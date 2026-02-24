@@ -73,6 +73,9 @@ pub struct InferenceConfig {
     pub model_path: Option<PathBuf>,
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: u32,
+    /// KV-cache session TTL in seconds (default 600 = 10 minutes).
+    #[serde(default = "default_kv_cache_ttl")]
+    pub kv_cache_ttl_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +122,10 @@ fn default_max_concurrent() -> u32 {
 
 fn default_gpu_layers() -> u32 {
     0
+}
+
+fn default_kv_cache_ttl() -> Option<u64> {
+    Some(600)
 }
 
 fn default_log_level() -> String {
@@ -177,6 +184,7 @@ impl Default for InferenceConfig {
             max_concurrent_requests: default_max_concurrent(),
             model_path: None,
             gpu_layers: default_gpu_layers(),
+            kv_cache_ttl_secs: default_kv_cache_ttl(),
         }
     }
 }

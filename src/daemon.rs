@@ -7,11 +7,14 @@ use crate::config::Config;
 use crate::health::monitor::HealthMonitor;
 use crate::identity::Identity;
 use crate::inference::executor::SharedExecutor;
+use crate::inference::router::{InferenceRouter, RouterCommand};
 use crate::model::registry::ModelRegistry;
 use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
-use crate::types::{CreditBalance, NodeId, NodeStats, PeerInfo, PipelineAssignment, ShardId};
+use crate::types::{
+    CreditBalance, NodeId, NodeStats, PeerInfo, PipelineAssignment, ShardId, SwarmMessage,
+};
 
 /// Thread-safe shared state accessible by all daemon tasks.
 pub struct SharedState {
@@ -118,9 +121,15 @@ impl Daemon {
             }
         }
 
-        // Create channels for inter-task communication
-        let (network_tx, network_rx) = mpsc::channel::<crate::types::SwarmMessage>(1024);
-        let (network_out_tx, _network_out_rx) = mpsc::channel::<crate::types::SwarmMessage>(1024);
+        // ── Channel Architecture ──
+        //
+        // network_tx  → NetworkManager (outbound to network)
+        // network_out_tx → from NetworkManager (inbound from network)
+        // router_cmd_tx  → InferenceRouter (commands from API + network)
+        //
+        let (network_tx, network_rx) = mpsc::channel::<SwarmMessage>(1024);
+        let (network_out_tx, mut network_out_rx) = mpsc::channel::<SwarmMessage>(1024);
+        let (router_cmd_tx, router_cmd_rx) = mpsc::channel::<RouterCommand>(256);
 
         // Spawn NetworkManager
         let network_manager = NetworkManager::new(
@@ -138,6 +147,32 @@ impl Daemon {
             }
         });
 
+        // Spawn InferenceRouter
+        let inference_router = InferenceRouter::new(
+            shared_state.clone(),
+            router_cmd_rx,
+            network_tx.clone(),
+            shutdown_rx.clone(),
+        );
+
+        let inference_handle = tokio::spawn(async move {
+            if let Err(e) = inference_router.run().await {
+                tracing::error!(error = %e, "InferenceRouter exited with error");
+            }
+        });
+
+        // Spawn message dispatcher: routes network inbound messages to the right subsystem
+        let dispatcher_router_tx = router_cmd_tx.clone();
+        let dispatcher_shutdown = shutdown_rx.clone();
+        let dispatcher_handle = tokio::spawn(async move {
+            dispatch_network_messages(
+                &mut network_out_rx,
+                &dispatcher_router_tx,
+                dispatcher_shutdown,
+            )
+            .await;
+        });
+
         // Spawn HealthMonitor
         let health_monitor = HealthMonitor::new(
             shared_state.clone(),
@@ -151,10 +186,13 @@ impl Daemon {
             }
         });
 
-        // Spawn API server
+        // Spawn API server (pass router_cmd_tx so API can submit inference requests)
         let api_shared_state = shared_state.clone();
+        let api_router_tx = router_cmd_tx.clone();
         let api_handle = tokio::spawn(async move {
-            if let Err(e) = crate::api::server::run_server_with_state(api_shared_state).await {
+            if let Err(e) =
+                crate::api::server::run_server_with_state(api_shared_state, api_router_tx).await
+            {
                 tracing::error!(error = %e, "API server exited with error");
             }
         });
@@ -173,11 +211,17 @@ impl Daemon {
             result = network_handle => {
                 tracing::error!(?result, "NetworkManager task exited");
             }
+            result = inference_handle => {
+                tracing::error!(?result, "InferenceRouter task exited");
+            }
             result = health_handle => {
                 tracing::error!(?result, "HealthMonitor task exited");
             }
             result = api_handle => {
                 tracing::error!(?result, "API server task exited");
+            }
+            result = dispatcher_handle => {
+                tracing::error!(?result, "Message dispatcher task exited");
             }
         }
 
@@ -186,5 +230,54 @@ impl Daemon {
         tracing::info!("Daemon shutdown complete");
 
         Ok(())
+    }
+}
+
+/// Dispatch inbound network messages to the appropriate subsystem.
+///
+/// Inference-related messages (InferenceRequest, LayerForward, LayerResult,
+/// InferenceError, PipelineAssignment) are routed to the InferenceRouter.
+/// Other messages (health, discovery, credits) are handled by their respective
+/// subsystems directly via SharedState or are already handled by NetworkManager.
+async fn dispatch_network_messages(
+    network_out_rx: &mut mpsc::Receiver<SwarmMessage>,
+    router_tx: &mpsc::Sender<RouterCommand>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            msg = network_out_rx.recv() => {
+                match msg {
+                    Some(msg) => {
+                        match &msg {
+                            SwarmMessage::InferenceRequest(_)
+                            | SwarmMessage::PipelineAssignment(_)
+                            | SwarmMessage::LayerForward(_)
+                            | SwarmMessage::LayerResult(_)
+                            | SwarmMessage::InferenceError(_) => {
+                                if let Err(e) = router_tx
+                                    .send(RouterCommand::NetworkMessage(msg))
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to route inference message to router"
+                                    );
+                                }
+                            }
+                            // Discovery, health, credit messages are handled
+                            // by NetworkManager or their respective subsystems
+                            _ => {}
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 }

@@ -10,7 +10,8 @@ use tokio_stream::StreamExt;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::inference::executor::build_chat_prompt;
-use crate::types::{ChatMessage, SamplingParams};
+use crate::inference::router::RouterCommand;
+use crate::types::{ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams};
 
 // ---- Request types ----
 
@@ -160,6 +161,14 @@ pub async fn chat_completions(
         "Chat completion request"
     );
 
+    // Try routing through InferenceRouter if available and not streaming
+    if let Some(router_tx) = &state.router_tx {
+        if !req.stream {
+            return router_inference(router_tx.clone(), &req, request_id, created).await;
+        }
+    }
+
+    // Fallback: direct executor path (streaming or no router available)
     let prompt = build_chat_prompt(&req.messages);
     let params = req.to_sampling_params();
     let model_name = {
@@ -183,6 +192,67 @@ pub async fn chat_completions(
                 .into_response(),
         )
     }
+}
+
+/// Route inference through the InferenceRouter (non-streaming).
+async fn router_inference(
+    router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
+    req: &ChatCompletionRequest,
+    request_id: String,
+    created: i64,
+) -> Result<axum::response::Response, ApiError> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    let inference_req = InferenceRequest {
+        id: uuid::Uuid::new_v4(),
+        model_id: ModelId(req.model.clone()),
+        messages: req.messages.clone(),
+        sampling_params: req.to_sampling_params(),
+        stream: false,
+        requester: NodeId([0u8; 32]), // Local API request
+        priority: PriorityTier::Silver,
+        created_at: chrono::Utc::now(),
+    };
+
+    router_tx
+        .send(RouterCommand::Submit {
+            request: inference_req,
+            result_tx,
+        })
+        .await
+        .map_err(|_| {
+            ApiError(crate::error::SwarmError::Internal(
+                "Router unavailable".into(),
+            ))
+        })?;
+
+    let output = result_rx.await.map_err(|_| {
+        ApiError(crate::error::SwarmError::Internal(
+            "Router dropped the request".into(),
+        ))
+    })??;
+
+    let response = ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion",
+        created,
+        model: req.model.clone(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessageResponse {
+                role: "assistant".into(),
+                content: output.content,
+            },
+            finish_reason: output.finish_reason,
+        }],
+        usage: Usage {
+            prompt_tokens: output.prompt_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: output.prompt_tokens + output.completion_tokens,
+        },
+    };
+
+    Ok(Json(response).into_response())
 }
 
 async fn non_stream_response(

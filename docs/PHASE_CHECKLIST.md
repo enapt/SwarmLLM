@@ -60,14 +60,14 @@
 
 **Goal**: Inference request flows through a pipeline of multiple nodes.
 
-- [ ] `src/inference/router.rs` — Request queuing, pipeline assembly trigger
-- [ ] `src/inference/scheduler.rs` — Pipeline assembly algorithm (greedy layer assignment)
-- [ ] `src/inference/pipeline.rs` — Pipeline execution: forward activations between nodes
-- [ ] `src/inference/kv_cache.rs` — Session-based KV-cache management
-- [ ] Wire NetworkManager <-> InferenceRouter <-> ShardExecutor communication
-- [ ] Implement LayerForward and LayerResult message handling in NetworkManager
-- [ ] Implement hot-standby failover in pipeline.rs
-- [ ] Add PipelineAssignment to SharedState for monitoring
+- [x] `src/inference/router.rs` — Request queuing, pipeline assembly trigger
+- [x] `src/inference/scheduler.rs` — Pipeline assembly algorithm (greedy layer assignment)
+- [x] `src/inference/pipeline.rs` — Pipeline execution: forward activations between nodes
+- [x] `src/inference/kv_cache.rs` — Session-based KV-cache management
+- [x] Wire NetworkManager <-> InferenceRouter <-> ShardExecutor communication
+- [x] Implement LayerForward and LayerResult message handling in NetworkManager
+- [x] Implement hot-standby failover in pipeline.rs
+- [x] Add PipelineAssignment to SharedState for monitoring
 
 **Acceptance test**: 3 nodes, each holding different layer ranges. Client sends request to Node A, pipeline assembled across all 3 nodes, returns generated text.
 

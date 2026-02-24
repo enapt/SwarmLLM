@@ -2,11 +2,13 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
+use tokio::sync::mpsc;
 
 use crate::api::{middleware, openai};
 use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
+use crate::inference::router::RouterCommand;
 use crate::storage::db::Database;
 
 /// Shared application state passed to all Axum handlers.
@@ -15,6 +17,8 @@ pub struct AppState {
     pub config: Config,
     pub db: Database,
     pub executor: SharedExecutor,
+    /// Channel to submit inference requests to the InferenceRouter.
+    pub router_tx: Option<mpsc::Sender<RouterCommand>>,
 }
 
 /// Build the Axum router with all routes.
@@ -47,6 +51,7 @@ pub async fn run_server(
         config,
         db,
         executor,
+        router_tx: None,
     };
 
     let app = build_router(state);
@@ -61,12 +66,16 @@ pub async fn run_server(
 }
 
 /// Start the Axum HTTP server using SharedState from the daemon.
-pub async fn run_server_with_state(shared_state: Arc<SharedState>) -> anyhow::Result<()> {
+pub async fn run_server_with_state(
+    shared_state: Arc<SharedState>,
+    router_tx: mpsc::Sender<RouterCommand>,
+) -> anyhow::Result<()> {
     let port = shared_state.config.node.listen_port;
     let state = AppState {
         config: shared_state.config.clone(),
         db: shared_state.db.clone(),
         executor: shared_state.executor.clone(),
+        router_tx: Some(router_tx),
     };
 
     let app = build_router(state);
