@@ -1,6 +1,11 @@
 pub mod api;
 pub mod config;
+pub mod daemon;
 pub mod error;
+pub mod health;
+pub mod identity;
 pub mod inference;
+pub mod model;
+pub mod network;
 pub mod storage;
 pub mod types;

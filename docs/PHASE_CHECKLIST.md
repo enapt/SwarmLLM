@@ -33,24 +33,24 @@
 
 **Goal**: Nodes discover each other, exchange shard information, and can transfer shard data.
 
-- [ ] `src/identity/mod.rs` — Module structure
-- [ ] `src/identity/keypair.rs` — Ed25519 key generation, storage, export/import
-- [ ] `src/identity/keystore.rs` — Encrypted storage (AES-256-GCM + Argon2id)
-- [ ] `src/network/mod.rs` — Module structure
-- [ ] `src/network/transport.rs` — QUIC transport setup
-- [ ] `src/network/behaviour.rs` — Custom NetworkBehaviour (Kademlia + GossipSub + request_response)
-- [ ] `src/network/discovery.rs` — Bootstrap, peer discovery loop, PEX
-- [ ] `src/network/manager.rs` — Swarm lifecycle, message routing
-- [ ] `src/network/protocol.rs` — SwarmMessage serialization (serde_json initially)
-- [ ] `src/model/mod.rs` — Module structure
-- [ ] `src/model/manifest.rs` — Parse .swarm manifests
-- [ ] `src/model/shard.rs` — Shard loading, BLAKE3 verification
-- [ ] `src/model/distribution.rs` — Shard request/response protocol
-- [ ] `src/model/registry.rs` — Track known models and shard locations
-- [ ] `src/health/mod.rs` — Module structure
-- [ ] `src/health/monitor.rs` — Periodic health pings
-- [ ] `src/daemon.rs` — Top-level daemon orchestration (spawns all tasks)
-- [ ] `src/types.rs` — Add NodeId, NodeCapability, ShardInfo, ShardId, SwarmMessage types
+- [x] `src/identity/mod.rs` — Module structure
+- [x] `src/identity/keypair.rs` — Ed25519 key generation, storage, export/import
+- [x] `src/identity/keystore.rs` — Encrypted storage (AES-256-GCM + Argon2id)
+- [x] `src/network/mod.rs` — Module structure
+- [x] `src/network/transport.rs` — QUIC transport setup
+- [x] `src/network/behaviour.rs` — Custom NetworkBehaviour (Kademlia + GossipSub + request_response)
+- [x] `src/network/discovery.rs` — Bootstrap, peer discovery loop, PEX
+- [x] `src/network/manager.rs` — Swarm lifecycle, message routing
+- [x] `src/network/protocol.rs` — SwarmMessage serialization (serde_json initially)
+- [x] `src/model/mod.rs` — Module structure
+- [x] `src/model/manifest.rs` — Parse .swarm manifests
+- [x] `src/model/shard.rs` — Shard loading, BLAKE3 verification
+- [x] `src/model/distribution.rs` — Shard request/response protocol
+- [x] `src/model/registry.rs` — Track known models and shard locations
+- [x] `src/health/mod.rs` — Module structure
+- [x] `src/health/monitor.rs` — Periodic health pings
+- [x] `src/daemon.rs` — Top-level daemon orchestration (spawns all tasks)
+- [x] `src/types.rs` — Add NodeId, NodeCapability, ShardInfo, ShardId, SwarmMessage types
 
 **Acceptance test**: Start 3 nodes on LAN. Node A has a shard. Node B discovers A, downloads shard. Node C verifies shard exists on both A and B.
 

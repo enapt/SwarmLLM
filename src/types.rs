@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-// ---- Identity (stub for Phase 1, full impl in Phase 2) ----
+// ---- Identity ----
 /// Wrapper around Ed25519 public key. This IS the node's identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub [u8; 32]);
@@ -22,7 +22,109 @@ impl fmt::Display for ModelId {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelManifest {
+    pub id: ModelId,
+    pub name: String,
+    pub architecture: ModelArchitecture,
+    pub num_layers: u32,
+    pub num_params_billions: f32,
+    pub quantization: Quantization,
+    pub total_size_bytes: u64,
+    pub shard_count: u32,
+    pub shards: Vec<ShardInfo>,
+    pub tokenizer_hash: Blake3Hash,
+    pub manifest_hash: Blake3Hash,
+    pub publisher: NodeId,
+    pub publish_date: chrono::DateTime<chrono::Utc>,
+    pub license: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ModelArchitecture {
+    Llama,
+    Mistral,
+    Mixtral {
+        num_experts: u32,
+        experts_per_token: u32,
+    },
+    Qwen2,
+    DeepSeek {
+        num_experts: u32,
+        experts_per_token: u32,
+    },
+    Phi,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Quantization {
+    Q4KM,
+    Q5KM,
+    Q6K,
+    Q8_0,
+    FP16,
+}
+
+// ---- Shards ----
+pub type Blake3Hash = [u8; 32];
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardInfo {
+    pub index: u32,
+    pub layer_range: (u32, u32),
+    pub size_bytes: u64,
+    pub hash: Blake3Hash,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ShardId {
+    pub model_id: ModelId,
+    pub index: u32,
+}
+
+// ---- Node Capabilities ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeCapability {
+    pub node_id: NodeId,
+    pub gpu: Option<GpuInfo>,
+    pub ram_total_mb: u64,
+    pub ram_available_mb: u64,
+    pub disk_available_mb: u64,
+    pub bandwidth_mbps: f32,
+    pub hosted_shards: Vec<ShardId>,
+    pub max_contribution: ContributionLevel,
+    pub uptime_seconds: u64,
+    pub version: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vram_total_mb: u64,
+    pub vram_available_mb: u64,
+    pub compute_capability: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ContributionLevel {
+    Minimal,
+    Moderate,
+    Maximum,
+}
+
 // ---- Inference ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InferenceRequest {
+    pub id: uuid::Uuid,
+    pub model_id: ModelId,
+    pub messages: Vec<ChatMessage>,
+    pub sampling_params: SamplingParams,
+    pub stream: bool,
+    pub requester: NodeId,
+    pub priority: PriorityTier,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -63,30 +165,187 @@ impl Default for SamplingParams {
     }
 }
 
-// ---- Shards (stub for Phase 1) ----
-pub type Blake3Hash = [u8; 32];
-
+// ---- Credits ----
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ShardInfo {
-    pub index: u32,
-    pub layer_range: (u32, u32),
-    pub size_bytes: u64,
-    pub hash: Blake3Hash,
+pub struct CreditBalance {
+    pub node_id: NodeId,
+    pub balance: i64,
+    pub lifetime_earned: u64,
+    pub lifetime_spent: u64,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct ShardId {
-    pub model_id: ModelId,
-    pub index: u32,
-}
-
-// ---- Credits (stub for Phase 1) ----
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PriorityTier {
     Bronze = 0,
     Silver = 1,
     Gold = 2,
     Platinum = 3,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreditTransaction {
+    pub id: uuid::Uuid,
+    pub from: NodeId,
+    pub to: NodeId,
+    pub amount: i64,
+    pub reason: TransactionReason,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature_from: Vec<u8>,
+    pub signature_to: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TransactionReason {
+    InferenceServed { request_id: uuid::Uuid, tokens: u32 },
+    ShardHosting { shard_id: ShardId, hours: f32 },
+    ShardSeeding { shard_id: ShardId, bytes: u64 },
+    RelayService { duration_seconds: u64 },
+    InferenceConsumed { request_id: uuid::Uuid, tokens: u32 },
+    Penalty { reason: String },
+}
+
+// ---- Pipeline ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PipelineAssignment {
+    pub request_id: uuid::Uuid,
+    pub segments: Vec<PipelineSegment>,
+    pub standbys: Vec<PipelineSegment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PipelineSegment {
+    pub node_id: NodeId,
+    pub shard_id: ShardId,
+    pub layer_range: (u32, u32),
+}
+
+// ---- Network Messages ----
+/// Top-level enum for all protocol messages sent over libp2p.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SwarmMessage {
+    // Discovery
+    ShardAnnounce(ShardAnnounce),
+    NodeCapabilityUpdate(NodeCapability),
+
+    // Inference pipeline
+    InferenceRequest(InferenceRequest),
+    PipelineAssignment(PipelineAssignment),
+    LayerForward(LayerForward),
+    LayerResult(LayerResult),
+    InferenceError(InferenceError),
+
+    // Credits
+    CreditTransaction(CreditTransaction),
+
+    // Health
+    HealthPing { nonce: u64, timestamp: u64 },
+    HealthPong { nonce: u64, timestamp: u64 },
+
+    // Governance
+    ModelVote(ModelVote),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardAnnounce {
+    pub node_id: NodeId,
+    pub shards: Vec<ShardId>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerForward {
+    pub request_id: uuid::Uuid,
+    pub sequence_num: u32,
+    pub activations: Vec<u8>,
+    pub format: TensorFormat,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TensorFormat {
+    FP16,
+    FP32,
+    INT8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerResult {
+    pub request_id: uuid::Uuid,
+    pub token_ids: Vec<u32>,
+    pub finish_reason: Option<NetworkFinishReason>,
+}
+
+/// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum NetworkFinishReason {
+    Stop,
+    MaxTokens,
+    Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InferenceError {
+    pub request_id: uuid::Uuid,
+    pub error: String,
+    pub recoverable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelVote {
+    pub voter: NodeId,
+    pub model_manifest_hash: Blake3Hash,
+    pub vote: bool,
+    pub weight: u64,
+    pub signature: Vec<u8>,
+}
+
+// ---- Peer State ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub node_id: NodeId,
+    pub addresses: Vec<String>,
+    pub capability: Option<NodeCapability>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub latency_ms: Option<u32>,
+    pub trust_score: f32,
+}
+
+// ---- Node Stats ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeStats {
+    pub peers_connected: u32,
+    pub requests_served: u64,
+    pub requests_made: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+    pub uptime_start: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for NodeStats {
+    fn default() -> Self {
+        Self {
+            peers_connected: 0,
+            requests_served: 0,
+            requests_made: 0,
+            bytes_uploaded: 0,
+            bytes_downloaded: 0,
+            uptime_start: chrono::Utc::now(),
+        }
+    }
+}
+
+// ---- Shard transfer protocol ----
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardRequest {
+    pub shard_id: ShardId,
+    pub chunk_offset: u64,
+    pub chunk_size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardResponse {
+    pub data: Vec<u8>,
+    pub total_size: u64,
 }
 
 #[cfg(test)]
@@ -132,5 +391,35 @@ mod tests {
             serde_json::to_string(&Role::Assistant).unwrap(),
             "\"assistant\""
         );
+    }
+
+    #[test]
+    fn swarm_message_serde_roundtrip() {
+        let msg = SwarmMessage::HealthPing {
+            nonce: 42,
+            timestamp: 1000,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: SwarmMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SwarmMessage::HealthPing { nonce, timestamp } => {
+                assert_eq!(nonce, 42);
+                assert_eq!(timestamp, 1000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn shard_id_equality() {
+        let a = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+        let b = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+        assert_eq!(a, b);
     }
 }

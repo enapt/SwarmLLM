@@ -4,8 +4,9 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use tokio::sync::Mutex;
 
-use swarmllm::api::server;
 use swarmllm::config::Config;
+use swarmllm::daemon::Daemon;
+use swarmllm::identity::Identity;
 use swarmllm::inference::executor::ModelExecutor;
 use swarmllm::storage::db::Database;
 
@@ -88,6 +89,9 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     // Ensure data directory exists
     std::fs::create_dir_all(&config.node.data_dir)?;
 
+    // Load or generate node identity
+    let identity = Identity::load_or_generate(&config.node.data_dir)?;
+
     // Open database
     let db = Database::open(&config.node.data_dir)?;
 
@@ -109,10 +113,9 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
 
     let executor = Arc::new(Mutex::new(executor));
 
-    // Start API server (blocks until shutdown)
-    server::run_server(config, db, executor).await?;
-
-    Ok(())
+    // Build and run daemon (spawns network, health, API tasks)
+    let daemon = Daemon::new(config, identity, db, executor);
+    daemon.run().await
 }
 
 async fn query_status(port: u16) -> anyhow::Result<()> {
@@ -159,7 +162,7 @@ fn init_tracing(verbose: u8) {
     let filter = match verbose {
         0 => "swarmllm=info",
         1 => "swarmllm=debug",
-        2 => "swarmllm=debug,tower_http=debug",
+        2 => "swarmllm=debug,libp2p=info,tower_http=debug",
         _ => "trace",
     };
 

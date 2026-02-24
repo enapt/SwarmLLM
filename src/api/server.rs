@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use axum::routing::{get, post};
 use axum::Router;
 
 use crate::api::{middleware, openai};
 use crate::config::Config;
+use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
 use crate::storage::db::Database;
 
@@ -14,7 +17,7 @@ pub struct AppState {
     pub executor: SharedExecutor,
 }
 
-/// Build the Axum router with all Phase 1 routes.
+/// Build the Axum router with all routes.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         // OpenAI-compatible API
@@ -33,7 +36,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Start the Axum HTTP server on the configured port.
+/// Start the Axum HTTP server on the configured port (standalone mode).
 pub async fn run_server(
     config: Config,
     db: Database,
@@ -44,6 +47,26 @@ pub async fn run_server(
         config,
         db,
         executor,
+    };
+
+    let app = build_router(state);
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+
+    tracing::info!(%addr, "Starting HTTP server");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+/// Start the Axum HTTP server using SharedState from the daemon.
+pub async fn run_server_with_state(shared_state: Arc<SharedState>) -> anyhow::Result<()> {
+    let port = shared_state.config.node.listen_port;
+    let state = AppState {
+        config: shared_state.config.clone(),
+        db: shared_state.db.clone(),
+        executor: shared_state.executor.clone(),
     };
 
     let app = build_router(state);

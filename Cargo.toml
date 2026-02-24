@@ -12,6 +12,25 @@ path = "src/main.rs"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# P2P Networking
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "quic",
+    "kad",
+    "gossipsub",
+    "request-response",
+    "identify",
+    "autonat",
+    "dcutr",
+    "relay",
+    "noise",
+    "dns",
+    "tcp",
+    "yamux",
+    "macros",
+    "serde",
+] }
+
 # HTTP server
 axum = { version = "0.7", features = ["ws", "multipart"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
@@ -23,11 +42,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 
-# Cryptography (needed for types even in Phase 1)
+# Cryptography
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 blake3 = "1"
+argon2 = { version = "0.5", features = ["std"] }
+aes-gcm = "0.10"
+rand = "0.8"
 
 # Database
 sled = "0.34"
+
+# Concurrent state
+dashmap = "5"
+async-trait = "0.1"
 
 # Utilities
 clap = { version = "4", features = ["derive"] }
@@ -40,6 +67,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-stream = "0.1"
 futures = "0.3"
 hex = "0.4"
+base64 = "0.22"
 dirs = "5"
 bytes = "1"
 
