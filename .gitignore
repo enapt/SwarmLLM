@@ -1,0 +1,32 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# SwarmLLM runtime data
+/.swarmllm/
+
+# Environment
+.env
+.env.*
+
+# Claude Code local config (personal settings, not shared)
+.claude/settings.local.json
+.claude/logs/
+
+# Test artifacts
+tests/fixtures/tiny_model/*.bin
+
+# Build logs
+/tmp/swarmllm-*.log
