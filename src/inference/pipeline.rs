@@ -83,16 +83,14 @@ impl PipelineExecutor {
 
     /// Execute entirely on the local node (we have all layers).
     async fn execute_local(&self) -> Result<InferenceOutput, SwarmError> {
-        let executor = self.shared_state.executor.lock().await;
+        let mut executor = self.shared_state.executor.lock().await;
 
         if !executor.is_loaded() {
             return Err(SwarmError::NoModelLoaded);
         }
 
         let prompt = build_chat_prompt(&self.request.messages);
-        let (content, gen_result) = executor
-            .generate(&prompt, &self.request.sampling_params)
-            .await?;
+        let (content, gen_result) = executor.generate(&prompt, &self.request.sampling_params)?;
 
         Ok(InferenceOutput {
             request_id: self.request.id,
@@ -273,12 +271,11 @@ impl PipelineExecutor {
         // 3. Return the output activations (or final tokens if last segment)
         //
         // For Phase 3 stub: use the executor to generate tokens
-        let executor = self.shared_state.executor.lock().await;
+        let mut executor = self.shared_state.executor.lock().await;
         if executor.is_loaded() {
             let prompt = build_chat_prompt(&self.request.messages);
-            let (content, gen_result) = executor
-                .generate(&prompt, &self.request.sampling_params)
-                .await?;
+            let (content, gen_result) =
+                executor.generate(&prompt, &self.request.sampling_params)?;
 
             let token_ids: Vec<u32> = content.bytes().map(|b| b as u32).collect();
             let finish = match gen_result.finish_reason {

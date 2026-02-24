@@ -324,7 +324,7 @@ async fn execute_request(
 
     // Check if we can handle this entirely locally
     let local_node_id = shared_state.identity.node_id().clone();
-    let executor = shared_state.executor.lock().await;
+    let mut executor = shared_state.executor.lock().await;
 
     if executor.is_loaded() {
         // Local-only inference path (single node has the model loaded)
@@ -335,7 +335,7 @@ async fn execute_request(
         );
 
         let prompt = build_chat_prompt(&request.messages);
-        let (content, gen_result) = executor.generate(&prompt, &request.sampling_params).await?;
+        let (content, gen_result) = executor.generate(&prompt, &request.sampling_params)?;
 
         return Ok(InferenceOutput {
             request_id: request.id,

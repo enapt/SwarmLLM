@@ -29,31 +29,34 @@ Single Rust binary, three simultaneous functions:
 ## Daemon Task Architecture
 
 ```
-                    ┌──────────────┐
-                    │   daemon.rs  │
-                    │  (bootstrap) │
-                    └──────┬───────┘
-                           │ spawns tokio tasks
-           ┌───────┬───────┼───────┬───────────┐
-           ▼       ▼       ▼       ▼           ▼
-    ┌──────────┐ ┌─────┐ ┌─────┐ ┌──────┐ ┌──────┐
-    │ Network  │ │Infer│ │Credit│ │Health│ │ API  │
-    │ Manager  │ │Router│ │Ledger│ │Mon.  │ │Server│
-    └────┬─────┘ └──┬──┘ └──┬──┘ └──┬───┘ └──┬───┘
-         │          │       │       │         │
-         └──────────┴───────┴───────┴─────────┘
-                  mpsc channels between tasks
+                        ┌──────────────┐
+                        │   daemon.rs  │
+                        │  (bootstrap) │
+                        └──────┬───────┘
+                               │ spawns tokio tasks
+       ┌───────┬───────┬───────┼───────┬───────────┬──────────┐
+       ▼       ▼       ▼       ▼       ▼           ▼          ▼
+┌──────────┐ ┌─────┐ ┌─────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐
+│ Network  │ │Infer│ │Credit│ │Health│ │ API  │ │Rebal-│ │Acquisi-│
+│ Manager  │ │Router│ │Ledger│ │Mon.  │ │Server│ │ancer │ │tion Mgr│
+└────┬─────┘ └──┬──┘ └──┬──┘ └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘
+     │          │       │       │         │        │          │
+     └──────────┴───────┴───────┴─────────┴────────┴──────────┘
+                      mpsc channels between tasks
 ```
 
 ### Channel Layout
 
 | From | To | Channel | Message Types |
 |---|---|---|---|
-| NetworkManager | InferenceRouter | `inference_tx` | InferenceRequest, LayerForward, LayerResult |
+| NetworkManager | InferenceRouter | `network_out_tx` | InferenceRequest, LayerForward, LayerResult |
 | InferenceRouter | NetworkManager | `network_tx` | SwarmMessage (outgoing P2P) |
 | InferenceRouter | CreditLedger | `credit_tx` | CreditTransaction |
-| HealthMonitor | NetworkManager | `network_tx` | HealthPing, rebalance triggers |
-| ApiServer | InferenceRouter | `inference_tx` | InferenceRequest (from HTTP) |
+| HealthMonitor | NetworkManager | `network_tx` | HealthPing |
+| HealthMonitor | ShardRebalancer | `rebalance_tx` | RebalanceEvent |
+| ApiServer | InferenceRouter | `router_cmd_tx` | RouterCommand (from HTTP) |
+| ApiServer | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (model download) |
+| AcquisitionManager | NetworkManager | `network_tx` | ShardAnnounce (shard requests) |
 
 ## Startup Sequence
 
@@ -158,6 +161,49 @@ Tiers:
   Bronze    (zero/negative)     → 30s+ queue
 ```
 
+## Model Acquisition Security
+
+Models enter the system through a verified pipeline — arbitrary files on disk are never
+absorbed into the network.
+
+```
+Network Registry (GossipSub/DHT)
+        │
+        ▼
+ ┌─────────────────┐     BLAKE3 hash
+ │  Manifest Check │────────────────▶ Reject if tampered
+ └────────┬────────┘
+          │ verified manifest
+          ▼
+ ┌─────────────────┐     Rarest-first
+ │ Shard Selection │────────────────▶ BitTorrent-style
+ └────────┬────────┘
+          │ request from peers
+          ▼
+ ┌─────────────────┐     Per-chunk write
+ │  Download Loop  │────────────────▶ Progressive to disk
+ └────────┬────────┘
+          │ complete shard
+          ▼
+ ┌─────────────────┐     BLAKE3 vs manifest
+ │ Shard Verify    │────────────────▶ Quarantine + penalize on mismatch
+ └────────┬────────┘
+          │ all shards verified
+          ▼
+    Model Ready
+```
+
+**Key invariants**:
+- Manifests MUST come from the network registry, not from disk
+- Manifest integrity is verified (BLAKE3 self-hash) before trusting shard hashes
+- Each downloaded shard is verified against the manifest hash
+- Failed shards are renamed `.bin.quarantine` and the serving peer's trust is penalized
+- On startup, `load_all_local()` rejects model directories without a valid manifest
+- On startup, every existing shard is re-verified against its manifest hash
+
+**AcquisitionManager** (`src/model/acquisition.rs`) orchestrates this flow as a
+long-running Tokio task, receiving commands via `mpsc` from the API server.
+
 ## Data Directory
 
 ```
@@ -205,6 +251,8 @@ Tiers:
 - `GET/PUT /api/admin/config` — Configuration
 - `GET     /api/admin/stats` — Node statistics
 - `GET     /api/admin/models` — Model list
+- `POST    /api/admin/models/:id/add` — Trigger model acquisition
+- `GET     /api/admin/models/:id/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers
 - `GET     /api/admin/credits` — Credit info
 - `GET     /api/admin/ws` — WebSocket for live updates

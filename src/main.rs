@@ -1,13 +1,10 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tokio::sync::Mutex;
 
 use swarmllm::config::Config;
 use swarmllm::daemon::Daemon;
 use swarmllm::identity::Identity;
-use swarmllm::inference::executor::ModelExecutor;
 use swarmllm::storage::db::Database;
 
 #[derive(Parser)]
@@ -95,26 +92,8 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     // Open database
     let db = Database::open(&config.node.data_dir)?;
 
-    // Initialize model executor
-    let mut executor = ModelExecutor::new();
-    if let Some(ref model_path) = config.inference.model_path {
-        match executor.load_model(model_path, config.inference.gpu_layers) {
-            Ok(()) => tracing::info!("Model ready"),
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to load model — running without inference")
-            }
-        }
-    } else {
-        tracing::info!(
-            "No model path configured — running API server without inference capability"
-        );
-        tracing::info!("Use --model <path.gguf> to load a model");
-    }
-
-    let executor = Arc::new(Mutex::new(executor));
-
     // Build and run daemon (spawns network, health, API tasks)
-    let daemon = Daemon::new(config, identity, db, executor);
+    let daemon = Daemon::new(config, identity, db);
     daemon.run().await
 }
 

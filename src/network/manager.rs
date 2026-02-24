@@ -105,11 +105,14 @@ impl NetworkManager {
         self.swarm
             .listen_on(quic_addr.clone())
             .map_err(|e| SwarmError::Network(format!("Failed to listen on QUIC: {e}")))?;
-        self.swarm
-            .listen_on(tcp_addr.clone())
-            .map_err(|e| SwarmError::Network(format!("Failed to listen on TCP: {e}")))?;
 
-        tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections");
+        // TCP listen is best-effort — may not be available depending on transport config
+        match self.swarm.listen_on(tcp_addr.clone()) {
+            Ok(_) => tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections"),
+            Err(e) => {
+                tracing::warn!(%quic_addr, error = %e, "TCP listen unavailable, using QUIC only");
+            }
+        }
 
         // Subscribe to GossipSub topics
         discovery::subscribe_topics(&mut self.swarm)?;

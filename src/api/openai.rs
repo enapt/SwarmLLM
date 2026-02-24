@@ -161,14 +161,17 @@ pub async fn chat_completions(
         "Chat completion request"
     );
 
-    // Try routing through InferenceRouter if available and not streaming
+    // Route all requests through InferenceRouter when available
     if let Some(router_tx) = &state.router_tx {
-        if !req.stream {
+        if req.stream {
+            return router_inference_stream(router_tx.clone(), &state, &req, request_id, created)
+                .await;
+        } else {
             return router_inference(router_tx.clone(), &req, request_id, created).await;
         }
     }
 
-    // Fallback: direct executor path (streaming or no router available)
+    // Fallback: direct executor path (no router available — standalone mode)
     let prompt = build_chat_prompt(&req.messages);
     let params = req.to_sampling_params();
     let model_name = {
@@ -255,6 +258,130 @@ async fn router_inference(
     Ok(Json(response).into_response())
 }
 
+/// Route streaming inference through the InferenceRouter.
+///
+/// Submits the request to the router for priority queueing and pipeline assembly,
+/// then streams the result back via SSE.
+async fn router_inference_stream(
+    router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
+    _state: &AppState,
+    req: &ChatCompletionRequest,
+    request_id: String,
+    created: i64,
+) -> Result<axum::response::Response, ApiError> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+    let inference_req = InferenceRequest {
+        id: uuid::Uuid::new_v4(),
+        model_id: ModelId(req.model.clone()),
+        messages: req.messages.clone(),
+        sampling_params: req.to_sampling_params(),
+        stream: true,
+        requester: NodeId([0u8; 32]),
+        priority: PriorityTier::Silver,
+        created_at: chrono::Utc::now(),
+    };
+
+    router_tx
+        .send(RouterCommand::Submit {
+            request: inference_req,
+            result_tx,
+        })
+        .await
+        .map_err(|_| {
+            ApiError(crate::error::SwarmError::Internal(
+                "Router unavailable".into(),
+            ))
+        })?;
+
+    let model_name = req.model.clone();
+    let rid = request_id.clone();
+
+    // Spawn a task that waits for the router result and streams it as SSE chunks
+    let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+
+    tokio::spawn(async move {
+        // Send initial role delta
+        let _ = tx
+            .send(StreamEvent::Delta {
+                content: None,
+                role: Some("assistant".into()),
+                finish_reason: None,
+            })
+            .await;
+
+        match result_rx.await {
+            Ok(Ok(output)) => {
+                // Stream the content word by word for SSE compatibility
+                for word in output.content.split_inclusive(' ') {
+                    if tx
+                        .send(StreamEvent::Delta {
+                            content: Some(word.to_string()),
+                            role: None,
+                            finish_reason: None,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let _ = tx
+                    .send(StreamEvent::Delta {
+                        content: None,
+                        role: None,
+                        finish_reason: Some(output.finish_reason),
+                    })
+                    .await;
+            }
+            Ok(Err(e)) => {
+                let _ = tx
+                    .send(StreamEvent::Delta {
+                        content: Some(format!("Error: {e}")),
+                        role: None,
+                        finish_reason: Some("error".into()),
+                    })
+                    .await;
+            }
+            Err(_) => {
+                let _ = tx
+                    .send(StreamEvent::Delta {
+                        content: None,
+                        role: None,
+                        finish_reason: Some("error".into()),
+                    })
+                    .await;
+            }
+        }
+        let _ = tx.send(StreamEvent::Done).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
+        StreamEvent::Delta {
+            content,
+            role,
+            finish_reason,
+        } => {
+            let chunk = ChatCompletionChunk {
+                id: rid.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model_name.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta { role, content },
+                    finish_reason,
+                }],
+            };
+            let json = serde_json::to_string(&chunk).unwrap_or_default();
+            Ok::<_, Infallible>(Event::default().data(json))
+        }
+        StreamEvent::Done => Ok(Event::default().data("[DONE]")),
+    });
+
+    Ok(Sse::new(stream).into_response())
+}
+
 async fn non_stream_response(
     state: AppState,
     request_id: String,
@@ -263,11 +390,8 @@ async fn non_stream_response(
     prompt: String,
     params: SamplingParams,
 ) -> Result<Json<ChatCompletionResponse>, ApiError> {
-    let executor = state.executor.lock().await;
-    let (content, result) = executor
-        .generate(&prompt, &params)
-        .await
-        .map_err(ApiError)?;
+    let mut executor = state.executor.lock().await;
+    let (content, result) = executor.generate(&prompt, &params).map_err(ApiError)?;
 
     let response = ChatCompletionResponse {
         id: request_id,
@@ -313,17 +437,15 @@ async fn stream_response(
             })
             .await;
 
-        let executor = state.executor.lock().await;
-        let result = executor
-            .generate_stream(&prompt, &params, |token| {
-                let send_result = tx.try_send(StreamEvent::Delta {
-                    content: Some(token.to_string()),
-                    role: None,
-                    finish_reason: None,
-                });
-                send_result.is_ok()
-            })
-            .await;
+        let mut executor = state.executor.lock().await;
+        let result = executor.generate_stream(&prompt, &params, |token| {
+            let send_result = tx.try_send(StreamEvent::Delta {
+                content: Some(token.to_string()),
+                role: None,
+                finish_reason: None,
+            });
+            send_result.is_ok()
+        });
 
         // Send finish reason
         let finish = match result {
@@ -440,15 +562,12 @@ pub async fn completions(
         presence_penalty: 0.0,
     };
 
-    let executor = state.executor.lock().await;
+    let mut executor = state.executor.lock().await;
     if !executor.is_loaded() {
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
     }
 
-    let (content, result) = executor
-        .generate(&req.prompt, &params)
-        .await
-        .map_err(ApiError)?;
+    let (content, result) = executor.generate(&req.prompt, &params).map_err(ApiError)?;
 
     Ok(Json(CompletionResponse {
         id: request_id,

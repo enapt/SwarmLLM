@@ -47,6 +47,7 @@
 - [x] `src/model/shard.rs` — Shard loading, BLAKE3 verification
 - [x] `src/model/distribution.rs` — Shard request/response protocol
 - [x] `src/model/registry.rs` — Track known models and shard locations
+- [x] `src/model/acquisition.rs` — Secure model acquisition from network (BLAKE3-verified)
 - [x] `src/health/mod.rs` — Module structure
 - [x] `src/health/monitor.rs` — Periodic health pings
 - [x] `src/daemon.rs` — Top-level daemon orchestration (spawns all tasks)

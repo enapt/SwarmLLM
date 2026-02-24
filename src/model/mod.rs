@@ -1,3 +1,4 @@
+pub mod acquisition;
 pub mod distribution;
 pub mod governance;
 pub mod manifest;

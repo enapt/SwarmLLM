@@ -51,12 +51,39 @@ pub struct ResourceConfig {
     pub max_disk_mb: u64,
     #[serde(default)]
     pub max_bandwidth_mbps: u64,
+    #[serde(default)]
+    pub schedule: ResourceSchedule,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceSchedule {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_reduced_hours_start")]
+    pub reduced_hours_start: u32,
+    #[serde(default = "default_reduced_hours_end")]
+    pub reduced_hours_end: u32,
+    #[serde(default = "default_reduced_contribution")]
+    pub reduced_contribution: String,
+}
+
+impl Default for ResourceSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reduced_hours_start: default_reduced_hours_start(),
+            reduced_hours_end: default_reduced_hours_end(),
+            reduced_contribution: default_reduced_contribution(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(default)]
     pub bootstrap_peers: Vec<String>,
+    #[serde(default = "default_true")]
+    pub peer_exchange: bool,
     #[serde(default = "default_true")]
     pub enable_relay: bool,
     #[serde(default = "default_true")]
@@ -220,6 +247,18 @@ fn default_relay_max_circuits() -> usize {
     16
 }
 
+fn default_reduced_hours_start() -> u32 {
+    22
+}
+
+fn default_reduced_hours_end() -> u32 {
+    8
+}
+
+fn default_reduced_contribution() -> String {
+    "minimal".into()
+}
+
 fn default_log_level() -> String {
     "info".into()
 }
@@ -253,6 +292,7 @@ impl Default for ResourceConfig {
             max_ram_mb: 0,
             max_disk_mb: default_max_disk(),
             max_bandwidth_mbps: 0,
+            schedule: ResourceSchedule::default(),
         }
     }
 }
@@ -261,6 +301,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             bootstrap_peers: vec![],
+            peer_exchange: true,
             enable_relay: true,
             enable_relay_client: true,
             max_peers: default_max_peers(),

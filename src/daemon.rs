@@ -10,6 +10,7 @@ use crate::health::rebalancer::ShardRebalancer;
 use crate::identity::Identity;
 use crate::inference::executor::SharedExecutor;
 use crate::inference::router::{InferenceRouter, RouterCommand};
+use crate::model::acquisition::{AcquisitionCommand, AcquisitionManager};
 use crate::model::registry::ModelRegistry;
 use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
@@ -26,8 +27,10 @@ pub struct SharedState {
     pub db: Database,
     pub peer_registry: DashMap<NodeId, PeerInfo>,
     pub model_registry: ModelRegistry,
+    /// Which nodes have which shards — spec-required top-level field.
+    pub shard_registry: DashMap<ShardId, Vec<NodeId>>,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
-    pub credit_balance: RwLock<CreditBalance>,
+    pub credit_balance: Arc<RwLock<CreditBalance>>,
     pub node_stats: RwLock<NodeStats>,
     pub executor: SharedExecutor,
     /// Model governance vote tallies.
@@ -57,14 +60,15 @@ impl SharedState {
             db,
             peer_registry: DashMap::new(),
             model_registry,
+            shard_registry: DashMap::new(),
             active_pipelines: DashMap::new(),
-            credit_balance: RwLock::new(CreditBalance {
+            credit_balance: Arc::new(RwLock::new(CreditBalance {
                 node_id,
                 balance: 0,
                 lifetime_earned: 0,
                 lifetime_spent: 0,
                 last_updated: chrono::Utc::now(),
-            }),
+            })),
             node_stats: RwLock::new(NodeStats::default()),
             executor,
             model_vote_tallies: DashMap::new(),
@@ -90,30 +94,40 @@ pub struct Daemon {
     config: Config,
     identity: Identity,
     db: Database,
-    executor: SharedExecutor,
 }
 
 impl Daemon {
-    pub fn new(config: Config, identity: Identity, db: Database, executor: SharedExecutor) -> Self {
+    pub fn new(config: Config, identity: Identity, db: Database) -> Self {
         Self {
             config,
             identity,
             db,
-            executor,
         }
     }
 
     /// Run the daemon — spawns all subsystems and waits for shutdown.
     pub async fn run(self) -> anyhow::Result<()> {
+        // Initialize model executor
+        let mut executor = crate::inference::executor::ModelExecutor::new();
+        if let Some(ref model_path) = self.config.inference.model_path {
+            match executor.load_model(model_path, self.config.inference.gpu_layers) {
+                Ok(()) => tracing::info!("Model ready"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to load model — running without inference")
+                }
+            }
+        }
+        let executor = Arc::new(tokio::sync::Mutex::new(executor));
+
         // Create shared state
         let (shared_state, shutdown_rx) = SharedState::new(
             self.config.clone(),
             self.identity.clone(),
             self.db.clone(),
-            self.executor.clone(),
+            executor,
         );
 
-        // Scan local shards and register them in the model_registry
+        // Scan local shards and register them in both model_registry and shard_registry
         let shard_store = ShardStore::new(&self.config.node.data_dir);
         match shard_store.load_all_local() {
             Ok(shards) => {
@@ -122,9 +136,15 @@ impl Daemon {
                         model_id: model_id.clone(),
                         index: shard_info.index,
                     };
+                    let node_id = shared_state.identity.node_id().clone();
                     shared_state
                         .model_registry
-                        .record_shard_holder(shard_id, shared_state.identity.node_id().clone());
+                        .record_shard_holder(shard_id.clone(), node_id.clone());
+                    shared_state
+                        .shard_registry
+                        .entry(shard_id)
+                        .or_default()
+                        .push(node_id);
                 }
             }
             Err(e) => {
@@ -134,15 +154,17 @@ impl Daemon {
 
         // ── Channel Architecture ──
         //
-        // network_tx  → NetworkManager (outbound commands: broadcast, send tensor)
-        // network_out_tx → from NetworkManager (inbound decoded messages)
-        // router_cmd_tx  → InferenceRouter (commands from API + network)
-        // rebalance_tx   → ShardRebalancer (events from HealthMonitor)
+        // network_tx      → NetworkManager (outbound commands: broadcast, send tensor)
+        // network_out_tx  → from NetworkManager (inbound decoded messages)
+        // router_cmd_tx   → InferenceRouter (commands from API + network)
+        // rebalance_tx    → ShardRebalancer (events from HealthMonitor)
+        // acquisition_tx  → AcquisitionManager (model download commands from API)
         //
         let (network_tx, network_rx) = mpsc::channel::<NetworkCommand>(1024);
         let (network_out_tx, mut network_out_rx) = mpsc::channel::<SwarmMessage>(1024);
         let (router_cmd_tx, router_cmd_rx) = mpsc::channel::<RouterCommand>(256);
         let (rebalance_tx, rebalance_rx) = mpsc::channel::<RebalanceEvent>(64);
+        let (acquisition_tx, acquisition_rx) = mpsc::channel::<AcquisitionCommand>(64);
 
         // Spawn NetworkManager
         let network_manager = NetworkManager::new(
@@ -219,13 +241,10 @@ impl Daemon {
             }
         });
 
-        // Spawn CreditLedger
-        let credit_balance_arc = Arc::new(RwLock::new(
-            shared_state.credit_balance.read().await.clone(),
-        ));
+        // Spawn CreditLedger — shares the same Arc<RwLock<CreditBalance>> as SharedState
         let credit_ledger = CreditLedger::new(
             shared_state.identity.node_id().clone(),
-            credit_balance_arc,
+            shared_state.credit_balance.clone(),
             self.db.clone(),
             network_tx.clone(),
             shutdown_rx.clone(),
@@ -238,12 +257,31 @@ impl Daemon {
             }
         });
 
-        // Spawn API server (pass router_cmd_tx so API can submit inference requests)
+        // Spawn AcquisitionManager
+        let acquisition_manager = AcquisitionManager::new(
+            shared_state.clone(),
+            network_tx.clone(),
+            acquisition_rx,
+            shutdown_rx.clone(),
+        );
+
+        let acquisition_handle = tokio::spawn(async move {
+            if let Err(e) = acquisition_manager.run().await {
+                tracing::error!(error = %e, "AcquisitionManager exited with error");
+            }
+        });
+
+        // Spawn API server (pass router_cmd_tx + acquisition_tx so API can submit requests)
         let api_shared_state = shared_state.clone();
         let api_router_tx = router_cmd_tx.clone();
+        let api_acquisition_tx = acquisition_tx.clone();
         let api_handle = tokio::spawn(async move {
-            if let Err(e) =
-                crate::api::server::run_server_with_state(api_shared_state, api_router_tx).await
+            if let Err(e) = crate::api::server::run_server_with_state(
+                api_shared_state,
+                api_router_tx,
+                api_acquisition_tx,
+            )
+            .await
             {
                 tracing::error!(error = %e, "API server exited with error");
             }
@@ -293,6 +331,9 @@ impl Daemon {
             }
             result = credit_handle => {
                 tracing::error!(?result, "CreditLedger task exited");
+            }
+            result = acquisition_handle => {
+                tracing::error!(?result, "AcquisitionManager task exited");
             }
             result = api_handle => {
                 tracing::error!(?result, "API server task exited");
@@ -505,7 +546,7 @@ async fn dispatch_network_messages(
                                     );
                                 }
                                 let key = tx.id.to_string();
-                                if let Err(e) = shared_state.db.put_json("credit_transactions", &key, &tx) {
+                                if let Err(e) = shared_state.db.put_json(crate::credit::ledger::TREE_TRANSACTIONS, &key, &tx) {
                                     tracing::warn!(error = %e, "Failed to store credit transaction");
                                 }
                             }

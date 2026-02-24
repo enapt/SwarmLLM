@@ -139,16 +139,77 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
 /// POST /api/admin/models/:id/add — Express interest in a model (trigger download).
 pub async fn add_model_interest(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
-    tracing::info!(model_id = %model_id, "Model interest registered");
-    // In a complete implementation, this would trigger shard discovery and download.
-    // For now, acknowledge the intent.
-    Json(serde_json::json!({
-        "status": "queued",
-        "model_id": model_id,
-    }))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!(model_id = %model_id, "Model acquisition requested");
+
+    let mid = crate::types::ModelId(model_id.clone());
+
+    // Send acquisition command if the channel is wired up
+    if let Some(ref tx) = state.acquisition_tx {
+        tx.send(crate::model::acquisition::AcquisitionCommand::Acquire { model_id: mid })
+            .await
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to send acquisition command: {e}"
+                )))
+            })?;
+
+        Ok(Json(serde_json::json!({
+            "status": "acquiring",
+            "model_id": model_id,
+        })))
+    } else {
+        // Standalone mode — no acquisition manager
+        Ok(Json(serde_json::json!({
+            "status": "unavailable",
+            "model_id": model_id,
+            "message": "Model acquisition requires daemon mode with P2P networking",
+        })))
+    }
+}
+
+/// GET /api/admin/models/:id/status — Query model acquisition progress.
+pub async fn model_acquisition_status(
+    State(state): State<AppState>,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+
+    if let Some(ref tx) = state.acquisition_tx {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(crate::model::acquisition::AcquisitionCommand::Status {
+            model_id: mid,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Failed to query acquisition status: {e}"
+            )))
+        })?;
+
+        match reply_rx.await {
+            Ok(Some(status)) => Ok(Json(serde_json::to_value(&status).unwrap_or_default())),
+            Ok(None) => Ok(Json(serde_json::json!({
+                "model_id": model_id,
+                "state": "unknown",
+                "message": "No active acquisition for this model",
+            }))),
+            Err(_) => Ok(Json(serde_json::json!({
+                "model_id": model_id,
+                "state": "error",
+                "message": "Acquisition manager did not respond",
+            }))),
+        }
+    } else {
+        Ok(Json(serde_json::json!({
+            "model_id": model_id,
+            "state": "unavailable",
+            "message": "Model acquisition requires daemon mode",
+        })))
+    }
 }
 
 /// GET /api/admin/peers — List connected peers.

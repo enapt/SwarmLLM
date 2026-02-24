@@ -20,7 +20,8 @@ pub const PENALTY_SERVE_FAILURE: i64 = 50; // per incident
 /// Database tree name for credit data.
 const TREE_CREDITS: &str = "credits";
 const KEY_BALANCE: &str = "balance";
-const TREE_TRANSACTIONS: &str = "credit_transactions";
+/// Tree name for credit transaction history (spec: `credit_txns`).
+pub const TREE_TRANSACTIONS: &str = "credit_txns";
 
 /// CreditLedger tracks the local node's credit balance and transaction history.
 ///

@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
 use crate::inference::router::RouterCommand;
+use crate::model::acquisition::AcquisitionCommand;
 use crate::storage::db::Database;
 use crate::ui::assets;
 
@@ -21,6 +22,8 @@ pub struct AppState {
     pub executor: SharedExecutor,
     /// Channel to submit inference requests to the InferenceRouter.
     pub router_tx: Option<mpsc::Sender<RouterCommand>>,
+    /// Channel to submit model acquisition requests.
+    pub acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     /// Full daemon shared state for admin endpoints.
     pub shared_state: Arc<SharedState>,
 }
@@ -41,9 +44,10 @@ pub fn build_router(state: AppState) -> Router {
             get(admin::get_config).put(admin::update_config),
         )
         .route("/api/admin/models", get(admin::list_models))
+        .route("/api/admin/models/:id/add", post(admin::add_model_interest))
         .route(
-            "/api/admin/models/{id}/add",
-            post(admin::add_model_interest),
+            "/api/admin/models/:id/status",
+            get(admin::model_acquisition_status),
         )
         .route("/api/admin/peers", get(admin::list_peers))
         .route("/api/admin/credits", get(admin::credit_info))
@@ -52,20 +56,20 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/issues",
             get(admin::list_issues).post(admin::create_issue),
         )
-        .route("/api/admin/issues/{hash}", get(admin::get_issue))
+        .route("/api/admin/issues/:hash", get(admin::get_issue))
         .route(
-            "/api/admin/issues/{hash}/comment",
+            "/api/admin/issues/:hash/comment",
             post(admin::add_issue_comment),
         )
-        .route("/api/admin/issues/{hash}/upvote", post(admin::upvote_issue))
+        .route("/api/admin/issues/:hash/upvote", post(admin::upvote_issue))
         // Governance: Proposals
         .route(
             "/api/admin/proposals",
             get(admin::list_proposals).post(admin::create_proposal),
         )
-        .route("/api/admin/proposals/{hash}", get(admin::get_proposal))
+        .route("/api/admin/proposals/:hash", get(admin::get_proposal))
         .route(
-            "/api/admin/proposals/{hash}/vote",
+            "/api/admin/proposals/:hash/vote",
             post(admin::vote_proposal),
         )
         // Governance: Releases
@@ -83,7 +87,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/admin", get(assets::serve_dashboard))
         .route("/chat", get(assets::serve_chat))
         .route("/setup", get(assets::serve_setup))
-        .route("/admin/{*path}", get(assets::serve_static))
+        .route("/static/*path", get(assets::serve_static))
         // Root redirect
         .route("/", get(|| async { Redirect::to("/admin") }))
         // Health check
@@ -115,6 +119,7 @@ pub async fn run_server(
         db,
         executor,
         router_tx: None,
+        acquisition_tx: None,
         shared_state,
     };
 
@@ -133,6 +138,7 @@ pub async fn run_server(
 pub async fn run_server_with_state(
     shared_state: Arc<SharedState>,
     router_tx: mpsc::Sender<RouterCommand>,
+    acquisition_tx: mpsc::Sender<AcquisitionCommand>,
 ) -> anyhow::Result<()> {
     let port = shared_state.config.node.listen_port;
     let state = AppState {
@@ -140,6 +146,7 @@ pub async fn run_server_with_state(
         db: shared_state.db.clone(),
         executor: shared_state.executor.clone(),
         router_tx: Some(router_tx),
+        acquisition_tx: Some(acquisition_tx),
         shared_state,
     };
 
