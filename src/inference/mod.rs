@@ -4,3 +4,4 @@ pub mod pipeline;
 pub mod router;
 pub mod sampling;
 pub mod scheduler;
+pub mod speculative;

@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use libp2p::identity::Keypair;
@@ -7,7 +5,8 @@ use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{autonat, dcutr, gossipsub, identify, kad, relay, request_response, StreamProtocol};
 
-use crate::network::protocol::SwarmCodec;
+use crate::network::protocol::{SwarmCodec, TensorCodec};
+use crate::network::relay::RelayServerConfig;
 
 /// Combined network behaviour for the SwarmLLM node.
 ///
@@ -18,16 +17,21 @@ pub struct SwarmBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
     pub request_response: request_response::Behaviour<SwarmCodec>,
+    /// Cap'n Proto tensor protocol for zero-copy activation forwarding.
+    pub tensor_rr: request_response::Behaviour<TensorCodec>,
     pub identify: identify::Behaviour,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub relay_client: relay::client::Behaviour,
+    /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
+    pub relay_server: relay::Behaviour,
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
 pub fn build_behaviour(
     local_key: &Keypair,
     relay_behaviour: relay::client::Behaviour,
+    relay_server_config: Option<&RelayServerConfig>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -37,11 +41,15 @@ pub fn build_behaviour(
     kademlia.set_mode(Some(kad::Mode::Server));
 
     // GossipSub for network-wide announcements
+    // Use blake3 for deterministic message IDs across processes
+    // (DefaultHasher is seeded randomly per process, breaking deduplication)
     let message_id_fn = |message: &gossipsub::Message| {
-        let mut hasher = DefaultHasher::new();
-        message.data.hash(&mut hasher);
-        message.source.hash(&mut hasher);
-        gossipsub::MessageId::from(hasher.finish().to_string())
+        let mut input = message.data.clone();
+        if let Some(ref source) = message.source {
+            input.extend_from_slice(&source.to_bytes());
+        }
+        let hash = blake3::hash(&input);
+        gossipsub::MessageId::from(hex::encode(&hash.as_bytes()[..16]))
     };
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(10))
@@ -55,13 +63,22 @@ pub fn build_behaviour(
     )
     .map_err(|e| format!("GossipSub init error: {e}"))?;
 
-    // Request/Response for direct peer communication (shard transfers, inference pipeline)
+    // Request/Response for direct peer communication (shard transfers, control messages)
     let request_response = request_response::Behaviour::new(
         [(
             StreamProtocol::new("/swarmllm/1.0.0"),
             request_response::ProtocolSupport::Full,
         )],
         request_response::Config::default(),
+    );
+
+    // Tensor request/response for zero-copy activation forwarding (Cap'n Proto)
+    let tensor_rr = request_response::Behaviour::new(
+        [(
+            StreamProtocol::new("/swarmllm/tensor/1.0.0"),
+            request_response::ProtocolSupport::Full,
+        )],
+        request_response::Config::default().with_request_timeout(Duration::from_secs(120)),
     );
 
     // Identify protocol
@@ -76,14 +93,22 @@ pub fn build_behaviour(
     // DCUtR for hole punching
     let dcutr = dcutr::Behaviour::new(local_peer_id);
 
+    // Relay server: if config provided, use those limits; otherwise use defaults.
+    let relay_config = relay_server_config
+        .map(crate::network::relay::build_relay_server_config)
+        .unwrap_or_default();
+    let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
+
     Ok(SwarmBehaviour {
         kademlia,
         gossipsub,
         request_response,
+        tensor_rr,
         identify,
         autonat,
         dcutr,
         relay_client: relay_behaviour,
+        relay_server,
     })
 }
 
@@ -97,7 +122,21 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour);
+        let result = build_behaviour(&keypair, relay_behaviour, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_behaviour_with_relay_config() {
+        let keypair = Keypair::generate_ed25519();
+        let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
+        drop(relay_transport);
+        let relay_cfg = RelayServerConfig {
+            max_reservations: 64,
+            max_circuits: 8,
+            ..Default::default()
+        };
+        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg));
         assert!(result.is_ok());
     }
 }

@@ -1,0 +1,263 @@
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use crate::types::NodeId;
+
+/// Rate limiter and anti-gaming checks for the credit system.
+///
+/// Prevents:
+/// - Rapid-fire transactions from a single peer (rate limiting)
+/// - Self-dealing (same node as from/to)
+/// - Transaction amounts that are implausibly large
+/// - Spot-check verification of claimed work
+pub struct AntiGaming {
+    /// Per-peer rate limiting: tracks last N transaction timestamps.
+    rate_limits: HashMap<NodeId, Vec<Instant>>,
+    /// Maximum transactions per peer per window.
+    max_tx_per_window: usize,
+    /// Rate limit window duration.
+    window_duration: Duration,
+    /// Maximum single transaction amount.
+    max_transaction_amount: i64,
+    /// Spot-check probability (0.0 to 1.0).
+    spot_check_rate: f64,
+}
+
+impl AntiGaming {
+    pub fn new() -> Self {
+        Self {
+            rate_limits: HashMap::new(),
+            max_tx_per_window: 100,
+            window_duration: Duration::from_secs(300), // 5 minutes
+            max_transaction_amount: 100_000,
+            spot_check_rate: 0.05, // 5% of transactions
+        }
+    }
+
+    /// Check whether a transaction should be allowed based on rate limits and validity.
+    pub fn check_transaction(
+        &mut self,
+        from: &NodeId,
+        to: &NodeId,
+        amount: i64,
+    ) -> Result<SpotCheckDecision, AntiGamingViolation> {
+        // Check self-dealing
+        if from == to {
+            return Err(AntiGamingViolation::SelfDealing);
+        }
+
+        // Check amount bounds
+        if amount <= 0 {
+            return Err(AntiGamingViolation::InvalidAmount(amount));
+        }
+        if amount > self.max_transaction_amount {
+            return Err(AntiGamingViolation::ExcessiveAmount {
+                amount,
+                max: self.max_transaction_amount,
+            });
+        }
+
+        // Rate limit check
+        if !self.check_rate_limit(from) {
+            return Err(AntiGamingViolation::RateLimited {
+                node: from.clone(),
+                window_secs: self.window_duration.as_secs(),
+            });
+        }
+
+        // Decide whether to spot-check
+        let should_spot_check = rand::random::<f64>() < self.spot_check_rate;
+
+        Ok(if should_spot_check {
+            SpotCheckDecision::RequiresVerification
+        } else {
+            SpotCheckDecision::Approved
+        })
+    }
+
+    /// Record a transaction for rate limiting purposes.
+    pub fn record_transaction(&mut self, node: &NodeId) {
+        let entries = self.rate_limits.entry(node.clone()).or_default();
+        entries.push(Instant::now());
+    }
+
+    /// Cleanup expired rate limit entries.
+    pub fn cleanup(&mut self) {
+        let cutoff = Instant::now() - self.window_duration;
+        self.rate_limits.retain(|_, timestamps| {
+            timestamps.retain(|t| *t > cutoff);
+            !timestamps.is_empty()
+        });
+    }
+
+    /// Report a spot-check failure — peer claimed work they didn't do.
+    pub fn report_spot_check_failure(&mut self, _node: &NodeId) -> PenaltyAction {
+        // For now, return a trust score reduction
+        // In Phase 6, this integrates with the trust system
+        PenaltyAction::ReduceTrust { amount: 0.1 }
+    }
+
+    /// Check rate limit for a node. Returns true if within limits.
+    fn check_rate_limit(&mut self, node: &NodeId) -> bool {
+        let cutoff = Instant::now() - self.window_duration;
+
+        let entries = self.rate_limits.entry(node.clone()).or_default();
+        entries.retain(|t| *t > cutoff);
+
+        entries.len() < self.max_tx_per_window
+    }
+}
+
+impl Default for AntiGaming {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Result of an anti-gaming check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpotCheckDecision {
+    /// Transaction approved, no spot-check needed.
+    Approved,
+    /// Transaction approved, but requires spot-check verification.
+    RequiresVerification,
+}
+
+/// A violation detected by the anti-gaming system.
+#[derive(Debug, Clone)]
+pub enum AntiGamingViolation {
+    /// Node tried to transact with itself.
+    SelfDealing,
+    /// Transaction amount is zero or negative.
+    InvalidAmount(i64),
+    /// Transaction amount exceeds maximum.
+    ExcessiveAmount { amount: i64, max: i64 },
+    /// Node exceeded transaction rate limit.
+    RateLimited { node: NodeId, window_secs: u64 },
+}
+
+impl std::fmt::Display for AntiGamingViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SelfDealing => write!(f, "Self-dealing detected"),
+            Self::InvalidAmount(a) => write!(f, "Invalid transaction amount: {a}"),
+            Self::ExcessiveAmount { amount, max } => {
+                write!(f, "Excessive amount: {amount} (max: {max})")
+            }
+            Self::RateLimited { node, window_secs } => {
+                write!(f, "Rate limited: {node} in {window_secs}s window")
+            }
+        }
+    }
+}
+
+/// Action to take when a penalty is assessed.
+#[derive(Debug, Clone)]
+pub enum PenaltyAction {
+    /// Reduce the peer's trust score.
+    ReduceTrust { amount: f64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(b: u8) -> NodeId {
+        NodeId([b; 32])
+    }
+
+    #[test]
+    fn rejects_self_dealing() {
+        let mut ag = AntiGaming::new();
+        let n = node(1);
+        assert!(matches!(
+            ag.check_transaction(&n, &n, 10),
+            Err(AntiGamingViolation::SelfDealing)
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_amount() {
+        let mut ag = AntiGaming::new();
+        assert!(matches!(
+            ag.check_transaction(&node(1), &node(2), 0),
+            Err(AntiGamingViolation::InvalidAmount(0))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_amount() {
+        let mut ag = AntiGaming::new();
+        assert!(matches!(
+            ag.check_transaction(&node(1), &node(2), -5),
+            Err(AntiGamingViolation::InvalidAmount(-5))
+        ));
+    }
+
+    #[test]
+    fn rejects_excessive_amount() {
+        let mut ag = AntiGaming::new();
+        assert!(matches!(
+            ag.check_transaction(&node(1), &node(2), 200_000),
+            Err(AntiGamingViolation::ExcessiveAmount { .. })
+        ));
+    }
+
+    #[test]
+    fn approves_valid_transaction() {
+        let mut ag = AntiGaming::new();
+        let result = ag.check_transaction(&node(1), &node(2), 100);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rate_limits_after_threshold() {
+        let mut ag = AntiGaming::new();
+        ag.max_tx_per_window = 3;
+
+        let from = node(1);
+        let to = node(2);
+
+        // First 3 should succeed
+        for _ in 0..3 {
+            assert!(ag.check_transaction(&from, &to, 10).is_ok());
+            ag.record_transaction(&from);
+        }
+
+        // 4th should be rate limited
+        assert!(matches!(
+            ag.check_transaction(&from, &to, 10),
+            Err(AntiGamingViolation::RateLimited { .. })
+        ));
+    }
+
+    #[test]
+    fn cleanup_removes_old_entries() {
+        let mut ag = AntiGaming::new();
+        ag.window_duration = Duration::from_millis(1);
+        ag.max_tx_per_window = 1;
+
+        let from = node(1);
+        let to = node(2);
+
+        ag.record_transaction(&from);
+
+        // Wait for window to expire
+        std::thread::sleep(Duration::from_millis(5));
+        ag.cleanup();
+
+        // Should be allowed again
+        assert!(ag.check_transaction(&from, &to, 10).is_ok());
+    }
+
+    #[test]
+    fn spot_check_failure_returns_penalty() {
+        let mut ag = AntiGaming::new();
+        let action = ag.report_spot_check_failure(&node(1));
+        match action {
+            PenaltyAction::ReduceTrust { amount } => {
+                assert!((amount - 0.1).abs() < f64::EPSILON);
+            }
+        }
+    }
+}

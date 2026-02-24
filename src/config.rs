@@ -16,6 +16,10 @@ pub struct Config {
     pub inference: InferenceConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
+    pub updates: UpdateConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +63,12 @@ pub struct NetworkConfig {
     pub enable_relay_client: bool,
     #[serde(default = "default_max_peers")]
     pub max_peers: u32,
+    /// Maximum duration for a single relay circuit in seconds.
+    #[serde(default = "default_relay_circuit_duration")]
+    pub relay_max_circuit_duration_secs: u64,
+    /// Maximum number of relay circuits this node will serve simultaneously.
+    #[serde(default = "default_relay_max_circuits")]
+    pub relay_max_circuits: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +86,12 @@ pub struct InferenceConfig {
     /// KV-cache session TTL in seconds (default 600 = 10 minutes).
     #[serde(default = "default_kv_cache_ttl")]
     pub kv_cache_ttl_secs: Option<u64>,
+    /// Enable speculative decoding when a valid draft-target model pair is available.
+    #[serde(default)]
+    pub speculative_decoding: bool,
+    /// Number of draft tokens to propose per verification step (default: 4).
+    #[serde(default = "default_speculative_gamma")]
+    pub speculative_gamma: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +102,70 @@ pub struct LoggingConfig {
     pub format: String,
     #[serde(default)]
     pub file: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_true")]
+    pub open_browser_on_start: bool,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            open_browser_on_start: true,
+            theme: default_theme(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_auto_update")]
+    pub auto_update: AutoUpdateMode,
+    #[serde(default = "default_check_interval_hours")]
+    pub check_interval_hours: u32,
+    #[serde(default = "default_true")]
+    pub auto_restart: bool,
+    #[serde(default = "default_keep_versions")]
+    pub keep_versions: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoUpdateMode {
+    Disabled,
+    Stable,
+    All,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: AutoUpdateMode::Stable,
+            check_interval_hours: default_check_interval_hours(),
+            auto_restart: true,
+            keep_versions: default_keep_versions(),
+        }
+    }
+}
+
+fn default_auto_update() -> AutoUpdateMode {
+    AutoUpdateMode::Stable
+}
+
+fn default_check_interval_hours() -> u32 {
+    6
+}
+
+fn default_keep_versions() -> u32 {
+    3
+}
+
+fn default_theme() -> String {
+    "dark".into()
 }
 
 // ---- Defaults ----
@@ -126,6 +206,18 @@ fn default_gpu_layers() -> u32 {
 
 fn default_kv_cache_ttl() -> Option<u64> {
     Some(600)
+}
+
+fn default_speculative_gamma() -> u32 {
+    4
+}
+
+fn default_relay_circuit_duration() -> u64 {
+    3600
+}
+
+fn default_relay_max_circuits() -> usize {
+    16
 }
 
 fn default_log_level() -> String {
@@ -172,6 +264,8 @@ impl Default for NetworkConfig {
             enable_relay: true,
             enable_relay_client: true,
             max_peers: default_max_peers(),
+            relay_max_circuit_duration_secs: default_relay_circuit_duration(),
+            relay_max_circuits: default_relay_max_circuits(),
         }
     }
 }
@@ -185,6 +279,8 @@ impl Default for InferenceConfig {
             model_path: None,
             gpu_layers: default_gpu_layers(),
             kv_cache_ttl_secs: default_kv_cache_ttl(),
+            speculative_decoding: false,
+            speculative_gamma: default_speculative_gamma(),
         }
     }
 }

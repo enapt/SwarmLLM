@@ -375,6 +375,99 @@ enum StreamEvent {
     Done,
 }
 
+// ---- Completions (non-chat) ----
+
+#[derive(Debug, Deserialize)]
+pub struct CompletionRequest {
+    pub model: String,
+    pub prompt: String,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub stop: Option<StopSequence>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompletionResponse {
+    pub id: String,
+    pub object: &'static str,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<CompletionChoice>,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompletionChoice {
+    pub index: u32,
+    pub text: String,
+    pub finish_reason: String,
+}
+
+/// POST /v1/completions — OpenAI-compatible text completions endpoint.
+pub async fn completions(
+    State(state): State<AppState>,
+    Json(req): Json<CompletionRequest>,
+) -> Result<Json<CompletionResponse>, ApiError> {
+    let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
+    let created = chrono::Utc::now().timestamp();
+
+    tracing::info!(
+        request_id = %request_id,
+        model = %req.model,
+        "Completion request"
+    );
+
+    let stop = match &req.stop {
+        Some(StopSequence::Single(s)) => vec![s.clone()],
+        Some(StopSequence::Multiple(v)) => v.clone(),
+        None => vec![],
+    };
+
+    let params = SamplingParams {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        top_k: 40,
+        max_tokens: req.max_tokens,
+        stop,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+    };
+
+    let executor = state.executor.lock().await;
+    if !executor.is_loaded() {
+        return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+    }
+
+    let (content, result) = executor
+        .generate(&req.prompt, &params)
+        .await
+        .map_err(ApiError)?;
+
+    Ok(Json(CompletionResponse {
+        id: request_id,
+        object: "text_completion",
+        created,
+        model: req.model,
+        choices: vec![CompletionChoice {
+            index: 0,
+            text: content,
+            finish_reason: result.finish_reason.as_str().into(),
+        }],
+        usage: Usage {
+            prompt_tokens: result.prompt_tokens,
+            completion_tokens: result.completion_tokens,
+            total_tokens: result.prompt_tokens + result.completion_tokens,
+        },
+    }))
+}
+
 /// GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelListResponse> {
     let executor = state.executor.lock().await;

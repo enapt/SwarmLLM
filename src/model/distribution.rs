@@ -46,7 +46,7 @@ impl ShardDistributor {
     /// Send a shard transfer request to a peer via the network channel.
     pub async fn request_shard(
         shard_id: &ShardId,
-        network_tx: &mpsc::Sender<SwarmMessage>,
+        network_tx: &mpsc::Sender<crate::types::NetworkCommand>,
     ) -> Result<(), SwarmError> {
         tracing::info!(
             model = %shard_id.model_id,
@@ -71,7 +71,7 @@ impl ShardDistributor {
         });
 
         network_tx
-            .send(announce)
+            .send(crate::types::NetworkCommand::Broadcast(announce))
             .await
             .map_err(|e| SwarmError::Network(format!("Failed to send shard request: {e}")))?;
 

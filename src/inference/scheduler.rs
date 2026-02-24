@@ -103,23 +103,7 @@ impl PipelineScheduler {
             // Check model_registry shard_holders
             let holders = self.shared_state.model_registry.shard_holders(&shard_id);
 
-            // Also check shard_registry (tracks nodes from network announcements)
-            let network_holders: Vec<NodeId> = self
-                .shared_state
-                .shard_registry
-                .get(&shard_id)
-                .map(|v| v.clone())
-                .unwrap_or_default();
-
-            // Merge unique holders
-            let mut all_holders = holders;
-            for holder in network_holders {
-                if !all_holders.contains(&holder) {
-                    all_holders.push(holder);
-                }
-            }
-
-            for node_id in all_holders {
+            for node_id in holders {
                 let (latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
 
                 candidates.push(NodeCandidate {

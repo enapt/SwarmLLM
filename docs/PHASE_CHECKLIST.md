@@ -77,14 +77,14 @@
 
 **Goal**: Incentive-aligned credit system with priority tiers.
 
-- [ ] `src/credit/mod.rs` — Module structure
-- [ ] `src/credit/ledger.rs` — Local balance tracking, credit operations
-- [ ] `src/credit/transaction.rs` — Transaction creation, dual signing
-- [ ] `src/credit/priority.rs` — Tier calculation, queue ordering
-- [ ] `src/credit/anti_gaming.rs` — Spot-check verification, rate limiting
-- [ ] Wire credit events into inference pipeline (earn on serve, spend on request)
-- [ ] Add credit gossip for percentile estimation
-- [ ] Priority queue in InferenceRouter respects tiers
+- [x] `src/credit/mod.rs` — Module structure
+- [x] `src/credit/ledger.rs` — Local balance tracking, credit operations
+- [x] `src/credit/transaction.rs` — Transaction creation, dual signing
+- [x] `src/credit/priority.rs` — Tier calculation, queue ordering
+- [x] `src/credit/anti_gaming.rs` — Spot-check verification, rate limiting
+- [x] Wire credit events into inference pipeline (earn on serve, spend on request)
+- [x] Add credit gossip for percentile estimation
+- [x] Priority queue in InferenceRouter respects tiers
 
 **Acceptance test**: Node A serves 100 requests for Node B. A's balance increases. B's balance decreases. A achieves higher priority tier.
 
@@ -94,16 +94,16 @@
 
 **Goal**: Polished web interface with setup wizard, dashboard, and chat.
 
-- [ ] `frontend/setup.html` + `frontend/js/setup.js` — First-run wizard
-- [ ] `frontend/index.html` + `frontend/js/app.js` — Admin dashboard
-- [ ] `frontend/chat.html` + `frontend/js/chat.js` — Chat interface
-- [ ] `frontend/css/style.css` — Dark theme styling
-- [ ] `build.rs` — Embed frontend assets with include_dir
-- [ ] `src/ui/mod.rs` + `src/ui/assets.rs` — Serve embedded files
-- [ ] `src/api/admin.rs` — All admin REST endpoints
-- [ ] `src/api/websocket.rs` — Real-time dashboard updates via WebSocket
-- [ ] Hardware auto-detection in config.rs (GPU probing, RAM, disk)
-- [ ] `open_browser_on_start` logic in daemon.rs
+- [x] `frontend/setup.html` + `frontend/js/setup.js` — First-run wizard
+- [x] `frontend/index.html` + `frontend/js/app.js` — Admin dashboard
+- [x] `frontend/chat.html` + `frontend/js/chat.js` — Chat interface
+- [x] `frontend/css/style.css` — Dark theme styling
+- [x] `build.rs` — Embed frontend assets with include_dir
+- [x] `src/ui/mod.rs` + `src/ui/assets.rs` — Serve embedded files
+- [x] `src/api/admin.rs` — All admin REST endpoints
+- [x] `src/api/websocket.rs` — Real-time dashboard updates via WebSocket
+- [x] Hardware auto-detection in config.rs (GPU probing, RAM, disk)
+- [x] `open_browser_on_start` logic in daemon.rs
 
 **Acceptance test**: Fresh install. Run binary. Browser opens. Setup wizard detects hardware. User completes wizard. Dashboard shows real-time stats. Chat works.
 
@@ -113,16 +113,16 @@
 
 **Goal**: Production-ready networking, performance, and cross-platform support.
 
-- [ ] NAT traversal: AutoNAT, DCUtR, relay
-- [ ] `src/network/relay.rs` — Circuit relay client/server
-- [ ] Protocol migration from serde_json to Cap'n Proto for tensor data
-- [ ] `proto/messages.capnp` — Cap'n Proto schema definitions
-- [ ] `src/model/quantization.rs` — GGUF format handling, quantization utilities
-- [ ] Shard rebalancing on node join/leave
-- [ ] Model governance voting
-- [ ] Cross-platform builds and testing (Linux, macOS, Windows)
-- [ ] Speculative decoding groundwork
-- [ ] MoE-optimized sharding
+- [x] NAT traversal: AutoNAT, DCUtR, relay
+- [x] `src/network/relay.rs` — Circuit relay client/server
+- [x] Protocol migration from serde_json to Cap'n Proto for tensor data
+- [x] `proto/messages.capnp` — Cap'n Proto schema definitions
+- [x] `src/model/quantization.rs` — GGUF format handling, quantization utilities
+- [x] Shard rebalancing on node join/leave
+- [x] Model governance voting
+- [x] Cross-platform builds and testing (Linux, macOS, Windows)
+- [x] Speculative decoding groundwork
+- [x] MoE-optimized sharding
 
 ---
 
@@ -130,17 +130,17 @@
 
 **Goal**: Fully decentralized development lifecycle — no central repository needed.
 
-- [ ] `src/governance/mod.rs` — Module structure
-- [ ] `src/governance/proposals.rs` — RFC creation, validation, lifecycle management
-- [ ] `src/governance/voting.rs` — Weighted voting, quorum calculation, tallying
-- [ ] `src/governance/issues.rs` — Bug reports, feature requests, prioritization
-- [ ] `src/governance/releases.rs` — Release candidate management, threshold signing
-- [ ] `src/governance/testing.rs` — Distributed test coordination, canary rollouts
-- [ ] `src/governance/changelog.rs` — Auto-generated changelog from merged proposals
-- [ ] Wire governance messages into NetworkManager (new GossipSub topics)
-- [ ] Wire governance into ApiServer (new admin endpoints)
-- [ ] Wire governance into admin dashboard (new tabs)
-- [ ] `UpdateManager` integration into daemon.rs
-- [ ] Genesis period bootstrap logic
+- [x] `src/governance/mod.rs` — Module structure
+- [x] `src/governance/proposals.rs` — RFC creation, validation, lifecycle management
+- [x] `src/governance/voting.rs` — Weighted voting, quorum calculation, tallying
+- [x] `src/governance/issues.rs` — Bug reports, feature requests, prioritization
+- [x] `src/governance/releases.rs` — Release candidate management, threshold signing
+- [x] `src/governance/testing.rs` — Distributed test coordination, canary rollouts
+- [x] `src/governance/changelog.rs` — Auto-generated changelog from merged proposals
+- [x] Wire governance messages into NetworkManager (new GossipSub topics)
+- [x] Wire governance into ApiServer (new admin endpoints)
+- [x] Wire governance into admin dashboard (new tabs)
+- [x] `UpdateManager` integration into daemon.rs
+- [x] Genesis period bootstrap logic
 
 **Acceptance test**: Full lifecycle from issue filing through proposal, vote, build, test, approve, and canary rollout — with no central coordination.

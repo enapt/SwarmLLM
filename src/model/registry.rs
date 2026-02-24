@@ -61,9 +61,35 @@ impl ModelRegistry {
         self.manifests.iter().map(|v| v.value().clone()).collect()
     }
 
+    /// List all known model manifests (alias for models()).
+    pub fn list_models(&self) -> Vec<ModelManifest> {
+        self.models()
+    }
+
     /// Get the number of registered models.
     pub fn model_count(&self) -> usize {
         self.manifests.len()
+    }
+
+    /// Get the number of tracked shards.
+    pub fn shard_count(&self) -> usize {
+        self.shard_holders.len()
+    }
+
+    /// Check if a specific shard is tracked.
+    pub fn has_shard(&self, shard_id: &ShardId) -> bool {
+        self.shard_holders
+            .get(shard_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Iterate over all tracked shard entries (shard_id, holders).
+    pub fn all_shard_entries(&self) -> Vec<(ShardId, Vec<NodeId>)> {
+        self.shard_holders
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
     }
 
     /// Load model and shard metadata from the database.

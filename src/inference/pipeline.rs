@@ -8,8 +8,8 @@ use crate::error::SwarmError;
 use crate::inference::executor::build_chat_prompt;
 use crate::inference::router::InferenceOutput;
 use crate::types::{
-    InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkFinishReason,
-    PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
+    InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkCommand,
+    NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
 };
 
 /// Timeout for a single layer forward pass across the network.
@@ -27,7 +27,7 @@ const _MAX_FAILOVER_ATTEMPTS: u32 = 2;
 /// If a segment fails, the executor attempts failover to a standby node.
 pub struct PipelineExecutor {
     shared_state: Arc<SharedState>,
-    network_tx: mpsc::Sender<SwarmMessage>,
+    network_tx: mpsc::Sender<NetworkCommand>,
     request: InferenceRequest,
     assignment: PipelineAssignment,
 }
@@ -35,7 +35,7 @@ pub struct PipelineExecutor {
 impl PipelineExecutor {
     pub fn new(
         shared_state: Arc<SharedState>,
-        network_tx: mpsc::Sender<SwarmMessage>,
+        network_tx: mpsc::Sender<NetworkCommand>,
         request: InferenceRequest,
         assignment: PipelineAssignment,
     ) -> Self {
@@ -209,8 +209,6 @@ impl PipelineExecutor {
                 format: TensorFormat::FP16,
             };
 
-            let msg = SwarmMessage::LayerForward(forward);
-
             // If this is the local node, process locally
             if segment.node_id == *self.shared_state.identity.node_id() {
                 let result = self.process_local_segment(segment, &activations).await?;
@@ -224,9 +222,13 @@ impl PipelineExecutor {
                     .flat_map(|t| t.to_le_bytes())
                     .collect();
             } else {
-                // Send to remote node via network
+                // Send to remote node via directed tensor protocol
+                let target_peer_bytes = segment.node_id.0.to_vec();
                 self.network_tx
-                    .send(msg)
+                    .send(NetworkCommand::SendTensor {
+                        target_peer_bytes,
+                        forward,
+                    })
                     .await
                     .map_err(|_| SwarmError::Network("Failed to send LayerForward".to_string()))?;
 
@@ -354,7 +356,7 @@ impl PipelineExecutor {
                     "Failing over to standby node"
                 );
 
-                // Send to backup node
+                // Send to backup node via directed tensor protocol
                 let forward = LayerForward {
                     request_id,
                     sequence_num,
@@ -362,8 +364,12 @@ impl PipelineExecutor {
                     format: TensorFormat::FP16,
                 };
 
+                let target_peer_bytes = backup.node_id.0.to_vec();
                 self.network_tx
-                    .send(SwarmMessage::LayerForward(forward))
+                    .send(NetworkCommand::SendTensor {
+                        target_peer_bytes,
+                        forward,
+                    })
                     .await
                     .map_err(|_| {
                         SwarmError::Network("Failed to send to standby node".to_string())
@@ -389,7 +395,7 @@ impl PipelineExecutor {
 
 /// Notify all pipeline participants of an error.
 pub async fn broadcast_pipeline_error(
-    network_tx: &mpsc::Sender<SwarmMessage>,
+    network_tx: &mpsc::Sender<NetworkCommand>,
     request_id: uuid::Uuid,
     error: &str,
 ) {
@@ -399,7 +405,7 @@ pub async fn broadcast_pipeline_error(
         recoverable: false,
     });
 
-    if let Err(e) = network_tx.send(error_msg).await {
+    if let Err(e) = network_tx.send(NetworkCommand::Broadcast(error_msg)).await {
         tracing::warn!(error = %e, "Failed to broadcast pipeline error");
     }
 }
@@ -444,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn empty_pipeline_fails() {
         let state = make_test_state();
-        let (tx, _rx) = mpsc::channel(64);
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(64);
         let request = make_test_request(&state);
         let assignment = PipelineAssignment {
             request_id: request.id,
@@ -461,7 +467,7 @@ mod tests {
     async fn local_pipeline_returns_stub() {
         let state = make_test_state();
         let local_id = state.identity.node_id().clone();
-        let (tx, _rx) = mpsc::channel(64);
+        let (tx, _rx) = mpsc::channel::<NetworkCommand>(64);
         let request = make_test_request(&state);
         let request_id = request.id;
 

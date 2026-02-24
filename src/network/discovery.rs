@@ -65,10 +65,23 @@ pub fn trigger_bootstrap(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmE
 
 /// Subscribe to the standard GossipSub topics.
 pub fn subscribe_topics(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmError> {
-    use crate::network::protocol::{TOPIC_GOVERNANCE, TOPIC_HEALTH, TOPIC_MODELS};
+    use crate::network::protocol::{
+        TOPIC_CREDITS, TOPIC_GOVERNANCE, TOPIC_GOV_CHANGELOG, TOPIC_GOV_ISSUES,
+        TOPIC_GOV_PROPOSALS, TOPIC_GOV_RELEASES, TOPIC_GOV_VOTES, TOPIC_HEALTH, TOPIC_MODELS,
+    };
     use libp2p::gossipsub::IdentTopic;
 
-    let topics = [TOPIC_MODELS, TOPIC_GOVERNANCE, TOPIC_HEALTH];
+    let topics = [
+        TOPIC_MODELS,
+        TOPIC_GOVERNANCE,
+        TOPIC_HEALTH,
+        TOPIC_CREDITS,
+        TOPIC_GOV_PROPOSALS,
+        TOPIC_GOV_VOTES,
+        TOPIC_GOV_ISSUES,
+        TOPIC_GOV_RELEASES,
+        TOPIC_GOV_CHANGELOG,
+    ];
 
     for topic_str in &topics {
         let topic = IdentTopic::new(*topic_str);

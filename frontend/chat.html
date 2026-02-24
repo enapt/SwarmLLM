@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwarmLLM — Chat</title>
+  <link rel="stylesheet" href="/admin/css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="logo">SwarmLLM</div>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/chat" class="active">Chat</a>
+    </nav>
+    <div class="node-info">
+      <span class="mono" id="node-id">—</span>
+    </div>
+  </header>
+
+  <div class="chat-container">
+    <div class="chat-messages" id="chat-messages"></div>
+
+    <div class="chat-input-area">
+      <div class="chat-input-wrap">
+        <textarea id="chat-input" placeholder="Type a message..." rows="1"
+                  onkeydown="handleInputKey(event)"></textarea>
+        <button class="btn btn-primary" id="send-btn" onclick="sendMessage()">Send</button>
+      </div>
+      <div class="chat-toolbar">
+        <select id="model-select">
+          <option value="local">local</option>
+        </select>
+        <div class="chat-settings">
+          <label style="display:inline">Temp:
+            <input type="number" id="chat-temp" value="0.7" min="0" max="2" step="0.1">
+          </label>
+          <label style="display:inline">Max tokens:
+            <input type="number" id="chat-max-tokens" value="2048" min="1" max="8192" step="64">
+          </label>
+          <button class="btn" onclick="clearChat()">Clear</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/admin/js/chat.js"></script>
+</body>
+</html>

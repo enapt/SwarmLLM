@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwarmLLM — Dashboard</title>
+  <link rel="stylesheet" href="/admin/css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="logo">SwarmLLM</div>
+    <nav>
+      <a href="/admin" class="active">Dashboard</a>
+      <a href="/chat">Chat</a>
+    </nav>
+    <div class="node-info">
+      <span class="mono" id="node-id">—</span>
+      <span class="tier-badge silver" id="tier-badge">Silver</span>
+      <span id="uptime">—</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Top stats row -->
+    <div class="grid grid-4 mb-2" id="stats-row">
+      <div class="panel">
+        <div class="stat-label">Connected Peers</div>
+        <div class="stat-value" id="stat-peers">0</div>
+      </div>
+      <div class="panel">
+        <div class="stat-label">Credit Balance</div>
+        <div class="stat-value" id="stat-credits">0</div>
+      </div>
+      <div class="panel">
+        <div class="stat-label">Requests Served</div>
+        <div class="stat-value" id="stat-served">0</div>
+      </div>
+      <div class="panel">
+        <div class="stat-label">Active Requests</div>
+        <div class="stat-value" id="stat-active">0</div>
+      </div>
+    </div>
+
+    <div class="grid grid-2">
+      <!-- Your Node panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Your Node</h2>
+          <span class="text-muted mono" id="version">v—</span>
+        </div>
+        <div class="form-group">
+          <label>GPU</label>
+          <div class="mono" id="node-gpu">—</div>
+        </div>
+        <div class="form-group">
+          <label>RAM Usage</label>
+          <div class="flex-between mb-1">
+            <span class="mono" id="ram-used">—</span>
+            <span class="text-muted" id="ram-total">/ —</span>
+          </div>
+          <div class="progress-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
+        </div>
+        <div class="form-group">
+          <label>Disk Usage</label>
+          <div class="flex-between mb-1">
+            <span class="mono" id="disk-used">—</span>
+            <span class="text-muted" id="disk-total">/ —</span>
+          </div>
+          <div class="progress-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+        </div>
+        <div class="form-group">
+          <label>Hosted Shards</label>
+          <div class="mono" id="hosted-shards">0</div>
+        </div>
+      </div>
+
+      <!-- Credits panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Credits</h2>
+          <span class="tier-badge silver" id="credit-tier">Silver</span>
+        </div>
+        <div class="stat-value mb-1" id="credit-balance">0</div>
+        <div class="grid grid-2 mt-1">
+          <div>
+            <div class="stat-label">Lifetime Earned</div>
+            <div class="mono text-green" id="credit-earned">0</div>
+          </div>
+          <div>
+            <div class="stat-label">Lifetime Spent</div>
+            <div class="mono text-red" id="credit-spent">0</div>
+          </div>
+        </div>
+        <div class="mt-2">
+          <label>Recent Activity</label>
+          <div class="sparkline" id="credit-sparkline"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Models table -->
+    <div class="panel mt-2">
+      <div class="panel-header">
+        <h2>Models</h2>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Size</th>
+            <th>Shards</th>
+            <th>Network Health</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="models-table-body">
+          <tr><td colspan="5" class="text-muted">No models loaded</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Active Requests -->
+    <div class="panel mt-2">
+      <div class="panel-header">
+        <h2>Active Requests</h2>
+      </div>
+      <div id="active-requests">
+        <p class="text-muted">No active requests</p>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="panel mt-2">
+      <div class="panel-header">
+        <h2>Settings</h2>
+      </div>
+      <div class="grid grid-2">
+        <div class="form-group">
+          <label>Contribution Level</label>
+          <select id="settings-contribution">
+            <option value="minimal">Minimal</option>
+            <option value="moderate" selected>Moderate</option>
+            <option value="maximum">Maximum</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Max Concurrent Requests</label>
+          <input type="number" id="settings-max-requests" value="10" min="1" max="100">
+        </div>
+        <div class="form-group">
+          <label>Max Bandwidth (Mbps, 0 = unlimited)</label>
+          <input type="number" id="settings-bandwidth" value="0" min="0">
+        </div>
+        <div class="form-group">
+          <label>Max Disk (MB)</label>
+          <input type="number" id="settings-disk" value="50000" min="1000">
+        </div>
+      </div>
+      <button class="btn btn-primary mt-1" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+
+  <script src="/admin/js/app.js"></script>
+</body>
+</html>

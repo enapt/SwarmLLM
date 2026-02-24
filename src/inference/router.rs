@@ -1,4 +1,5 @@
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, watch};
@@ -9,7 +10,7 @@ use crate::inference::executor::build_chat_prompt;
 use crate::inference::kv_cache::KvCacheManager;
 use crate::inference::pipeline::PipelineExecutor;
 use crate::inference::scheduler::PipelineScheduler;
-use crate::types::{InferenceRequest, SwarmMessage};
+use crate::types::{InferenceRequest, NetworkCommand, SwarmMessage};
 
 /// Result channel for returning inference output to API callers.
 pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>>;
@@ -72,20 +73,20 @@ pub enum RouterCommand {
 pub struct InferenceRouter {
     shared_state: Arc<SharedState>,
     command_rx: mpsc::Receiver<RouterCommand>,
-    network_tx: mpsc::Sender<SwarmMessage>,
+    network_tx: mpsc::Sender<NetworkCommand>,
     shutdown_rx: watch::Receiver<bool>,
     queue: BinaryHeap<QueuedRequest>,
     scheduler: PipelineScheduler,
     kv_cache: KvCacheManager,
     max_concurrent: usize,
-    active_count: usize,
+    active_count: Arc<AtomicUsize>,
 }
 
 impl InferenceRouter {
     pub fn new(
         shared_state: Arc<SharedState>,
         command_rx: mpsc::Receiver<RouterCommand>,
-        network_tx: mpsc::Sender<SwarmMessage>,
+        network_tx: mpsc::Sender<NetworkCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         let kv_cache_ttl = std::time::Duration::from_secs(
@@ -95,6 +96,7 @@ impl InferenceRouter {
                 .kv_cache_ttl_secs
                 .unwrap_or(600),
         );
+        let max_concurrent = shared_state.config.inference.max_concurrent_requests as usize;
         Self {
             shared_state: shared_state.clone(),
             command_rx,
@@ -103,8 +105,8 @@ impl InferenceRouter {
             queue: BinaryHeap::new(),
             scheduler: PipelineScheduler::new(shared_state),
             kv_cache: KvCacheManager::new(kv_cache_ttl),
-            max_concurrent: 8,
-            active_count: 0,
+            max_concurrent,
+            active_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -158,15 +160,45 @@ impl InferenceRouter {
     }
 
     /// Handle a new inference submission.
+    ///
+    /// Checks credit balance / priority tier before queueing.
     fn handle_submit(&mut self, request: InferenceRequest, result_tx: InferenceResultTx) {
+        // Check credit balance — Bronze tier nodes are deprioritized but not blocked
+        // per spec: "Credit errors: degrade priority tier, never block"
+        let balance = {
+            if let Ok(bal) = self.shared_state.credit_balance.try_read() {
+                bal.balance
+            } else {
+                0
+            }
+        };
+
+        let priority = if balance < 0 {
+            // Negative balance → force Bronze tier
+            tracing::debug!(
+                request_id = %request.id,
+                balance,
+                "Negative credit balance, degrading to Bronze tier"
+            );
+            crate::types::PriorityTier::Bronze
+        } else {
+            request.priority
+        };
+
+        let mut adjusted_request = request;
+        adjusted_request.priority = priority;
+
         tracing::info!(
-            request_id = %request.id,
-            model = %request.model_id,
-            priority = ?request.priority,
+            request_id = %adjusted_request.id,
+            model = %adjusted_request.model_id,
+            priority = ?adjusted_request.priority,
             "Queued inference request"
         );
 
-        self.queue.push(QueuedRequest { request, result_tx });
+        self.queue.push(QueuedRequest {
+            request: adjusted_request,
+            result_tx,
+        });
     }
 
     /// Handle network messages (LayerResult, InferenceError, etc.)
@@ -205,13 +237,14 @@ impl InferenceRouter {
 
     /// Drain the priority queue and execute requests.
     async fn drain_queue(&mut self) {
-        while self.active_count < self.max_concurrent {
+        while self.active_count.load(Ordering::Relaxed) < self.max_concurrent {
             let queued = match self.queue.pop() {
                 Some(q) => q,
                 None => break,
             };
 
-            self.active_count += 1;
+            self.active_count.fetch_add(1, Ordering::Relaxed);
+            let active_count = self.active_count.clone();
             let shared_state = self.shared_state.clone();
             let network_tx = self.network_tx.clone();
             let scheduler = self.scheduler.clone();
@@ -223,15 +256,56 @@ impl InferenceRouter {
                     execute_request(shared_state.clone(), network_tx, scheduler, request.clone())
                         .await;
 
-                // Update stats
-                if let Ok(mut stats) = shared_state.node_stats.try_write() {
-                    if output.is_ok() {
+                // Update stats and apply credit events
+                let local_node_id = shared_state.identity.node_id().clone();
+                let is_remote_request = request.requester != local_node_id;
+
+                if let Ok(ref result) = output {
+                    if let Ok(mut stats) = shared_state.node_stats.try_write() {
                         stats.requests_served += 1;
+                    }
+
+                    // Credit operations: earn if we served a remote request,
+                    // spend if we consumed inference as the requester
+                    let total_tokens = result.prompt_tokens + result.completion_tokens;
+                    let layers = 1u32; // Local path = 1 logical layer pass
+
+                    if is_remote_request {
+                        // We served someone else — earn credits
+                        let mut bal = shared_state.credit_balance.write().await;
+                        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE
+                            * layers as i64
+                            * total_tokens as i64;
+                        bal.balance += earned;
+                        bal.lifetime_earned += earned as u64;
+                        bal.last_updated = chrono::Utc::now();
+                        tracing::debug!(
+                            earned,
+                            request_id = %request.id,
+                            "Earned credits for serving inference"
+                        );
+                    } else {
+                        // We requested inference — spend credits
+                        let mut bal = shared_state.credit_balance.write().await;
+                        let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME
+                            * layers as i64
+                            * total_tokens as i64;
+                        bal.balance -= spent;
+                        bal.lifetime_spent += spent as u64;
+                        bal.last_updated = chrono::Utc::now();
+                        tracing::debug!(
+                            spent,
+                            request_id = %request.id,
+                            "Spent credits for consuming inference"
+                        );
                     }
                 }
 
                 // Remove from active pipelines
                 shared_state.active_pipelines.remove(&request.id);
+
+                // Decrement active count so new requests can be dispatched
+                active_count.fetch_sub(1, Ordering::Relaxed);
 
                 let _ = result_tx.send(output);
             });
@@ -242,7 +316,7 @@ impl InferenceRouter {
 /// Execute a single inference request — either locally or via distributed pipeline.
 async fn execute_request(
     shared_state: Arc<SharedState>,
-    network_tx: mpsc::Sender<SwarmMessage>,
+    network_tx: mpsc::Sender<NetworkCommand>,
     scheduler: PipelineScheduler,
     request: InferenceRequest,
 ) -> Result<InferenceOutput, SwarmError> {

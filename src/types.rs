@@ -242,8 +242,25 @@ pub enum SwarmMessage {
     HealthPing { nonce: u64, timestamp: u64 },
     HealthPong { nonce: u64, timestamp: u64 },
 
+    // Credits — gossip
+    CreditGossip(CreditGossip),
+
     // Governance
     ModelVote(ModelVote),
+
+    // Self-governance (Phase 7)
+    Proposal(Proposal),
+    ProposalAmendment(ProposalAmendment),
+    ProposalStatusChange(ProposalStatusChange),
+    ProposalVote(ProposalVote),
+    Issue(Issue),
+    IssueComment(IssueComment),
+    IssueStatusChange(IssueStatusChange),
+    IssueUpvote(IssueUpvote),
+    ReleaseCandidate(ReleaseCandidate),
+    TestReport(TestReport),
+    ReleaseApproval(ReleaseApproval),
+    ChangelogEntry(ChangelogEntry),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -290,6 +307,14 @@ pub struct InferenceError {
     pub recoverable: bool,
 }
 
+/// Bucketed credit balance gossip for network-wide percentile estimation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreditGossip {
+    pub node_id: NodeId,
+    pub balance_bucket: i64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelVote {
     pub voter: NodeId,
@@ -297,6 +322,467 @@ pub struct ModelVote {
     pub vote: bool,
     pub weight: u64,
     pub signature: Vec<u8>,
+}
+
+// ---- Governance ----
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum GovernanceRole {
+    Member,
+    Contributor,
+    Maintainer,
+    Council,
+}
+
+impl GovernanceRole {
+    pub fn can_create_proposals(&self) -> bool {
+        matches!(
+            self,
+            GovernanceRole::Contributor | GovernanceRole::Maintainer | GovernanceRole::Council
+        )
+    }
+
+    pub fn can_approve_releases(&self) -> bool {
+        matches!(self, GovernanceRole::Maintainer | GovernanceRole::Council)
+    }
+
+    pub fn can_emergency_veto(&self) -> bool {
+        matches!(self, GovernanceRole::Council)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GovernanceParams {
+    // Voting
+    pub code_change_voting_days: u32,
+    pub protocol_change_voting_days: u32,
+    pub governance_change_voting_days: u32,
+    pub code_change_quorum_pct: f32,
+    pub protocol_change_quorum_pct: f32,
+    pub governance_change_quorum_pct: f32,
+    pub code_change_approval_pct: f32,
+    pub protocol_change_approval_pct: f32,
+    pub governance_change_approval_pct: f32,
+    // Roles
+    pub contributor_percentile: f32,
+    pub contributor_min_uptime_days: u32,
+    pub maintainer_percentile: f32,
+    pub maintainer_min_uptime_days: u32,
+    pub maintainer_min_accepted_proposals: u32,
+    pub council_seats: u32,
+    pub council_term_days: u32,
+    // Releases
+    pub release_approval_threshold: u32,
+    pub release_verification_days_stable: u32,
+    pub release_verification_days_patch: u32,
+    pub canary_phase1_days: u32,
+    pub canary_phase2_pct: f32,
+    pub canary_phase3_pct: f32,
+    pub max_proposal_amendments: u32,
+    // Issues
+    pub min_credit_balance_for_issues: i64,
+    pub issue_auto_close_days: u32,
+}
+
+impl Default for GovernanceParams {
+    fn default() -> Self {
+        Self {
+            code_change_voting_days: 7,
+            protocol_change_voting_days: 14,
+            governance_change_voting_days: 21,
+            code_change_quorum_pct: 0.10,
+            protocol_change_quorum_pct: 0.20,
+            governance_change_quorum_pct: 0.25,
+            code_change_approval_pct: 0.50,
+            protocol_change_approval_pct: 0.66,
+            governance_change_approval_pct: 0.75,
+            contributor_percentile: 0.80,
+            contributor_min_uptime_days: 30,
+            maintainer_percentile: 0.95,
+            maintainer_min_uptime_days: 90,
+            maintainer_min_accepted_proposals: 3,
+            council_seats: 7,
+            council_term_days: 365,
+            release_approval_threshold: 3,
+            release_verification_days_stable: 7,
+            release_verification_days_patch: 3,
+            canary_phase1_days: 3,
+            canary_phase2_pct: 0.05,
+            canary_phase3_pct: 0.25,
+            max_proposal_amendments: 3,
+            min_credit_balance_for_issues: 0,
+            issue_auto_close_days: 90,
+        }
+    }
+}
+
+/// Network-wide statistics used for role calculation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NetworkStats {
+    pub total_active_vote_weight: u64,
+    pub nodes_with_30d_uptime: u32,
+    pub total_active_nodes: u32,
+}
+
+/// Extended per-node stats used for governance role calculation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GovernanceNodeStats {
+    pub lifetime_earned_percentile: f32,
+    pub uptime_days: u32,
+    pub accepted_proposals: u32,
+    pub is_council_member: bool,
+}
+
+impl GovernanceRole {
+    pub fn from_node_governance_stats(
+        stats: &GovernanceNodeStats,
+        params: &GovernanceParams,
+    ) -> Self {
+        if stats.is_council_member {
+            GovernanceRole::Council
+        } else if stats.lifetime_earned_percentile >= params.maintainer_percentile
+            && stats.uptime_days >= params.maintainer_min_uptime_days
+            && stats.accepted_proposals >= params.maintainer_min_accepted_proposals
+        {
+            GovernanceRole::Maintainer
+        } else if stats.lifetime_earned_percentile >= params.contributor_percentile
+            && stats.uptime_days >= params.contributor_min_uptime_days
+        {
+            GovernanceRole::Contributor
+        } else {
+            GovernanceRole::Member
+        }
+    }
+}
+
+// ---- Issues ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Issue {
+    pub hash: Blake3Hash,
+    pub author: NodeId,
+    pub title: String,
+    pub body: String,
+    pub category: IssueCategory,
+    pub severity: Option<IssueSeverity>,
+    pub status: IssueStatus,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub upvotes: u32,
+    pub tags: Vec<String>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IssueCategory {
+    Bug,
+    FeatureRequest,
+    Performance,
+    Security,
+    Documentation,
+    ModelRequest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IssueSeverity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IssueStatus {
+    Open,
+    Acknowledged,
+    InProgress,
+    Resolved,
+    Closed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueComment {
+    pub issue_hash: Blake3Hash,
+    pub author: NodeId,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueUpvote {
+    pub issue_hash: Blake3Hash,
+    pub voter: NodeId,
+    pub weight: u64,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueStatusChange {
+    pub issue_hash: Blake3Hash,
+    pub new_status: IssueStatus,
+    pub changed_by: NodeId,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+// ---- Proposals ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Proposal {
+    pub hash: Blake3Hash,
+    pub author: NodeId,
+    pub title: String,
+    pub body: String,
+    pub category: ProposalCategory,
+    pub status: ProposalStatus,
+    pub linked_issues: Vec<Blake3Hash>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub voting_deadline: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+    pub patch: Option<ProposalPatch>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProposalCategory {
+    CodeChange,
+    ProtocolChange,
+    GovernanceChange,
+    ModelAddition,
+    ModelDeprecation,
+    ParameterTuning,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProposalPatch {
+    pub diff_hash: Blake3Hash,
+    pub diff_size_bytes: u64,
+    pub files_changed: Vec<String>,
+    pub insertions: u32,
+    pub deletions: u32,
+    pub inline_diff: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProposalStatus {
+    Draft,
+    Open,
+    Amended,
+    Accepted,
+    Rejected,
+    Implemented,
+    Released,
+    Withdrawn,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProposalVote {
+    pub proposal_hash: Blake3Hash,
+    pub voter: NodeId,
+    pub vote: VoteChoice,
+    pub weight: u64,
+    pub role: GovernanceRole,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VoteChoice {
+    Approve,
+    Reject,
+    Abstain,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProposalAmendment {
+    pub proposal_hash: Blake3Hash,
+    pub author: NodeId,
+    pub body: String,
+    pub new_patch: Option<ProposalPatch>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProposalStatusChange {
+    pub proposal_hash: Blake3Hash,
+    pub new_status: ProposalStatus,
+    pub changed_by: NodeId,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+// ---- Releases ----
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemVer {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub pre: Option<String>,
+}
+
+impl fmt::Display for SemVer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(ref pre) = self.pre {
+            write!(f, "-{pre}")?;
+        }
+        Ok(())
+    }
+}
+
+impl SemVer {
+    pub fn is_prerelease(&self) -> bool {
+        self.pre.is_some()
+    }
+
+    pub fn to_key(&self) -> String {
+        format!("{self}")
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    MacOS,
+    Windows,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Architecture {
+    X86_64,
+    Aarch64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseBinary {
+    pub platform: Platform,
+    pub arch: Architecture,
+    pub hash: Blake3Hash,
+    pub size_bytes: u64,
+    pub shard_manifest: Blake3Hash,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseCandidate {
+    pub version: SemVer,
+    pub builder: NodeId,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub changelog: String,
+    pub included_proposals: Vec<Blake3Hash>,
+    pub binaries: Vec<ReleaseBinary>,
+    pub source_hash: Blake3Hash,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseApproval {
+    pub release_version: SemVer,
+    pub approver: NodeId,
+    pub role: GovernanceRole,
+    pub binary_hashes_verified: bool,
+    pub test_suite_passed: bool,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+// ---- Testing ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TestReport {
+    pub release_version: SemVer,
+    pub tester: NodeId,
+    pub platform: Platform,
+    pub architecture: Architecture,
+    pub gpu: Option<String>,
+    pub status: TestStatus,
+    pub results: TestResults,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TestStatus {
+    Passed,
+    Failed { failures: Vec<String> },
+    HashMismatch { expected: String, actual: String },
+    BuildFailed { error: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TestResults {
+    pub tests_run: u32,
+    pub tests_passed: u32,
+    pub tests_failed: u32,
+    pub tests_skipped: u32,
+    pub build_time_seconds: u64,
+    pub binary_hash: Blake3Hash,
+    pub binary_size_bytes: u64,
+}
+
+// ---- Changelog ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangelogEntry {
+    pub version: SemVer,
+    pub date: chrono::DateTime<chrono::Utc>,
+    pub entries: Vec<ChangelogItem>,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangelogItem {
+    pub category: ProposalCategory,
+    pub title: String,
+    pub proposal_hash: Blake3Hash,
+    pub author: NodeId,
+}
+
+/// Canary rollout phase.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CanaryPhase {
+    /// Day 0-3: only auto_update="all" nodes
+    Phase1,
+    /// Day 3-7: 5% of auto_update="stable" nodes
+    Phase2,
+    /// Day 7-10: 25% of auto_update="stable" nodes
+    Phase3,
+    /// Day 10+: 100% of auto_update="stable" nodes
+    Complete,
+    /// Rollout halted due to issues
+    Halted { reason: String },
+}
+
+// ---- Network Commands ----
+/// Commands sent from daemon tasks to the NetworkManager.
+///
+/// `Broadcast` wraps a `SwarmMessage` for GossipSub. `SendTensor` and
+/// `SendTensorResult` route tensor data through the Cap'n Proto
+/// request_response protocol for zero-copy efficiency.
+#[derive(Clone, Debug)]
+pub enum NetworkCommand {
+    /// Broadcast a message via GossipSub to all subscribers.
+    Broadcast(SwarmMessage),
+    /// Send a tensor forward pass to a specific peer via Cap'n Proto.
+    SendTensor {
+        target_peer_bytes: Vec<u8>,
+        forward: LayerForward,
+    },
+    /// Send a tensor result back to a specific peer via Cap'n Proto.
+    SendTensorResult {
+        target_peer_bytes: Vec<u8>,
+        result: LayerResult,
+    },
+}
+
+// ---- Rebalancing ----
+/// Events that trigger shard rebalancing.
+#[derive(Clone, Debug)]
+pub enum RebalanceEvent {
+    PeerJoined(NodeId),
+    PeerLeft(NodeId),
+    DiskPressure { available_mb: u64 },
+    ManualTrigger,
 }
 
 // ---- Peer State ----
@@ -319,6 +805,9 @@ pub struct NodeStats {
     pub bytes_uploaded: u64,
     pub bytes_downloaded: u64,
     pub uptime_start: chrono::DateTime<chrono::Utc>,
+    /// NAT status detected by AutoNAT ("Public", "Private", "Unknown").
+    #[serde(default)]
+    pub nat_status: Option<String>,
 }
 
 impl Default for NodeStats {
@@ -330,6 +819,7 @@ impl Default for NodeStats {
             bytes_uploaded: 0,
             bytes_downloaded: 0,
             uptime_start: chrono::Utc::now(),
+            nat_status: None,
         }
     }
 }
