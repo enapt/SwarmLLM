@@ -1,0 +1,27 @@
+[node]
+# data_dir = "~/.swarmllm"    # Platform default
+listen_port = 8800
+contribution = "moderate"      # "minimal", "moderate", "maximum"
+
+[resources]
+max_gpu_vram_mb = 0            # 0 = auto-detect
+max_ram_mb = 0                 # 0 = auto (50% of system RAM)
+max_disk_mb = 50000            # 50GB for model storage
+max_bandwidth_mbps = 0         # 0 = unlimited
+
+[network]
+bootstrap_peers = []
+enable_relay = true
+enable_relay_client = true
+max_peers = 200
+
+[inference]
+default_model = ""             # Empty = first available
+session_timeout_seconds = 600
+max_concurrent_requests = 10
+# model_path = "/path/to/model.gguf"  # Uncomment and set to load a model
+gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
+
+[logging]
+level = "info"                 # trace, debug, info, warn, error
+format = "pretty"              # "pretty" or "json"

@@ -8,22 +8,22 @@
 
 **Goal**: Single binary that loads a GGUF model and serves it via OpenAI-compatible API.
 
-- [ ] `src/main.rs` — CLI with clap (subcommands: `run`, `version`)
-- [ ] `src/config.rs` — Load config from TOML, environment, defaults
-- [ ] `src/error.rs` — SwarmError enum with thiserror
-- [ ] `src/types.rs` — Core types: ModelId, SamplingParams, ChatMessage, Role
-- [ ] `src/inference/mod.rs` — Module structure
-- [ ] `src/inference/executor.rs` — Wrap llama-cpp-2 for GGUF loading and token generation
-- [ ] `src/inference/sampling.rs` — Temperature, top-p, top-k sampling
-- [ ] `src/api/mod.rs` — Module structure
-- [ ] `src/api/server.rs` — Axum server on localhost:8800
-- [ ] `src/api/openai.rs` — `/v1/chat/completions` (streaming + non-streaming), `/v1/models`
-- [ ] `src/api/middleware.rs` — Request logging, CORS
-- [ ] `src/storage/mod.rs` — Module structure
-- [ ] `src/storage/db.rs` — sled wrapper (config storage)
-- [ ] `src/lib.rs` — Re-exports
-- [ ] `Cargo.toml` — Dependencies for Phase 1
-- [ ] `config/default.toml` — Default configuration
+- [x] `src/main.rs` — CLI with clap (subcommands: `run`, `version`)
+- [x] `src/config.rs` — Load config from TOML, environment, defaults
+- [x] `src/error.rs` — SwarmError enum with thiserror
+- [x] `src/types.rs` — Core types: ModelId, SamplingParams, ChatMessage, Role
+- [x] `src/inference/mod.rs` — Module structure
+- [x] `src/inference/executor.rs` — Wrap llama-cpp-2 for GGUF loading and token generation
+- [x] `src/inference/sampling.rs` — Temperature, top-p, top-k sampling
+- [x] `src/api/mod.rs` — Module structure
+- [x] `src/api/server.rs` — Axum server on localhost:8800
+- [x] `src/api/openai.rs` — `/v1/chat/completions` (streaming + non-streaming), `/v1/models`
+- [x] `src/api/middleware.rs` — Request logging, CORS
+- [x] `src/storage/mod.rs` — Module structure
+- [x] `src/storage/db.rs` — sled wrapper (config storage)
+- [x] `src/lib.rs` — Re-exports
+- [x] `Cargo.toml` — Dependencies for Phase 1
+- [x] `config/default.toml` — Default configuration
 
 **Acceptance test**: `curl localhost:8800/v1/chat/completions -d '{"model":"local","messages":[{"role":"user","content":"hi"}],"stream":true}'` returns streamed tokens from a local GGUF model.
 
