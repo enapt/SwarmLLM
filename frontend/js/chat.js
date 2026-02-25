@@ -92,6 +92,7 @@ async function sendMessage() {
 
   isStreaming = true;
   document.getElementById('send-btn').disabled = true;
+  var startTime = performance.now();
 
   var body = {
     model: currentModel,
@@ -168,6 +169,13 @@ async function sendMessage() {
       contentEl.textContent = 'Error: Connection failed.';
     }
   }
+
+  // Show response time
+  var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
+  var timerEl = document.createElement('div');
+  timerEl.className = 'msg-timer';
+  timerEl.textContent = elapsed + 's';
+  assistantEl.appendChild(timerEl);
 
   if (fullContent) {
     messages.push({ role: 'assistant', content: fullContent });
