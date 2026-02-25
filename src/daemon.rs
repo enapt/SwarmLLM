@@ -42,6 +42,8 @@ pub struct SharedState {
     pub executor: SharedExecutor,
     /// Cached model info for lock-free reads (set once at startup).
     pub loaded_model_info: RwLock<Option<LoadedModelInfo>>,
+    /// Detected GPU info (set once at startup).
+    pub gpu_info: Option<crate::inference::executor::GpuInfo>,
     /// Model governance vote tallies.
     pub model_vote_tallies: DashMap<crate::types::Blake3Hash, crate::model::governance::VoteTally>,
     /// Governance parameters (tunable via GovernanceChange proposals).
@@ -57,6 +59,7 @@ impl SharedState {
         identity: Identity,
         db: Database,
         executor: SharedExecutor,
+        gpu_info: Option<crate::inference::executor::GpuInfo>,
     ) -> (Arc<Self>, watch::Receiver<bool>) {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -81,6 +84,7 @@ impl SharedState {
             node_stats: RwLock::new(NodeStats::default()),
             executor,
             loaded_model_info: RwLock::new(None),
+            gpu_info,
             model_vote_tallies: DashMap::new(),
             governance_params: RwLock::new(
                 // Load from DB or use defaults (genesis params if early network)
@@ -138,6 +142,12 @@ impl Daemon {
             None
         };
 
+        // Detect GPU via llama.cpp backend
+        let gpu_info = crate::inference::executor::detect_gpu();
+        if let Some(ref gpu) = gpu_info {
+            tracing::info!(gpu = %gpu.name, vram_mb = gpu.vram_total_mb, backend = %gpu.backend, "GPU detected");
+        }
+
         let executor = Arc::new(tokio::sync::Mutex::new(executor));
 
         // Create shared state
@@ -146,6 +156,7 @@ impl Daemon {
             self.identity.clone(),
             self.db.clone(),
             executor,
+            gpu_info,
         );
 
         // Set the cached model info (lock-free for admin reads)

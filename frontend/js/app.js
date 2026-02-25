@@ -40,6 +40,10 @@ async function loadInitialData() {
   } catch (e) {
     console.error('Failed to load models:', e);
   }
+
+  // Load governance data
+  loadGovernanceData();
+  loadNetworkData();
 }
 
 // --- Status banner ---
@@ -77,9 +81,6 @@ function handleWsMessage(msg) {
     case 'stats_update':
       updateStats(msg.data);
       break;
-    case 'inference_progress':
-      updateActiveRequest(msg.data);
-      break;
   }
 }
 
@@ -104,7 +105,19 @@ function updateDashboard(data) {
 
   if (data.hardware) {
     var hw = data.hardware;
-    document.getElementById('node-gpu').textContent = hw.gpu_name || 'CPU only';
+
+    // GPU display
+    if (hw.gpu_name) {
+      document.getElementById('node-gpu').textContent = hw.gpu_name;
+      if (hw.gpu_vram_mb) {
+        document.getElementById('node-vram').textContent = formatMB(hw.gpu_vram_mb) + ' VRAM';
+      }
+    } else {
+      document.getElementById('node-gpu').textContent = 'CPU only';
+      document.getElementById('node-vram').textContent = '';
+    }
+
+    // CPU display
     document.getElementById('node-cpu').textContent = hw.cpu_name
       ? hw.cpu_name + ' (' + hw.cpu_cores + ' cores)'
       : 'Unknown';
@@ -159,6 +172,106 @@ function updateStats(data) {
   }
 }
 
+// --- Governance ---
+
+async function loadGovernanceData() {
+  // Governance role
+  try {
+    var resp = await fetch('/api/admin/governance/role');
+    var role = await resp.json();
+    var el = document.getElementById('governance-role');
+    if (role.role) {
+      el.textContent = capitalize(role.role);
+    }
+  } catch (e) {}
+
+  // Proposals
+  try {
+    var resp = await fetch('/api/admin/proposals');
+    var proposals = await resp.json();
+    var list = document.getElementById('proposals-list');
+    if (proposals && proposals.length > 0) {
+      list.innerHTML = '';
+      proposals.slice(0, 5).forEach(function (p) {
+        var div = document.createElement('div');
+        div.className = 'flex-between mb-1';
+        div.innerHTML = '<span style="font-size:0.85rem">' + escapeHtml(p.title || p.proposal_type || 'Proposal') + '</span>' +
+          '<span class="mono text-muted" style="font-size:0.8rem">' + (p.votes_for || 0) + '/' + (p.votes_against || 0) + '</span>';
+        list.appendChild(div);
+      });
+    }
+  } catch (e) {}
+
+  // Issues
+  try {
+    var resp = await fetch('/api/admin/issues');
+    var issues = await resp.json();
+    var list = document.getElementById('issues-list');
+    if (issues && issues.length > 0) {
+      list.innerHTML = '';
+      issues.slice(0, 5).forEach(function (issue) {
+        var div = document.createElement('div');
+        div.className = 'flex-between mb-1';
+        div.innerHTML = '<span style="font-size:0.85rem">' + escapeHtml(issue.title || 'Issue') + '</span>' +
+          '<span class="mono text-muted" style="font-size:0.8rem">' + (issue.upvotes || 0) + ' upvotes</span>';
+        list.appendChild(div);
+      });
+    }
+  } catch (e) {}
+
+  // Governance params
+  try {
+    var resp = await fetch('/api/admin/governance/params');
+    var params = await resp.json();
+    var el = document.getElementById('gov-params');
+    var lines = [];
+    if (params.proposal_quorum !== undefined) lines.push('Quorum: ' + params.proposal_quorum);
+    if (params.proposal_pass_threshold !== undefined) lines.push('Pass threshold: ' + (params.proposal_pass_threshold * 100).toFixed(0) + '%');
+    if (params.release_approval_threshold !== undefined) lines.push('Release approvals: ' + params.release_approval_threshold);
+    if (params.voting_duration_hours !== undefined) lines.push('Voting period: ' + params.voting_duration_hours + 'h');
+    el.textContent = lines.length > 0 ? lines.join(' | ') : 'Default parameters';
+  } catch (e) {}
+}
+
+// --- Network ---
+
+async function loadNetworkData() {
+  // Peers
+  try {
+    var resp = await fetch('/api/admin/peers');
+    var peers = await resp.json();
+    var list = document.getElementById('peers-list');
+    if (peers && peers.length > 0) {
+      list.innerHTML = '';
+      peers.forEach(function (p) {
+        var div = document.createElement('div');
+        div.className = 'flex-between mb-1';
+        div.innerHTML = '<span class="mono" style="font-size:0.8rem">' + escapeHtml(p.node_id || p.peer_id || 'unknown') + '</span>' +
+          '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
+        list.appendChild(div);
+      });
+    }
+  } catch (e) {}
+
+  // Latest release
+  try {
+    var resp = await fetch('/api/admin/releases/latest');
+    if (resp.ok) {
+      var release = await resp.json();
+      var el = document.getElementById('latest-release');
+      if (release && release.version) {
+        el.textContent = 'v' + release.version + (release.approved ? ' (approved)' : ' (pending)');
+      } else {
+        el.textContent = 'No releases yet';
+      }
+    } else {
+      document.getElementById('latest-release').textContent = 'No releases yet';
+    }
+  } catch (e) {
+    document.getElementById('latest-release').textContent = 'No releases yet';
+  }
+}
+
 // --- Models table ---
 
 function renderModelsTable(models) {
@@ -180,7 +293,7 @@ function renderModelsTable(models) {
     var tr = document.createElement('tr');
     var statusClass = m.healthy ? 'online' : 'degraded';
     var statusText = m.healthy ? 'Healthy' : 'Degraded';
-    tr.innerHTML = '<td>' + m.id + '</td>' +
+    tr.innerHTML = '<td>' + escapeHtml(m.id) + '</td>' +
       '<td>' + formatBytes(m.total_size_bytes || 0) + '</td>' +
       '<td>' + (m.shard_count || '\u2014') + '</td>' +
       '<td><span class="status-dot ' + statusClass + '"></span>' + statusText + '</td>' +
@@ -224,6 +337,12 @@ async function saveSettings() {
 }
 
 // --- Helpers ---
+
+function escapeHtml(str) {
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
 
 function setTierBadge(elementId, tier) {
   var el = document.getElementById(elementId);

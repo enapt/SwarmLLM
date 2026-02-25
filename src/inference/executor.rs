@@ -8,6 +8,36 @@ use crate::types::SamplingParams;
 /// Thread-safe handle to the model executor.
 pub type SharedExecutor = Arc<Mutex<ModelExecutor>>;
 
+/// Detected GPU information.
+#[derive(Clone, Debug)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vram_total_mb: u64,
+    pub vram_free_mb: u64,
+    pub backend: String,
+}
+
+/// Detect GPU devices via llama.cpp backend.
+/// Returns None if no GPU found or llama feature not enabled.
+pub fn detect_gpu() -> Option<GpuInfo> {
+    #[cfg(feature = "llama")]
+    {
+        let devices = llama_cpp_2::list_llama_ggml_backend_devices();
+        for dev in &devices {
+            let is_gpu = format!("{:?}", dev.device_type).contains("Gpu");
+            if is_gpu {
+                return Some(GpuInfo {
+                    name: dev.description.clone(),
+                    vram_total_mb: (dev.memory_total / (1024 * 1024)) as u64,
+                    vram_free_mb: (dev.memory_free / (1024 * 1024)) as u64,
+                    backend: dev.backend.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Manages a loaded model and provides token generation.
 ///
 /// With the `llama` feature: wraps llama-cpp-2 for real GGUF model inference with GPU support.

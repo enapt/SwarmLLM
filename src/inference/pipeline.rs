@@ -424,7 +424,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (state, _) = SharedState::new(config, identity, db, executor);
+        let (state, _) = SharedState::new(config, identity, db, executor, None);
         state
     }
 

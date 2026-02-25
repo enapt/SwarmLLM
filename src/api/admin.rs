@@ -21,7 +21,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let hosted_shards = state.shared_state.model_registry.shard_count();
 
     // Hardware detection
-    let hardware = detect_hardware();
+    let hardware = detect_hardware(&state.shared_state);
 
     Json(serde_json::json!({
         "node_id": node_id,
@@ -683,7 +683,7 @@ pub struct ConfigUpdate {
 
 // ---- Hardware detection ----
 
-fn detect_hardware() -> serde_json::Value {
+fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {
     use sysinfo::System;
 
     let mut sys = System::new_all();
@@ -708,12 +708,11 @@ fn detect_hardware() -> serde_json::Value {
     }
     let used_disk_mb = total_disk_mb.saturating_sub(available_disk_mb);
 
-    // GPU detection — check for common env hints
-    // Real GPU detection would require CUDA/ROCm libraries; keep it simple
-    let gpu_name = std::env::var("SWARMLLM_GPU_NAME").ok();
-    let gpu_vram_mb: Option<u64> = std::env::var("SWARMLLM_GPU_VRAM_MB")
-        .ok()
-        .and_then(|v| v.parse().ok());
+    // GPU info from llama.cpp device detection (set at startup)
+    let (gpu_name, gpu_vram_mb) = match &shared_state.gpu_info {
+        Some(gpu) => (Some(gpu.name.clone()), Some(gpu.vram_total_mb)),
+        None => (None, None),
+    };
 
     serde_json::json!({
         "gpu_name": gpu_name,

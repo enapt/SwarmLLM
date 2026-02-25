@@ -112,7 +112,7 @@ pub async fn run_server(
     // Create a minimal SharedState for standalone mode
     let identity = crate::identity::Identity::generate();
     let (shared_state, _shutdown_rx) =
-        SharedState::new(config.clone(), identity, db.clone(), executor.clone());
+        SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
 
     let state = AppState {
         config,

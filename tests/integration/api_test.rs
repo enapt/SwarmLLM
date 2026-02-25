@@ -18,7 +18,7 @@ async fn spawn_test_server() -> String {
     ));
 
     let (shared_state, _shutdown_rx) =
-        swarmllm::daemon::SharedState::new(config.clone(), identity, db.clone(), executor.clone());
+        swarmllm::daemon::SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
 
     let state = swarmllm::api::server::AppState {
         config,
