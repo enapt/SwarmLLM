@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SwarmLLM — Dashboard</title>
-  <link rel="stylesheet" href="/admin/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
   <header class="app-header">
@@ -14,30 +14,37 @@
       <a href="/chat">Chat</a>
     </nav>
     <div class="node-info">
-      <span class="mono" id="node-id">—</span>
-      <span class="tier-badge silver" id="tier-badge">Silver</span>
-      <span id="uptime">—</span>
+      <span class="pulse-dot"></span>
+      <span class="mono" id="node-id">...</span>
+      <span class="tier-badge silver" id="tier-badge">...</span>
     </div>
   </header>
 
   <div class="container">
-    <!-- Top stats row -->
+    <!-- Status banner -->
+    <div id="status-banner"></div>
+
+    <!-- Stat cards -->
     <div class="grid grid-4 mb-2" id="stats-row">
-      <div class="panel">
-        <div class="stat-label">Connected Peers</div>
+      <div class="stat-card">
+        <div class="stat-icon blue">&#9901;</div>
         <div class="stat-value" id="stat-peers">0</div>
+        <div class="stat-label">Connected Peers</div>
       </div>
-      <div class="panel">
-        <div class="stat-label">Credit Balance</div>
+      <div class="stat-card">
+        <div class="stat-icon green">&#9733;</div>
         <div class="stat-value" id="stat-credits">0</div>
+        <div class="stat-label">Credit Balance</div>
       </div>
-      <div class="panel">
-        <div class="stat-label">Requests Served</div>
+      <div class="stat-card">
+        <div class="stat-icon purple">&#9889;</div>
         <div class="stat-value" id="stat-served">0</div>
+        <div class="stat-label">Requests Served</div>
       </div>
-      <div class="panel">
-        <div class="stat-label">Active Requests</div>
+      <div class="stat-card">
+        <div class="stat-icon orange">&#9203;</div>
         <div class="stat-value" id="stat-active">0</div>
+        <div class="stat-label">Active Requests</div>
       </div>
     </div>
 
@@ -45,32 +52,40 @@
       <!-- Your Node panel -->
       <div class="panel">
         <div class="panel-header">
-          <h2>Your Node</h2>
-          <span class="text-muted mono" id="version">v—</span>
+          <h2>Node</h2>
+          <span class="mono text-muted" id="version" style="font-size:0.8rem">v...</span>
+        </div>
+        <div class="form-group">
+          <label>CPU</label>
+          <div class="mono" id="node-cpu" style="font-size:0.85rem">...</div>
         </div>
         <div class="form-group">
           <label>GPU</label>
-          <div class="mono" id="node-gpu">—</div>
+          <div class="mono" id="node-gpu" style="font-size:0.85rem">CPU only</div>
         </div>
         <div class="form-group">
-          <label>RAM Usage</label>
+          <label>RAM</label>
           <div class="flex-between mb-1">
-            <span class="mono" id="ram-used">—</span>
-            <span class="text-muted" id="ram-total">/ —</span>
+            <span class="mono" id="ram-used" style="font-size:0.85rem">...</span>
+            <span class="text-muted" id="ram-total" style="font-size:0.85rem">/ ...</span>
           </div>
           <div class="progress-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
         </div>
         <div class="form-group">
-          <label>Disk Usage</label>
+          <label>Disk</label>
           <div class="flex-between mb-1">
-            <span class="mono" id="disk-used">—</span>
-            <span class="text-muted" id="disk-total">/ —</span>
+            <span class="mono" id="disk-used" style="font-size:0.85rem">...</span>
+            <span class="text-muted" id="disk-total" style="font-size:0.85rem">/ ...</span>
           </div>
           <div class="progress-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
         </div>
-        <div class="form-group">
-          <label>Hosted Shards</label>
-          <div class="mono" id="hosted-shards">0</div>
+        <div class="flex-between">
+          <label style="margin:0">Hosted Shards</label>
+          <span class="mono" id="hosted-shards">0</span>
+        </div>
+        <div class="flex-between mt-1">
+          <label style="margin:0">Uptime</label>
+          <span class="mono" id="uptime">...</span>
         </div>
       </div>
 
@@ -78,21 +93,21 @@
       <div class="panel">
         <div class="panel-header">
           <h2>Credits</h2>
-          <span class="tier-badge silver" id="credit-tier">Silver</span>
+          <span class="tier-badge silver" id="credit-tier">...</span>
         </div>
-        <div class="stat-value mb-1" id="credit-balance">0</div>
-        <div class="grid grid-2 mt-1">
+        <div style="font-family:var(--font-mono);font-size:2.5rem;font-weight:700;margin:8px 0 16px" id="credit-balance">0</div>
+        <div class="grid grid-2">
           <div>
             <div class="stat-label">Lifetime Earned</div>
-            <div class="mono text-green" id="credit-earned">0</div>
+            <div class="mono text-green" style="font-size:1.1rem;font-weight:600" id="credit-earned">+0</div>
           </div>
           <div>
             <div class="stat-label">Lifetime Spent</div>
-            <div class="mono text-red" id="credit-spent">0</div>
+            <div class="mono text-red" style="font-size:1.1rem;font-weight:600" id="credit-spent">-0</div>
           </div>
         </div>
         <div class="mt-2">
-          <label>Recent Activity</label>
+          <label>Activity</label>
           <div class="sparkline" id="credit-sparkline"></div>
         </div>
       </div>
@@ -103,29 +118,23 @@
       <div class="panel-header">
         <h2>Models</h2>
       </div>
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th>Size</th>
-            <th>Shards</th>
-            <th>Network Health</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="models-table-body">
-          <tr><td colspan="5" class="text-muted">No models loaded</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Active Requests -->
-    <div class="panel mt-2">
-      <div class="panel-header">
-        <h2>Active Requests</h2>
-      </div>
-      <div id="active-requests">
-        <p class="text-muted">No active requests</p>
+      <div id="models-container">
+        <table class="data-table" id="models-table" style="display:none">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Size</th>
+              <th>Shards</th>
+              <th>Health</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="models-table-body"></tbody>
+        </table>
+        <div class="empty-state" id="models-empty">
+          <div class="empty-icon">&#128229;</div>
+          <p>No models loaded yet. Add a model to start serving inference.</p>
+        </div>
       </div>
     </div>
 
@@ -156,10 +165,10 @@
           <input type="number" id="settings-disk" value="50000" min="1000">
         </div>
       </div>
-      <button class="btn btn-primary mt-1" onclick="saveSettings()">Save Settings</button>
+      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
     </div>
   </div>
 
-  <script src="/admin/js/app.js"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>

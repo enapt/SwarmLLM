@@ -170,6 +170,10 @@ async function sendMessage() {
 
 function appendMessageToDOM(role, content) {
   var container = document.getElementById('chat-messages');
+  // Hide empty state on first message
+  var empty = document.getElementById('chat-empty');
+  if (empty) empty.style.display = 'none';
+
   var div = document.createElement('div');
   div.className = 'chat-msg ' + role;
   div.innerHTML = '<div class="msg-role">' + role + '</div><div class="msg-content"></div>';

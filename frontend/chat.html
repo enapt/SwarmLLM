@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SwarmLLM — Chat</title>
-  <link rel="stylesheet" href="/admin/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
   <header class="app-header">
@@ -14,12 +14,18 @@
       <a href="/chat" class="active">Chat</a>
     </nav>
     <div class="node-info">
-      <span class="mono" id="node-id">—</span>
+      <span class="mono" id="node-id">...</span>
     </div>
   </header>
 
   <div class="chat-container">
-    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-empty" id="chat-empty">
+        <div class="chat-empty-icon">&#11088;</div>
+        <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>
+        <div>Send a message to start a conversation</div>
+      </div>
+    </div>
 
     <div class="chat-input-area">
       <div class="chat-input-wrap">
@@ -32,18 +38,18 @@
           <option value="local">local</option>
         </select>
         <div class="chat-settings">
-          <label style="display:inline">Temp:
+          <label>Temp:
             <input type="number" id="chat-temp" value="0.7" min="0" max="2" step="0.1">
           </label>
-          <label style="display:inline">Max tokens:
+          <label>Tokens:
             <input type="number" id="chat-max-tokens" value="2048" min="1" max="8192" step="64">
           </label>
-          <button class="btn" onclick="clearChat()">Clear</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearChat()">Clear</button>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/admin/js/chat.js"></script>
+  <script src="/static/js/chat.js"></script>
 </body>
 </html>

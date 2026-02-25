@@ -1,7 +1,7 @@
 'use strict';
 
-let ws = null;
-let creditHistory = [];
+var ws = null;
+var creditHistory = [];
 
 // --- Initial data load ---
 
@@ -11,7 +11,7 @@ async function loadInitialData() {
     var data = await resp.json();
     updateDashboard(data);
   } catch (e) {
-    console.error('Failed to load initial stats:', e);
+    showBanner('error', 'Failed to connect to SwarmLLM daemon');
   }
 
   try {
@@ -42,6 +42,14 @@ async function loadInitialData() {
   }
 }
 
+// --- Status banner ---
+
+function showBanner(type, message) {
+  var banner = document.getElementById('status-banner');
+  if (!banner) return;
+  banner.innerHTML = '<div class="alert alert-' + type + '">' + message + '</div>';
+}
+
 // --- WebSocket for real-time updates ---
 
 function connectWebSocket() {
@@ -52,13 +60,10 @@ function connectWebSocket() {
     try {
       var msg = JSON.parse(event.data);
       handleWsMessage(msg);
-    } catch (e) {
-      console.warn('Invalid WS message:', event.data);
-    }
+    } catch (e) {}
   };
 
   ws.onclose = function () {
-    // Reconnect after 3 seconds
     setTimeout(connectWebSocket, 3000);
   };
 
@@ -75,18 +80,12 @@ function handleWsMessage(msg) {
     case 'inference_progress':
       updateActiveRequest(msg.data);
       break;
-    case 'peer_joined':
-      // Could show a toast notification
-      break;
-    case 'shard_status':
-      break;
   }
 }
 
 // --- Dashboard update ---
 
 function updateDashboard(data) {
-  // Node info
   if (data.node_id) {
     document.getElementById('node-id').textContent = data.node_id;
   }
@@ -101,26 +100,31 @@ function updateDashboard(data) {
     setTierBadge('credit-tier', data.tier);
   }
 
-  // Stats
   updateStats(data);
 
-  // Hardware
   if (data.hardware) {
     var hw = data.hardware;
     document.getElementById('node-gpu').textContent = hw.gpu_name || 'CPU only';
+    document.getElementById('node-cpu').textContent = hw.cpu_name
+      ? hw.cpu_name + ' (' + hw.cpu_cores + ' cores)'
+      : 'Unknown';
+
     if (hw.total_ram_mb) {
       document.getElementById('ram-total').textContent = '/ ' + formatMB(hw.total_ram_mb);
       var ramUsed = hw.used_ram_mb || 0;
       document.getElementById('ram-used').textContent = formatMB(ramUsed);
       var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
-      document.getElementById('ram-bar').style.width = ramPct + '%';
+      document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
+      if (ramPct > 90) document.getElementById('ram-bar').className = 'fill red';
+      else if (ramPct > 70) document.getElementById('ram-bar').className = 'fill orange';
+      else document.getElementById('ram-bar').className = 'fill green';
     }
     if (hw.total_disk_mb) {
       document.getElementById('disk-total').textContent = '/ ' + formatMB(hw.total_disk_mb);
       var diskUsed = hw.used_disk_mb || 0;
       document.getElementById('disk-used').textContent = formatMB(diskUsed);
       var diskPct = hw.total_disk_mb > 0 ? (diskUsed / hw.total_disk_mb * 100) : 0;
-      document.getElementById('disk-bar').style.width = diskPct + '%';
+      document.getElementById('disk-bar').style.width = diskPct.toFixed(1) + '%';
     }
   }
 
@@ -128,12 +132,11 @@ function updateDashboard(data) {
     document.getElementById('hosted-shards').textContent = data.hosted_shards;
   }
 
-  // Credits
   if (data.credits) {
-    document.getElementById('credit-balance').textContent = data.credits.balance;
-    document.getElementById('stat-credits').textContent = data.credits.balance;
-    document.getElementById('credit-earned').textContent = '+' + (data.credits.lifetime_earned || 0);
-    document.getElementById('credit-spent').textContent = '-' + (data.credits.lifetime_spent || 0);
+    document.getElementById('credit-balance').textContent = data.credits.balance.toLocaleString();
+    document.getElementById('stat-credits').textContent = data.credits.balance.toLocaleString();
+    document.getElementById('credit-earned').textContent = '+' + (data.credits.lifetime_earned || 0).toLocaleString();
+    document.getElementById('credit-spent').textContent = '-' + (data.credits.lifetime_spent || 0).toLocaleString();
   }
 }
 
@@ -143,8 +146,7 @@ function updateStats(data) {
   }
   if (data.credits !== undefined) {
     var bal = typeof data.credits === 'object' ? data.credits.balance : data.credits;
-    document.getElementById('stat-credits').textContent = bal;
-    // Push to sparkline history
+    document.getElementById('stat-credits').textContent = bal.toLocaleString();
     creditHistory.push(Math.abs(bal));
     if (creditHistory.length > 30) creditHistory.shift();
     renderSparkline('credit-sparkline', creditHistory);
@@ -157,39 +159,32 @@ function updateStats(data) {
   }
 }
 
-function updateActiveRequest(data) {
-  var container = document.getElementById('active-requests');
-  var id = 'req-' + data.request_id;
-  var el = document.getElementById(id);
-  if (!el) {
-    el = document.createElement('div');
-    el.id = id;
-    el.className = 'flex-between mb-1';
-    container.innerHTML = '';
-    container.appendChild(el);
-  }
-  var pct = data.tokens_total > 0 ? Math.round(data.tokens_generated / data.tokens_total * 100) : 0;
-  el.innerHTML = '<span class="mono">' + data.request_id.substring(0, 8) + '...</span>' +
-    '<div style="flex:1;margin:0 12px"><div class="progress-bar"><div class="fill accent" style="width:' + pct + '%"></div></div></div>' +
-    '<span class="mono">' + data.tokens_generated + '/' + data.tokens_total + '</span>';
-}
-
 // --- Models table ---
 
 function renderModelsTable(models) {
+  var table = document.getElementById('models-table');
+  var empty = document.getElementById('models-empty');
   var tbody = document.getElementById('models-table-body');
+
   if (!models || models.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">No models loaded</td></tr>';
+    table.style.display = 'none';
+    empty.style.display = '';
     return;
   }
+
+  table.style.display = '';
+  empty.style.display = 'none';
   tbody.innerHTML = '';
+
   models.forEach(function (m) {
     var tr = document.createElement('tr');
+    var statusClass = m.healthy ? 'online' : 'degraded';
+    var statusText = m.healthy ? 'Healthy' : 'Degraded';
     tr.innerHTML = '<td>' + m.id + '</td>' +
       '<td>' + formatBytes(m.total_size_bytes || 0) + '</td>' +
-      '<td>' + (m.shard_count || '—') + '</td>' +
-      '<td><span class="status-dot ' + (m.healthy ? 'online' : 'degraded') + '"></span>' + (m.healthy ? 'Healthy' : 'Degraded') + '</td>' +
-      '<td>' + (m.status || 'available') + '</td>';
+      '<td>' + (m.shard_count || '\u2014') + '</td>' +
+      '<td><span class="status-dot ' + statusClass + '"></span>' + statusText + '</td>' +
+      '<td>' + capitalize(m.status || 'available') + '</td>';
     tbody.appendChild(tr);
   });
 }
@@ -197,6 +192,10 @@ function renderModelsTable(models) {
 // --- Settings ---
 
 async function saveSettings() {
+  var btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
   var config = {
     contribution: document.getElementById('settings-contribution').value,
     max_concurrent_requests: parseInt(document.getElementById('settings-max-requests').value, 10),
@@ -211,13 +210,17 @@ async function saveSettings() {
       body: JSON.stringify(config),
     });
     if (resp.ok) {
-      alert('Settings saved.');
+      showBanner('success', 'Settings saved successfully');
+      setTimeout(function() { document.getElementById('status-banner').innerHTML = ''; }, 3000);
     } else {
-      alert('Failed to save settings.');
+      showBanner('error', 'Failed to save settings');
     }
   } catch (e) {
-    alert('Error saving settings: ' + e.message);
+    showBanner('error', 'Error: ' + e.message);
   }
+
+  btn.disabled = false;
+  btn.textContent = 'Save Settings';
 }
 
 // --- Helpers ---
@@ -233,17 +236,22 @@ function formatUptime(seconds) {
   if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
   var h = Math.floor(seconds / 3600);
   var m = Math.floor((seconds % 3600) / 60);
+  if (h >= 24) {
+    var d = Math.floor(h / 24);
+    h = h % 24;
+    return d + 'd ' + h + 'h';
+  }
   return h + 'h ' + m + 'm';
 }
 
 function formatMB(mb) {
-  if (!mb || mb === 0) return '—';
+  if (!mb || mb === 0) return '\u2014';
   if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
   return mb + ' MB';
 }
 
 function formatBytes(bytes) {
-  if (!bytes || bytes === 0) return '—';
+  if (!bytes || bytes === 0) return '\u2014';
   if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
   return Math.round(bytes / 1024) + ' KB';
@@ -261,7 +269,7 @@ function renderSparkline(containerId, data) {
   data.forEach(function (val) {
     var bar = document.createElement('div');
     bar.className = 'bar';
-    bar.style.height = Math.max(2, (val / max) * 30) + 'px';
+    bar.style.height = Math.max(2, (val / max) * 36) + 'px';
     container.appendChild(bar);
   });
 }
@@ -269,3 +277,6 @@ function renderSparkline(containerId, data) {
 // --- Init ---
 loadInitialData();
 connectWebSocket();
+
+// Refresh stats every 30 seconds
+setInterval(loadInitialData, 30000);
