@@ -106,33 +106,55 @@ pub async fn update_config(
 
 /// GET /api/admin/models — List known models and their status.
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    let mut models: Vec<serde_json::Value> = Vec::new();
+
+    // Include the locally loaded executor model (from --model flag)
+    {
+        let executor = state.executor.lock().await;
+        if executor.is_loaded() {
+            let size = executor.model_size_bytes().unwrap_or(0);
+            models.push(serde_json::json!({
+                "id": executor.model_name(),
+                "name": executor.model_name(),
+                "total_size_bytes": size,
+                "shard_count": 1,
+                "hosted_shards": 1,
+                "healthy": true,
+                "status": "loaded",
+            }));
+        }
+    }
+
+    // Include models from the P2P registry
     let registry = &state.shared_state.model_registry;
     let manifests = registry.list_models();
 
-    let models: Vec<serde_json::Value> = manifests
-        .iter()
-        .map(|m| {
-            let hosted_count = (0..m.shard_count)
-                .filter(|&idx| {
-                    let shard_id = crate::types::ShardId {
-                        model_id: m.id.clone(),
-                        index: idx,
-                    };
-                    state.shared_state.model_registry.has_shard(&shard_id)
-                })
-                .count();
+    for m in &manifests {
+        // Skip if already listed from executor (same name)
+        if models.iter().any(|existing| existing["id"].as_str() == Some(&m.id.0)) {
+            continue;
+        }
 
-            serde_json::json!({
-                "id": m.id.0,
-                "name": m.name,
-                "total_size_bytes": m.total_size_bytes,
-                "shard_count": m.shard_count,
-                "hosted_shards": hosted_count,
-                "healthy": hosted_count == m.shard_count as usize,
-                "status": if hosted_count == m.shard_count as usize { "complete" } else { "partial" },
+        let hosted_count = (0..m.shard_count)
+            .filter(|&idx| {
+                let shard_id = crate::types::ShardId {
+                    model_id: m.id.clone(),
+                    index: idx,
+                };
+                state.shared_state.model_registry.has_shard(&shard_id)
             })
-        })
-        .collect();
+            .count();
+
+        models.push(serde_json::json!({
+            "id": m.id.0,
+            "name": m.name,
+            "total_size_bytes": m.total_size_bytes,
+            "shard_count": m.shard_count,
+            "hosted_shards": hosted_count,
+            "healthy": hosted_count == m.shard_count as usize,
+            "status": if hosted_count == m.shard_count as usize { "complete" } else { "partial" },
+        }));
+    }
 
     Json(models)
 }

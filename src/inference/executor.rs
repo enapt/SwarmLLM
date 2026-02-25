@@ -134,6 +134,14 @@ impl ModelExecutor {
         &self.model_name
     }
 
+    /// Get the file size of the loaded model in bytes, if available.
+    pub fn model_size_bytes(&self) -> Option<u64> {
+        self.model_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+    }
+
     /// Generate a streaming response for the given prompt.
     ///
     /// Calls the callback with each generated token string. The callback
