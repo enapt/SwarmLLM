@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -11,6 +12,8 @@ use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::identity::Identity;
+use crate::model::acquisition::AcquisitionCommand;
+use crate::model::shard::ShardStore;
 use crate::network::behaviour::{self, SwarmBehaviour, SwarmBehaviourEvent};
 use crate::network::discovery;
 use crate::network::protocol::{
@@ -28,6 +31,14 @@ pub struct NetworkManager {
     inbound_rx: mpsc::Receiver<NetworkCommand>,
     /// Sends decoded network messages to the dispatcher for routing.
     outbound_tx: mpsc::Sender<SwarmMessage>,
+    /// Sends shard data to the AcquisitionManager when received from peers.
+    acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
+    /// Shard store for serving shard data to peers.
+    shard_store: ShardStore,
+    /// Maps peer_id → shard_id for in-flight shard download requests.
+    pending_shard_requests: HashMap<libp2p::PeerId, crate::types::ShardId>,
+    /// Tracks bytes downloaded so far per shard for chunked transfers.
+    shard_download_progress: HashMap<crate::types::ShardId, u64>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -40,6 +51,7 @@ impl NetworkManager {
         inbound_rx: mpsc::Receiver<NetworkCommand>,
         outbound_tx: mpsc::Sender<SwarmMessage>,
         shutdown_rx: watch::Receiver<bool>,
+        acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     ) -> Result<Self, SwarmError> {
         let keypair = transport::ed25519_to_libp2p_keypair(identity.signing_key_bytes())?;
         let peer_id = keypair.public().to_peer_id();
@@ -80,11 +92,17 @@ impl NetworkManager {
             })
             .build();
 
+        let shard_store = ShardStore::new(&config.node.data_dir);
+
         Ok(Self {
             shared_state,
             swarm,
             inbound_rx,
             outbound_tx,
+            acquisition_tx,
+            shard_store,
+            pending_shard_requests: HashMap::new(),
+            shard_download_progress: HashMap::new(),
             shutdown_rx,
         })
     }
@@ -209,34 +227,62 @@ impl NetworkManager {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    tracing::debug!(%peer, "Received tensor request");
-                    match protocol::decode_layer_forward(&request.payload) {
-                        Ok(forward) => {
-                            let msg = SwarmMessage::LayerForward(forward);
-                            let _ = self.outbound_tx.send(msg).await;
-                            // ACK the tensor request
-                            let resp = TensorResponse {
-                                payload: protocol::encode_ack(),
-                            };
-                            let _ = self
-                                .swarm
-                                .behaviour_mut()
-                                .tensor_rr
-                                .send_response(channel, resp);
+                    // Dispatch based on the message type tag (first byte)
+                    let tag = request.payload.first().copied().unwrap_or(0);
+                    match tag {
+                        protocol::TENSOR_TAG_FORWARD => {
+                            tracing::debug!(%peer, "Received tensor LayerForward");
+                            match protocol::decode_layer_forward(&request.payload) {
+                                Ok(mut forward) => {
+                                    // Attach sender's PeerId so the dispatcher can route back the result
+                                    forward.sender_peer_bytes = Some(peer.to_bytes());
+                                    let msg = SwarmMessage::LayerForward(forward);
+                                    let _ = self.outbound_tx.send(msg).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to decode tensor forward");
+                                }
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to decode tensor forward");
+                        protocol::TENSOR_TAG_RESULT => {
+                            tracing::debug!(%peer, "Received tensor LayerResult");
+                            match protocol::decode_layer_result(&request.payload) {
+                                Ok(result) => {
+                                    let _ = self
+                                        .outbound_tx
+                                        .send(SwarmMessage::LayerResult(result))
+                                        .await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to decode tensor result");
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(%peer, tag, "Unknown tensor message tag");
                         }
                     }
+                    // ACK the tensor request
+                    let resp = TensorResponse {
+                        payload: protocol::encode_ack(),
+                    };
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .tensor_rr
+                        .send_response(channel, resp);
                 }
                 request_response::Message::Response { response, .. } => {
-                    // Decode LayerResult from the tensor response
+                    // Check for LayerResult in response (legacy path)
                     if response.payload.len() > 1 {
-                        if let Ok(result) = protocol::decode_layer_result(&response.payload) {
-                            let _ = self
-                                .outbound_tx
-                                .send(SwarmMessage::LayerResult(result))
-                                .await;
+                        let tag = response.payload[0];
+                        if tag == protocol::TENSOR_TAG_RESULT {
+                            if let Ok(result) = protocol::decode_layer_result(&response.payload) {
+                                let _ = self
+                                    .outbound_tx
+                                    .send(SwarmMessage::LayerResult(result))
+                                    .await;
+                            }
                         }
                     }
                     // Single byte = ACK, ignore
@@ -295,6 +341,7 @@ impl NetworkManager {
                     last_seen: chrono::Utc::now(),
                     latency_ms: None,
                     trust_score: 0.5,
+                    peer_id_bytes: Some(peer_id.to_bytes()),
                 };
                 self.shared_state.peer_registry.insert(node_id, peer_info);
             }
@@ -348,17 +395,18 @@ impl NetworkManager {
                     %peer,
                     model = %shard_req.shard_id.model_id,
                     index = shard_req.shard_id.index,
+                    offset = shard_req.chunk_offset,
+                    chunk_size = shard_req.chunk_size,
                     "Shard transfer request"
                 );
-                // Shard transfer is handled by reading from disk
-                // For now, respond with empty data (full implementation in model/distribution)
-                let _ = self.swarm.behaviour_mut().request_response.send_response(
-                    channel,
-                    SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    }),
-                );
+
+                let response = self.serve_shard_data(&shard_req);
+
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, response);
             }
         }
     }
@@ -371,8 +419,73 @@ impl NetworkManager {
                 }
             }
             SwarmResponse::ShardData(data) => {
-                tracing::info!(%peer, size = data.total_size, "Received shard data");
-                // Route to model distribution handler
+                if data.data.is_empty() {
+                    tracing::debug!(%peer, "Received empty shard response (peer doesn't have it)");
+                    return;
+                }
+                tracing::info!(
+                    %peer,
+                    bytes = data.data.len(),
+                    total_size = data.total_size,
+                    "Received shard data chunk"
+                );
+                // Route to AcquisitionManager if we have a pending request
+                if let Some(ref acq_tx) = self.acquisition_tx {
+                    // Look up which shard this peer was sending us from pending requests
+                    if let Some(shard_id) = self.pending_shard_requests.remove(&peer) {
+                        let offset = self
+                            .shard_download_progress
+                            .get(&shard_id)
+                            .copied()
+                            .unwrap_or(0);
+                        let chunk_len = data.data.len() as u64;
+
+                        if let Err(e) = acq_tx
+                            .send(AcquisitionCommand::ShardDataReceived {
+                                shard_id: shard_id.clone(),
+                                offset,
+                                data: data.data,
+                                total_size: data.total_size,
+                            })
+                            .await
+                        {
+                            tracing::warn!(error = %e, "Failed to forward shard data to acquisition");
+                        }
+
+                        // Update progress tracking
+                        let new_offset = offset + chunk_len;
+                        if new_offset < data.total_size {
+                            // More chunks needed — re-register and request next chunk
+                            self.shard_download_progress
+                                .insert(shard_id.clone(), new_offset);
+                            self.pending_shard_requests.insert(peer, shard_id.clone());
+
+                            let next_req = crate::types::ShardRequest {
+                                shard_id,
+                                chunk_offset: new_offset,
+                                chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                            };
+                            let req = SwarmRequest::ShardTransfer(next_req);
+                            self.swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(&peer, req);
+                        } else {
+                            // Download complete for this shard
+                            self.shard_download_progress.remove(&shard_id);
+                            tracing::info!(
+                                model = %shard_id.model_id,
+                                index = shard_id.index,
+                                "Shard download complete"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            %peer,
+                            "Received shard data but no pending request found for peer"
+                        );
+                    }
+                }
             }
             SwarmResponse::Ack => {
                 tracing::debug!(%peer, "Received ACK");
@@ -398,13 +511,21 @@ impl NetworkManager {
             } => {
                 self.handle_send_tensor_result(target_peer_bytes, result);
             }
+            NetworkCommand::SendShardRequest {
+                target_peer_bytes,
+                request,
+            } => {
+                self.handle_send_shard_request(target_peer_bytes, request);
+            }
         }
     }
 
     /// Broadcast a message via GossipSub.
     async fn handle_broadcast(&mut self, msg: SwarmMessage) {
         let topic = match &msg {
-            SwarmMessage::ShardAnnounce(_) | SwarmMessage::NodeCapabilityUpdate(_) => TOPIC_MODELS,
+            SwarmMessage::ShardAnnounce(_)
+            | SwarmMessage::NodeCapabilityUpdate(_)
+            | SwarmMessage::ModelManifest(_) => TOPIC_MODELS,
             SwarmMessage::CreditGossip(_) => crate::network::protocol::TOPIC_CREDITS,
             SwarmMessage::ModelVote(_) => crate::network::protocol::TOPIC_GOVERNANCE,
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
@@ -513,6 +634,196 @@ impl NetworkManager {
                 tracing::warn!(error = %e, "Failed to encode tensor result");
             }
         }
+    }
+
+    /// Serve shard data from disk. Supports two modes:
+    /// 1. Individual shard files (shard_NNN.bin) — for nodes that downloaded shards
+    /// 2. Source GGUF file with byte-range mapping — for the original model host
+    ///
+    /// The shard's `chunk_offset` is relative to the shard itself (not the source file).
+    fn serve_shard_data(&self, req: &crate::types::ShardRequest) -> SwarmResponse {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let model_id = &req.shard_id.model_id;
+        let shard_index = req.shard_id.index;
+
+        // First try: individual shard file on disk
+        let shard_path = self.shard_store.shard_path(model_id, shard_index);
+        if shard_path.exists() {
+            return self.read_file_chunk(
+                &shard_path,
+                req.chunk_offset,
+                req.chunk_size,
+                model_id,
+                shard_index,
+            );
+        }
+
+        // Second try: read byte range from the source GGUF file
+        // The source_path file tells us where the original GGUF lives
+        let model_dir = self.shard_store.models_dir().join(&model_id.0);
+        let source_path_file = model_dir.join("source_path");
+        if source_path_file.exists() {
+            if let Ok(source_path_str) = std::fs::read_to_string(&source_path_file) {
+                let source_path = std::path::Path::new(source_path_str.trim());
+                if source_path.exists() {
+                    // Look up the shard's size from the manifest to compute byte offset
+                    let manifest = self.shared_state.model_registry.get_manifest(model_id);
+                    if let Some(manifest) = manifest {
+                        if let Some(shard_info) =
+                            manifest.shards.iter().find(|s| s.index == shard_index)
+                        {
+                            // Compute the byte offset in the source file for this shard
+                            let shard_file_offset: u64 = manifest
+                                .shards
+                                .iter()
+                                .filter(|s| s.index < shard_index)
+                                .map(|s| s.size_bytes)
+                                .sum();
+                            let total_shard_size = shard_info.size_bytes;
+
+                            // chunk_offset is relative to this shard
+                            let file_offset = shard_file_offset + req.chunk_offset;
+                            let chunk_size = req.chunk_size.min(32 * 1024 * 1024);
+                            let remaining_in_shard =
+                                total_shard_size.saturating_sub(req.chunk_offset);
+                            let read_len = chunk_size.min(remaining_in_shard) as usize;
+
+                            if read_len == 0 {
+                                return SwarmResponse::ShardData(crate::types::ShardResponse {
+                                    data: vec![],
+                                    total_size: total_shard_size,
+                                });
+                            }
+
+                            match std::fs::File::open(source_path) {
+                                Ok(mut file) => {
+                                    let _ = file.seek(SeekFrom::Start(file_offset));
+                                    let mut buf = vec![0u8; read_len];
+                                    match file.read_exact(&mut buf) {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                model = %model_id,
+                                                shard = shard_index,
+                                                bytes = buf.len(),
+                                                shard_size = total_shard_size,
+                                                "Serving shard from source GGUF"
+                                            );
+                                            return SwarmResponse::ShardData(
+                                                crate::types::ShardResponse {
+                                                    data: buf,
+                                                    total_size: total_shard_size,
+                                                },
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Failed to read from source GGUF");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to open source GGUF");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(
+            model = %model_id,
+            shard = shard_index,
+            "Shard not available locally"
+        );
+        SwarmResponse::ShardData(crate::types::ShardResponse {
+            data: vec![],
+            total_size: 0,
+        })
+    }
+
+    /// Read a chunk from a file (individual shard file on disk).
+    fn read_file_chunk(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+        chunk_size: u64,
+        model_id: &crate::types::ModelId,
+        shard_index: u32,
+    ) -> SwarmResponse {
+        use std::io::{Read, Seek, SeekFrom};
+
+        match std::fs::File::open(path) {
+            Ok(mut file) => {
+                let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let chunk_size = chunk_size.min(32 * 1024 * 1024);
+                let _ = file.seek(SeekFrom::Start(offset));
+                let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
+                let mut buf = vec![0u8; read_len];
+                match file.read_exact(&mut buf) {
+                    Ok(()) => {
+                        tracing::info!(
+                            model = %model_id,
+                            shard = shard_index,
+                            bytes = buf.len(),
+                            total_size,
+                            "Serving shard chunk from file"
+                        );
+                        SwarmResponse::ShardData(crate::types::ShardResponse {
+                            data: buf,
+                            total_size,
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to read shard file");
+                        SwarmResponse::ShardData(crate::types::ShardResponse {
+                            data: vec![],
+                            total_size: 0,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to open shard file");
+                SwarmResponse::ShardData(crate::types::ShardResponse {
+                    data: vec![],
+                    total_size: 0,
+                })
+            }
+        }
+    }
+
+    /// Send a shard transfer request to a specific peer.
+    fn handle_send_shard_request(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        request: crate::types::ShardRequest,
+    ) {
+        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, "Invalid peer ID bytes for shard request");
+                return;
+            }
+        };
+
+        tracing::info!(
+            %peer_id,
+            model = %request.shard_id.model_id,
+            index = request.shard_id.index,
+            offset = request.chunk_offset,
+            "Sending shard transfer request to peer"
+        );
+
+        // Track this request so we know which shard the response belongs to
+        self.pending_shard_requests
+            .insert(peer_id, request.shard_id.clone());
+
+        let req = SwarmRequest::ShardTransfer(request);
+        self.swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, req);
     }
 
     fn update_peer_count(&mut self) {

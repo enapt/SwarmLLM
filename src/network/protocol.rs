@@ -81,7 +81,7 @@ impl request_response::Codec for SwarmCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        if len > 64 * 1024 * 1024 {
+        if len > 256 * 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Message too large",
@@ -106,7 +106,7 @@ impl request_response::Codec for SwarmCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        if len > 64 * 1024 * 1024 {
+        if len > 256 * 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Response too large",
@@ -288,12 +288,18 @@ impl request_response::Codec for TensorCodec {
 //   [21..25] data_len (u32 LE)
 //   [25..]   activation data
 
+/// Tensor message type tag — first byte of every tensor protocol message.
+pub const TENSOR_TAG_FORWARD: u8 = 0x01;
+pub const TENSOR_TAG_RESULT: u8 = 0x02;
+
 /// Encode a LayerForward into a binary tensor envelope.
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
     let data_len = forward.activations.len();
-    let total = 25 + data_len;
+    let total = 1 + 25 + data_len;
     let mut buf = Vec::with_capacity(total);
 
+    // Message type tag
+    buf.push(TENSOR_TAG_FORWARD);
     // UUID (16 bytes)
     buf.extend_from_slice(forward.request_id.as_bytes());
     // sequence_num (4 bytes LE)
@@ -314,7 +320,15 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
 }
 
 /// Decode a binary tensor envelope back into a LayerForward.
+/// Expects the 1-byte tag prefix to already be stripped (or handles both cases).
 pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
+    // Skip the tag byte if present
+    let data = if !data.is_empty() && data[0] == TENSOR_TAG_FORWARD {
+        &data[1..]
+    } else {
+        data
+    };
+
     if data.len() < 25 {
         return Err(SwarmError::Network("Tensor envelope too short".to_string()));
     }
@@ -360,21 +374,25 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         sequence_num,
         activations,
         format,
+        sender_peer_bytes: None,
     })
 }
 
-// Binary layout for LayerResult:
-//   [0..16]  request_id (UUID bytes)
-//   [16..20] num_tokens (u32 LE)
+// Binary layout for LayerResult (v2 with activations):
+//   [0..16]      request_id (UUID bytes)
+//   [16..20]     num_tokens (u32 LE)
 //   [20..20+n*4] token_ids (each u32 LE)
-//   [20+n*4] finish_reason tag: 0=None, 1=Stop, 2=MaxTokens, 3=Error
-//   [21+n*4..] error message (only if tag=3, UTF-8 bytes)
+//   [T]          finish_reason tag: 0=None, 1=Stop, 2=MaxTokens, 3=Error
+//   [T+1..]      if tag=3: error message (UTF-8 bytes) followed by [4B activations_len][activations]
+//                if tag!=3: [4B activations_len][activations data]
 
 /// Encode a LayerResult into binary.
 pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> {
     let num_tokens = result.token_ids.len();
-    let mut buf = Vec::with_capacity(21 + num_tokens * 4);
+    let mut buf = Vec::with_capacity(1 + 25 + num_tokens * 4 + result.activations.len());
 
+    // Message type tag
+    buf.push(TENSOR_TAG_RESULT);
     buf.extend_from_slice(result.request_id.as_bytes());
     buf.extend_from_slice(&(num_tokens as u32).to_le_bytes());
     for &token in &result.token_ids {
@@ -387,15 +405,29 @@ pub fn encode_layer_result(result: &LayerResult) -> Result<Vec<u8>, SwarmError> 
         Some(NetworkFinishReason::MaxTokens) => buf.push(2),
         Some(NetworkFinishReason::Error(msg)) => {
             buf.push(3);
+            // Error message length + message
+            buf.extend_from_slice(&(msg.len() as u32).to_le_bytes());
             buf.extend_from_slice(msg.as_bytes());
         }
     }
+
+    // Append activations (for intermediate pipeline segments)
+    buf.extend_from_slice(&(result.activations.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&result.activations);
 
     Ok(buf)
 }
 
 /// Decode binary into a LayerResult.
+/// Expects the 1-byte tag prefix to already be stripped (or handles both cases).
 pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
+    // Skip the tag byte if present
+    let data = if !data.is_empty() && data[0] == TENSOR_TAG_RESULT {
+        &data[1..]
+    } else {
+        data
+    };
+
     if data.len() < 21 {
         return Err(SwarmError::Network(
             "LayerResult envelope too short".to_string(),
@@ -429,13 +461,33 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         token_ids.push(token);
     }
 
-    let finish_reason = match data[tokens_end] {
-        0 => None,
-        1 => Some(NetworkFinishReason::Stop),
-        2 => Some(NetworkFinishReason::MaxTokens),
+    let mut pos = tokens_end;
+    let finish_reason = match data[pos] {
+        0 => {
+            pos += 1;
+            None
+        }
+        1 => {
+            pos += 1;
+            Some(NetworkFinishReason::Stop)
+        }
+        2 => {
+            pos += 1;
+            Some(NetworkFinishReason::MaxTokens)
+        }
         3 => {
-            let msg = String::from_utf8_lossy(&data[tokens_end + 1..]).to_string();
-            Some(NetworkFinishReason::Error(msg))
+            pos += 1;
+            // Error: read message length + message
+            if pos + 4 <= data.len() {
+                let msg_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                let msg = String::from_utf8_lossy(&data[pos..pos + msg_len.min(data.len() - pos)])
+                    .to_string();
+                pos += msg_len.min(data.len() - pos);
+                Some(NetworkFinishReason::Error(msg))
+            } else {
+                Some(NetworkFinishReason::Error(String::new()))
+            }
         }
         t => {
             return Err(SwarmError::Network(format!(
@@ -444,10 +496,24 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         }
     };
 
+    // Read activations if present
+    let activations = if pos + 4 <= data.len() {
+        let act_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if act_len > 0 && pos + act_len <= data.len() {
+            data[pos..pos + act_len].to_vec()
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     Ok(LayerResult {
         request_id,
         token_ids,
         finish_reason,
+        activations,
     })
 }
 
@@ -572,6 +638,7 @@ mod tests {
             sequence_num: 42,
             activations: vec![1, 2, 3, 4, 5, 6, 7, 8],
             format: TensorFormat::FP16,
+            sender_peer_bytes: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -595,9 +662,10 @@ mod tests {
                 sequence_num: 0,
                 activations: vec![],
                 format: fmt,
+                sender_peer_bytes: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
-            assert_eq!(encoded[20], tag);
+            assert_eq!(encoded[21], tag); // +1 for the message type tag byte
             let decoded = decode_layer_forward(&encoded).unwrap();
             assert!(matches!(
                 (&forward.format, &decoded.format),
@@ -616,6 +684,7 @@ mod tests {
             sequence_num: 100,
             activations: data.clone(),
             format: TensorFormat::FP32,
+            sender_peer_bytes: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -630,6 +699,7 @@ mod tests {
             request_id: uuid::Uuid::new_v4(),
             token_ids: vec![100, 200, 300],
             finish_reason: Some(NetworkFinishReason::Stop),
+            activations: vec![],
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -649,6 +719,7 @@ mod tests {
             request_id: uuid::Uuid::nil(),
             token_ids: vec![42],
             finish_reason: None,
+            activations: vec![],
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -662,6 +733,7 @@ mod tests {
             request_id: uuid::Uuid::nil(),
             token_ids: vec![],
             finish_reason: Some(NetworkFinishReason::Error("OOM".to_string())),
+            activations: vec![],
         };
 
         let encoded = encode_layer_result(&result).unwrap();

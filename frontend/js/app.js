@@ -80,6 +80,9 @@ function handleWsMessage(msg) {
   switch (msg.type) {
     case 'stats_update':
       updateStats(msg.data);
+      if (msg.data.acquisitions) {
+        updateAcquisitionProgress(msg.data.acquisitions);
+      }
       break;
   }
 }
@@ -245,9 +248,26 @@ async function loadNetworkData() {
       list.innerHTML = '';
       peers.forEach(function (p) {
         var div = document.createElement('div');
-        div.className = 'flex-between mb-1';
-        div.innerHTML = '<span class="mono" style="font-size:0.8rem">' + escapeHtml(p.node_id || p.peer_id || 'unknown') + '</span>' +
-          '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
+        div.style.cssText = 'margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
+
+        var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
+        var nodeId = '<span class="mono" style="font-size:0.8rem">' + escapeHtml(p.node_id || 'unknown') + '</span>';
+
+        var details = '';
+        if (p.gpu) {
+          details += '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:3px">GPU: ' + escapeHtml(p.gpu) + '</div>';
+        }
+        if (p.hosted_models && p.hosted_models.length > 0) {
+          details += '<div style="font-size:0.75rem;margin-top:2px">';
+          p.hosted_models.forEach(function (model) {
+            details += '<span class="source-badge local" style="margin-right:4px">' + escapeHtml(model) + '</span>';
+          });
+          details += '</div>';
+        } else {
+          details += '<div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px">No models loaded</div>';
+        }
+
+        div.innerHTML = statusDot + nodeId + details;
         list.appendChild(div);
       });
     }
@@ -290,16 +310,277 @@ function renderModelsTable(models) {
   tbody.innerHTML = '';
 
   models.forEach(function (m) {
+    var source = m.source || 'local';
+    var shards = m.shards || [];
+    var shardCount = m.shard_count || 0;
+    var hostedShards = m.hosted_shards || 0;
+    var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
+
+    // Main model row
     var tr = document.createElement('tr');
-    var statusClass = m.healthy ? 'online' : 'degraded';
-    var statusText = m.healthy ? 'Healthy' : 'Degraded';
-    tr.innerHTML = '<td>' + escapeHtml(m.id) + '</td>' +
+
+    // Source badge
+    var sourceBadge = '<span class="source-badge ' + source + '">' + source + '</span>';
+    if (shardCount > 1) {
+      sourceBadge += ' <span class="text-muted" style="font-size:0.7rem">' +
+        hostedShards + '/' + shardCount + ' shards</span>';
+    }
+
+    // Shard map: visual representation of which shards are local/available/missing
+    var shardMap = '';
+    if (shardCount > 1 && shards.length > 0) {
+      shardMap = '<div class="shard-map" style="display:flex;gap:2px;margin-top:4px">';
+      shards.forEach(function (s) {
+        var color = s.local ? 'var(--green)' : (s.holders > 0 ? 'var(--accent)' : 'var(--border)');
+        var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')' +
+          (s.local ? ' - Local' : '') +
+          (s.holders > 0 ? ' - ' + s.holders + ' holder(s)' : ' - Unavailable');
+        shardMap += '<div title="' + title + '" style="width:' + Math.max(6, Math.floor(80 / shardCount)) +
+          'px;height:14px;border-radius:2px;background:' + color + ';cursor:help"></div>';
+      });
+      shardMap += '</div>';
+    }
+
+    // Availability column
+    var availability = '';
+    if (m.local && m.status === 'loaded') {
+      availability = '<span class="status-dot online"></span><span class="text-green" style="font-size:0.8rem">Loaded</span>';
+    } else if (hostedShards > 0 && hostedShards === shardCount) {
+      availability = '<span class="status-dot online"></span><span style="font-size:0.8rem">All shards local</span>';
+    } else if (hostedShards > 0) {
+      availability = '<span class="status-dot degraded"></span><span style="font-size:0.8rem">' +
+        hostedShards + '/' + shardCount + ' shards</span>';
+    } else if (m.peers_hosting > 0) {
+      availability = '<span class="status-dot online"></span><span style="font-size:0.8rem">' +
+        m.peers_hosting + ' peer' + (m.peers_hosting > 1 ? 's' : '') + '</span>';
+    } else {
+      availability = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
+    }
+    if (m.peers_hosting > 0 && m.local) {
+      availability += '<br><span class="text-muted" style="font-size:0.75rem">+ ' +
+        m.peers_hosting + ' peer' + (m.peers_hosting > 1 ? 's' : '') + '</span>';
+    }
+    availability += shardMap;
+
+    // Action column
+    var action = '';
+    if (m.status === 'loaded') {
+      action = '<span class="text-green" style="font-size:0.8rem;font-weight:600">Active</span>';
+      if (shardCount > 1) {
+        action += '<br><span class="text-muted" style="font-size:0.7rem">Seeding ' + shardCount + ' shards</span>';
+      }
+    } else if (activeAcquisitions[m.id]) {
+      action = '<span class="text-muted" style="font-size:0.8rem">&#8593; See progress above</span>';
+    } else if (source === 'network' || m.status === 'available' || m.status === 'partial') {
+      // Show download controls with shard count option
+      if (shardCount > 1) {
+        var missingShards = shardCount - hostedShards;
+        action = '<div style="display:flex;align-items:center;gap:6px">' +
+          '<select id="shard-count-' + safeId + '" class="shard-select" style="width:60px;padding:2px 4px;font-size:0.75rem;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg-secondary);color:var(--text-primary)">';
+        for (var i = 1; i <= missingShards; i++) {
+          var selected = (i === missingShards) ? ' selected' : '';
+          action += '<option value="' + i + '"' + selected + '>' + i + '</option>';
+        }
+        action += '</select>' +
+          '<button class="btn btn-sm btn-primary" onclick="requestModel(\'' +
+          escapeHtml(m.id) + '\')">Get Shards</button></div>';
+      } else {
+        action = '<button class="btn btn-sm btn-primary" onclick="requestModel(\'' +
+          escapeHtml(m.id) + '\')">Download</button>';
+      }
+    } else if (source === 'local' && m.status !== 'loaded') {
+      action = '<span class="text-muted" style="font-size:0.8rem">Stored</span>';
+    }
+
+    tr.innerHTML = '<td><strong>' + escapeHtml(m.id || m.name) + '</strong>' +
+      (shardCount > 1 ? '<br><span class="text-muted" style="font-size:0.7rem">' + shardCount + ' shards @ ' + formatBytes((m.total_size_bytes || 0) / shardCount) + ' each</span>' : '') +
+      '</td>' +
+      '<td>' + sourceBadge + '</td>' +
       '<td>' + formatBytes(m.total_size_bytes || 0) + '</td>' +
-      '<td>' + (m.shard_count || '\u2014') + '</td>' +
-      '<td><span class="status-dot ' + statusClass + '"></span>' + statusText + '</td>' +
-      '<td>' + capitalize(m.status || 'available') + '</td>';
+      '<td>' + availability + '</td>' +
+      '<td>' + action + '</td>';
     tbody.appendChild(tr);
   });
+}
+
+var activeAcquisitions = {};
+
+async function requestModel(modelId) {
+  try {
+    var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
+    var data = await resp.json();
+    if (data.status === 'acquiring') {
+      activeAcquisitions[modelId] = { started: Date.now() };
+      renderAcquisitionPanel(modelId, null);
+    } else {
+      showBanner('warning', data.message || 'Model acquisition unavailable');
+    }
+  } catch (e) {
+    showBanner('error', 'Failed to request model: ' + e.message);
+  }
+}
+
+function updateAcquisitionProgress(acquisitions) {
+  if (!acquisitions || acquisitions.length === 0) return;
+
+  acquisitions.forEach(function (status) {
+    var modelId = status.model_id;
+    if (!modelId) return;
+
+    // Track it
+    if (!activeAcquisitions[modelId]) {
+      if (status.state === 'complete') return; // Already done, skip
+      activeAcquisitions[modelId] = { started: Date.now() };
+    }
+
+    renderAcquisitionPanel(modelId, status);
+
+    // Clean up on completion
+    if (status.state === 'complete') {
+      setTimeout(function () {
+        delete activeAcquisitions[modelId];
+        loadInitialData();
+      }, 3000);
+    } else if (status.state && status.state.failed) {
+      setTimeout(function () {
+        delete activeAcquisitions[modelId];
+      }, 10000);
+    }
+  });
+}
+
+function renderAcquisitionPanel(modelId, status) {
+  var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+  var panelId = 'acq-panel-' + safeId;
+  var panel = document.getElementById(panelId);
+
+  if (!panel) {
+    // Create the acquisition progress panel in the status banner area
+    var banner = document.getElementById('status-banner');
+    panel = document.createElement('div');
+    panel.id = panelId;
+    panel.className = 'acq-panel';
+    panel.style.cssText = 'background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:8px';
+    banner.appendChild(panel);
+  }
+
+  if (!status) {
+    panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px">' +
+      '<div class="spinner"></div>' +
+      '<strong>' + escapeHtml(modelId) + '</strong>' +
+      '<span class="text-muted" style="font-size:0.8rem">Starting acquisition...</span></div>';
+    return;
+  }
+
+  var state = status.state;
+  var stateName = typeof state === 'string' ? state : (state && state.failed ? 'failed' : 'unknown');
+  var totalBytes = status.total_bytes || 0;
+  var dlBytes = status.downloaded_bytes || 0;
+  var pct = totalBytes > 0 ? Math.round((dlBytes / totalBytes) * 100) : 0;
+  var speed = status.speed_bytes_per_sec || 0;
+  var totalShards = status.total_shards || 0;
+  var dlShards = status.downloaded_shards || 0;
+  var verifiedShards = status.verified_shards || 0;
+  var failedShards = status.failed_shards || 0;
+  var shardProgress = status.shard_progress || {};
+  var logs = status.log || [];
+
+  // Header line
+  var stateIcon = '&#9660;'; // downloading arrow
+  var stateColor = 'var(--accent)';
+  if (stateName === 'complete') { stateIcon = '&#10003;'; stateColor = 'var(--green)'; }
+  else if (stateName === 'failed') { stateIcon = '&#10007;'; stateColor = 'var(--red)'; }
+  else if (stateName === 'awaiting_manifest') { stateIcon = '&#8987;'; stateColor = 'var(--text-muted)'; }
+
+  var header = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<div><span style="color:' + stateColor + ';font-size:1.1rem;margin-right:6px">' + stateIcon + '</span>' +
+    '<strong>' + escapeHtml(modelId) + '</strong>' +
+    '<span class="text-muted" style="margin-left:8px;font-size:0.8rem">' + capitalize(stateName.replace('_', ' ')) + '</span></div>' +
+    '<div class="mono" style="font-size:0.85rem">' +
+    formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' +
+    (speed > 0 ? ' &mdash; ' + formatSpeed(speed) : '') +
+    '</div></div>';
+
+  // Main progress bar
+  var barColor = stateName === 'complete' ? 'var(--green)' : (stateName === 'failed' ? 'var(--red)' : 'var(--accent)');
+  var progressBar = '<div style="width:100%;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden;margin-bottom:10px">' +
+    '<div style="width:' + pct + '%;height:100%;background:' + barColor + ';transition:width 0.3s ease"></div></div>';
+
+  // Per-shard progress grid
+  var shardGrid = '';
+  if (totalShards > 1) {
+    shardGrid = '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+    for (var i = 0; i < totalShards; i++) {
+      var sp = shardProgress[String(i)] || shardProgress[i];
+      var sState = sp ? sp.state : 'pending';
+      var sPct = (sp && sp.total_bytes > 0) ? Math.round((sp.downloaded_bytes / sp.total_bytes) * 100) : 0;
+
+      var sColor = 'var(--bg-tertiary)';
+      var sBorder = 'var(--border)';
+      var sLabel = 'Pending';
+      if (sState === 'complete') { sColor = 'var(--green)'; sBorder = 'var(--green)'; sLabel = 'Complete'; }
+      else if (sState === 'downloading') { sColor = 'var(--accent)'; sBorder = 'var(--accent)'; sLabel = sPct + '%'; }
+      else if (sState === 'verifying') { sColor = 'var(--yellow, #e6a817)'; sBorder = 'var(--yellow, #e6a817)'; sLabel = 'Verifying'; }
+      else if (sState === 'failed') { sColor = 'var(--red)'; sBorder = 'var(--red)'; sLabel = 'Failed'; }
+
+      var w = Math.max(28, Math.floor(100 / totalShards)) + 'px';
+      var tooltip = 'Shard ' + i + ': ' + sLabel;
+      if (sp) tooltip += ' (' + formatBytes(sp.downloaded_bytes || 0) + '/' + formatBytes(sp.total_bytes || 0) + ')';
+
+      // Partially filled shard block for downloading state
+      var innerFill = '';
+      if (sState === 'downloading' && sPct > 0 && sPct < 100) {
+        innerFill = '<div style="position:absolute;bottom:0;left:0;width:100%;height:' + sPct + '%;background:' + sColor + ';opacity:0.5;border-radius:0 0 3px 3px"></div>';
+      }
+
+      shardGrid += '<div title="' + tooltip + '" style="position:relative;width:' + w + ';height:24px;border-radius:3px;' +
+        'border:1px solid ' + sBorder + ';overflow:hidden;cursor:help;text-align:center;line-height:24px;font-size:0.65rem;color:var(--text-secondary);' +
+        (sState === 'complete' || sState === 'failed' || sState === 'verifying' ? 'background:' + sColor + ';color:#fff;font-weight:600' : 'background:var(--bg-tertiary)') +
+        '">' + innerFill + '<span style="position:relative;z-index:1">' + i + '</span></div>';
+    }
+    shardGrid += '</div>';
+
+    // Shard counter line
+    shardGrid += '<div class="text-muted" style="font-size:0.75rem;margin-bottom:8px">' +
+      'Shards: ' + verifiedShards + ' verified';
+    if (failedShards > 0) shardGrid += ', <span style="color:var(--red)">' + failedShards + ' failed</span>';
+    var inProgress = totalShards - verifiedShards - failedShards;
+    if (inProgress > 0 && stateName !== 'complete') shardGrid += ', ' + inProgress + ' remaining';
+    // ETA
+    if (speed > 0 && dlBytes < totalBytes) {
+      var remaining = totalBytes - dlBytes;
+      var etaSec = Math.round(remaining / speed);
+      shardGrid += ' &mdash; ETA: ' + formatEta(etaSec);
+    }
+    shardGrid += '</div>';
+  }
+
+  // Log tail (last 6 lines)
+  var logHtml = '';
+  if (logs.length > 0) {
+    var recentLogs = logs.slice(-6);
+    logHtml = '<div style="font-family:var(--mono);font-size:0.72rem;color:var(--text-secondary);background:var(--bg-tertiary);padding:6px 10px;border-radius:var(--radius);max-height:120px;overflow-y:auto">';
+    recentLogs.forEach(function (line) {
+      logHtml += '<div style="margin-bottom:2px">' + escapeHtml(line) + '</div>';
+    });
+    logHtml += '</div>';
+  }
+
+  panel.innerHTML = header + progressBar + shardGrid + logHtml;
+}
+
+function formatSpeed(bytesPerSec) {
+  if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
+  if (bytesPerSec >= 1024) return Math.round(bytesPerSec / 1024) + ' KB/s';
+  return bytesPerSec + ' B/s';
+}
+
+function formatEta(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
 }
 
 // --- Settings ---

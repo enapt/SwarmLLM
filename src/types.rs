@@ -235,6 +235,9 @@ pub enum SwarmMessage {
     LayerResult(LayerResult),
     InferenceError(InferenceError),
 
+    // Model manifest distribution
+    ModelManifest(ModelManifest),
+
     // Credits
     CreditTransaction(CreditTransaction),
 
@@ -276,6 +279,10 @@ pub struct LayerForward {
     pub sequence_num: u32,
     pub activations: Vec<u8>,
     pub format: TensorFormat,
+    /// Populated locally after receiving from the network — not serialized over the wire.
+    /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
+    #[serde(skip)]
+    pub sender_peer_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -290,6 +297,10 @@ pub struct LayerResult {
     pub request_id: uuid::Uuid,
     pub token_ids: Vec<u32>,
     pub finish_reason: Option<NetworkFinishReason>,
+    /// Intermediate hidden-state activations (for non-final pipeline segments).
+    /// Empty for the final segment (which returns token_ids instead).
+    #[serde(default)]
+    pub activations: Vec<u8>,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
@@ -773,6 +784,11 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         result: LayerResult,
     },
+    /// Send a shard transfer request to a specific peer.
+    SendShardRequest {
+        target_peer_bytes: Vec<u8>,
+        request: ShardRequest,
+    },
 }
 
 // ---- Rebalancing ----
@@ -794,6 +810,9 @@ pub struct PeerInfo {
     pub last_seen: chrono::DateTime<chrono::Utc>,
     pub latency_ms: Option<u32>,
     pub trust_score: f32,
+    /// Raw libp2p PeerId bytes for directed request_response messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id_bytes: Option<Vec<u8>>,
 }
 
 // ---- Node Stats ----

@@ -204,7 +204,8 @@ impl PipelineExecutor {
                 request_id,
                 sequence_num,
                 activations: activations.clone(),
-                format: TensorFormat::FP16,
+                format: TensorFormat::FP32,
+                sender_peer_bytes: None,
             };
 
             // If this is the local node, process locally
@@ -213,13 +214,15 @@ impl PipelineExecutor {
                 if is_last {
                     return Ok(result);
                 }
-                // Use the result's token_ids as activations for next segment
-                activations = result
-                    .token_ids
-                    .iter()
-                    .flat_map(|t| t.to_le_bytes())
-                    .collect();
+                // Use hidden-state activations for the next segment
+                activations = result.activations;
             } else {
+                // Register a response channel BEFORE sending the request
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.shared_state
+                    .pending_layer_results
+                    .insert(request_id, tx);
+
                 // Send to remote node via directed tensor protocol
                 let target_peer_bytes = segment.node_id.0.to_vec();
                 self.network_tx
@@ -230,19 +233,14 @@ impl PipelineExecutor {
                     .await
                     .map_err(|_| SwarmError::Network("Failed to send LayerForward".to_string()))?;
 
-                // Wait for response (with timeout)
-                // In a full implementation, this would use a response channel
-                // keyed by (request_id, segment_idx). For now, simulate with timeout.
-                match self.wait_for_segment_result(request_id, idx, is_last).await {
+                // Wait for response via the oneshot channel (with timeout)
+                match Self::wait_for_result(rx).await {
                     Ok(result) => {
                         if is_last {
                             return Ok(result);
                         }
-                        activations = result
-                            .token_ids
-                            .iter()
-                            .flat_map(|t| t.to_le_bytes())
-                            .collect();
+                        // Use hidden-state activations for the next segment
+                        activations = result.activations;
                     }
                     Err(_e) => {
                         // Attempt failover to standby
@@ -259,66 +257,150 @@ impl PipelineExecutor {
         ))
     }
 
-    /// Process a pipeline segment locally (this node has the shard).
+    /// Process a pipeline segment locally using the split inference engine.
+    ///
+    /// Loads the split model (layer range) from the local GGUF if not already cached,
+    /// then runs the forward pass on the activation tensor.
     async fn process_local_segment(
         &self,
-        _segment: &PipelineSegment,
-        _activations: &[u8],
+        segment: &PipelineSegment,
+        activation_bytes: &[u8],
     ) -> Result<LayerResult, SwarmError> {
-        // In a full implementation, this would:
-        // 1. Load the shard for segment.layer_range
-        // 2. Run the forward pass on the activation tensor
-        // 3. Return the output activations (or final tokens if last segment)
-        //
-        // For Phase 3 stub: use the executor to generate tokens
-        let mut executor = self.shared_state.executor.lock().await;
-        if executor.is_loaded() {
-            let prompt = build_chat_prompt(&self.request.messages);
-            let (content, gen_result) =
-                executor.generate(&prompt, &self.request.sampling_params)?;
+        use crate::inference::split::{self, SplitModel};
 
-            let token_ids: Vec<u32> = content.bytes().map(|b| b as u32).collect();
-            let finish = match gen_result.finish_reason {
-                crate::inference::executor::FinishReason::Stop => Some(NetworkFinishReason::Stop),
-                crate::inference::executor::FinishReason::MaxTokens => {
-                    Some(NetworkFinishReason::MaxTokens)
+        let model_id = &segment.shard_id.model_id;
+        let (layer_start, layer_end) = (
+            segment.layer_range.0 as usize,
+            segment.layer_range.1 as usize,
+        );
+
+        // Ensure the split model is loaded for this model's layer range
+        if !self.shared_state.split_models.contains_key(model_id) {
+            // Find the GGUF file (reconstructed or original)
+            let shard_store =
+                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let model_dir = shard_store.models_dir().join(&model_id.0);
+            let gguf_path = model_dir.join("model.gguf");
+
+            // If no reconstructed GGUF, try the source_path file
+            let gguf_path = if gguf_path.exists() {
+                gguf_path
+            } else {
+                let source_path_file = model_dir.join("source_path");
+                if source_path_file.exists() {
+                    let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
+                    std::path::PathBuf::from(p.trim())
+                } else {
+                    return Err(SwarmError::Internal(
+                        "No GGUF file found for split model".into(),
+                    ));
                 }
             };
 
-            return Ok(LayerResult {
-                request_id: self.request.id,
-                token_ids,
-                finish_reason: finish,
-            });
+            // Determine if this is the first/last segment
+            let manifest = self
+                .shared_state
+                .model_registry
+                .get_manifest(model_id)
+                .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
+            let total_layers = manifest.num_layers as usize;
+            let is_first = layer_start == 0;
+            let is_last = layer_end >= total_layers;
+
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{layer_start}..{layer_end})"),
+                total = total_layers,
+                path = %gguf_path.display(),
+                "Loading split model segment"
+            );
+
+            let split_model =
+                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)?;
+
+            self.shared_state.split_models.insert(
+                model_id.clone(),
+                std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
+            );
         }
 
-        // Stub: return a placeholder result
-        Ok(LayerResult {
-            request_id: self.request.id,
-            token_ids: vec![72, 105], // "Hi"
-            finish_reason: Some(NetworkFinishReason::Stop),
-        })
+        let split_model_ref = self
+            .shared_state
+            .split_models
+            .get(model_id)
+            .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
+
+        let mut split_model = split_model_ref.lock().await;
+
+        let is_first = split_model.layer_start == 0;
+        let is_last = split_model.layer_end == split_model.total_layers;
+
+        // Convert activation bytes to a candle Tensor
+        let input_tensor = if is_first {
+            // First segment: input is prompt text → tokenize
+            // For now, use the prompt string from the request
+            let prompt = build_chat_prompt(&self.request.messages);
+            // Simple byte-to-token mapping (placeholder tokenizer)
+            // In production, use the model's actual tokenizer
+            let token_ids: Vec<i64> = prompt.bytes().map(|b| b as i64).collect();
+            candle_core::Tensor::from_vec(
+                token_ids.clone(),
+                &[1, token_ids.len()],
+                &candle_core::Device::Cpu,
+            )
+            .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+        } else {
+            // Non-first segment: input is hidden states from previous segment
+            split::bytes_to_tensor(activation_bytes)?
+        };
+
+        // Run the forward pass
+        let output = split_model.forward(&input_tensor, 0)?;
+
+        if is_last {
+            // Last segment: output is logits → sample token
+            let token_id = split::sample_token(
+                &output,
+                self.request.sampling_params.temperature,
+                self.request.sampling_params.top_p,
+            )?;
+
+            // Check for EOS (token 2 for many models, or specific stop tokens)
+            let finish = if token_id == 2 || token_id == 0 {
+                Some(NetworkFinishReason::Stop)
+            } else {
+                None
+            };
+
+            Ok(LayerResult {
+                request_id: self.request.id,
+                token_ids: vec![token_id],
+                finish_reason: finish,
+                activations: vec![],
+            })
+        } else {
+            // Intermediate segment: return hidden states for next segment
+            let activation_bytes = split::tensor_to_bytes(&output)?;
+            Ok(LayerResult {
+                request_id: self.request.id,
+                token_ids: vec![],
+                finish_reason: None,
+                activations: activation_bytes,
+            })
+        }
     }
 
-    /// Wait for a segment to return its result.
-    async fn wait_for_segment_result(
-        &self,
-        request_id: uuid::Uuid,
-        _segment_idx: usize,
-        _is_last: bool,
+    /// Wait for a remote segment to return its result via the oneshot channel.
+    async fn wait_for_result(
+        rx: tokio::sync::oneshot::Receiver<LayerResult>,
     ) -> Result<LayerResult, SwarmError> {
-        // In a full implementation, this would listen on a channel
-        // for LayerResult messages matching (request_id, segment_idx).
-        // For Phase 3: use a timeout-based stub that simulates network latency.
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Stub: return placeholder tokens
-        Ok(LayerResult {
-            request_id,
-            token_ids: vec![72, 105], // "Hi"
-            finish_reason: Some(NetworkFinishReason::Stop),
-        })
+        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => Err(SwarmError::PipelineError("Response channel dropped".into())),
+            Err(_) => Err(SwarmError::PipelineError(
+                "Timed out waiting for segment result".into(),
+            )),
+        }
     }
 
     /// Attempt failover to a standby node for a failed segment.
@@ -328,7 +410,7 @@ impl PipelineExecutor {
         request_id: uuid::Uuid,
         sequence_num: u32,
         activations: &[u8],
-        is_last: bool,
+        _is_last: bool,
     ) -> Result<LayerResult, SwarmError> {
         let failed_segment = &self.assignment.segments[failed_idx];
 
@@ -353,12 +435,19 @@ impl PipelineExecutor {
                     "Failing over to standby node"
                 );
 
+                // Register a response channel BEFORE sending the request
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.shared_state
+                    .pending_layer_results
+                    .insert(request_id, tx);
+
                 // Send to backup node via directed tensor protocol
                 let forward = LayerForward {
                     request_id,
                     sequence_num,
                     activations: activations.to_vec(),
                     format: TensorFormat::FP16,
+                    sender_peer_bytes: None,
                 };
 
                 let target_peer_bytes = backup.node_id.0.to_vec();
@@ -372,9 +461,8 @@ impl PipelineExecutor {
                         SwarmError::Network("Failed to send to standby node".to_string())
                     })?;
 
-                // Wait for standby response
-                self.wait_for_segment_result(request_id, failed_idx, is_last)
-                    .await
+                // Wait for standby response via the oneshot channel
+                Self::wait_for_result(rx).await
             }
             None => {
                 tracing::error!(

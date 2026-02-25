@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::config::Config;
 use crate::credit::ledger::CreditLedger;
+use crate::error::SwarmError;
 use crate::health::monitor::HealthMonitor;
 use crate::health::rebalancer::ShardRebalancer;
 use crate::identity::Identity;
@@ -50,6 +51,23 @@ pub struct SharedState {
     pub governance_params: RwLock<GovernanceParams>,
     /// Network-wide statistics for governance role calculation.
     pub network_stats: RwLock<NetworkStats>,
+    /// Live acquisition progress — written by AcquisitionManager, read by API/WebSocket.
+    pub acquisition_progress:
+        DashMap<crate::types::ModelId, crate::model::acquisition::AcquisitionStatus>,
+    /// Pending LayerResult channels for distributed pipeline execution.
+    /// Keyed by request_id. Pipeline executor registers a oneshot sender before
+    /// sending a LayerForward, and the network dispatcher fires it when the
+    /// LayerResult arrives.
+    pub pending_layer_results:
+        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
+    /// Loaded split models for distributed inference (layer-range segments).
+    /// Keyed by model_id. Each node loads only its assigned layers.
+    pub split_models: DashMap<
+        crate::types::ModelId,
+        Arc<tokio::sync::Mutex<crate::inference::split::SplitModel>>,
+    >,
+    /// GGUF tensor metadata for known models (extracted from GGUF header, stored in manifest).
+    pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -91,6 +109,10 @@ impl SharedState {
                 GovernanceParams::default(),
             ),
             network_stats: RwLock::new(NetworkStats::default()),
+            acquisition_progress: DashMap::new(),
+            pending_layer_results: DashMap::new(),
+            split_models: DashMap::new(),
+            gguf_meta: DashMap::new(),
             shutdown_tx,
         });
 
@@ -160,13 +182,47 @@ impl Daemon {
         );
 
         // Set the cached model info (lock-free for admin reads)
-        *shared_state.loaded_model_info.write().await = cached_info;
+        *shared_state.loaded_model_info.write().await = cached_info.clone();
 
-        // Scan local shards and register them in both model_registry and shard_registry
+        // Generate a ModelManifest for the locally loaded model so peers can discover it
+        if let Some(ref info) = cached_info {
+            if let Some(ref model_path) = self.config.inference.model_path {
+                generate_and_register_local_manifest(&shared_state, info, model_path);
+            }
+        }
+
+        // Scan local shards and register them + their manifests
         let shard_store = ShardStore::new(&self.config.node.data_dir);
         match shard_store.load_all_local() {
             Ok(shards) => {
+                // Track which model manifests we've already registered
+                let mut registered_manifests = std::collections::HashSet::new();
+
                 for (model_id, shard_info) in &shards {
+                    // Register the manifest if we haven't yet
+                    if registered_manifests.insert(model_id.clone()) {
+                        let model_dir = shard_store.models_dir().join(&model_id.0);
+                        if let Ok(manifest) = crate::types::ModelManifest::load_from_dir(&model_dir)
+                        {
+                            if manifest.verify_hash().is_ok() {
+                                shared_state
+                                    .model_registry
+                                    .register_manifest(manifest.clone());
+                                if let Err(e) = shared_state
+                                    .model_registry
+                                    .persist_manifest(&shared_state.db, &manifest)
+                                {
+                                    tracing::warn!(error = %e, "Failed to persist manifest to DB");
+                                }
+                                tracing::info!(
+                                    model = %model_id,
+                                    shards = manifest.shard_count,
+                                    "Registered manifest from local shard directory"
+                                );
+                            }
+                        }
+                    }
+
                     let shard_id = ShardId {
                         model_id: model_id.clone(),
                         index: shard_info.index,
@@ -201,7 +257,7 @@ impl Daemon {
         let (rebalance_tx, rebalance_rx) = mpsc::channel::<RebalanceEvent>(64);
         let (acquisition_tx, acquisition_rx) = mpsc::channel::<AcquisitionCommand>(64);
 
-        // Spawn NetworkManager
+        // Spawn NetworkManager (acquisition_tx wired after channel creation below)
         let network_manager = NetworkManager::new(
             shared_state.clone(),
             &self.identity,
@@ -209,6 +265,7 @@ impl Daemon {
             network_rx,
             network_out_tx,
             shutdown_rx.clone(),
+            Some(acquisition_tx.clone()),
         )?;
 
         let network_handle = tokio::spawn(async move {
@@ -237,12 +294,14 @@ impl Daemon {
         let dispatcher_shutdown = shutdown_rx.clone();
         let dispatcher_credit_ref = dispatcher_credit_balances.clone();
         let dispatcher_state = shared_state.clone();
+        let dispatcher_network_tx = network_tx.clone();
         let dispatcher_handle = tokio::spawn(async move {
             dispatch_network_messages(
                 &mut network_out_rx,
                 &dispatcher_router_tx,
                 dispatcher_credit_ref,
                 &dispatcher_state,
+                dispatcher_network_tx,
                 dispatcher_shutdown,
             )
             .await;
@@ -399,6 +458,7 @@ async fn dispatch_network_messages(
     router_tx: &mpsc::Sender<RouterCommand>,
     credit_peer_balances: Arc<RwLock<Vec<i64>>>,
     shared_state: &Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     loop {
@@ -411,12 +471,39 @@ async fn dispatch_network_messages(
             msg = network_out_rx.recv() => {
                 match msg {
                     Some(msg) => {
-                        match &msg {
-                            SwarmMessage::InferenceRequest(_)
-                            | SwarmMessage::PipelineAssignment(_)
-                            | SwarmMessage::LayerForward(_)
-                            | SwarmMessage::LayerResult(_)
-                            | SwarmMessage::InferenceError(_) => {
+                        match msg {
+                            // LayerResult: route to pending pipeline executor via oneshot channel
+                            SwarmMessage::LayerResult(ref result) => {
+                                tracing::debug!(
+                                    request_id = %result.request_id,
+                                    tokens = result.token_ids.len(),
+                                    activations_bytes = result.activations.len(),
+                                    "Received LayerResult from remote segment"
+                                );
+                                if let Some((_, tx)) = shared_state
+                                    .pending_layer_results
+                                    .remove(&result.request_id)
+                                {
+                                    let _ = tx.send(result.clone());
+                                } else {
+                                    tracing::warn!(
+                                        request_id = %result.request_id,
+                                        "No pending channel for LayerResult — dropped"
+                                    );
+                                }
+                            }
+                            // LayerForward: process locally using split inference engine,
+                            // then send back a LayerResult to the requesting node.
+                            SwarmMessage::LayerForward(forward) => {
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+                                tokio::spawn(async move {
+                                    handle_layer_forward(ss, ntx, forward).await;
+                                });
+                            }
+                            msg @ SwarmMessage::InferenceRequest(_)
+                            | msg @ SwarmMessage::PipelineAssignment(_)
+                            | msg @ SwarmMessage::InferenceError(_) => {
                                 if let Err(e) = router_tx
                                     .send(RouterCommand::NetworkMessage(msg))
                                     .await
@@ -553,7 +640,7 @@ async fn dispatch_network_messages(
                                     tracing::warn!(error = %e, "Failed to store test report");
                                 }
                             }
-                            SwarmMessage::ChangelogEntry(entry) => {
+                            SwarmMessage::ChangelogEntry(ref entry) => {
                                 if let Err(e) = crate::governance::changelog::store_changelog(&shared_state.db, entry) {
                                     tracing::warn!(error = %e, "Failed to store changelog");
                                 }
@@ -585,8 +672,58 @@ async fn dispatch_network_messages(
                                     tracing::warn!(error = %e, "Failed to store credit transaction");
                                 }
                             }
-                            // Discovery, health, and status change messages
-                            // are handled by NetworkManager or their respective subsystems
+                            // Process shard announcements from peers
+                            SwarmMessage::ShardAnnounce(announce) => {
+                                tracing::debug!(
+                                    node_id = %announce.node_id,
+                                    shards = announce.shards.len(),
+                                    "Received shard announce from peer"
+                                );
+                                for shard_id in &announce.shards {
+                                    shared_state.shard_registry
+                                        .entry(shard_id.clone())
+                                        .or_default()
+                                        .push(announce.node_id.clone());
+                                    // Also register in model_registry so auto-acquire
+                                    // can see shard coverage across the network
+                                    shared_state.model_registry
+                                        .record_shard_holder(shard_id.clone(), announce.node_id.clone());
+                                }
+                            }
+                            // Process model manifests from peers — register in model_registry
+                            SwarmMessage::ModelManifest(manifest) => {
+                                tracing::info!(
+                                    model = %manifest.id,
+                                    name = %manifest.name,
+                                    shards = manifest.shard_count,
+                                    publisher = %manifest.publisher,
+                                    "Received model manifest from network"
+                                );
+                                // Verify the manifest hash before trusting it
+                                match manifest.verify_hash() {
+                                    Ok(()) => {
+                                        shared_state.model_registry.register_manifest(manifest.clone());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Manifest hash verification failed — rejecting"
+                                        );
+                                    }
+                                }
+                            }
+                            // Process capability updates from peers
+                            SwarmMessage::NodeCapabilityUpdate(cap) => {
+                                tracing::debug!(
+                                    node_id = %cap.node_id,
+                                    hosted_shards = cap.hosted_shards.len(),
+                                    "Received capability update from peer"
+                                );
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
+                                    peer.capability = Some(cap.clone());
+                                }
+                            }
+                            // Other messages handled by NetworkManager
                             _ => {}
                         }
                     }
@@ -595,6 +732,570 @@ async fn dispatch_network_messages(
             }
         }
     }
+}
+
+/// Generate a ModelManifest for a locally loaded GGUF file and register it.
+///
+/// This solves the "bootstrap deadlock" — without a manifest, peers can't discover
+/// or request the model. By generating a manifest from the loaded GGUF at startup,
+/// we can broadcast it to the network so other nodes can acquire shards.
+pub fn generate_and_register_local_manifest(
+    shared_state: &Arc<SharedState>,
+    info: &LoadedModelInfo,
+    model_path: &std::path::Path,
+) {
+    let model_id = crate::types::ModelId(info.name.clone());
+
+    // Check if we already have a manifest for this model
+    if shared_state
+        .model_registry
+        .get_manifest(&model_id)
+        .is_some()
+    {
+        tracing::debug!(model = %model_id, "Manifest already registered, skipping generation");
+        return;
+    }
+
+    let path = std::path::Path::new(model_path);
+    if !path.exists() {
+        tracing::warn!(path = %model_path.display(), "Model file not found, cannot generate manifest");
+        return;
+    }
+
+    let file_size = std::fs::metadata(path)
+        .map(|m| m.len())
+        .unwrap_or(info.size_bytes);
+
+    // Split model into multiple shards (~512MB each) for torrent-style distribution.
+    // Each shard is a byte range of the original GGUF file.
+    const SHARD_SIZE: u64 = 512 * 1024 * 1024; // 512MB per shard
+    let node_id = shared_state.identity.node_id().clone();
+    let shard_count = file_size.div_ceil(SHARD_SIZE).max(1) as u32;
+
+    // Compute per-shard BLAKE3 hashes by reading byte ranges
+    let mut shards = match compute_shard_hashes(path, file_size, SHARD_SIZE) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to compute shard hashes");
+            return;
+        }
+    };
+
+    // If we have GGUF metadata, compute per-shard layer ranges so the scheduler
+    // can assign correct layers to nodes that only hold certain shards.
+    if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
+        for shard in &mut shards {
+            let indices = [shard.index];
+            let (ls, le) =
+                crate::inference::split::compute_local_layer_range(&meta, SHARD_SIZE, &indices);
+            shard.layer_range = (ls as u32, le as u32);
+        }
+    }
+
+    // Extract model metadata from GGUF header (num_layers, architecture, etc.)
+    let (num_layers, architecture) =
+        match crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
+            Ok(meta) => {
+                let num_layers = meta.block_count as u32;
+                tracing::info!(
+                    model = %model_id,
+                    num_layers,
+                    embedding_length = meta.embedding_length,
+                    "Extracted GGUF metadata for manifest"
+                );
+                // Store the metadata for later use in layer range computation
+                shared_state.gguf_meta.insert(model_id.clone(), meta);
+                (num_layers, crate::types::ModelArchitecture::Llama)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to extract GGUF metadata, using defaults");
+                (0u32, crate::types::ModelArchitecture::Llama)
+            }
+        };
+
+    let mut manifest = crate::types::ModelManifest {
+        id: model_id.clone(),
+        name: info.name.clone(),
+        architecture,
+        num_layers,
+        num_params_billions: 0.0,
+        quantization: crate::types::Quantization::Q4KM,
+        total_size_bytes: file_size,
+        shard_count,
+        shards,
+        tokenizer_hash: [0u8; 32],
+        manifest_hash: [0u8; 32],
+        publisher: node_id.clone(),
+        publish_date: chrono::Utc::now(),
+        license: "Unknown".to_string(),
+    };
+    manifest.manifest_hash = manifest.compute_hash();
+
+    // Store the source GGUF path so the shard server can read byte ranges from it.
+    // We write a small metadata file alongside the manifest.
+    let shard_store = ShardStore::new(&shared_state.config.node.data_dir);
+    let model_dir = shard_store.models_dir().join(&model_id.0);
+    let _ = std::fs::create_dir_all(&model_dir);
+
+    // Write a source_path file so the shard server knows where the original GGUF lives
+    if let Ok(canonical) = path.canonicalize() {
+        let source_path_file = model_dir.join("source_path");
+        if let Err(e) = std::fs::write(&source_path_file, canonical.to_string_lossy().as_bytes()) {
+            tracing::warn!(error = %e, "Failed to write source_path file");
+        }
+    }
+
+    // Save manifest to disk
+    if let Err(e) = manifest.save_to_dir(&model_dir) {
+        tracing::warn!(error = %e, "Failed to save generated manifest");
+        return;
+    }
+
+    // Register in model_registry
+    shared_state
+        .model_registry
+        .register_manifest(manifest.clone());
+
+    // Register ourselves as holder of ALL shards
+    for shard_info in &manifest.shards {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_info.index,
+        };
+        shared_state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), node_id.clone());
+        shared_state
+            .shard_registry
+            .entry(shard_id)
+            .or_default()
+            .push(node_id.clone());
+    }
+
+    // Persist to DB
+    if let Err(e) = shared_state
+        .model_registry
+        .persist_manifest(&shared_state.db, &manifest)
+    {
+        tracing::warn!(error = %e, "Failed to persist manifest to DB");
+    }
+
+    tracing::info!(
+        model = %model_id,
+        size = file_size,
+        shards = shard_count,
+        "Generated and registered multi-shard manifest for local model"
+    );
+}
+
+/// Split a file into byte-range shards and compute BLAKE3 hash for each.
+fn compute_shard_hashes(
+    path: &std::path::Path,
+    file_size: u64,
+    shard_size: u64,
+) -> Result<Vec<crate::types::ShardInfo>, SwarmError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
+    let shard_count = file_size.div_ceil(shard_size).max(1);
+    let mut shards = Vec::with_capacity(shard_count as usize);
+
+    for i in 0..shard_count {
+        let offset = i * shard_size;
+        let this_shard_size = shard_size.min(file_size - offset);
+
+        file.seek(SeekFrom::Start(offset)).map_err(SwarmError::Io)?;
+
+        let mut hasher = blake3::Hasher::new();
+        let mut remaining = this_shard_size;
+        let mut buf = [0u8; 64 * 1024];
+
+        while remaining > 0 {
+            let to_read = (remaining as usize).min(buf.len());
+            let n = file.read(&mut buf[..to_read]).map_err(SwarmError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            remaining -= n as u64;
+        }
+
+        shards.push(crate::types::ShardInfo {
+            index: i as u32,
+            layer_range: (0, 0), // Byte-range shards, not layer-based
+            size_bytes: this_shard_size,
+            hash: *hasher.finalize().as_bytes(),
+        });
+    }
+
+    tracing::info!(
+        shards = shards.len(),
+        shard_size_mb = shard_size / (1024 * 1024),
+        "Computed shard hashes"
+    );
+
+    Ok(shards)
+}
+
+/// Handle an incoming LayerForward from a remote peer: run the local split model
+/// segment and send back a LayerResult with either logits (last segment) or
+/// hidden-state activations (intermediate segment).
+async fn handle_layer_forward(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    forward: crate::types::LayerForward,
+) {
+    use crate::inference::split::{self, SplitModel};
+
+    let request_id = forward.request_id;
+    let sender_peer_bytes = match forward.sender_peer_bytes {
+        Some(ref bytes) => bytes.clone(),
+        None => {
+            tracing::warn!(request_id = %request_id, "LayerForward missing sender_peer_bytes");
+            return;
+        }
+    };
+
+    tracing::info!(
+        request_id = %request_id,
+        seq = forward.sequence_num,
+        activation_bytes = forward.activations.len(),
+        "Processing LayerForward locally"
+    );
+
+    // Find which model we have shards for. For now, pick the first model with a split model
+    // or the first model we have local shards for.
+    let model_id = {
+        // Check if we already have a cached split model
+        if let Some(entry) = shared_state.split_models.iter().next() {
+            entry.key().clone()
+        } else {
+            // Find a model we have local shards for
+            match shared_state.shard_registry.iter().next() {
+                Some(entry) => entry.key().model_id.clone(),
+                None => {
+                    tracing::warn!(request_id = %request_id, "No local shards to process LayerForward");
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        "No local shards",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Determine our layer range from the manifest and local shards
+    let manifest = match shared_state.model_registry.get_manifest(&model_id) {
+        Some(m) => m,
+        None => {
+            send_error_result(
+                &network_tx,
+                &sender_peer_bytes,
+                request_id,
+                "No manifest for model",
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Figure out which shard indices we hold locally
+    let local_node_id = shared_state.identity.node_id().clone();
+    let mut local_shard_indices: Vec<u32> = Vec::new();
+    for shard_info in &manifest.shards {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_info.index,
+        };
+        let holders = shared_state.model_registry.shard_holders(&shard_id);
+        if holders.contains(&local_node_id) {
+            local_shard_indices.push(shard_info.index);
+        }
+    }
+
+    if local_shard_indices.is_empty() {
+        send_error_result(
+            &network_tx,
+            &sender_peer_bytes,
+            request_id,
+            "No local shards for model",
+        )
+        .await;
+        return;
+    }
+
+    // Use GgufTensorMeta to compute our layer range, or fall back to manifest layer_range
+    let (layer_start, layer_end, total_layers) = if let Some(meta) =
+        shared_state.gguf_meta.get(&model_id)
+    {
+        let shard_size = if manifest.shard_count > 0 {
+            manifest.total_size_bytes / manifest.shard_count as u64
+        } else {
+            manifest.total_size_bytes
+        };
+        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
+        (ls, le, meta.block_count)
+    } else if manifest.num_layers > 0 {
+        // Use shard layer_range from manifest
+        let mut ls = manifest.num_layers as usize;
+        let mut le = 0usize;
+        for shard_info in &manifest.shards {
+            if local_shard_indices.contains(&shard_info.index) {
+                ls = ls.min(shard_info.layer_range.0 as usize);
+                le = le.max(shard_info.layer_range.1 as usize);
+            }
+        }
+        (ls, le, manifest.num_layers as usize)
+    } else {
+        send_error_result(
+            &network_tx,
+            &sender_peer_bytes,
+            request_id,
+            "Cannot determine layer range",
+        )
+        .await;
+        return;
+    };
+
+    if layer_start >= layer_end {
+        send_error_result(
+            &network_tx,
+            &sender_peer_bytes,
+            request_id,
+            "Empty layer range",
+        )
+        .await;
+        return;
+    }
+
+    let is_first = layer_start == 0;
+    let is_last = layer_end >= total_layers;
+
+    // Ensure the split model is loaded
+    if !shared_state.split_models.contains_key(&model_id) {
+        let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
+        let model_dir = shard_store.models_dir().join(&model_id.0);
+        let gguf_path = model_dir.join("model.gguf");
+        let gguf_path = if gguf_path.exists() {
+            gguf_path
+        } else {
+            let source_path_file = model_dir.join("source_path");
+            if source_path_file.exists() {
+                match std::fs::read_to_string(&source_path_file) {
+                    Ok(p) => std::path::PathBuf::from(p.trim()),
+                    Err(e) => {
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            &format!("IO: {e}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            } else {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    "No GGUF file found",
+                )
+                .await;
+                return;
+            }
+        };
+
+        tracing::info!(
+            model = %model_id,
+            layers = format!("[{layer_start}..{layer_end})"),
+            total = total_layers,
+            path = %gguf_path.display(),
+            "Loading split model for LayerForward handling"
+        );
+
+        match SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last) {
+            Ok(model) => {
+                shared_state.split_models.insert(
+                    model_id.clone(),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(model)),
+                );
+            }
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Load failed: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    let split_model_ref = match shared_state.split_models.get(&model_id) {
+        Some(r) => r.clone(),
+        None => {
+            send_error_result(
+                &network_tx,
+                &sender_peer_bytes,
+                request_id,
+                "Split model vanished",
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut split_model = split_model_ref.lock().await;
+
+    // Convert activation bytes to a candle Tensor
+    let input_tensor = if is_first {
+        // First segment: activations are the prompt text → tokenize
+        let prompt = String::from_utf8_lossy(&forward.activations);
+        let token_ids: Vec<i64> = prompt.bytes().map(|b| b as i64).collect();
+        match candle_core::Tensor::from_vec(
+            token_ids.clone(),
+            &[1, token_ids.len()],
+            &candle_core::Device::Cpu,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Tensor: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        match split::bytes_to_tensor(&forward.activations) {
+            Ok(t) => t,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Decode: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    };
+
+    // Run the forward pass
+    let output = match split_model.forward(&input_tensor, forward.sequence_num as usize) {
+        Ok(o) => o,
+        Err(e) => {
+            send_error_result(
+                &network_tx,
+                &sender_peer_bytes,
+                request_id,
+                &format!("Forward: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let result = if is_last {
+        // Sample a token from logits
+        let token_id = match split::sample_token(&output, 0.7, 0.9) {
+            Ok(t) => t,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Sample: {e}"),
+                )
+                .await;
+                return;
+            }
+        };
+        let finish = if token_id == 2 || token_id == 0 {
+            Some(crate::types::NetworkFinishReason::Stop)
+        } else {
+            None
+        };
+        crate::types::LayerResult {
+            request_id,
+            token_ids: vec![token_id],
+            finish_reason: finish,
+            activations: vec![],
+        }
+    } else {
+        // Intermediate segment: serialize hidden states
+        let activation_bytes = match split::tensor_to_bytes(&output) {
+            Ok(b) => b,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Encode: {e}"),
+                )
+                .await;
+                return;
+            }
+        };
+        crate::types::LayerResult {
+            request_id,
+            token_ids: vec![],
+            finish_reason: None,
+            activations: activation_bytes,
+        }
+    };
+
+    tracing::info!(
+        request_id = %request_id,
+        tokens = result.token_ids.len(),
+        activations_bytes = result.activations.len(),
+        is_last,
+        "LayerForward processed, sending result back"
+    );
+
+    // Send back via tensor protocol
+    if let Err(e) = network_tx
+        .send(NetworkCommand::SendTensorResult {
+            target_peer_bytes: sender_peer_bytes,
+            result,
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
+    }
+}
+
+/// Send an error LayerResult back to the requesting peer.
+async fn send_error_result(
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    target_peer_bytes: &[u8],
+    request_id: uuid::Uuid,
+    error: &str,
+) {
+    tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
+    let result = crate::types::LayerResult {
+        request_id,
+        token_ids: vec![],
+        finish_reason: Some(crate::types::NetworkFinishReason::Error(error.to_string())),
+        activations: vec![],
+    };
+    let _ = network_tx
+        .send(NetworkCommand::SendTensorResult {
+            target_peer_bytes: target_peer_bytes.to_vec(),
+            result,
+        })
+        .await;
 }
 
 /// Try to open a URL in the default browser.

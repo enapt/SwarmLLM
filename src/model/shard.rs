@@ -199,6 +199,76 @@ impl ShardStore {
         Ok(())
     }
 
+    /// Reconstruct a full GGUF file by concatenating shard files in order.
+    ///
+    /// Byte-range shards are contiguous slices of the original GGUF,
+    /// so concatenating shard_000.bin + shard_001.bin + ... recreates the exact file.
+    /// Returns the path to the reconstructed GGUF.
+    pub fn reconstruct_gguf(
+        &self,
+        model_id: &ModelId,
+        manifest: &crate::types::ModelManifest,
+    ) -> Result<PathBuf, SwarmError> {
+        let model_dir = self.models_dir().join(&model_id.0);
+        let gguf_path = model_dir.join("model.gguf");
+
+        // Skip if already reconstructed
+        if gguf_path.exists() {
+            let meta = std::fs::metadata(&gguf_path).map_err(SwarmError::Io)?;
+            if meta.len() == manifest.total_size_bytes {
+                tracing::info!(
+                    model = %model_id,
+                    "GGUF already reconstructed, skipping"
+                );
+                return Ok(gguf_path);
+            }
+        }
+
+        tracing::info!(
+            model = %model_id,
+            shards = manifest.shard_count,
+            total_bytes = manifest.total_size_bytes,
+            "Reconstructing GGUF from shards"
+        );
+
+        let mut out = std::fs::File::create(&gguf_path).map_err(SwarmError::Io)?;
+        let mut total_written: u64 = 0;
+
+        // Shards must be concatenated in order
+        let mut sorted_shards = manifest.shards.clone();
+        sorted_shards.sort_by_key(|s| s.index);
+
+        for shard_info in &sorted_shards {
+            let shard_path = self.shard_path(model_id, shard_info.index);
+            if !shard_path.exists() {
+                return Err(SwarmError::ShardNotFound(crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: shard_info.index,
+                }));
+            }
+
+            let mut input = std::fs::File::open(&shard_path).map_err(SwarmError::Io)?;
+            let copied = std::io::copy(&mut input, &mut out).map_err(SwarmError::Io)?;
+            total_written += copied;
+
+            tracing::debug!(
+                model = %model_id,
+                shard = shard_info.index,
+                bytes = copied,
+                "Appended shard to GGUF"
+            );
+        }
+
+        tracing::info!(
+            model = %model_id,
+            path = %gguf_path.display(),
+            bytes = total_written,
+            "GGUF reconstruction complete"
+        );
+
+        Ok(gguf_path)
+    }
+
     /// Delete a shard file from disk.
     pub fn delete_shard(&self, model_id: &ModelId, index: u32) -> Result<(), SwarmError> {
         let path = self.shard_path(model_id, index);

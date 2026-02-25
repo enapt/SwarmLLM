@@ -46,6 +46,13 @@ async fn build_stats_message(state: &SharedState) -> String {
     let stats = state.node_stats.read().await;
     let credit = state.credit_balance.read().await;
 
+    // Collect active acquisition progress
+    let acquisitions: Vec<serde_json::Value> = state
+        .acquisition_progress
+        .iter()
+        .map(|entry| serde_json::to_value(entry.value()).unwrap_or_default())
+        .collect();
+
     let msg = serde_json::json!({
         "type": "stats_update",
         "data": {
@@ -53,6 +60,7 @@ async fn build_stats_message(state: &SharedState) -> String {
             "credits": credit.balance,
             "active_requests": state.active_pipelines.len(),
             "requests_served": stats.requests_served,
+            "acquisitions": acquisitions,
         }
     });
 

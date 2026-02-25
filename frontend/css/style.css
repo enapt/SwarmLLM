@@ -19,6 +19,7 @@
   --red-dim: rgba(239, 68, 68, 0.15);
   --orange: #f59e0b;
   --orange-dim: rgba(245, 158, 11, 0.15);
+  --yellow: #eab308;
   --purple: #a78bfa;
   --purple-dim: rgba(167, 139, 250, 0.15);
   --cyan: #22d3ee;
@@ -586,6 +587,43 @@ input[type="range"]::-webkit-slider-thumb {
 
 .empty-state .empty-icon { font-size: 2.5rem; margin-bottom: 12px; opacity: 0.5; }
 .empty-state p { font-size: 0.9rem; max-width: 300px; margin: 0 auto; }
+
+/* ---- Source badges ---- */
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+}
+.source-badge.local { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.25); }
+.source-badge.network { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.25); }
+.source-badge.hybrid { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.25); }
+
+.peers-count {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.peers-count strong { color: var(--accent); }
+
+/* ---- Shard map ---- */
+.shard-map {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+}
+.shard-map div {
+  transition: transform 0.15s;
+}
+.shard-map div:hover {
+  transform: scaleY(1.5);
+  z-index: 1;
+}
 
 /* ---- Utility ---- */
 .mono { font-family: var(--font-mono); }

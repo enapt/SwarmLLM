@@ -105,31 +105,108 @@ pub async fn update_config(
 }
 
 /// GET /api/admin/models — List known models and their status.
+///
+/// Returns all models: locally loaded, from the P2P registry, and discovered
+/// on the network from peer announcements. Each model includes its source,
+/// availability info, and which peers host it.
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let mut models: Vec<serde_json::Value> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let local_node_id = state.shared_state.identity.node_id().clone();
 
-    // Include the locally loaded model from cached info (lock-free, no executor contention)
+    // Collect peer info for each model from shard_registry
+    let mut model_peers: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for entry in state.shared_state.shard_registry.iter() {
+        let shard_id = entry.key();
+        let holders = entry.value();
+        let model_name = shard_id.model_id.0.clone();
+        for holder in holders.iter() {
+            if *holder != local_node_id {
+                model_peers
+                    .entry(model_name.clone())
+                    .or_default()
+                    .insert(format!("{}", holder));
+            }
+        }
+    }
+
+    // Also gather peer node_ids that host each model from capability data
+    for entry in state.shared_state.peer_registry.iter() {
+        let peer = entry.value();
+        if let Some(ref cap) = peer.capability {
+            for shard in &cap.hosted_shards {
+                model_peers
+                    .entry(shard.model_id.0.clone())
+                    .or_default()
+                    .insert(format!("{}", peer.node_id));
+            }
+        }
+    }
+
+    // Helper: build per-shard detail for a manifest
+    let build_shard_detail =
+        |m: &crate::types::ModelManifest, state: &AppState| -> Vec<serde_json::Value> {
+            m.shards
+                .iter()
+                .map(|s| {
+                    let shard_id = crate::types::ShardId {
+                        model_id: m.id.clone(),
+                        index: s.index,
+                    };
+                    let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+                    let local = holders.contains(&local_node_id);
+                    serde_json::json!({
+                        "index": s.index,
+                        "size_bytes": s.size_bytes,
+                        "local": local,
+                        "holders": holders.len(),
+                    })
+                })
+                .collect()
+        };
+
+    // 1. Locally loaded model (full model via --model flag)
+    // Even though it's locally loaded, get the real manifest to show shard info
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
+        seen_ids.insert(info.name.clone());
+
+        let mid = crate::types::ModelId(info.name.clone());
+        let manifest = state.shared_state.model_registry.get_manifest(&mid);
+        let (shard_count, hosted_shards, shard_detail) = match manifest {
+            Some(ref m) => {
+                let detail = build_shard_detail(m, &state);
+                (m.shard_count, m.shard_count, detail)
+            }
+            None => (1, 1, vec![]),
+        };
+
         models.push(serde_json::json!({
             "id": info.name,
             "name": info.name,
             "total_size_bytes": info.size_bytes,
-            "shard_count": 1,
-            "hosted_shards": 1,
+            "shard_count": shard_count,
+            "hosted_shards": hosted_shards,
             "healthy": true,
             "status": "loaded",
+            "mode": "full",
+            "source": "local",
+            "local": true,
+            "peers_hosting": peer_count,
+            "shards": shard_detail,
         }));
     }
 
-    // Include models from the P2P registry
+    // 2. Models from the P2P manifest registry
     let registry = &state.shared_state.model_registry;
     let manifests = registry.list_models();
 
     for m in &manifests {
-        // Skip if already listed from executor (same name)
-        if models.iter().any(|existing| existing["id"].as_str() == Some(&m.id.0)) {
+        if seen_ids.contains(&m.id.0) {
             continue;
         }
+        seen_ids.insert(m.id.0.clone());
 
         let hosted_count = (0..m.shard_count)
             .filter(|&idx| {
@@ -137,9 +214,29 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     model_id: m.id.clone(),
                     index: idx,
                 };
-                state.shared_state.model_registry.has_shard(&shard_id)
+                let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+                holders.contains(&local_node_id)
             })
             .count();
+
+        let peer_count = model_peers.get(&m.id.0).map_or(0, |s| s.len());
+        let shard_detail = build_shard_detail(m, &state);
+
+        let (source, mode) = if hosted_count == m.shard_count as usize {
+            ("local", "full")
+        } else if hosted_count > 0 {
+            ("hybrid", "sharded")
+        } else {
+            ("network", "sharded")
+        };
+
+        let status = if hosted_count == m.shard_count as usize {
+            "complete"
+        } else if hosted_count > 0 {
+            "partial"
+        } else {
+            "available"
+        };
 
         models.push(serde_json::json!({
             "id": m.id.0,
@@ -148,7 +245,34 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "shard_count": m.shard_count,
             "hosted_shards": hosted_count,
             "healthy": hosted_count == m.shard_count as usize,
-            "status": if hosted_count == m.shard_count as usize { "complete" } else { "partial" },
+            "status": status,
+            "mode": mode,
+            "source": source,
+            "local": hosted_count > 0,
+            "peers_hosting": peer_count,
+            "shards": shard_detail,
+        }));
+    }
+
+    // 3. Models discovered from peer announcements (not in our registry or loaded)
+    for (model_name, peers) in &model_peers {
+        if seen_ids.contains(model_name) {
+            continue;
+        }
+        seen_ids.insert(model_name.clone());
+        models.push(serde_json::json!({
+            "id": model_name,
+            "name": model_name,
+            "total_size_bytes": 0,
+            "shard_count": 0,
+            "hosted_shards": 0,
+            "healthy": true,
+            "status": "available",
+            "mode": "full",
+            "source": "network",
+            "local": false,
+            "peers_hosting": peers.len(),
+            "shards": [],
         }));
     }
 
@@ -189,62 +313,61 @@ pub async fn add_model_interest(
 }
 
 /// GET /api/admin/models/:id/status — Query model acquisition progress.
+///
+/// Reads directly from the shared `acquisition_progress` DashMap for low-latency,
+/// lock-free progress reporting without going through the AcquisitionManager channel.
 pub async fn model_acquisition_status(
     State(state): State<AppState>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mid = crate::types::ModelId(model_id.clone());
 
-    if let Some(ref tx) = state.acquisition_tx {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(crate::model::acquisition::AcquisitionCommand::Status {
-            model_id: mid,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Failed to query acquisition status: {e}"
-            )))
-        })?;
-
-        match reply_rx.await {
-            Ok(Some(status)) => Ok(Json(serde_json::to_value(&status).unwrap_or_default())),
-            Ok(None) => Ok(Json(serde_json::json!({
-                "model_id": model_id,
-                "state": "unknown",
-                "message": "No active acquisition for this model",
-            }))),
-            Err(_) => Ok(Json(serde_json::json!({
-                "model_id": model_id,
-                "state": "error",
-                "message": "Acquisition manager did not respond",
-            }))),
-        }
-    } else {
-        Ok(Json(serde_json::json!({
-            "model_id": model_id,
-            "state": "unavailable",
-            "message": "Model acquisition requires daemon mode",
-        })))
+    // Fast path: read from shared state (no channel round-trip)
+    if let Some(status) = state.shared_state.acquisition_progress.get(&mid) {
+        return Ok(Json(
+            serde_json::to_value(status.value()).unwrap_or_default(),
+        ));
     }
+
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "state": "unknown",
+        "message": "No active acquisition for this model",
+    })))
 }
 
 /// GET /api/admin/peers — List connected peers.
 pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
+    let timeout = chrono::Duration::seconds(90); // 3 missed pings
+    let now = chrono::Utc::now();
+
     let peers: Vec<serde_json::Value> = state
         .shared_state
         .peer_registry
         .iter()
         .map(|entry| {
             let peer = entry.value();
+            let healthy = now.signed_duration_since(peer.last_seen) < timeout;
+            let hosted_models: Vec<String> = peer
+                .capability
+                .as_ref()
+                .map(|c| {
+                    c.hosted_shards
+                        .iter()
+                        .map(|s| s.model_id.0.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             serde_json::json!({
                 "node_id": format!("{}", peer.node_id),
                 "addresses": peer.addresses,
                 "last_seen": peer.last_seen.to_rfc3339(),
                 "latency_ms": peer.latency_ms,
                 "trust_score": peer.trust_score,
+                "healthy": healthy,
                 "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
+                "hosted_models": hosted_models,
             })
         })
         .collect();

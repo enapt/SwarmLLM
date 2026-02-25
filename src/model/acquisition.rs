@@ -7,7 +7,7 @@ use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::model::distribution::ShardDistributor;
 use crate::model::shard::ShardStore;
-use crate::types::{ModelId, ModelManifest, NetworkCommand, NodeId, ShardId, SwarmMessage};
+use crate::types::{ModelId, ModelManifest, NetworkCommand, NodeId, ShardId};
 
 /// Status of a model acquisition job.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -20,6 +20,37 @@ pub struct AcquisitionStatus {
     pub failed_shards: u32,
     pub total_bytes: u64,
     pub downloaded_bytes: u64,
+    /// Per-shard progress: index → bytes received so far.
+    #[serde(default)]
+    pub shard_progress: HashMap<u32, ShardProgress>,
+    /// Bytes/sec download speed (rolling average).
+    #[serde(default)]
+    pub speed_bytes_per_sec: u64,
+    /// Timestamp when acquisition started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Recent log lines for the UI.
+    #[serde(default)]
+    pub log: Vec<String>,
+}
+
+/// Progress for a single shard.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ShardProgress {
+    pub index: u32,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub state: ShardState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShardState {
+    Pending,
+    Downloading,
+    Verifying,
+    Complete,
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -75,8 +106,10 @@ pub struct AcquisitionManager {
 struct AcquisitionJob {
     manifest: ModelManifest,
     status: AcquisitionStatus,
-    /// Tracks bytes received per shard (for multi-chunk downloads).
-    shard_progress: HashMap<u32, u64>,
+    /// Tracks raw bytes received per shard (for multi-chunk downloads).
+    shard_bytes: HashMap<u32, u64>,
+    /// For speed calculation: (timestamp, cumulative_bytes) samples.
+    speed_samples: Vec<(std::time::Instant, u64)>,
 }
 
 impl AcquisitionManager {
@@ -148,6 +181,21 @@ impl AcquisitionManager {
                     model = %model_id,
                     "Cannot acquire model: manifest not found in network registry"
                 );
+                let status = AcquisitionStatus {
+                    model_id: model_id.clone(),
+                    state: AcquisitionState::AwaitingManifest,
+                    total_shards: 0,
+                    downloaded_shards: 0,
+                    verified_shards: 0,
+                    failed_shards: 0,
+                    total_bytes: 0,
+                    downloaded_bytes: 0,
+                    shard_progress: HashMap::new(),
+                    speed_bytes_per_sec: 0,
+                    started_at: Some(chrono::Utc::now()),
+                    log: vec!["Waiting for manifest from network...".into()],
+                };
+                self.publish_progress(&model_id, &status);
                 self.jobs.insert(
                     model_id.clone(),
                     AcquisitionJob {
@@ -167,17 +215,9 @@ impl AcquisitionManager {
                             publish_date: chrono::Utc::now(),
                             license: String::new(),
                         },
-                        status: AcquisitionStatus {
-                            model_id: model_id.clone(),
-                            state: AcquisitionState::AwaitingManifest,
-                            total_shards: 0,
-                            downloaded_shards: 0,
-                            verified_shards: 0,
-                            failed_shards: 0,
-                            total_bytes: 0,
-                            downloaded_bytes: 0,
-                        },
-                        shard_progress: HashMap::new(),
+                        status,
+                        shard_bytes: HashMap::new(),
+                        speed_samples: Vec::new(),
                     },
                 );
                 return;
@@ -232,21 +272,59 @@ impl AcquisitionManager {
             })
             .collect();
 
+        // Build initial per-shard progress
+        let mut shard_prog: HashMap<u32, ShardProgress> = HashMap::new();
+        for s in &manifest.shards {
+            let already_local = !needed.iter().any(|sid| sid.index == s.index);
+            shard_prog.insert(
+                s.index,
+                ShardProgress {
+                    index: s.index,
+                    total_bytes: s.size_bytes,
+                    downloaded_bytes: if already_local { s.size_bytes } else { 0 },
+                    state: if already_local {
+                        ShardState::Complete
+                    } else {
+                        ShardState::Pending
+                    },
+                },
+            );
+        }
+
+        let already_bytes: u64 = manifest
+            .shards
+            .iter()
+            .filter(|s| !needed.iter().any(|sid| sid.index == s.index))
+            .map(|s| s.size_bytes)
+            .sum();
+
+        let status = AcquisitionStatus {
+            model_id: model_id.clone(),
+            state: AcquisitionState::Downloading,
+            total_shards,
+            downloaded_shards: total_shards - needed.len() as u32,
+            verified_shards: total_shards - needed.len() as u32,
+            failed_shards: 0,
+            total_bytes,
+            downloaded_bytes: already_bytes,
+            shard_progress: shard_prog,
+            speed_bytes_per_sec: 0,
+            started_at: Some(chrono::Utc::now()),
+            log: vec![format!(
+                "Starting acquisition: {} shards to download ({} total)",
+                needed.len(),
+                format_bytes_short(total_bytes)
+            )],
+        };
+        self.publish_progress(&model_id, &status);
+
         self.jobs.insert(
             model_id.clone(),
             AcquisitionJob {
                 manifest: manifest.clone(),
-                status: AcquisitionStatus {
-                    model_id: model_id.clone(),
-                    state: AcquisitionState::Downloading,
-                    total_shards,
-                    downloaded_shards: total_shards - needed.len() as u32,
-                    verified_shards: total_shards - needed.len() as u32,
-                    failed_shards: 0,
-                    total_bytes,
-                    downloaded_bytes: 0,
-                },
-                shard_progress: HashMap::new(),
+                status,
+                shard_bytes: HashMap::new(),
+                speed_samples: vec![(std::time::Instant::now(), already_bytes)],
             },
         );
 
@@ -254,6 +332,12 @@ impl AcquisitionManager {
             tracing::info!(model = %model_id, "All shards already present and verified");
             if let Some(job) = self.jobs.get_mut(&model_id) {
                 job.status.state = AcquisitionState::Complete;
+                job.status
+                    .log
+                    .push("All shards already present and verified".into());
+                self.shared_state
+                    .acquisition_progress
+                    .insert(model_id.clone(), job.status.clone());
             }
             self.register_model(&model_id, &manifest);
             return;
@@ -275,21 +359,36 @@ impl AcquisitionManager {
             // Pick the best peer (lowest latency, highest trust)
             let target = self.select_best_peer(&holders);
 
-            // Send shard transfer request
-            let _request = crate::types::ShardRequest {
+            // Send directed shard transfer request to the target peer
+            let request = crate::types::ShardRequest {
                 shard_id: shard_id.clone(),
                 chunk_offset: 0,
-                chunk_size: 1024 * 1024, // 1MB chunks
+                chunk_size: 32 * 1024 * 1024, // 32MB chunks
             };
 
-            let msg = SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-                node_id: self.shared_state.identity.node_id().clone(),
-                shards: vec![shard_id.clone()],
-                timestamp: chrono::Utc::now(),
-            });
+            // Look up the peer's libp2p PeerId bytes for directed request_response
+            let peer_id_bytes = self
+                .shared_state
+                .peer_registry
+                .get(&target)
+                .and_then(|p| p.peer_id_bytes.clone());
 
-            if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
-                tracing::warn!(error = %e, "Failed to request shard from network");
+            match peer_id_bytes {
+                Some(bytes) => {
+                    let cmd = NetworkCommand::SendShardRequest {
+                        target_peer_bytes: bytes,
+                        request,
+                    };
+                    if let Err(e) = self.network_tx.send(cmd).await {
+                        tracing::warn!(error = %e, "Failed to send shard request");
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        peer = %target,
+                        "Cannot send shard request: peer_id_bytes not available"
+                    );
+                }
             }
 
             tracing::info!(
@@ -298,6 +397,20 @@ impl AcquisitionManager {
                 peer = %target,
                 "Requested shard transfer"
             );
+
+            // Update status log and mark shard as downloading
+            if let Some(job) = self.jobs.get_mut(&model_id) {
+                job.status.log.push(format!(
+                    "Requesting shard {} from peer {}",
+                    shard_id.index, target
+                ));
+                if let Some(sp) = job.status.shard_progress.get_mut(&shard_id.index) {
+                    sp.state = ShardState::Downloading;
+                }
+                self.shared_state
+                    .acquisition_progress
+                    .insert(model_id.clone(), job.status.clone());
+            }
         }
     }
 
@@ -312,16 +425,13 @@ impl AcquisitionManager {
         let model_id = shard_id.model_id.clone();
         let shard_index = shard_id.index;
 
-        let job = match self.jobs.get_mut(&model_id) {
-            Some(j) => j,
-            None => {
-                tracing::warn!(
-                    model = %model_id,
-                    "Received shard data for unknown acquisition — ignoring"
-                );
-                return;
-            }
-        };
+        if !self.jobs.contains_key(&model_id) {
+            tracing::warn!(
+                model = %model_id,
+                "Received shard data for unknown acquisition — ignoring"
+            );
+            return;
+        }
 
         // Write chunk to disk
         if let Err(e) = self
@@ -337,50 +447,116 @@ impl AcquisitionManager {
             return;
         }
 
+        // Grab references we need before borrowing job mutably
+        let progress_map = &self.shared_state.acquisition_progress;
+        let node_id = self.shared_state.identity.node_id().clone();
+
+        let job = self.jobs.get_mut(&model_id).unwrap();
+
         // Track progress
-        let received = job.shard_progress.entry(shard_index).or_insert(0);
+        let received = job.shard_bytes.entry(shard_index).or_insert(0);
         *received += data.len() as u64;
         job.status.downloaded_bytes += data.len() as u64;
+
+        // Update per-shard progress
+        if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+            sp.downloaded_bytes = *received;
+            sp.state = ShardState::Downloading;
+        }
+
+        // Update speed (rolling 10-second window)
+        let now = std::time::Instant::now();
+        job.speed_samples.push((now, job.status.downloaded_bytes));
+        let cutoff = now - std::time::Duration::from_secs(10);
+        job.speed_samples.retain(|(t, _)| *t >= cutoff);
+        if job.speed_samples.len() >= 2 {
+            let first = &job.speed_samples[0];
+            let last = &job.speed_samples[job.speed_samples.len() - 1];
+            let dt = last.0.duration_since(first.0).as_secs_f64();
+            if dt > 0.1 {
+                job.status.speed_bytes_per_sec = ((last.1 - first.1) as f64 / dt) as u64;
+            }
+        }
+
+        // Publish progress
+        progress_map.insert(model_id.clone(), job.status.clone());
 
         // Check if this shard is complete
         if *received >= total_size {
             // SECURITY: Verify the completed shard against the manifest hash
-            let shard_info = job.manifest.shards.iter().find(|s| s.index == shard_index);
-            match shard_info {
-                Some(info) => match self.shard_store.verify_shard(&model_id, info) {
-                    Ok(()) => {
-                        job.status.downloaded_shards += 1;
-                        job.status.verified_shards += 1;
-                        tracing::info!(
-                            model = %model_id,
-                            shard = shard_index,
-                            "Shard downloaded and verified"
-                        );
+            let shard_info_cloned = job
+                .manifest
+                .shards
+                .iter()
+                .find(|s| s.index == shard_index)
+                .cloned();
 
-                        // Register as shard holder
-                        let node_id = self.shared_state.identity.node_id().clone();
-                        self.shared_state
-                            .model_registry
-                            .record_shard_holder(shard_id.clone(), node_id.clone());
-                        self.shared_state
-                            .shard_registry
-                            .entry(shard_id)
-                            .or_default()
-                            .push(node_id);
+            match shard_info_cloned {
+                Some(info) => {
+                    // Mark as verifying
+                    if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+                        sp.state = ShardState::Verifying;
                     }
-                    Err(e) => {
-                        job.status.failed_shards += 1;
-                        tracing::warn!(
-                            model = %model_id,
-                            shard = shard_index,
-                            error = %e,
-                            "Downloaded shard failed verification — quarantined, penalizing peer"
-                        );
-                        // Shard is already quarantined by verify_shard()
+                    job.status.log.push(format!(
+                        "Shard {} complete ({}) — verifying BLAKE3 hash...",
+                        shard_index,
+                        format_bytes_short(total_size)
+                    ));
+                    progress_map.insert(model_id.clone(), job.status.clone());
+
+                    match self.shard_store.verify_shard(&model_id, &info) {
+                        Ok(()) => {
+                            job.status.downloaded_shards += 1;
+                            job.status.verified_shards += 1;
+                            if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+                                sp.state = ShardState::Complete;
+                            }
+                            job.status.log.push(format!(
+                                "Shard {} verified OK ({}/{})",
+                                shard_index, job.status.verified_shards, job.status.total_shards
+                            ));
+                            tracing::info!(
+                                model = %model_id,
+                                shard = shard_index,
+                                "Shard downloaded and verified"
+                            );
+
+                            // Register as shard holder
+                            self.shared_state
+                                .model_registry
+                                .record_shard_holder(shard_id.clone(), node_id.clone());
+                            self.shared_state
+                                .shard_registry
+                                .entry(shard_id)
+                                .or_default()
+                                .push(node_id);
+                        }
+                        Err(e) => {
+                            job.status.failed_shards += 1;
+                            if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+                                sp.state = ShardState::Failed;
+                            }
+                            job.status
+                                .log
+                                .push(format!("Shard {} FAILED verification: {}", shard_index, e));
+                            tracing::warn!(
+                                model = %model_id,
+                                shard = shard_index,
+                                error = %e,
+                                "Downloaded shard failed verification — quarantined, penalizing peer"
+                            );
+                        }
                     }
-                },
+                }
                 None => {
                     job.status.failed_shards += 1;
+                    if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+                        sp.state = ShardState::Failed;
+                    }
+                    job.status.log.push(format!(
+                        "Shard {} not found in manifest — discarding",
+                        shard_index
+                    ));
                     tracing::error!(
                         model = %model_id,
                         shard = shard_index,
@@ -390,28 +566,53 @@ impl AcquisitionManager {
                 }
             }
 
-            // Check if all shards are done — extract what we need before calling register_model
+            // Publish updated progress
+            progress_map.insert(model_id.clone(), job.status.clone());
+
+            // Check if all shards are done
             let all_done =
                 job.status.verified_shards + job.status.failed_shards >= job.status.total_shards;
             if all_done {
                 if job.status.failed_shards == 0 {
                     job.status.state = AcquisitionState::Complete;
+                    job.status.speed_bytes_per_sec = 0;
+                    let elapsed = job
+                        .status
+                        .started_at
+                        .map(|s| (chrono::Utc::now() - s).num_seconds().max(1) as u64)
+                        .unwrap_or(1);
+                    let avg_speed = job.status.total_bytes / elapsed;
+                    job.status.log.push(format!(
+                        "Acquisition complete! {} in {}s (avg {})",
+                        format_bytes_short(job.status.total_bytes),
+                        elapsed,
+                        format_speed(avg_speed)
+                    ));
+                    progress_map.insert(model_id.clone(), job.status.clone());
                     let manifest = job.manifest.clone();
                     tracing::info!(model = %model_id, "Model acquisition complete");
                     self.register_model(&model_id, &manifest);
                 } else {
-                    job.status.state = AcquisitionState::Failed {
-                        reason: format!(
-                            "{} of {} shards failed verification",
-                            job.status.failed_shards, job.status.total_shards
-                        ),
-                    };
+                    let reason = format!(
+                        "{} of {} shards failed verification",
+                        job.status.failed_shards, job.status.total_shards
+                    );
+                    job.status.log.push(format!("FAILED: {}", reason));
+                    job.status.state = AcquisitionState::Failed { reason };
+                    progress_map.insert(model_id.clone(), job.status.clone());
                 }
             }
         }
     }
 
-    /// Register a fully acquired model in the local registry and announce it.
+    /// Publish acquisition progress to SharedState for WebSocket/API consumption.
+    fn publish_progress(&self, model_id: &ModelId, status: &AcquisitionStatus) {
+        self.shared_state
+            .acquisition_progress
+            .insert(model_id.clone(), status.clone());
+    }
+
+    /// Register a fully acquired model, reconstruct the GGUF, and auto-load for inference.
     fn register_model(&self, model_id: &ModelId, manifest: &ModelManifest) {
         // Persist manifest to DB
         if let Err(e) = self
@@ -422,7 +623,81 @@ impl AcquisitionManager {
             tracing::error!(model = %model_id, error = %e, "Failed to persist manifest to DB");
         }
 
-        tracing::info!(model = %model_id, "Model registered and ready for inference");
+        // Update acquisition log
+        if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
+            entry.log.push("Reconstructing GGUF from shards...".into());
+        }
+
+        // Reconstruct the full GGUF file from shard files
+        let gguf_path = match self.shard_store.reconstruct_gguf(model_id, manifest) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::error!(model = %model_id, error = %e, "Failed to reconstruct GGUF");
+                if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
+                    entry.log.push(format!("GGUF reconstruction failed: {}", e));
+                }
+                return;
+            }
+        };
+
+        tracing::info!(model = %model_id, path = %gguf_path.display(), "GGUF reconstructed");
+
+        // Auto-load the model into the executor for inference
+        let executor = self.shared_state.executor.clone();
+        let shared_state = self.shared_state.clone();
+        let model_name = manifest.name.clone();
+        let model_id_clone = model_id.clone();
+        let gpu_layers = self.shared_state.config.inference.gpu_layers;
+
+        if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
+            entry
+                .log
+                .push("Loading model into GPU for inference...".into());
+        }
+
+        tokio::spawn(async move {
+            tracing::info!(model = %model_name, "Loading reconstructed model...");
+
+            let mut exec = executor.lock().await;
+            match exec.load_model(&gguf_path, gpu_layers) {
+                Ok(()) => {
+                    let size = exec.model_size_bytes().unwrap_or(0);
+                    *shared_state.loaded_model_info.write().await =
+                        Some(crate::daemon::LoadedModelInfo {
+                            name: model_name.clone(),
+                            size_bytes: size,
+                        });
+
+                    // Generate manifest for the reconstructed model so we can serve shards
+                    crate::daemon::generate_and_register_local_manifest(
+                        &shared_state,
+                        &crate::daemon::LoadedModelInfo {
+                            name: model_name.clone(),
+                            size_bytes: size,
+                        },
+                        &gguf_path,
+                    );
+
+                    if let Some(mut entry) =
+                        shared_state.acquisition_progress.get_mut(&model_id_clone)
+                    {
+                        entry
+                            .log
+                            .push(format!("Model loaded! {} ready for inference", model_name));
+                    }
+
+                    tracing::info!(model = %model_name, "Model loaded and ready for inference");
+                }
+                Err(e) => {
+                    if let Some(mut entry) =
+                        shared_state.acquisition_progress.get_mut(&model_id_clone)
+                    {
+                        entry.log.push(format!("Model load failed: {}", e));
+                    }
+                    tracing::error!(model = %model_name, error = %e, "Failed to load reconstructed model");
+                }
+            }
+        });
     }
 
     /// Select the best peer to download from based on latency and trust.
@@ -445,6 +720,26 @@ impl AcquisitionManager {
             })
             .cloned()
             .unwrap_or_else(|| holders[0].clone())
+    }
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+fn format_speed(bytes_per_sec: u64) -> String {
+    if bytes_per_sec >= 1_048_576 {
+        format!("{:.1} MB/s", bytes_per_sec as f64 / 1_048_576.0)
+    } else if bytes_per_sec >= 1024 {
+        format!("{:.0} KB/s", bytes_per_sec as f64 / 1024.0)
+    } else {
+        format!("{} B/s", bytes_per_sec)
     }
 }
 

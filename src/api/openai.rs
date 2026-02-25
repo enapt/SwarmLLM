@@ -15,7 +15,7 @@ use crate::types::{ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier,
 
 // ---- Request types ----
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -35,7 +35,7 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: f32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum StopSequence {
     Single(String),
@@ -148,6 +148,7 @@ pub struct ModelInfo {
 /// POST /v1/chat/completions
 pub async fn chat_completions(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
@@ -164,11 +165,46 @@ pub async fn chat_completions(
     // Get model name from lock-free cache
     let model_name = {
         let info = state.shared_state.loaded_model_info.read().await;
-        match info.as_ref() {
-            Some(i) => i.name.clone(),
-            None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
-        }
+        info.as_ref().map(|i| i.name.clone())
     };
+
+    // If no model loaded locally, try to forward to a peer or auto-assemble.
+    // The `x-swarm-forwarded` header prevents infinite forwarding loops between nodes.
+    let is_forwarded = headers.get("x-swarm-forwarded").is_some();
+
+    if model_name.is_none() {
+        if !is_forwarded {
+            if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
+                tracing::info!(
+                    request_id = %request_id,
+                    peer_url = %peer_url,
+                    "Forwarding request to peer"
+                );
+                return forward_to_peer(&peer_url, &req, req.stream).await;
+            }
+        }
+
+        // No peer has the full model loaded — check if all shards exist across
+        // the pool for split/distributed inference. If so, route through the
+        // InferenceRouter which will assemble a pipeline spanning multiple nodes.
+        if all_shards_available(&state, &req.model) {
+            tracing::info!(
+                request_id = %request_id,
+                model = %req.model,
+                "All shards available across pool — using distributed inference"
+            );
+
+            if let Some(router_tx) = &state.router_tx {
+                return router_inference(router_tx.clone(), &req, request_id, created).await;
+            } else {
+                return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+            }
+        }
+
+        return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+    }
+
+    let model_name = model_name.unwrap();
 
     let prompt = build_chat_prompt(&req.messages);
     let params = req.to_sampling_params();
@@ -190,6 +226,128 @@ pub async fn chat_completions(
                 .await?
                 .into_response(),
         )
+    }
+}
+
+/// Find a peer that hosts the requested model (has all shards loaded) and return its HTTP base URL.
+fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
+    // Check peer capabilities for hosted models
+    for entry in state.shared_state.peer_registry.iter() {
+        let peer = entry.value();
+        if let Some(ref cap) = peer.capability {
+            // Check if this peer has shards matching the requested model
+            let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
+            if has_model {
+                if let Some(url) = peer_http_url(peer) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if all shards for a model exist across the network (for split inference).
+fn all_shards_available(state: &AppState, model_name: &str) -> bool {
+    let model_id = ModelId(model_name.to_string());
+
+    let manifest = match state.shared_state.model_registry.get_manifest(&model_id) {
+        Some(m) => m,
+        None => return false,
+    };
+
+    // Need a valid layer count for the scheduler to work
+    if manifest.num_layers == 0 {
+        return false;
+    }
+
+    for shard_info in &manifest.shards {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_info.index,
+        };
+        let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+        if holders.is_empty() {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Extract an HTTP base URL from a peer's known addresses.
+/// Multiaddrs look like `/ip4/127.0.0.1/udp/8800/quic-v1` — the peer runs
+/// HTTP on the same port as QUIC.
+fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
+    for addr in &peer.addresses {
+        // Parse multiaddr: /ip4/<ip>/udp/<port>/quic-v1
+        let parts: Vec<&str> = addr.split('/').collect();
+        let mut ip = None;
+        let mut port = None;
+        for i in 0..parts.len() {
+            if parts[i] == "ip4" && i + 1 < parts.len() {
+                ip = Some(parts[i + 1]);
+            }
+            if parts[i] == "udp" && i + 1 < parts.len() {
+                port = Some(parts[i + 1]);
+            }
+        }
+        if let (Some(ip_str), Some(port_str)) = (ip, port) {
+            // Skip non-routable addresses (10.255.x.x) but allow localhost and LAN
+            if ip_str.starts_with("10.255.") {
+                continue;
+            }
+            return Some(format!("http://{}:{}", ip_str, port_str));
+        }
+    }
+    None
+}
+
+/// Forward a chat completion request to a peer's HTTP API.
+async fn forward_to_peer(
+    peer_url: &str,
+    req: &ChatCompletionRequest,
+    stream: bool,
+) -> Result<axum::response::Response, ApiError> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", peer_url);
+
+    let peer_resp = client.post(&url).json(req).send().await.map_err(|e| {
+        tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Peer forwarding failed: {e}"
+        )))
+    })?;
+
+    if !peer_resp.status().is_success() {
+        let status = peer_resp.status();
+        let body = peer_resp.text().await.unwrap_or_default();
+        tracing::warn!(status = %status, body = %body, "Peer returned error");
+        return Err(ApiError(crate::error::SwarmError::Internal(format!(
+            "Peer error ({status}): {body}"
+        ))));
+    }
+
+    if stream {
+        // Forward the SSE stream from the peer
+        let byte_stream = peer_resp.bytes_stream();
+        let body = axum::body::Body::from_stream(byte_stream);
+        Ok(axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .header("x-swarm-forwarded", "true")
+            .body(body)
+            .unwrap()
+            .into_response())
+    } else {
+        // Forward JSON response
+        let body = peer_resp.text().await.unwrap_or_default();
+        Ok(axum::response::Response::builder()
+            .header("content-type", "application/json")
+            .header("x-swarm-forwarded", "true")
+            .body(axum::body::Body::from(body))
+            .unwrap()
+            .into_response())
     }
 }
 
@@ -589,15 +747,35 @@ pub async fn completions(
 /// GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelListResponse> {
     let mut data = vec![];
+    let mut seen = std::collections::HashSet::new();
 
     // Use cached model info (lock-free, no executor contention)
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        seen.insert(info.name.clone());
         data.push(ModelInfo {
             id: info.name.clone(),
             object: "model",
             created: 0,
             owned_by: "local".into(),
         });
+    }
+
+    // Include models available from peers (so chat can offer them)
+    for entry in state.shared_state.peer_registry.iter() {
+        let peer = entry.value();
+        if let Some(ref cap) = peer.capability {
+            for shard in &cap.hosted_shards {
+                let name = shard.model_id.0.clone();
+                if seen.insert(name.clone()) {
+                    data.push(ModelInfo {
+                        id: name,
+                        object: "model",
+                        created: 0,
+                        owned_by: "network".into(),
+                    });
+                }
+            }
+        }
     }
 
     Json(ModelListResponse {
@@ -609,10 +787,28 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
 /// GET /v1/status — SwarmLLM extension endpoint
 pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let info = state.shared_state.loaded_model_info.read().await;
+    let local_model = info.is_some();
+    let model_name = info.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+    drop(info);
+
+    // Count network-available models from peers
+    let mut network_models = Vec::new();
+    for entry in state.shared_state.peer_registry.iter() {
+        if let Some(ref cap) = entry.value().capability {
+            for shard in &cap.hosted_shards {
+                network_models.push(shard.model_id.0.clone());
+            }
+        }
+    }
+    network_models.sort();
+    network_models.dedup();
+
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "model_loaded": info.is_some(),
-        "model_name": info.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+        "model_loaded": local_model,
+        "model_name": model_name,
+        "network_models": network_models,
+        "peers": state.shared_state.peer_registry.len(),
     }))
 }

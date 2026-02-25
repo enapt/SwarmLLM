@@ -59,6 +59,8 @@ impl HealthMonitor {
                 _ = interval.tick() => {
                     nonce = nonce.wrapping_add(1);
                     self.send_health_ping(nonce).await;
+                    self.broadcast_capabilities().await;
+                    self.broadcast_manifests().await;
                     self.check_peer_health().await;
                 }
             }
@@ -77,6 +79,87 @@ impl HealthMonitor {
 
         if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
             tracing::warn!(error = %e, "Failed to send health ping");
+        }
+    }
+
+    async fn broadcast_capabilities(&self) {
+        let node_id = self.shared_state.identity.node_id().clone();
+
+        // Gather hosted model info
+        let mut hosted_shards = Vec::new();
+        if let Some(info) = self.shared_state.loaded_model_info.read().await.as_ref() {
+            // Represent the locally loaded model as a shard
+            hosted_shards.push(crate::types::ShardId {
+                model_id: crate::types::ModelId(info.name.clone()),
+                index: 0,
+            });
+        }
+
+        // Also include actual shards from registry
+        for entry in self.shared_state.model_registry.all_shard_entries() {
+            let (shard_id, holders) = entry;
+            if holders.contains(&node_id) {
+                hosted_shards.push(shard_id);
+            }
+        }
+
+        let gpu_info = self
+            .shared_state
+            .gpu_info
+            .as_ref()
+            .map(|g| crate::types::GpuInfo {
+                name: g.name.clone(),
+                vram_total_mb: g.vram_total_mb,
+                vram_available_mb: g.vram_free_mb,
+                compute_capability: None,
+            });
+
+        // Use real uptime so message content changes each broadcast (avoids GossipSub dedup)
+        let uptime_seconds = {
+            let stats = self.shared_state.node_stats.read().await;
+            (chrono::Utc::now() - stats.uptime_start)
+                .num_seconds()
+                .max(0) as u64
+        };
+
+        let cap = crate::types::NodeCapability {
+            node_id: node_id.clone(),
+            gpu: gpu_info,
+            ram_total_mb: 0,
+            ram_available_mb: 0,
+            disk_available_mb: 0,
+            bandwidth_mbps: 0.0,
+            hosted_shards: hosted_shards.clone(),
+            max_contribution: crate::types::ContributionLevel::Moderate,
+            uptime_seconds,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));
+        let _ = self.network_tx.send(msg).await;
+
+        // Also broadcast shard announcements for our hosted models
+        if !hosted_shards.is_empty() {
+            let announce = crate::types::ShardAnnounce {
+                node_id,
+                shards: hosted_shards,
+                timestamp: chrono::Utc::now(),
+            };
+            let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
+            let _ = self.network_tx.send(msg).await;
+        }
+    }
+
+    /// Broadcast model manifests so peers can discover and acquire models.
+    async fn broadcast_manifests(&self) {
+        for manifest in self.shared_state.model_registry.models() {
+            // Only broadcast manifests we published (or locally generated)
+            let our_id = self.shared_state.identity.node_id();
+            if manifest.publisher != *our_id {
+                continue;
+            }
+            let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest));
+            let _ = self.network_tx.send(msg).await;
         }
     }
 

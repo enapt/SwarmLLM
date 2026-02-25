@@ -342,6 +342,7 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(10),
                 trust_score: 0.8,
+                peer_id_bytes: None,
             },
         );
         state.peer_registry.insert(
@@ -353,6 +354,7 @@ mod tests {
                 last_seen: chrono::Utc::now(),
                 latency_ms: Some(15),
                 trust_score: 0.9,
+                peer_id_bytes: None,
             },
         );
 
