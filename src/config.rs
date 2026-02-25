@@ -344,6 +344,7 @@ impl Config {
         cli_data_dir: Option<&Path>,
         cli_model_path: Option<&Path>,
         cli_gpu_layers: Option<u32>,
+        cli_bootstrap: Vec<String>,
     ) -> Result<Self, SwarmError> {
         // 1. Start with defaults
         let mut config = Self::default();
@@ -394,6 +395,9 @@ impl Config {
         }
         if let Some(n) = cli_gpu_layers {
             config.inference.gpu_layers = n;
+        }
+        if !cli_bootstrap.is_empty() {
+            config.network.bootstrap_peers = cli_bootstrap;
         }
 
         // Validate
@@ -461,6 +465,7 @@ max_concurrent_requests = 5
             None,
             None,
             None,
+            vec![],
         )
         .unwrap();
         assert_eq!(config.node.listen_port, 8800);
@@ -474,6 +479,7 @@ max_concurrent_requests = 5
             None,
             None,
             None,
+            vec![],
         )
         .unwrap();
         assert_eq!(config.node.listen_port, 9999);

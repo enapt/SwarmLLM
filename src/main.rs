@@ -40,6 +40,10 @@ struct Cli {
     /// Number of layers to offload to GPU (0 = CPU only)
     #[arg(long, global = true)]
     gpu_layers: Option<u32>,
+
+    /// Bootstrap peer multiaddr (e.g. /ip4/127.0.0.1/udp/8800/quic-v1)
+    #[arg(long, global = true)]
+    bootstrap: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -81,6 +85,7 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
         cli.data_dir.as_deref(),
         cli.model.as_deref(),
         cli.gpu_layers,
+        cli.bootstrap,
     )?;
 
     // Ensure data directory exists
