@@ -21,6 +21,13 @@ use crate::types::{
 };
 
 /// Thread-safe shared state accessible by all daemon tasks.
+/// Cached info about a locally loaded model (lock-free reads).
+#[derive(Clone, Debug)]
+pub struct LoadedModelInfo {
+    pub name: String,
+    pub size_bytes: u64,
+}
+
 pub struct SharedState {
     pub config: Config,
     pub identity: Identity,
@@ -33,6 +40,8 @@ pub struct SharedState {
     pub credit_balance: Arc<RwLock<CreditBalance>>,
     pub node_stats: RwLock<NodeStats>,
     pub executor: SharedExecutor,
+    /// Cached model info for lock-free reads (set once at startup).
+    pub loaded_model_info: RwLock<Option<LoadedModelInfo>>,
     /// Model governance vote tallies.
     pub model_vote_tallies: DashMap<crate::types::Blake3Hash, crate::model::governance::VoteTally>,
     /// Governance parameters (tunable via GovernanceChange proposals).
@@ -71,6 +80,7 @@ impl SharedState {
             })),
             node_stats: RwLock::new(NodeStats::default()),
             executor,
+            loaded_model_info: RwLock::new(None),
             model_vote_tallies: DashMap::new(),
             governance_params: RwLock::new(
                 // Load from DB or use defaults (genesis params if early network)
@@ -117,6 +127,17 @@ impl Daemon {
                 }
             }
         }
+
+        // Cache model info for lock-free admin reads
+        let cached_info = if executor.is_loaded() {
+            Some(LoadedModelInfo {
+                name: executor.model_name().to_string(),
+                size_bytes: executor.model_size_bytes().unwrap_or(0),
+            })
+        } else {
+            None
+        };
+
         let executor = Arc::new(tokio::sync::Mutex::new(executor));
 
         // Create shared state
@@ -126,6 +147,9 @@ impl Daemon {
             self.db.clone(),
             executor,
         );
+
+        // Set the cached model info (lock-free for admin reads)
+        *shared_state.loaded_model_info.write().await = cached_info;
 
         // Scan local shards and register them in both model_registry and shard_registry
         let shard_store = ShardStore::new(&self.config.node.data_dir);

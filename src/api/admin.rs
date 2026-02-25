@@ -108,21 +108,17 @@ pub async fn update_config(
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let mut models: Vec<serde_json::Value> = Vec::new();
 
-    // Include the locally loaded executor model (from --model flag)
-    {
-        let executor = state.executor.lock().await;
-        if executor.is_loaded() {
-            let size = executor.model_size_bytes().unwrap_or(0);
-            models.push(serde_json::json!({
-                "id": executor.model_name(),
-                "name": executor.model_name(),
-                "total_size_bytes": size,
-                "shard_count": 1,
-                "hosted_shards": 1,
-                "healthy": true,
-                "status": "loaded",
-            }));
-        }
+    // Include the locally loaded model from cached info (lock-free, no executor contention)
+    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        models.push(serde_json::json!({
+            "id": info.name,
+            "name": info.name,
+            "total_size_bytes": info.size_bytes,
+            "shard_count": 1,
+            "hosted_shards": 1,
+            "healthy": true,
+            "status": "loaded",
+        }));
     }
 
     // Include models from the P2P registry

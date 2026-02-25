@@ -161,34 +161,30 @@ pub async fn chat_completions(
         "Chat completion request"
     );
 
-    // Route all requests through InferenceRouter when available
-    if let Some(router_tx) = &state.router_tx {
-        if req.stream {
-            return router_inference_stream(router_tx.clone(), &state, &req, request_id, created)
-                .await;
-        } else {
-            return router_inference(router_tx.clone(), &req, request_id, created).await;
-        }
-    }
-
-    // Fallback: direct executor path (no router available — standalone mode)
-    let prompt = build_chat_prompt(&req.messages);
-    let params = req.to_sampling_params();
+    // Get model name from lock-free cache
     let model_name = {
-        let executor = state.executor.lock().await;
-        if !executor.is_loaded() {
-            return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+        let info = state.shared_state.loaded_model_info.read().await;
+        match info.as_ref() {
+            Some(i) => i.name.clone(),
+            None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
         }
-        executor.model_name().to_string()
     };
 
+    let prompt = build_chat_prompt(&req.messages);
+    let params = req.to_sampling_params();
+
     if req.stream {
+        // Streaming: use direct executor path for real token-by-token SSE
         Ok(
             stream_response(state, request_id, created, model_name, prompt, params)
                 .await
                 .into_response(),
         )
+    } else if let Some(router_tx) = &state.router_tx {
+        // Non-streaming: route through InferenceRouter for priority queueing
+        router_inference(router_tx.clone(), &req, request_id, created).await
     } else {
+        // Fallback: direct executor path
         Ok(
             non_stream_response(state, request_id, created, model_name, prompt, params)
                 .await?
@@ -261,7 +257,10 @@ async fn router_inference(
 /// Route streaming inference through the InferenceRouter.
 ///
 /// Submits the request to the router for priority queueing and pipeline assembly,
-/// then streams the result back via SSE.
+/// then streams the result back via SSE. Currently unused — streaming goes through
+/// the direct executor path for real token-by-token SSE. Will be used for distributed
+/// inference streaming across nodes.
+#[allow(dead_code)]
 async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     _state: &AppState,
@@ -589,12 +588,12 @@ pub async fn completions(
 
 /// GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelListResponse> {
-    let executor = state.executor.lock().await;
     let mut data = vec![];
 
-    if executor.is_loaded() {
+    // Use cached model info (lock-free, no executor contention)
+    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
         data.push(ModelInfo {
-            id: executor.model_name().to_string(),
+            id: info.name.clone(),
             object: "model",
             created: 0,
             owned_by: "local".into(),
@@ -609,11 +608,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
 
 /// GET /v1/status — SwarmLLM extension endpoint
 pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let executor = state.executor.lock().await;
+    let info = state.shared_state.loaded_model_info.read().await;
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "model_loaded": executor.is_loaded(),
-        "model_name": executor.model_name(),
+        "model_loaded": info.is_some(),
+        "model_name": info.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
     }))
 }

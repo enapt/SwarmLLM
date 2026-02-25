@@ -3,6 +3,7 @@
 var STORAGE_KEY = 'swarmllm_chat_history';
 var messages = [];
 var isStreaming = false;
+var currentModel = 'local';
 
 // --- Load conversation from localStorage ---
 
@@ -30,9 +31,15 @@ function clearChat() {
   messages = [];
   saveHistory();
   document.getElementById('chat-messages').innerHTML = '';
+  // Restore empty state
+  var container = document.getElementById('chat-messages');
+  container.innerHTML = '<div class="chat-empty" id="chat-empty">' +
+    '<div class="chat-empty-icon">&#11088;</div>' +
+    '<div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>' +
+    '<div>Send a message to start a conversation</div></div>';
 }
 
-// --- Model selector ---
+// --- Model selector (hidden, auto-detect) ---
 
 async function loadModels() {
   try {
@@ -41,17 +48,13 @@ async function loadModels() {
     var sel = document.getElementById('model-select');
     sel.innerHTML = '';
     if (data.data && data.data.length > 0) {
+      currentModel = data.data[0].id;
       data.data.forEach(function (m) {
         var opt = document.createElement('option');
         opt.value = m.id;
         opt.textContent = m.id;
         sel.appendChild(opt);
       });
-    } else {
-      var opt = document.createElement('option');
-      opt.value = 'local';
-      opt.textContent = 'local';
-      sel.appendChild(opt);
     }
   } catch (e) {
     console.error('Failed to load models:', e);
@@ -85,21 +88,18 @@ async function sendMessage() {
   // Prepare assistant message element for streaming
   var assistantEl = appendMessageToDOM('assistant', '');
   var contentEl = assistantEl.querySelector('.msg-content');
+  contentEl.innerHTML = '<span class="typing-indicator">Thinking...</span>';
 
   isStreaming = true;
   document.getElementById('send-btn').disabled = true;
 
-  var model = document.getElementById('model-select').value;
-  var temperature = parseFloat(document.getElementById('chat-temp').value) || 0.7;
-  var maxTokens = parseInt(document.getElementById('chat-max-tokens').value, 10) || 2048;
-
   var body = {
-    model: model,
+    model: currentModel,
     messages: messages.map(function (m) {
       return { role: m.role, content: m.content };
     }),
-    temperature: temperature,
-    max_tokens: maxTokens,
+    temperature: 0.7,
+    max_tokens: 512,
     stream: true,
   };
 
@@ -119,6 +119,9 @@ async function sendMessage() {
       document.getElementById('send-btn').disabled = false;
       return;
     }
+
+    // Clear typing indicator on first data
+    var cleared = false;
 
     var reader = resp.body.getReader();
     var decoder = new TextDecoder();
@@ -143,6 +146,10 @@ async function sendMessage() {
           if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
             var delta = chunk.choices[0].delta;
             if (delta.content) {
+              if (!cleared) {
+                contentEl.textContent = '';
+                cleared = true;
+              }
               fullContent += delta.content;
               contentEl.textContent = fullContent;
               scrollToBottom();
@@ -150,6 +157,11 @@ async function sendMessage() {
           }
         } catch (e) { /* skip malformed chunks */ }
       }
+    }
+
+    // If stream ended but nothing streamed, it was a non-streaming response wrapped in SSE
+    if (!cleared && !fullContent) {
+      contentEl.textContent = 'No response received. The model may still be loading.';
     }
   } catch (e) {
     if (!fullContent) {
@@ -176,7 +188,8 @@ function appendMessageToDOM(role, content) {
 
   var div = document.createElement('div');
   div.className = 'chat-msg ' + role;
-  div.innerHTML = '<div class="msg-role">' + role + '</div><div class="msg-content"></div>';
+  var label = role === 'user' ? 'You' : 'Assistant';
+  div.innerHTML = '<div class="msg-role">' + label + '</div><div class="msg-content"></div>';
   div.querySelector('.msg-content').textContent = content;
   container.appendChild(div);
   scrollToBottom();
