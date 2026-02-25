@@ -396,8 +396,10 @@ mod tests {
         let rc = test_release();
         publish_release_candidate(&db, &rc, &GovernanceRole::Contributor).unwrap();
 
-        let mut params = GovernanceParams::default();
-        params.release_approval_threshold = 2;
+        let params = GovernanceParams {
+            release_approval_threshold: 2,
+            ..GovernanceParams::default()
+        };
 
         // One approval is not enough
         let approval1 = ReleaseApproval {

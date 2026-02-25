@@ -1,0 +1,205 @@
+//! Integration tests for the HTTP API server.
+//!
+//! These tests start a real Axum server and make HTTP requests against it.
+//! Run with: cargo test --test integration -- --test-threads=1
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+
+/// Spawn a test API server on a random available port. Returns the base URL.
+async fn spawn_test_server() -> String {
+    let config = swarmllm::config::Config::default();
+    let identity = swarmllm::identity::Identity::generate();
+    let db = swarmllm::storage::db::Database::open_temp().expect("temp db");
+    let executor = Arc::new(Mutex::new(
+        swarmllm::inference::executor::ModelExecutor::new(),
+    ));
+
+    let (shared_state, _shutdown_rx) =
+        swarmllm::daemon::SharedState::new(config.clone(), identity, db.clone(), executor.clone());
+
+    let state = swarmllm::api::server::AppState {
+        config,
+        db,
+        executor,
+        router_tx: None,
+        acquisition_tx: None,
+        shared_state,
+    };
+
+    let app = swarmllm::api::server::build_router(state);
+    let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // Small delay to let server bind
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn health_endpoint_returns_ok() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/health")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn status_endpoint_returns_json() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/v1/status")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["model_loaded"], false);
+}
+
+#[tokio::test]
+async fn models_endpoint_returns_empty_list() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/v1/models")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "list");
+    assert!(body["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn chat_completions_without_model_returns_503() {
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 503);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("No model loaded"));
+}
+
+#[tokio::test]
+async fn admin_stats_returns_hardware_info() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/admin/stats"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["node_id"].is_string());
+    assert!(body["hardware"]["cpu_cores"].as_u64().unwrap() > 0);
+    assert!(body["hardware"]["total_ram_mb"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn admin_credits_returns_tier() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/admin/credits"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["tier"].is_string());
+    assert!(body["balance"].is_number());
+}
+
+#[tokio::test]
+async fn admin_peers_returns_empty_array() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/admin/peers"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn root_redirects_to_admin() {
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client.get(format!("{base}/")).send().await.unwrap();
+    assert_eq!(resp.status(), 303);
+    assert!(resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("/admin"));
+}
+
+#[tokio::test]
+async fn admin_dashboard_serves_html() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/admin")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("<!DOCTYPE html>") || text.contains("<html"));
+}
+
+#[tokio::test]
+async fn governance_issues_empty_initially() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/admin/issues"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn governance_proposals_empty_initially() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/admin/proposals"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn completions_without_model_returns_503() {
+    let base = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "prompt": "Hello"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 503);
+}

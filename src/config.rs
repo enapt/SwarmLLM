@@ -396,7 +396,32 @@ impl Config {
             config.inference.gpu_layers = n;
         }
 
+        // Validate
+        config.validate()?;
+
         Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), SwarmError> {
+        // Warn on privileged ports (not fatal — user may have permissions)
+        if self.node.listen_port > 0 && self.node.listen_port < 1024 {
+            tracing::warn!(
+                port = self.node.listen_port,
+                "Using privileged port — may require elevated permissions"
+            );
+        }
+
+        // Validate model path exists if specified
+        if let Some(ref path) = self.inference.model_path {
+            if !path.exists() {
+                return Err(SwarmError::Config(format!(
+                    "Model file not found: {}",
+                    path.display()
+                )));
+            }
+        }
+
+        Ok(())
     }
 }
 

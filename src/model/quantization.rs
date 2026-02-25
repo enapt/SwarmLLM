@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn f32_f16_roundtrip() {
-        let values = vec![1.0f32, -2.5, 0.0, 3.14, 100.0];
+        let values = vec![1.0f32, -2.5, 0.0, 3.125, 100.0];
         let bytes = f32_to_f16_bytes(&values);
         assert_eq!(bytes.len(), values.len() * 2);
 

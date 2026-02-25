@@ -5,25 +5,29 @@
 Single Rust binary, three simultaneous functions:
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   swarmllm binary                    │
-│                                                     │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  P2P     │  │  HTTP API    │  │  Admin UI    │  │
-│  │  Node    │  │  Server      │  │  (embedded)  │  │
-│  │  (QUIC)  │  │  (Axum)      │  │              │  │
-│  └────┬─────┘  └──────┬───────┘  └──────┬───────┘  │
-│       │               │                 │           │
-│  ┌────┴───────────────┴─────────────────┴────────┐  │
-│  │              Shared State (Arc)                │  │
-│  │  DashMap<NodeId, PeerInfo>                     │  │
-│  │  DashMap<ModelId, ModelManifest>               │  │
-│  │  DashMap<ShardId, Vec<NodeId>>                 │  │
-│  │  DashMap<Uuid, PipelineAssignment>             │  │
-│  │  RwLock<CreditBalance>                         │  │
-│  │  RwLock<NodeStats>                             │  │
-│  └───────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      swarmllm binary                      │
+│                                                          │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │  P2P     │  │  HTTP API    │  │  Admin UI    │       │
+│  │  Node    │  │  Server      │  │  (embedded)  │       │
+│  │  (QUIC)  │  │  (Axum)      │  │              │       │
+│  └────┬─────┘  └──────┬───────┘  └──────┬───────┘       │
+│       │               │                 │                │
+│  ┌────┴───────────────┴─────────────────┴─────────────┐  │
+│  │              Shared State (Arc)                     │  │
+│  │  DashMap<NodeId, PeerInfo>      — peer registry     │  │
+│  │  ModelRegistry                  — models + shards   │  │
+│  │  DashMap<ShardId, Vec<NodeId>>  — shard locations   │  │
+│  │  DashMap<Uuid, PipelineAssignment> — pipelines      │  │
+│  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
+│  │  RwLock<NodeStats>              — node statistics    │  │
+│  │  SharedExecutor                 — llama.cpp model    │  │
+│  │  DashMap<Blake3Hash, VoteTally> — model votes       │  │
+│  │  RwLock<GovernanceParams>       — gov parameters    │  │
+│  │  RwLock<NetworkStats>           — network-wide data │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## Daemon Task Architecture
@@ -34,44 +38,52 @@ Single Rust binary, three simultaneous functions:
                         │  (bootstrap) │
                         └──────┬───────┘
                                │ spawns tokio tasks
-       ┌───────┬───────┬───────┼───────┬───────────┬──────────┐
-       ▼       ▼       ▼       ▼       ▼           ▼          ▼
-┌──────────┐ ┌─────┐ ┌─────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐
-│ Network  │ │Infer│ │Credit│ │Health│ │ API  │ │Rebal-│ │Acquisi-│
-│ Manager  │ │Router│ │Ledger│ │Mon.  │ │Server│ │ancer │ │tion Mgr│
-└────┬─────┘ └──┬──┘ └──┬──┘ └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘
-     │          │       │       │         │        │          │
-     └──────────┴───────┴───────┴─────────┴────────┴──────────┘
-                      mpsc channels between tasks
+       ┌───────┬───────┬───────┼───────┬───────────┬──────────┬──────────┐
+       ▼       ▼       ▼       ▼       ▼           ▼          ▼          ▼
+┌──────────┐ ┌─────┐ ┌─────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌────────┐
+│ Network  │ │Infer│ │Credit│ │Health│ │ API  │ │Rebal-│ │Acquisi-│ │Message │
+│ Manager  │ │Router│ │Ledger│ │Mon.  │ │Server│ │ancer │ │tion Mgr│ │Dispatch│
+└────┬─────┘ └──┬──┘ └──┬──┘ └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘ └───┬────┘
+     │          │       │       │         │        │          │          │
+     └──────────┴───────┴───────┴─────────┴────────┴──────────┴──────────┘
+                         mpsc channels between tasks
 ```
 
 ### Channel Layout
 
 | From | To | Channel | Message Types |
 |---|---|---|---|
-| NetworkManager | InferenceRouter | `network_out_tx` | InferenceRequest, LayerForward, LayerResult |
+| NetworkManager | MessageDispatcher | `network_out_tx` | All inbound SwarmMessage variants |
+| MessageDispatcher | InferenceRouter | `router_cmd_tx` | InferenceRequest, LayerForward, LayerResult, PipelineAssignment, InferenceError |
 | InferenceRouter | NetworkManager | `network_tx` | SwarmMessage (outgoing P2P) |
-| InferenceRouter | CreditLedger | `credit_tx` | CreditTransaction |
 | HealthMonitor | NetworkManager | `network_tx` | HealthPing |
 | HealthMonitor | ShardRebalancer | `rebalance_tx` | RebalanceEvent |
 | ApiServer | InferenceRouter | `router_cmd_tx` | RouterCommand (from HTTP) |
 | ApiServer | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (model download) |
 | AcquisitionManager | NetworkManager | `network_tx` | ShardAnnounce (shard requests) |
+| CreditLedger | NetworkManager | `network_tx` | CreditGossip, CreditTransaction |
+
+The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by governance, and Phase 7 governance messages (Proposal, ProposalVote, Issue, ReleaseCandidate, etc.) are persisted directly to sled.
 
 ## Startup Sequence
 
 ```
-1. Parse CLI args (clap)
-2. Initialize tracing subscriber
-3. Load or create config (TOML + env + defaults)
-4. Load or generate Ed25519 identity
-5. Open sled database
-6. Build Daemon { config, identity, db }
-7. Create mpsc channels
-8. Build Arc<SharedState>
-9. Spawn all tasks
-10. tokio::select! on shutdown signal or task exit
-11. Graceful shutdown
+1.  Parse CLI args (clap) — including optional --model and --gpu-layers
+2.  Initialize tracing subscriber (verbosity: info → debug → debug+libp2p → trace)
+3.  Load or create config (TOML + env + defaults + CLI overrides)
+4.  Ensure data directory exists
+5.  Load or generate Ed25519 identity
+6.  Open sled database
+7.  Build Daemon { config, identity, db }
+8.  Initialize ModelExecutor (load GGUF model if --model provided)
+9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)
+10. Scan local shards → register in model_registry + shard_registry
+11. Create mpsc channels (network, router, rebalance, acquisition)
+12. Spawn all tasks (8 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
+    HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer)
+13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
+14. tokio::select! on Ctrl+C signal or any task exit
+15. Signal graceful shutdown via watch channel
 ```
 
 ## Networking Stack
@@ -234,9 +246,13 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | model_meta | {model_id} | ModelManifest |
 | sessions | {session_id} | KV-cache metadata |
 | issues | {issue_hash_hex} | Issue |
+| issue_comments | {issue_hash_hex}/{timestamp_ms} | IssueComment |
+| issue_upvotes | {issue_hash_hex}/{voter_hex} | IssueUpvote |
 | proposals | {proposal_hash_hex} | Proposal |
 | proposal_votes | {proposal_hash}/{voter_hex} | ProposalVote |
 | releases | {version_string} | ReleaseCandidate |
+| release_approvals | {version_key}/{approver_hex} | ReleaseApproval |
+| test_reports | {version_key}/{tester_hex} | TestReport |
 | gov_params | "params" | GovernanceParams |
 
 ## HTTP API Routes
@@ -248,25 +264,34 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 - `GET  /v1/status` — SwarmLLM node status
 
 ### Admin API
-- `GET/PUT /api/admin/config` — Configuration
-- `GET     /api/admin/stats` — Node statistics
-- `GET     /api/admin/models` — Model list
+- `GET/PUT /api/admin/config` — Configuration read/update
+- `GET     /api/admin/stats` — Node statistics + hardware info
+- `GET     /api/admin/models` — Model list with shard status
 - `POST    /api/admin/models/:id/add` — Trigger model acquisition
 - `GET     /api/admin/models/:id/status` — Model acquisition progress
-- `GET     /api/admin/peers` — Connected peers
-- `GET     /api/admin/credits` — Credit info
+- `GET     /api/admin/peers` — Connected peers with latency/trust
+- `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/ws` — WebSocket for live updates
 
 ### Governance API (Phase 7)
-- `GET/POST /api/admin/issues` — Issue CRUD
-- `GET/POST /api/admin/proposals` — Proposal CRUD
-- `GET      /api/admin/releases` — Release info
-- `GET      /api/admin/governance/*` — Governance state
+- `GET/POST /api/admin/issues` — List/create issues
+- `GET      /api/admin/issues/:hash` — Issue details + comments
+- `POST     /api/admin/issues/:hash/comment` — Add comment to issue
+- `POST     /api/admin/issues/:hash/upvote` — Upvote issue
+- `GET/POST /api/admin/proposals` — List/create proposals
+- `GET      /api/admin/proposals/:hash` — Proposal details + vote tally
+- `POST     /api/admin/proposals/:hash/vote` — Cast vote on proposal
+- `GET      /api/admin/releases` — List releases with canary phase info
+- `GET      /api/admin/releases/latest` — Latest stable release
+- `GET      /api/admin/governance/role` — Current node's governance role
+- `GET      /api/admin/governance/params` — Governance parameters
 
-### Static
+### Static & Utility
 - `/admin` — Dashboard SPA
 - `/chat` — Chat interface
 - `/setup` — First-run wizard
+- `/static/*path` — Embedded static assets (CSS, JS)
+- `/health` — Health check endpoint
 - `/` → redirect to `/admin`
 
 ## Node Tiers

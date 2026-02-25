@@ -64,12 +64,15 @@ Single Rust binary, three simultaneous functions:
 | LLM API Server | OpenAI-compatible inference endpoint | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
-Internally, the daemon runs as async Tokio tasks communicating via channels:
+Internally, the daemon runs 8 async Tokio tasks communicating via channels:
 
 - **NetworkManager** — libp2p swarm lifecycle, peer discovery, message routing
 - **InferenceRouter** — request queuing, pipeline assembly, execution
+- **MessageDispatcher** — routes inbound network messages to subsystems
 - **CreditLedger** — balance tracking, transaction signing, priority tiers
 - **HealthMonitor** — periodic checks, rebalancing triggers
+- **ShardRebalancer** — shard redistribution on node join/leave
+- **AcquisitionManager** — BLAKE3-verified model download from peers
 - **ApiServer** — Axum HTTP server, WebSocket for live updates
 
 ## Node Tiers
@@ -111,10 +114,20 @@ Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
 ## Building from Source
 
 ```bash
-# Requirements: Rust 1.75+, cmake (for llama.cpp)
+# Requirements: Rust 1.75+, cmake (for llama.cpp, optional)
 git clone https://github.com/enapt/SwarmLLM.git
 cd SwarmLLM
+
+# CPU-only build (no model loading)
 cargo build --release
+
+# With llama.cpp inference support
+cargo build --release --features llama
+
+# With GPU acceleration
+cargo build --release --features cuda    # NVIDIA
+cargo build --release --features metal   # Apple Silicon
+cargo build --release --features rocm    # AMD
 ```
 
 ## CLI
@@ -123,20 +136,17 @@ cargo build --release
 swarmllm <COMMAND>
 
 Commands:
-  run         Start the SwarmLLM daemon (default)
-  status      Show node status
-  models      List available models
-  credits     Show credit balance and tier
-  config      Print current configuration
-  identity    Manage node identity (export/import/show)
+  run         Start the SwarmLLM daemon (default if omitted)
+  status      Show node status (queries running daemon)
   version     Print version information
 
 Options:
-  -c, --config <PATH>     Config file path [default: ~/.swarmllm/config.toml]
-  -p, --port <PORT>       Listen port [default: 8800]
-  -d, --data-dir <PATH>   Data directory [default: ~/.swarmllm]
-  -v, --verbose           Increase log verbosity (-v, -vv, -vvv)
-  --headless              No browser, no setup wizard
+  -c, --config <PATH>       Config file path
+  -p, --port <PORT>         Listen port [default: 8800]
+  -d, --data-dir <PATH>     Data directory [default: ~/.swarmllm]
+  -m, --model <PATH>        Path to a GGUF model file to load
+      --gpu-layers <N>      Number of layers to offload to GPU (0 = CPU only)
+  -v, --verbose             Increase log verbosity (-v, -vv, -vvv)
 ```
 
 ## Configuration
@@ -148,6 +158,17 @@ SWARMLLM_NODE_LISTEN_PORT=9000
 SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000
 SWARMLLM_LOGGING_LEVEL=debug
 ```
+
+### Default Config Sections
+
+| Section | Key Settings |
+|---------|-------------|
+| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
+| `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
+| `[network]` | `bootstrap_peers`, `enable_relay`, `max_peers` |
+| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_concurrent_requests` |
+| `[logging]` | `level`, `format` (pretty/json) |
+| `[ui]` | `open_browser_on_start` |
 
 ## Platform Support
 
@@ -174,4 +195,4 @@ SWARMLLM_LOGGING_LEVEL=debug
 
 ## License
 
-TBD
+Dual-licensed under MIT and Apache 2.0. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

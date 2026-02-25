@@ -20,6 +20,13 @@ impl Database {
         Ok(Self { inner })
     }
 
+    /// Open a temporary in-memory database (for testing).
+    pub fn open_temp() -> Result<Self, SwarmError> {
+        let config = sled::Config::new().temporary(true);
+        let inner = config.open()?;
+        Ok(Self { inner })
+    }
+
     /// Get a named tree (logical keyspace).
     pub fn tree(&self, name: &str) -> Result<sled::Tree, SwarmError> {
         Ok(self.inner.open_tree(name)?)

@@ -3,6 +3,13 @@ name = "swarmllm"
 version = "0.1.0"
 edition = "2021"
 default-run = "swarmllm"
+description = "Decentralized peer-to-peer LLM inference network"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/enapt/SwarmLLM"
+homepage = "https://github.com/enapt/SwarmLLM"
+keywords = ["llm", "p2p", "inference", "distributed", "decentralized"]
+categories = ["network-programming", "science"]
+rust-version = "1.75"
 
 [[bin]]
 name = "swarmllm"
@@ -97,6 +104,11 @@ tokio-test = "0.4"
 assert_cmd = "2"
 predicates = "3"
 wiremock = "0.6"
+reqwest = { version = "0.12", features = ["json"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration/api_test.rs"
 
 [profile.release]
 opt-level = 3

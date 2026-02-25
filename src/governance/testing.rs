@@ -164,7 +164,7 @@ mod tests {
         let bucket1 = node_canary_bucket(&node_id, &version);
         let bucket2 = node_canary_bucket(&node_id, &version);
         assert!((bucket1 - bucket2).abs() < f32::EPSILON);
-        assert!(bucket1 >= 0.0 && bucket1 <= 1.0);
+        assert!((0.0..=1.0).contains(&bucket1));
     }
 
     #[test]

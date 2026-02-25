@@ -76,9 +76,8 @@ impl ModelExecutor {
             use llama_cpp_2::model::LlamaModel;
 
             // Initialize backend (redirect logs to tracing)
-            let backend = LlamaBackend::init().map_err(|e| {
-                SwarmError::Inference(format!("Failed to init llama backend: {e}"))
-            })?;
+            let backend = LlamaBackend::init()
+                .map_err(|e| SwarmError::Inference(format!("Failed to init llama backend: {e}")))?;
 
             llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
 
@@ -104,14 +103,10 @@ impl ModelExecutor {
 
             // Load model with GPU layer offloading
             let model_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
-            let model = LlamaModel::load_from_file(&backend, path, &model_params).map_err(
-                |e| SwarmError::Inference(format!("Failed to load model: {e}")),
-            )?;
+            let model = LlamaModel::load_from_file(&backend, path, &model_params)
+                .map_err(|e| SwarmError::Inference(format!("Failed to load model: {e}")))?;
 
-            tracing::info!(
-                n_vocab = model.n_vocab(),
-                "Model loaded into llama.cpp"
-            );
+            tracing::info!(n_vocab = model.n_vocab(), "Model loaded into llama.cpp");
 
             self.backend = Some(backend);
             self.model = Some(model);
@@ -273,9 +268,7 @@ impl ModelExecutor {
             // Convert token to string
             let piece = model
                 .token_to_piece(new_token, &mut decoder, true, None)
-                .map_err(|e| {
-                    SwarmError::Inference(format!("Token to piece failed: {e}"))
-                })?;
+                .map_err(|e| SwarmError::Inference(format!("Token to piece failed: {e}")))?;
 
             completion_tokens += 1;
 

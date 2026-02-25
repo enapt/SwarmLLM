@@ -30,3 +30,10 @@ tests/fixtures/tiny_model/*.bin
 
 # Build logs
 /tmp/swarmllm-*.log
+
+# Package artifacts
+*.deb
+*.rpm
+*.dmg
+*.tar.gz
+*.zip

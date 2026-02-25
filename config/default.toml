@@ -25,3 +25,13 @@ gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
 [logging]
 level = "info"                 # trace, debug, info, warn, error
 format = "pretty"              # "pretty" or "json"
+
+[ui]
+open_browser_on_start = true   # Open browser to dashboard/setup on launch
+theme = "dark"                 # "dark" or "light"
+
+[updates]
+auto_update = "stable"         # "disabled", "stable", or "canary"
+check_interval_hours = 6
+auto_restart = true
+keep_versions = 3
