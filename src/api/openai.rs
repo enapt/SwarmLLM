@@ -173,20 +173,9 @@ pub async fn chat_completions(
     let is_forwarded = headers.get("x-swarm-forwarded").is_some();
 
     if model_name.is_none() {
-        if !is_forwarded {
-            if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
-                tracing::info!(
-                    request_id = %request_id,
-                    peer_url = %peer_url,
-                    "Forwarding request to peer"
-                );
-                return forward_to_peer(&peer_url, &req, req.stream).await;
-            }
-        }
-
-        // No peer has the full model loaded — check if all shards exist across
-        // the pool for split/distributed inference. If so, route through the
-        // InferenceRouter which will assemble a pipeline spanning multiple nodes.
+        // Priority 1: Check if all shards exist across the pool for split/distributed
+        // inference. This is preferred over forwarding because it uses the pipeline
+        // scheduler to coordinate multi-node layer processing.
         if all_shards_available(&state, &req.model) {
             tracing::info!(
                 request_id = %request_id,
@@ -198,6 +187,19 @@ pub async fn chat_completions(
                 return router_inference(router_tx.clone(), &req, request_id, created).await;
             } else {
                 return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+            }
+        }
+
+        // Priority 2: Forward to a peer that has the full model loaded.
+        // The x-swarm-forwarded header prevents infinite forwarding loops.
+        if !is_forwarded {
+            if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
+                tracing::info!(
+                    request_id = %request_id,
+                    peer_url = %peer_url,
+                    "Forwarding request to peer"
+                );
+                return forward_to_peer(&peer_url, &req, req.stream).await;
             }
         }
 
@@ -229,13 +231,15 @@ pub async fn chat_completions(
     }
 }
 
-/// Find a peer that hosts the requested model (has all shards loaded) and return its HTTP base URL.
+/// Find a peer that has the full model loaded (not just some shards) and return its HTTP base URL.
+/// This is a fallback for when distributed inference isn't available.
 fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
-    // Check peer capabilities for hosted models
     for entry in state.shared_state.peer_registry.iter() {
         let peer = entry.value();
         if let Some(ref cap) = peer.capability {
-            // Check if this peer has shards matching the requested model
+            // Check if this peer advertises shards matching the requested model.
+            // A peer with `loaded_model_info` broadcasts shard_id index=0 for
+            // the full model — look for that as a signal of full model loaded.
             let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
@@ -253,14 +257,20 @@ fn all_shards_available(state: &AppState, model_name: &str) -> bool {
 
     let manifest = match state.shared_state.model_registry.get_manifest(&model_id) {
         Some(m) => m,
-        None => return false,
+        None => {
+            tracing::debug!(model = %model_name, "all_shards_available: no manifest");
+            return false;
+        }
     };
 
     // Need a valid layer count for the scheduler to work
     if manifest.num_layers == 0 {
+        tracing::debug!(model = %model_name, "all_shards_available: num_layers=0");
         return false;
     }
 
+    let total = manifest.shards.len();
+    let mut covered = 0;
     for shard_info in &manifest.shards {
         let shard_id = crate::types::ShardId {
             model_id: model_id.clone(),
@@ -268,10 +278,23 @@ fn all_shards_available(state: &AppState, model_name: &str) -> bool {
         };
         let holders = state.shared_state.model_registry.shard_holders(&shard_id);
         if holders.is_empty() {
+            tracing::debug!(
+                model = %model_name,
+                shard = shard_info.index,
+                "all_shards_available: missing holders"
+            );
             return false;
         }
+        covered += 1;
     }
 
+    tracing::info!(
+        model = %model_name,
+        shards = total,
+        covered,
+        num_layers = manifest.num_layers,
+        "all_shards_available: all shards covered"
+    );
     true
 }
 
@@ -312,12 +335,18 @@ async fn forward_to_peer(
     let client = reqwest::Client::new();
     let url = format!("{}/v1/chat/completions", peer_url);
 
-    let peer_resp = client.post(&url).json(req).send().await.map_err(|e| {
-        tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "Peer forwarding failed: {e}"
-        )))
-    })?;
+    let peer_resp = client
+        .post(&url)
+        .header("x-swarm-forwarded", "true")
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Peer forwarding failed: {e}"
+            )))
+        })?;
 
     if !peer_resp.status().is_success() {
         let status = peer_resp.status();

@@ -154,14 +154,29 @@ impl Daemon {
             }
         }
 
-        // Cache model info for lock-free admin reads
-        let cached_info = if executor.is_loaded() {
+        // Gather model info for manifest generation and admin display.
+        let model_info = if executor.is_loaded() {
             Some(LoadedModelInfo {
                 name: executor.model_name().to_string(),
                 size_bytes: executor.model_size_bytes().unwrap_or(0),
             })
         } else {
             None
+        };
+
+        // When --shards is set, the node only holds part of the model — don't
+        // report a fully loaded model, which would cause the API to serve
+        // requests through the (incomplete) local executor.
+        let cached_info = if self.config.inference.shard_range.is_some() {
+            if let Some(ref info) = model_info {
+                tracing::info!(
+                    model = %info.name,
+                    "Model available for split inference (not full-model serving)"
+                );
+            }
+            None
+        } else {
+            model_info.clone()
         };
 
         // Detect GPU via llama.cpp backend
@@ -182,10 +197,11 @@ impl Daemon {
         );
 
         // Set the cached model info (lock-free for admin reads)
-        *shared_state.loaded_model_info.write().await = cached_info.clone();
+        *shared_state.loaded_model_info.write().await = cached_info;
 
-        // Generate a ModelManifest for the locally loaded model so peers can discover it
-        if let Some(ref info) = cached_info {
+        // Generate a ModelManifest for the locally loaded model so peers can discover it.
+        // This is needed even in split mode so the shard registry gets populated.
+        if let Some(ref info) = model_info {
             if let Some(ref model_path) = self.config.inference.model_path {
                 generate_and_register_local_manifest(&shared_state, info, model_path);
             }
@@ -386,6 +402,56 @@ impl Daemon {
             port = self.config.node.listen_port,
             "SwarmLLM daemon running"
         );
+
+        // Broadcast shard announcements and manifests shortly after startup
+        // so peers discover our shards quickly (don't wait for the 30s health tick).
+        {
+            let announce_state = shared_state.clone();
+            let announce_tx = network_tx.clone();
+            tokio::spawn(async move {
+                // Wait for peer connections to establish
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                let node_id = announce_state.identity.node_id().clone();
+
+                // Broadcast shard announcements
+                let mut hosted_shards = Vec::new();
+                for entry in announce_state.model_registry.all_shard_entries() {
+                    let (shard_id, holders) = entry;
+                    if holders.contains(&node_id) {
+                        hosted_shards.push(shard_id);
+                    }
+                }
+
+                if !hosted_shards.is_empty() {
+                    let announce = crate::types::ShardAnnounce {
+                        node_id: node_id.clone(),
+                        shards: hosted_shards,
+                        timestamp: chrono::Utc::now(),
+                    };
+                    tracing::info!(
+                        shards = announce.shards.len(),
+                        "Broadcasting initial shard announcement"
+                    );
+                    let _ = announce_tx
+                        .send(NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(
+                            announce,
+                        )))
+                        .await;
+                }
+
+                // Broadcast our manifests
+                for manifest in announce_state.model_registry.models() {
+                    if manifest.publisher == node_id {
+                        let _ = announce_tx
+                            .send(NetworkCommand::Broadcast(SwarmMessage::ModelManifest(
+                                manifest,
+                            )))
+                            .await;
+                    }
+                }
+            });
+        }
 
         // Open browser on first start if configured
         if self.config.ui.open_browser_on_start {
@@ -674,7 +740,7 @@ async fn dispatch_network_messages(
                             }
                             // Process shard announcements from peers
                             SwarmMessage::ShardAnnounce(announce) => {
-                                tracing::debug!(
+                                tracing::info!(
                                     node_id = %announce.node_id,
                                     shards = announce.shards.len(),
                                     "Received shard announce from peer"
@@ -781,18 +847,8 @@ pub fn generate_and_register_local_manifest(
         }
     };
 
-    // If we have GGUF metadata, compute per-shard layer ranges so the scheduler
-    // can assign correct layers to nodes that only hold certain shards.
-    if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
-        for shard in &mut shards {
-            let indices = [shard.index];
-            let (ls, le) =
-                crate::inference::split::compute_local_layer_range(&meta, SHARD_SIZE, &indices);
-            shard.layer_range = (ls as u32, le as u32);
-        }
-    }
-
     // Extract model metadata from GGUF header (num_layers, architecture, etc.)
+    // This MUST happen before computing per-shard layer ranges below.
     let (num_layers, architecture) =
         match crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
             Ok(meta) => {
@@ -803,6 +859,19 @@ pub fn generate_and_register_local_manifest(
                     embedding_length = meta.embedding_length,
                     "Extracted GGUF metadata for manifest"
                 );
+                // Assign layer ranges proportionally across shards.
+                // Simple linear distribution: divide num_layers evenly.
+                // This avoids gaps caused by tensor byte offsets crossing shard boundaries.
+                let n = shards.len() as u32;
+                let layers_per_shard = num_layers / n;
+                let remainder = num_layers % n;
+                let mut layer_cursor = 0u32;
+                for shard in &mut shards {
+                    let extra = if shard.index < remainder { 1 } else { 0 };
+                    let shard_layers = layers_per_shard + extra;
+                    shard.layer_range = (layer_cursor, layer_cursor + shard_layers);
+                    layer_cursor += shard_layers;
+                }
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
                 (num_layers, crate::types::ModelArchitecture::Llama)
@@ -856,8 +925,17 @@ pub fn generate_and_register_local_manifest(
         .model_registry
         .register_manifest(manifest.clone());
 
-    // Register ourselves as holder of ALL shards
+    // Register ourselves as holder of our shards.
+    // If --shards range is set, only claim those indices; otherwise claim all.
+    let shard_range = shared_state.config.inference.shard_range;
     for shard_info in &manifest.shards {
+        let in_range = match shard_range {
+            Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
+            None => true,
+        };
+        if !in_range {
+            continue;
+        }
         let shard_id = crate::types::ShardId {
             model_id: model_id.clone(),
             index: shard_info.index,
@@ -870,6 +948,14 @@ pub fn generate_and_register_local_manifest(
             .entry(shard_id)
             .or_default()
             .push(node_id.clone());
+    }
+    if let Some((s, e)) = shard_range {
+        tracing::info!(
+            model = %model_id,
+            shard_start = s,
+            shard_end = e,
+            "Registered as holder of shard range only"
+        );
     }
 
     // Persist to DB

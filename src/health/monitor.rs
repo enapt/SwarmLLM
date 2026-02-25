@@ -85,21 +85,24 @@ impl HealthMonitor {
     async fn broadcast_capabilities(&self) {
         let node_id = self.shared_state.identity.node_id().clone();
 
-        // Gather hosted model info
+        // Gather hosted shards from model_registry (which respects --shards range).
         let mut hosted_shards = Vec::new();
-        if let Some(info) = self.shared_state.loaded_model_info.read().await.as_ref() {
-            // Represent the locally loaded model as a shard
-            hosted_shards.push(crate::types::ShardId {
-                model_id: crate::types::ModelId(info.name.clone()),
-                index: 0,
-            });
-        }
-
-        // Also include actual shards from registry
+        let mut seen = std::collections::HashSet::new();
         for entry in self.shared_state.model_registry.all_shard_entries() {
             let (shard_id, holders) = entry;
-            if holders.contains(&node_id) {
+            if holders.contains(&node_id) && seen.insert(shard_id.clone()) {
                 hosted_shards.push(shard_id);
+            }
+        }
+
+        // If no shards from registry but we have a loaded model (and no shard_range),
+        // represent the full model as shard index 0 for backward compatibility.
+        if hosted_shards.is_empty() && self.shared_state.config.inference.shard_range.is_none() {
+            if let Some(info) = self.shared_state.loaded_model_info.read().await.as_ref() {
+                hosted_shards.push(crate::types::ShardId {
+                    model_id: crate::types::ModelId(info.name.clone()),
+                    index: 0,
+                });
             }
         }
 

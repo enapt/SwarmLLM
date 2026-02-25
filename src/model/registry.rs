@@ -29,11 +29,12 @@ impl ModelRegistry {
     }
 
     /// Record that a node holds a specific shard.
+    /// Deduplicates — won't add the same node_id twice.
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
-        self.shard_holders
-            .entry(shard_id)
-            .or_default()
-            .push(node_id);
+        let mut holders = self.shard_holders.entry(shard_id).or_default();
+        if !holders.contains(&node_id) {
+            holders.push(node_id);
+        }
     }
 
     /// Remove a node from shard holders (e.g., node went offline).

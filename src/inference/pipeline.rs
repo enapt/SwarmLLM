@@ -223,8 +223,21 @@ impl PipelineExecutor {
                     .pending_layer_results
                     .insert(request_id, tx);
 
+                // Look up the peer's libp2p PeerId bytes from the peer registry.
+                // NodeId (Ed25519 key) != PeerId (libp2p identity), so we need the mapping.
+                let target_peer_bytes = self
+                    .shared_state
+                    .peer_registry
+                    .get(&segment.node_id)
+                    .and_then(|p| p.peer_id_bytes.clone())
+                    .ok_or_else(|| {
+                        SwarmError::Network(format!(
+                            "No peer_id_bytes for node {}",
+                            segment.node_id
+                        ))
+                    })?;
+
                 // Send to remote node via directed tensor protocol
-                let target_peer_bytes = segment.node_id.0.to_vec();
                 self.network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,

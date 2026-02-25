@@ -44,6 +44,12 @@ struct Cli {
     /// Bootstrap peer multiaddr (e.g. /ip4/127.0.0.1/udp/8800/quic-v1)
     #[arg(long, global = true)]
     bootstrap: Vec<String>,
+
+    /// Only claim specific shards for split inference (e.g. "0-4" or "5-8").
+    /// When set, the node registers itself as holder of only these shards
+    /// instead of all shards, enabling distributed inference across nodes.
+    #[arg(long, global = true)]
+    shards: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -79,7 +85,7 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting SwarmLLM");
 
     // Load config
-    let config = Config::load_or_create(
+    let mut config = Config::load_or_create(
         cli.config.as_deref(),
         cli.port,
         cli.data_dir.as_deref(),
@@ -87,6 +93,20 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
         cli.gpu_layers,
         cli.bootstrap,
     )?;
+
+    // Parse --shards range (e.g. "0-4" → (0, 4))
+    if let Some(ref shard_str) = cli.shards {
+        if let Some((start, end)) = shard_str.split_once('-') {
+            if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {
+                config.inference.shard_range = Some((s, e));
+                tracing::info!(shard_start = s, shard_end = e, "Node claiming shard range");
+            } else {
+                anyhow::bail!("Invalid --shards format: expected 'START-END' (e.g. '0-4')");
+            }
+        } else {
+            anyhow::bail!("Invalid --shards format: expected 'START-END' (e.g. '0-4')");
+        }
+    }
 
     // Ensure data directory exists
     std::fs::create_dir_all(&config.node.data_dir)?;

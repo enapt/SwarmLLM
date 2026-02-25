@@ -326,7 +326,9 @@ async fn execute_request(
     let local_node_id = shared_state.identity.node_id().clone();
     let mut executor = shared_state.executor.lock().await;
 
-    if executor.is_loaded() {
+    // Only use local executor when the full model is loaded (not in split/shard mode)
+    let is_split_mode = shared_state.config.inference.shard_range.is_some();
+    if executor.is_loaded() && !is_split_mode {
         // Local-only inference path (single node has the model loaded)
         tracing::info!(
             request_id = %request.id,

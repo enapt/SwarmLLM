@@ -199,44 +199,53 @@ pub struct TensorLocation {
 impl GgufTensorMeta {
     /// Extract tensor metadata from a GGUF file header.
     /// Only needs to read the header, not the full file.
+    /// Supports multiple architecture prefixes (llama, qwen2, mistral, etc.)
     pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
         let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
         let ct = gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
 
-        let md_get = |s: &str| {
+        // Detect architecture prefix from general.architecture metadata
+        let arch = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "llama".to_string());
+
+        let md_get = |suffix: &str| {
+            let key = format!("{arch}.{suffix}");
             ct.metadata
-                .get(s)
-                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {s}")))
+                .get(&key)
+                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
 
-        let head_count = md_get("llama.attention.head_count")?
+        let head_count = md_get("attention.head_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
-        let head_count_kv = md_get("llama.attention.head_count_kv")?
+        let head_count_kv = md_get("attention.head_count_kv")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
-        let block_count = md_get("llama.block_count")?
+        let block_count = md_get("block_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
-        let embedding_length = md_get("llama.embedding_length")?
+        let embedding_length = md_get("embedding_length")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
-        let rope_dim = md_get("llama.rope.dimension_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
-            as usize;
-        let rms_norm_eps = md_get("llama.attention.layer_norm_rms_epsilon")?
+        // rope.dimension_count may not exist for all architectures — derive from head_dim
+        let rope_dim = md_get("rope.dimension_count")
+            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .unwrap_or((embedding_length / head_count) as u32) as usize;
+        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as f64;
         let rope_freq_base = ct
             .metadata
-            .get("llama.rope.freq_base")
+            .get(&format!("{arch}.rope.freq_base"))
             .and_then(|v| v.to_f32().ok())
             .unwrap_or(10000f32);
 
@@ -303,34 +312,42 @@ impl SplitModel {
 
         let device = Device::Cpu;
 
-        let md_get = |s: &str| {
+        // Detect architecture prefix from GGUF metadata
+        let arch = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "llama".to_string());
+
+        let md_get = |suffix: &str| {
+            let key = format!("{arch}.{suffix}");
             ct.metadata
-                .get(s)
-                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {s}")))
+                .get(&key)
+                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
         };
 
-        let head_count = md_get("llama.attention.head_count")?
+        let head_count = md_get("attention.head_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let head_count_kv = md_get("llama.attention.head_count_kv")?
+        let head_count_kv = md_get("attention.head_count_kv")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let block_count = md_get("llama.block_count")?
+        let block_count = md_get("block_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let embedding_length = md_get("llama.embedding_length")?
+        let embedding_length = md_get("embedding_length")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))?
             as usize;
-        let rope_dim = md_get("llama.rope.dimension_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let rms_norm_eps = md_get("llama.attention.layer_norm_rms_epsilon")?
+        let rope_dim = md_get("rope.dimension_count")
+            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .unwrap_or((embedding_length / head_count) as u32) as usize;
+        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
         let rope_freq_base = ct
             .metadata
-            .get("llama.rope.freq_base")
+            .get(&format!("{arch}.rope.freq_base"))
             .and_then(|v| v.to_f32().ok())
             .unwrap_or(10000f32);
 

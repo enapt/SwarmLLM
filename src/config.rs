@@ -119,6 +119,10 @@ pub struct InferenceConfig {
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
+    /// Optional shard range for split inference (e.g. "0-4").
+    /// When set, the node only claims these shard indices instead of all shards.
+    #[serde(skip)]
+    pub shard_range: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -322,6 +326,7 @@ impl Default for InferenceConfig {
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
             speculative_gamma: default_speculative_gamma(),
+            shard_range: None,
         }
     }
 }
