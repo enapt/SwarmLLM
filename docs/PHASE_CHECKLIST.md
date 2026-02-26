@@ -141,7 +141,30 @@
 - [x] `src/api/pool.rs` — 8 pool management endpoints
 - [x] Security hardening: path traversal fix, SSRF blocklist, CORS lockdown, key permissions, input validation
 - [x] Bug fixes: failover peer_id, pending_layer_results leak, OOM cap, shutdown DB flush, credit race
+- [x] Nonce overflow fix, pool signature verification (credit forward, invitation, gossip state)
+- [x] Rate limiter ordering fix, gossip key derivation from bootstrap addresses, pool name validation
+- [x] Shutdown endpoint restricted to localhost, CORS restricted to specific methods/headers
 
 **Acceptance test**: Two nodes. Set nicknames. Create device pool. Member earns credits that forward to owner. Tensor traffic is encrypted. Leaderboard shows pool ranking.
 
 > **Note**: Self-governance was removed. Issues, proposals, releases, and project management are handled via the GitHub repository.
+
+---
+
+## Phase 8: Production Hardening
+
+**Goal**: API authentication, dynamic EOS tokens, credit system integrity, performance optimizations.
+
+- [x] `src/api/middleware.rs` — Bearer token authentication middleware with exempt paths
+- [x] `src/config.rs` — `ApiConfig` with `api_key` field, auto-generation on first run
+- [x] `GET /api/admin/api-key` — Retrieve current API key for dashboard display
+- [x] EOS tokens loaded from GGUF metadata (`tokenizer.ggml.eos_token_id`) with architecture fallbacks
+- [x] `eos_tokens: Vec<u32>` in `SplitModel` and `LoadedModelInfo` — no more hardcoded Qwen2 tokens
+- [x] `acquisition_progress` DashMap cleanup: HealthMonitor removes Complete/Failed entries after 1hr
+- [x] `apply_credit_direct()` helper in `credit/ledger.rs` — proper balance persistence for all credit ops
+- [x] Credit mutations in `router.rs` and `pipeline.rs` route through ledger with DB persistence
+- [x] `model_loaded: AtomicBool` in SharedState — lock-free readiness check, executor Mutex only for generation
+- [x] Queue drain via `tokio::sync::Notify` — zero-latency dispatch replacing 50ms fixed polling
+- [x] `AntiGaming` wired into CreditTransaction handler with periodic cleanup in HealthMonitor
+
+**Acceptance test**: API returns 401 without Bearer token. Different GGUF models use correct EOS tokens. Credit operations persist across restarts. Queue responds instantly to new requests.
