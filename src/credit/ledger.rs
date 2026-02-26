@@ -35,6 +35,8 @@ pub struct CreditLedger {
     shutdown_rx: watch::Receiver<bool>,
     /// Bucketed balances from other nodes, used for percentile estimation.
     peer_balances: Arc<RwLock<Vec<i64>>>,
+    /// Reference to SharedState for pool credit forwarding.
+    shared_state: Option<std::sync::Arc<crate::daemon::SharedState>>,
 }
 
 impl CreditLedger {
@@ -75,7 +77,13 @@ impl CreditLedger {
             network_tx,
             shutdown_rx,
             peer_balances,
+            shared_state: None,
         }
+    }
+
+    /// Set a shared state reference for pool credit forwarding.
+    pub fn set_shared_state(&mut self, shared_state: std::sync::Arc<crate::daemon::SharedState>) {
+        self.shared_state = Some(shared_state);
     }
 
     /// Get the current credit balance.
@@ -84,6 +92,8 @@ impl CreditLedger {
     }
 
     /// Earn credits for serving inference.
+    ///
+    /// If this node is a pool member (not owner), forwards credits to the pool owner.
     pub async fn earn_inference(
         &self,
         request_id: uuid::Uuid,
@@ -101,6 +111,13 @@ impl CreditLedger {
             request_id = %request_id,
             "Earned credits for inference serving"
         );
+
+        // Forward credits to pool owner if we're a member (not owner)
+        if let Some(ref ss) = self.shared_state {
+            if let Err(e) = crate::pool::forward::forward_credits_to_owner(ss, amount).await {
+                tracing::debug!(error = %e, "Pool credit forwarding skipped");
+            }
+        }
 
         Ok(amount)
     }

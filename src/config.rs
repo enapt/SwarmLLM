@@ -20,6 +20,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub updates: UpdateConfig,
+    #[serde(default)]
+    pub pool: PoolConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -193,6 +195,45 @@ fn default_check_interval_hours() -> u32 {
 
 fn default_keep_versions() -> u32 {
     3
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolConfig {
+    #[serde(default = "default_max_pool_size")]
+    pub max_pool_size: u32,
+    #[serde(default = "default_invitation_ttl_hours")]
+    pub invitation_ttl_hours: u32,
+    #[serde(default = "default_pool_rate_limit")]
+    pub rate_limit_per_hour: u32,
+    #[serde(default = "default_pool_gossip_interval")]
+    pub gossip_interval_secs: u64,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_pool_size: default_max_pool_size(),
+            invitation_ttl_hours: default_invitation_ttl_hours(),
+            rate_limit_per_hour: default_pool_rate_limit(),
+            gossip_interval_secs: default_pool_gossip_interval(),
+        }
+    }
+}
+
+fn default_max_pool_size() -> u32 {
+    10
+}
+
+fn default_invitation_ttl_hours() -> u32 {
+    24
+}
+
+fn default_pool_rate_limit() -> u32 {
+    3
+}
+
+fn default_pool_gossip_interval() -> u64 {
+    600
 }
 
 fn default_theme() -> String {

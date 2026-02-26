@@ -35,3 +35,9 @@ auto_update = "stable"         # "disabled", "stable", or "canary"
 check_interval_hours = 6
 auto_restart = true
 keep_versions = 3
+
+[pool]
+max_pool_size = 10             # Maximum devices in a single pool
+invitation_ttl_hours = 24      # How long an invitation stays valid
+rate_limit_per_hour = 3        # Max join/leave/invite operations per hour
+gossip_interval_secs = 600     # How often to gossip pool state (10 min)
