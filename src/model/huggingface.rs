@@ -45,11 +45,11 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
 
     // For each repo, look up the file tree to find GGUF files
     for repo in repos.iter().take(10) {
-        match fetch_gguf_files(&client, &repo.model_id).await {
+        match fetch_gguf_files(&client, &repo.id).await {
             Ok(files) => {
                 for file in files {
                     results.push(HfModelResult {
-                        repo_id: repo.model_id.clone(),
+                        repo_id: repo.id.clone(),
                         filename: file.rfilename.clone(),
                         size_bytes: file.size.unwrap_or(0),
                         downloads: repo.downloads.unwrap_or(0),
@@ -57,7 +57,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
                 }
             }
             Err(e) => {
-                tracing::debug!(repo = %repo.model_id, error = %e, "Failed to list files for repo");
+                tracing::debug!(repo = %repo.id, error = %e, "Failed to list files for repo");
             }
         }
     }
@@ -191,8 +191,7 @@ pub struct DownloadProgress {
 
 #[derive(Deserialize)]
 struct HfRepoInfo {
-    #[serde(rename = "modelId", alias = "id")]
-    model_id: String,
+    id: String,
     downloads: Option<u64>,
 }
 

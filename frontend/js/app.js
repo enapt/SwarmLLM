@@ -629,10 +629,18 @@ var SwarmLLM = (function() {
 
       try {
         var resp = await fetch('/api/admin/hf/search?q=' + encodeURIComponent(query));
-        var data = await resp.json();
         loading.classList.add('hidden');
 
-        if (!data || data.length === 0) {
+        if (!resp.ok) {
+          var errBody = await resp.text();
+          try { var errJson = JSON.parse(errBody); errBody = errJson.error ? errJson.error.message : errBody; } catch (e2) {}
+          results.innerHTML = '<div class="empty-state"><p>Search failed: ' + escapeHtml(errBody) + '</p></div>';
+          return;
+        }
+
+        var data = await resp.json();
+
+        if (!Array.isArray(data) || data.length === 0) {
           results.innerHTML = '<div class="empty-state"><p>No GGUF models found for "' + escapeHtml(query) + '"</p></div>';
           return;
         }
@@ -770,6 +778,7 @@ var SwarmLLM = (function() {
       }
       setup.currentStep++;
       setup.updateUI();
+      if (setup.currentStep === 3) setup.loadModelSelection();
       if (setup.currentStep === 4) setup.populateSummary();
     },
 
@@ -801,6 +810,36 @@ var SwarmLLM = (function() {
       connectors.forEach(function(c, idx) { c.classList.toggle('done', idx + 1 < setup.currentStep); });
       document.getElementById('btn-prev').classList.toggle('hidden', setup.currentStep === 1);
       document.getElementById('btn-next').textContent = setup.currentStep === 4 ? 'Start SwarmLLM' : 'Continue';
+    },
+
+    loadModelSelection: async function() {
+      var list = document.getElementById('setup-model-list');
+      list.innerHTML = '<p class="text-muted">Loading available models...</p>';
+      try {
+        var resp = await fetch('/api/admin/models');
+        var models = await resp.json();
+        if (!models || models.length === 0) {
+          list.innerHTML = '<div class="empty-state" style="padding:20px 0">' +
+            '<p style="margin-bottom:8px">No models available yet.</p>' +
+            '<p class="text-muted" style="font-size:0.85rem">You can download models from HuggingFace after setup using the <strong>Browse Models</strong> button on the dashboard.</p>' +
+            '</div>';
+        } else {
+          list.innerHTML = '';
+          models.forEach(function(m) {
+            var div = document.createElement('div');
+            div.style.cssText = 'padding:8px 10px;margin-bottom:6px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
+            var name = m.name || m.id;
+            if (name.length > 50) name = name.substring(0, 50) + '...';
+            var size = m.total_size_bytes ? formatBytes(m.total_size_bytes) : '';
+            var status = m.status === 'loaded' ? '<span class="text-green" style="font-size:0.8rem">Loaded</span>' : '<span class="text-muted" style="font-size:0.8rem">' + (m.status || 'available') + '</span>';
+            div.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center"><strong style="font-size:0.9rem">' + escapeHtml(name) + '</strong>' + status + '</div>' +
+              (size ? '<div class="text-muted" style="font-size:0.8rem">' + size + '</div>' : '');
+            list.appendChild(div);
+          });
+        }
+      } catch (e) {
+        list.innerHTML = '<div class="empty-state"><p>Could not load models. You can browse models after setup.</p></div>';
+      }
     },
 
     populateSummary: function() {

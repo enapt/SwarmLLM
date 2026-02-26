@@ -1039,9 +1039,10 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     let used_disk_mb = total_disk_mb.saturating_sub(available_disk_mb);
 
     // GPU info from llama.cpp device detection (set at startup)
+    // Falls back to nvidia-smi when gpu_info is None (e.g. non-CUDA build)
     let (gpu_name, gpu_vram_mb) = match &shared_state.gpu_info {
         Some(gpu) => (Some(gpu.name.clone()), Some(gpu.vram_total_mb)),
-        None => (None, None),
+        None => detect_gpu_nvidia_smi(),
     };
 
     serde_json::json!({
@@ -1055,4 +1056,29 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         "cpu_name": cpu_name,
         "cpu_cores": cpu_cores,
     })
+}
+
+/// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
+fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let line = text.trim();
+            if let Some((name, vram_str)) = line.split_once(',') {
+                let name = name.trim().to_string();
+                let vram_mb = vram_str.trim().parse::<u64>().ok();
+                (Some(name), vram_mb)
+            } else {
+                (None, None)
+            }
+        }
+        _ => (None, None),
+    }
 }

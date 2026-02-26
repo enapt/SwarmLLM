@@ -107,10 +107,7 @@ impl IntoResponse for ApiError {
             SwarmError::ProposalNotFound(_)
             | SwarmError::IssueNotFound(_)
             | SwarmError::ReleaseNotFound(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".into(),
-            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
         };
         (
             status,
