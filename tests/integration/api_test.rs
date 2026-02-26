@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-/// Spawn a test API server on a random available port. Returns the base URL.
-async fn spawn_test_server() -> String {
+/// Spawn a test API server on a random available port. Returns (base_url, api_key).
+async fn spawn_test_server() -> (String, String) {
     let config = swarmllm::config::Config::default();
     let identity = swarmllm::identity::Identity::generate();
     let db = swarmllm::storage::db::Database::open_temp().expect("temp db");
@@ -24,6 +24,8 @@ async fn spawn_test_server() -> String {
         executor.clone(),
         None,
     );
+
+    let api_key = shared_state.api_key.clone();
 
     let state = swarmllm::api::server::AppState {
         config,
@@ -47,12 +49,25 @@ async fn spawn_test_server() -> String {
     // Small delay to let server bind
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    format!("http://127.0.0.1:{port}")
+    (format!("http://127.0.0.1:{port}"), api_key)
+}
+
+/// Create a reqwest client with the Bearer token pre-configured.
+fn auth_client(api_key: &str) -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+    );
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
-    let base = spawn_test_server().await;
+    let (base, _key) = spawn_test_server().await;
     let resp = reqwest::get(format!("{base}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
@@ -60,8 +75,13 @@ async fn health_endpoint_returns_ok() {
 
 #[tokio::test]
 async fn status_endpoint_returns_json() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/v1/status")).await.unwrap();
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/v1/status"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -71,8 +91,13 @@ async fn status_endpoint_returns_json() {
 
 #[tokio::test]
 async fn models_endpoint_returns_empty_list() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/v1/models")).await.unwrap();
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -82,8 +107,8 @@ async fn models_endpoint_returns_empty_list() {
 
 #[tokio::test]
 async fn chat_completions_without_model_returns_503() {
-    let base = spawn_test_server().await;
-    let client = reqwest::Client::new();
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
     let resp = client
         .post(format!("{base}/v1/chat/completions"))
         .json(&serde_json::json!({
@@ -104,8 +129,11 @@ async fn chat_completions_without_model_returns_503() {
 
 #[tokio::test]
 async fn admin_stats_returns_hardware_info() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/admin/stats"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/admin/stats"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -118,8 +146,11 @@ async fn admin_stats_returns_hardware_info() {
 
 #[tokio::test]
 async fn admin_credits_returns_tier() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/admin/credits"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/admin/credits"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -131,8 +162,11 @@ async fn admin_credits_returns_tier() {
 
 #[tokio::test]
 async fn admin_peers_returns_empty_array() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/admin/peers"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/admin/peers"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -143,7 +177,7 @@ async fn admin_peers_returns_empty_array() {
 
 #[tokio::test]
 async fn root_redirects_to_admin() {
-    let base = spawn_test_server().await;
+    let (base, _key) = spawn_test_server().await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -162,7 +196,7 @@ async fn root_redirects_to_admin() {
 
 #[tokio::test]
 async fn admin_dashboard_serves_html() {
-    let base = spawn_test_server().await;
+    let (base, _key) = spawn_test_server().await;
     let resp = reqwest::get(format!("{base}/admin")).await.unwrap();
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
@@ -171,8 +205,11 @@ async fn admin_dashboard_serves_html() {
 
 #[tokio::test]
 async fn identity_nickname_get_returns_anonymous() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/identity/nickname"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/identity/nickname"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -183,8 +220,11 @@ async fn identity_nickname_get_returns_anonymous() {
 
 #[tokio::test]
 async fn identity_leaderboard_returns_ok() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/identity/leaderboard"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/identity/leaderboard"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -196,8 +236,11 @@ async fn identity_leaderboard_returns_ok() {
 
 #[tokio::test]
 async fn pool_state_returns_null_when_not_in_pool() {
-    let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/pool/state"))
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/pool/state"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -208,8 +251,8 @@ async fn pool_state_returns_null_when_not_in_pool() {
 
 #[tokio::test]
 async fn completions_without_model_returns_503() {
-    let base = spawn_test_server().await;
-    let client = reqwest::Client::new();
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
     let resp = client
         .post(format!("{base}/v1/completions"))
         .json(&serde_json::json!({
@@ -221,4 +264,42 @@ async fn completions_without_model_returns_503() {
         .unwrap();
 
     assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn unauthenticated_api_returns_401() {
+    let (base, _key) = spawn_test_server().await;
+    // No Bearer token — should get 401
+    let resp = reqwest::get(format!("{base}/v1/models")).await.unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], 401);
+}
+
+#[tokio::test]
+async fn wrong_api_key_returns_401() {
+    let (base, _key) = spawn_test_server().await;
+    let client = auth_client("wrong-key-12345");
+    let resp = client
+        .get(format!("{base}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn api_key_endpoint_returns_key() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .get(format!("{base}/api/admin/api-key"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["api_key"].as_str().unwrap(), key);
 }

@@ -65,6 +65,10 @@ pub enum SwarmError {
     #[error("Insufficient disk space: need {need_mb}MB, have {have_mb}MB")]
     InsufficientDisk { need_mb: u64, have_mb: u64 },
 
+    // Auth
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+
     // Config
     #[error("Configuration error: {0}")]
     Config(String),
@@ -96,6 +100,7 @@ impl IntoResponse for ApiError {
             SwarmError::InsufficientCredits { .. } => {
                 (StatusCode::TOO_MANY_REQUESTS, self.0.to_string())
             }
+            SwarmError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.0.to_string()),
             SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             SwarmError::InvalidNickname(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),

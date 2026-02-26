@@ -59,6 +59,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/hf/download", post(admin::hf_download))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
+        // API key (requires auth)
+        .route("/api/admin/api-key", get(admin::get_api_key))
         // Identity & Nickname
         .route(
             "/api/identity/nickname",
@@ -88,7 +90,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/admin") }))
         // Health check
         .route("/health", get(health))
-        // Middleware
+        // Middleware (layers run bottom-to-top: CORS first, then auth, then handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_middleware,
+        ))
         .layer(middleware::cors_layer())
         .with_state(state)
 }

@@ -36,6 +36,9 @@ check_interval_hours = 6
 auto_restart = true
 keep_versions = 3
 
+[api]
+# api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
+
 [pool]
 max_pool_size = 10             # Maximum devices in a single pool
 invitation_ttl_hours = 24      # How long an invitation stays valid

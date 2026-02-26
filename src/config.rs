@@ -22,6 +22,8 @@ pub struct Config {
     pub updates: UpdateConfig,
     #[serde(default)]
     pub pool: PoolConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -234,6 +236,13 @@ fn default_pool_rate_limit() -> u32 {
 
 fn default_pool_gossip_interval() -> u64 {
     600
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ApiConfig {
+    /// Bearer token for API authentication. If empty, one is auto-generated on first run.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 fn default_theme() -> String {
