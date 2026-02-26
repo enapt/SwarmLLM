@@ -46,28 +46,26 @@ impl CreditLedger {
         shutdown_rx: watch::Receiver<bool>,
         peer_balances: Arc<RwLock<Vec<i64>>>,
     ) -> Self {
-        // Try to restore persisted balance
+        // Restore persisted balance synchronously to avoid race condition.
+        // sled reads are fast (in-memory B-tree), so this is safe in constructor.
         let restored = db
             .get_json::<CreditBalance>(TREE_CREDITS, KEY_BALANCE)
             .ok()
             .flatten();
 
         if let Some(restored_balance) = restored {
-            // Overwrite the in-memory balance with persisted data
-            let balance_clone = balance.clone();
-            let node_id_clone = node_id.clone();
-            tokio::spawn(async move {
-                let mut bal = balance_clone.write().await;
-                // Only restore if it's for our node
-                if restored_balance.node_id == node_id_clone {
-                    *bal = restored_balance;
+            if restored_balance.node_id == node_id {
+                // Use try_write to avoid blocking if somehow locked;
+                // fall back to best-effort if lock not available immediately.
+                if let Ok(mut bal) = balance.try_write() {
                     tracing::info!(
-                        balance = bal.balance,
-                        lifetime_earned = bal.lifetime_earned,
+                        balance = restored_balance.balance,
+                        lifetime_earned = restored_balance.lifetime_earned,
                         "Restored credit balance from database"
                     );
+                    *bal = restored_balance;
                 }
-            });
+            }
         }
 
         Self {

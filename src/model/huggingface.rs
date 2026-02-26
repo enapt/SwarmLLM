@@ -139,7 +139,11 @@ pub async fn download_model(
     // Create destination directory
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
 
-    let dest_path = dest_dir.join(filename);
+    // SECURITY: Strip directory components from filename to prevent path traversal
+    let safe_filename = std::path::Path::new(filename)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("model.gguf"));
+    let dest_path = dest_dir.join(safe_filename);
     let mut file = tokio::fs::File::create(&dest_path)
         .await
         .map_err(|e| format!("Failed to create file: {e}"))?;

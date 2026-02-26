@@ -54,7 +54,24 @@ impl Identity {
                 std::fs::create_dir_all(parent).map_err(SwarmError::Io)?;
             }
 
-            std::fs::write(&key_path, identity.signing_key.to_bytes()).map_err(SwarmError::Io)?;
+            // SECURITY: Write key file with restricted permissions (owner-only)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&key_path)
+                    .map_err(SwarmError::Io)?;
+                file.write_all(&identity.signing_key.to_bytes()).map_err(SwarmError::Io)?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::write(&key_path, identity.signing_key.to_bytes()).map_err(SwarmError::Io)?;
+            }
             tracing::info!(node_id = %identity.node_id, "Generated new identity");
             Ok(identity)
         }
@@ -85,8 +102,18 @@ impl Identity {
     }
 
     /// Get the raw signing key bytes (for libp2p keypair conversion).
-    pub fn signing_key_bytes(&self) -> [u8; 32] {
+    pub(crate) fn signing_key_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
+    }
+
+    /// Derive an X25519 static secret from this identity's Ed25519 signing key.
+    pub fn x25519_static_secret(&self) -> x25519_dalek::StaticSecret {
+        crate::crypto::session::ed25519_to_x25519_secret(&self.signing_key.to_bytes())
+    }
+
+    /// Derive the X25519 public key for this identity.
+    pub fn x25519_public_key(&self) -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(&self.x25519_static_secret())
     }
 }
 

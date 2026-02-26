@@ -4,6 +4,13 @@ use std::path::{Path, PathBuf};
 use crate::error::SwarmError;
 use crate::types::{ModelId, ShardInfo};
 
+/// Sanitize a path component to prevent path traversal attacks.
+/// Strips directory separators and rejects `..` sequences.
+fn sanitize_path_component(s: &str) -> String {
+    s.replace(['/', '\\'], "_")
+        .replace("..", "_")
+}
+
 /// Manages shard files on disk — loading, verification, and storage.
 pub struct ShardStore {
     data_dir: PathBuf,
@@ -18,9 +25,11 @@ impl ShardStore {
 
     /// Get the path to a specific shard file.
     pub fn shard_path(&self, model_id: &ModelId, index: u32) -> PathBuf {
+        // SECURITY: Sanitize model_id to prevent path traversal
+        let safe_id = sanitize_path_component(&model_id.0);
         self.data_dir
             .join("models")
-            .join(&model_id.0)
+            .join(&safe_id)
             .join(format!("shard_{index:03}.bin"))
     }
 

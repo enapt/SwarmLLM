@@ -304,13 +304,17 @@ impl PipelineExecutor {
                     })?;
 
                 // Send to remote node via directed tensor protocol
-                self.network_tx
+                if let Err(_) = self.network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
                         forward,
                     })
                     .await
-                    .map_err(|_| SwarmError::Network("Failed to send LayerForward".to_string()))?;
+                {
+                    // Clean up the pending entry to prevent memory leak
+                    self.shared_state.pending_layer_results.remove(&request_id);
+                    return Err(SwarmError::Network("Failed to send LayerForward".to_string()));
+                }
 
                 // Wait for response via the oneshot channel (with timeout)
                 match Self::wait_for_result(rx).await {
@@ -322,6 +326,8 @@ impl PipelineExecutor {
                         activations = result.activations;
                     }
                     Err(_e) => {
+                        // Clean up the pending entry to prevent memory leak
+                        self.shared_state.pending_layer_results.remove(&request_id);
                         // Attempt failover to standby
                         return self
                             .failover_segment(idx, request_id, sequence_num, &activations, is_last)
@@ -564,7 +570,17 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                 };
 
-                let target_peer_bytes = backup.node_id.0.to_vec();
+                let target_peer_bytes = self
+                    .shared_state
+                    .peer_registry
+                    .get(&backup.node_id)
+                    .and_then(|p| p.peer_id_bytes.clone())
+                    .ok_or_else(|| {
+                        SwarmError::Network(format!(
+                            "No peer_id_bytes for backup node {}",
+                            backup.node_id
+                        ))
+                    })?;
                 self.network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
@@ -631,22 +647,29 @@ fn decode_bpe_text(text: &str) -> String {
 
 /// Reverse the GPT-2 byte-to-unicode mapping for a Unicode codepoint.
 fn gpt2_unicode_to_byte(cp: u32) -> u8 {
-    // Build the reverse mapping: the GPT-2 encoder assigns unicode codepoints
-    // to bytes that aren't in the "printable" set. The mapping is:
-    // printable bytes (33-126, 161-172, 174-255) → themselves
-    // remaining bytes 0-32, 127-160, 173 → 256, 257, ... (U+0100, U+0101, ...)
-    let mut non_printable = Vec::new();
-    for b in 0u16..=255 {
-        let is_printable =
-            (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
-        if !is_printable {
-            non_printable.push(b as u8);
+    use std::sync::OnceLock;
+    static LOOKUP: OnceLock<Vec<u8>> = OnceLock::new();
+
+    let table = LOOKUP.get_or_init(|| {
+        // Build the reverse mapping once: the GPT-2 encoder assigns unicode codepoints
+        // to bytes that aren't in the "printable" set. The mapping is:
+        // printable bytes (33-126, 161-172, 174-255) → themselves
+        // remaining bytes 0-32, 127-160, 173 → 256, 257, ... (U+0100, U+0101, ...)
+        let mut non_printable = Vec::new();
+        for b in 0u16..=255 {
+            let is_printable =
+                (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
+            if !is_printable {
+                non_printable.push(b as u8);
+            }
         }
-    }
+        non_printable
+    });
+
     // non_printable[i] maps to U+0100+i
     let offset = cp.wrapping_sub(0x0100) as usize;
-    if offset < non_printable.len() {
-        non_printable[offset]
+    if offset < table.len() {
+        table[offset]
     } else {
         b'?'
     }

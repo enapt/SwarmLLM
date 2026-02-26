@@ -1,12 +1,23 @@
 use axum::extract::Request;
+use axum::http::HeaderValue;
 use axum::middleware::Next;
 use axum::response::Response;
 use tower_http::cors::CorsLayer;
 
-/// Create a permissive CORS layer.
-/// SwarmLLM serves on localhost so permissive CORS is acceptable.
+/// Create a CORS layer restricted to localhost origins by default.
 pub fn cors_layer() -> CorsLayer {
-    CorsLayer::permissive()
+    let origins = [
+        "http://localhost:8800".parse::<HeaderValue>().unwrap(),
+        "http://127.0.0.1:8800".parse::<HeaderValue>().unwrap(),
+        "http://localhost:8801".parse::<HeaderValue>().unwrap(),
+        "http://127.0.0.1:8801".parse::<HeaderValue>().unwrap(),
+        "http://localhost:8802".parse::<HeaderValue>().unwrap(),
+        "http://127.0.0.1:8802".parse::<HeaderValue>().unwrap(),
+    ];
+    CorsLayer::new()
+        .allow_origin(origins.to_vec())
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
 }
 
 /// Request logging middleware using tracing.

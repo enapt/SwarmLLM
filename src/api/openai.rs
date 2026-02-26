@@ -60,13 +60,16 @@ impl ChatCompletionRequest {
             None => vec![],
         };
         SamplingParams {
-            temperature: self.temperature,
-            top_p: self.top_p,
+            // Clamp temperature to [0.0, 2.0] to prevent invalid values
+            temperature: self.temperature.clamp(0.0, 2.0),
+            // Clamp top_p to (0.0, 1.0]
+            top_p: self.top_p.clamp(f32::EPSILON, 1.0),
             top_k: 40,
-            max_tokens: self.max_tokens,
+            // Clamp max_tokens to a reasonable range
+            max_tokens: self.max_tokens.min(32768),
             stop,
-            frequency_penalty: self.frequency_penalty,
-            presence_penalty: self.presence_penalty,
+            frequency_penalty: self.frequency_penalty.clamp(-2.0, 2.0),
+            presence_penalty: self.presence_penalty.clamp(-2.0, 2.0),
         }
     }
 }
@@ -333,14 +336,33 @@ fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
             }
         }
         if let (Some(ip_str), Some(port_str)) = (ip, port) {
-            // Skip non-routable addresses (10.255.x.x) but allow localhost and LAN
-            if ip_str.starts_with("10.255.") {
+            // SECURITY: Block RFC-1918 private ranges, loopback, and link-local
+            // to prevent SSRF. Only allow routable peer addresses.
+            if is_private_ip(ip_str) {
                 continue;
             }
             return Some(format!("http://{}:{}", ip_str, port_str));
         }
     }
     None
+}
+
+/// Check if an IP address string is in a private/reserved range (SSRF protection).
+fn is_private_ip(ip: &str) -> bool {
+    if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+        let octets = addr.octets();
+        return octets[0] == 10                                              // 10.0.0.0/8
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))         // 172.16.0.0/12
+            || (octets[0] == 192 && octets[1] == 168)                       // 192.168.0.0/16
+            || octets[0] == 127                                             // 127.0.0.0/8
+            || (octets[0] == 169 && octets[1] == 254)                       // 169.254.0.0/16
+            || octets[0] == 0;                                              // 0.0.0.0/8
+    }
+    if let Ok(addr) = ip.parse::<std::net::Ipv6Addr>() {
+        return addr.is_loopback()                                           // ::1
+            || (addr.segments()[0] & 0xfe00) == 0xfc00;                     // fc00::/7
+    }
+    true // block unparseable addresses
 }
 
 /// Forward a chat completion request to a peer's HTTP API.

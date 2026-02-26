@@ -29,6 +29,9 @@ pub const TOPIC_CREDITS: &str = "swarm/credits";
 /// GossipSub topic for network health.
 pub const TOPIC_HEALTH: &str = "swarm/health";
 
+/// GossipSub topic for identity/nickname announcements.
+pub const TOPIC_IDENTITY: &str = "swarm/identity";
+
 /// Codec for SwarmLLM request/response protocol using serde_json.
 #[derive(Debug, Clone, Default)]
 pub struct SwarmCodec;
@@ -276,6 +279,8 @@ impl request_response::Codec for TensorCodec {
 /// Tensor message type tag — first byte of every tensor protocol message.
 pub const TENSOR_TAG_FORWARD: u8 = 0x01;
 pub const TENSOR_TAG_RESULT: u8 = 0x02;
+/// Encrypted tensor message tag (activations encrypted, header fields are cleartext AAD).
+pub const TENSOR_TAG_ENCRYPTED: u8 = 0x10;
 
 /// Encode a LayerForward into a binary tensor envelope.
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
@@ -440,6 +445,11 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
             .map_err(|_| SwarmError::Network("Invalid num_tokens".into()))?,
     ) as usize;
 
+    // SECURITY: Cap num_tokens to prevent OOM from crafted messages
+    if num_tokens > 65536 {
+        return Err(SwarmError::Network("num_tokens exceeds maximum (65536)".into()));
+    }
+
     let tokens_end = 20 + num_tokens * 4;
     if data.len() < tokens_end + 1 {
         return Err(SwarmError::Network("LayerResult truncated".to_string()));
@@ -515,6 +525,119 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
 /// Encode an ACK response (empty payload marker).
 pub fn encode_ack() -> Vec<u8> {
     vec![0] // Single zero byte = ACK
+}
+
+// ---- Encrypted Tensor Encoding ----
+//
+// Wire format for TENSOR_TAG_ENCRYPTED (0x10):
+//   [0]        tag = 0x10
+//   [1..17]    request_id (UUID, 16 bytes) — cleartext AAD
+//   [17..21]   sequence_num (u32 LE) — cleartext AAD
+//   [21..25]   index_pos (u32 LE) — cleartext AAD
+//   [25]       format tag (0=FP16, 1=FP32, 2=INT8) — cleartext AAD
+//   [26..30]   sealed_len (u32 LE)
+//   [30..]     sealed activations (nonce + ciphertext + AEAD tag)
+//
+// The AAD for the AEAD is the header bytes [1..26] (uuid+seq+idx+fmt).
+
+/// Encode a LayerForward with encrypted activations.
+/// The `sealed_activations` should already be encrypted by the SessionManager.
+pub fn encode_layer_forward_encrypted(
+    forward: &LayerForward,
+    sealed_activations: Vec<u8>,
+) -> Result<Vec<u8>, SwarmError> {
+    let sealed_len = sealed_activations.len();
+    let total = 1 + 25 + 4 + sealed_len;
+    let mut buf = Vec::with_capacity(total);
+
+    buf.push(TENSOR_TAG_ENCRYPTED);
+    buf.extend_from_slice(forward.request_id.as_bytes());
+    buf.extend_from_slice(&forward.sequence_num.to_le_bytes());
+    buf.extend_from_slice(&forward.index_pos.to_le_bytes());
+    let fmt_tag: u8 = match forward.format {
+        TensorFormat::FP16 => 0,
+        TensorFormat::FP32 => 1,
+        TensorFormat::INT8 => 2,
+    };
+    buf.push(fmt_tag);
+    buf.extend_from_slice(&(sealed_len as u32).to_le_bytes());
+    buf.extend_from_slice(&sealed_activations);
+
+    Ok(buf)
+}
+
+/// Decode an encrypted tensor envelope.
+/// Returns the cleartext header fields (as a LayerForward with empty activations)
+/// plus the sealed activation bytes, along with the AAD bytes.
+/// The caller must decrypt the sealed bytes using the SessionManager.
+pub fn decode_layer_forward_encrypted(
+    data: &[u8],
+) -> Result<(LayerForward, Vec<u8>, Vec<u8>), SwarmError> {
+    // Skip tag byte if present
+    let data = if !data.is_empty() && data[0] == TENSOR_TAG_ENCRYPTED {
+        &data[1..]
+    } else {
+        data
+    };
+
+    // Header: uuid(16) + seq(4) + idx_pos(4) + fmt(1) + sealed_len(4) = 29
+    if data.len() < 29 {
+        return Err(SwarmError::Network(
+            "Encrypted tensor envelope too short".to_string(),
+        ));
+    }
+
+    let aad = data[..25].to_vec(); // uuid + seq + idx_pos + fmt
+
+    let request_id = uuid::Uuid::from_bytes(
+        data[0..16]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid UUID".into()))?,
+    );
+    let sequence_num = u32::from_le_bytes(
+        data[16..20]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid sequence_num".into()))?,
+    );
+    let index_pos = u32::from_le_bytes(
+        data[20..24]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid index_pos".into()))?,
+    );
+    let format = match data[24] {
+        0 => TensorFormat::FP16,
+        1 => TensorFormat::FP32,
+        2 => TensorFormat::INT8,
+        t => {
+            return Err(SwarmError::Network(format!(
+                "Unknown tensor format tag: {t}"
+            )))
+        }
+    };
+    let sealed_len = u32::from_le_bytes(
+        data[25..29]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid sealed_len".into()))?,
+    ) as usize;
+
+    if data.len() < 29 + sealed_len {
+        return Err(SwarmError::Network(
+            "Encrypted tensor data truncated".to_string(),
+        ));
+    }
+
+    let sealed = data[29..29 + sealed_len].to_vec();
+
+    let forward = LayerForward {
+        request_id,
+        sequence_num,
+        index_pos,
+        activations: vec![], // Will be filled after decryption
+        format,
+        sender_peer_bytes: None,
+    };
+
+    Ok((forward, sealed, aad))
 }
 
 // Serde impls for SwarmRequest/SwarmResponse

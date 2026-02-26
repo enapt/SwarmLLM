@@ -587,9 +587,13 @@ pub async fn shutdown_node(State(state): State<AppState>) -> Json<serde_json::Va
     // Signal all subsystems to shut down
     state.shared_state.shutdown();
 
-    // Give a moment for the response to send, then exit
-    tokio::spawn(async {
+    // Flush the database before exiting to prevent corruption
+    let db = state.shared_state.db.clone();
+    tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Err(e) = db.flush() {
+            tracing::error!(error = %e, "Failed to flush database on shutdown");
+        }
         std::process::exit(0);
     });
 

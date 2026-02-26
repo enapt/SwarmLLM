@@ -64,6 +64,18 @@ pub struct SharedState {
     >,
     /// GGUF tensor metadata for known models (extracted from GGUF header, stored in manifest).
     pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
+    /// Nickname registry: node_id -> signed nickname record.
+    pub nickname_registry: DashMap<NodeId, crate::identity::nickname::NicknameRecord>,
+    /// E2E encryption session manager for pairwise ECDH sessions.
+    pub session_manager: Arc<crate::crypto::SessionManager>,
+    /// Gossip message sealer with epoch-based group key.
+    pub gossip_sealer: Arc<crate::crypto::GossipSealer>,
+    /// Current pool state for this node (owner or member).
+    pub pool_state: RwLock<Option<crate::pool::types::PoolState>>,
+    /// Network-wide pool registry (pool_id → PoolState).
+    pub pool_registry: DashMap<crate::pool::types::PoolId, crate::pool::types::PoolState>,
+    /// Channel to send commands to the PoolManager task.
+    pub pool_tx: RwLock<Option<mpsc::Sender<crate::pool::types::PoolCommand>>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -79,7 +91,25 @@ impl SharedState {
 
         let model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
 
+        // Hydrate nickname registry from sled
+        let nickname_registry = DashMap::new();
+        let nick_store = crate::identity::nickname::NicknameStore::new(db.clone());
+        if let Ok(records) = nick_store.load_all() {
+            for record in records {
+                nickname_registry.insert(record.node_id.clone(), record);
+            }
+        }
+
         let node_id = identity.node_id().clone();
+
+        // Initialize E2E encryption subsystem
+        let session_manager = Arc::new(
+            crate::crypto::SessionManager::from_ed25519_key(&identity.signing_key_bytes()),
+        );
+        let gossip_sealer = Arc::new(
+            crate::crypto::GossipSealer::new(b"swarmllm-default-network"),
+        );
+
         let state = Arc::new(Self {
             config,
             identity,
@@ -104,6 +134,12 @@ impl SharedState {
             pending_layer_results: DashMap::new(),
             split_models: DashMap::new(),
             gguf_meta: DashMap::new(),
+            nickname_registry,
+            session_manager,
+            gossip_sealer,
+            pool_state: RwLock::new(None),
+            pool_registry: DashMap::new(),
+            pool_tx: RwLock::new(None),
             shutdown_tx,
         });
 
@@ -231,11 +267,13 @@ impl Daemon {
                             shared_state
                                 .model_registry
                                 .record_shard_holder(shard_id.clone(), node_id.clone());
-                            shared_state
+                            let mut holders = shared_state
                                 .shard_registry
                                 .entry(shard_id)
-                                .or_default()
-                                .push(node_id.clone());
+                                .or_default();
+                            if !holders.contains(&node_id) {
+                                holders.push(node_id.clone());
+                            }
                         }
                     }
                     // Load GGUF metadata for the model if we have a source path
@@ -299,11 +337,13 @@ impl Daemon {
                     shared_state
                         .model_registry
                         .record_shard_holder(shard_id.clone(), node_id.clone());
-                    shared_state
+                    let mut holders = shared_state
                         .shard_registry
                         .entry(shard_id)
-                        .or_default()
-                        .push(node_id);
+                        .or_default();
+                    if !holders.contains(&node_id) {
+                        holders.push(node_id);
+                    }
                 }
             }
             Err(e) => {
@@ -433,15 +473,35 @@ impl Daemon {
             }
         });
 
-        // Spawn API server (pass router_cmd_tx + acquisition_tx so API can submit requests)
+        // Spawn PoolManager (9th subsystem task)
+        let (pool_cmd_tx, pool_cmd_rx) =
+            mpsc::channel::<crate::pool::types::PoolCommand>(64);
+        {
+            *shared_state.pool_tx.write().await = Some(pool_cmd_tx);
+        }
+        let pool_manager = crate::pool::manager::PoolManager::new(
+            shared_state.clone(),
+            pool_cmd_rx,
+            network_tx.clone(),
+            shutdown_rx.clone(),
+        );
+        let pool_handle = tokio::spawn(async move {
+            if let Err(e) = pool_manager.run().await {
+                tracing::error!(error = %e, "PoolManager exited with error");
+            }
+        });
+
+        // Spawn API server (pass router_cmd_tx + acquisition_tx + network_tx so API can submit requests)
         let api_shared_state = shared_state.clone();
         let api_router_tx = router_cmd_tx.clone();
         let api_acquisition_tx = acquisition_tx.clone();
+        let api_network_tx = network_tx.clone();
         let api_handle = tokio::spawn(async move {
             if let Err(e) = crate::api::server::run_server_with_state(
                 api_shared_state,
                 api_router_tx,
                 api_acquisition_tx,
+                api_network_tx,
             )
             .await
             {
@@ -505,6 +565,15 @@ impl Daemon {
             });
         }
 
+        // Spawn key rotation task (evicts stale encryption sessions)
+        {
+            let rotation_sm = shared_state.session_manager.clone();
+            let rotation_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                crate::crypto::key_rotation::run_key_rotation(rotation_sm, rotation_shutdown).await;
+            });
+        }
+
         // Open browser on first start if configured
         if self.config.ui.open_browser_on_start {
             let url = format!("http://localhost:{}", self.config.node.listen_port);
@@ -546,6 +615,9 @@ impl Daemon {
             }
             result = acquisition_handle => {
                 tracing::error!(?result, "AcquisitionManager task exited");
+            }
+            result = pool_handle => {
+                tracing::error!(?result, "PoolManager task exited");
             }
             result = api_handle => {
                 tracing::error!(?result, "API server task exited");
@@ -752,6 +824,92 @@ async fn dispatch_network_messages(
                                     peer.last_seen = chrono::Utc::now();
                                 }
                             }
+                            // Nickname gossip from peers
+                            SwarmMessage::NicknameGossip(gossip) => {
+                                let record = &gossip.record;
+                                // Age check: reject messages older than 24 hours
+                                let age = chrono::Utc::now() - record.timestamp;
+                                if age > chrono::Duration::hours(24) {
+                                    tracing::debug!(
+                                        node_id = %record.node_id,
+                                        "Rejecting stale nickname gossip (>24h old)"
+                                    );
+                                } else if record.verify().is_err() {
+                                    tracing::warn!(
+                                        node_id = %record.node_id,
+                                        "Rejecting nickname gossip with invalid signature"
+                                    );
+                                } else {
+                                    // Timestamp-wins: only update if newer
+                                    let should_insert = match shared_state
+                                        .nickname_registry
+                                        .get(&record.node_id)
+                                    {
+                                        Some(existing) => record.timestamp > existing.timestamp,
+                                        None => true,
+                                    };
+                                    if should_insert {
+                                        tracing::info!(
+                                            node_id = %record.node_id,
+                                            nickname = %record.nickname,
+                                            "Accepted nickname from peer"
+                                        );
+                                        shared_state
+                                            .nickname_registry
+                                            .insert(record.node_id.clone(), record.clone());
+                                        // Persist
+                                        let store = crate::identity::nickname::NicknameStore::new(
+                                            shared_state.db.clone(),
+                                        );
+                                        if let Err(e) = store.put_record(record) {
+                                            tracing::warn!(error = %e, "Failed to persist nickname");
+                                        }
+                                    }
+                                }
+                            }
+                            // Route pool messages to the PoolManager
+                            SwarmMessage::PoolMessage(pool_msg) => {
+                                if let Some(ref tx) = *shared_state.pool_tx.read().await {
+                                    let cmd = match pool_msg {
+                                        crate::types::PoolMessage::Invitation(inv) => {
+                                            Some(crate::pool::types::PoolCommand::InboundInvitation {
+                                                invitation: inv,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::Acceptance(acc) => {
+                                            Some(crate::pool::types::PoolCommand::InboundAcceptance {
+                                                acceptance: acc,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::StateGossip(state) => {
+                                            Some(crate::pool::types::PoolCommand::PoolStateGossip {
+                                                state,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::CreditForward(fwd) => {
+                                            Some(crate::pool::types::PoolCommand::ProcessCreditForward {
+                                                forward: fwd,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::Removal(rem) => {
+                                            Some(crate::pool::types::PoolCommand::InboundRemoval {
+                                                removal: rem,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::MemberLeft { pool_id, node_id } => {
+                                            Some(crate::pool::types::PoolCommand::InboundMemberLeft {
+                                                pool_id,
+                                                node_id,
+                                            })
+                                        }
+                                    };
+                                    if let Some(cmd) = cmd {
+                                        if let Err(e) = tx.send(cmd).await {
+                                            tracing::warn!(error = %e, "Failed to route pool message");
+                                        }
+                                    }
+                                }
+                            }
                             // Other messages handled by NetworkManager
                             _ => {}
                         }
@@ -794,11 +952,13 @@ pub fn generate_and_register_local_manifest(
                 shared_state
                     .model_registry
                     .record_shard_holder(shard_id.clone(), node_id.clone());
-                shared_state
+                let mut holders = shared_state
                     .shard_registry
                     .entry(shard_id)
-                    .or_default()
-                    .push(node_id.clone());
+                    .or_default();
+                if !holders.contains(&node_id) {
+                    holders.push(node_id.clone());
+                }
             }
         }
         // Also load GGUF metadata if not already cached
@@ -932,11 +1092,13 @@ pub fn generate_and_register_local_manifest(
         shared_state
             .model_registry
             .record_shard_holder(shard_id.clone(), node_id.clone());
-        shared_state
+        let mut holders = shared_state
             .shard_registry
             .entry(shard_id)
-            .or_default()
-            .push(node_id.clone());
+            .or_default();
+        if !holders.contains(&node_id) {
+            holders.push(node_id.clone());
+        }
     }
     if let Some((s, e)) = shard_range {
         tracing::info!(
@@ -1258,7 +1420,21 @@ async fn handle_layer_forward(
         } else {
             // Decode step: activations are a single i64 token ID (8 bytes LE)
             let token_id = if forward.activations.len() >= 8 {
-                i64::from_le_bytes(forward.activations[..8].try_into().unwrap())
+                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        tracing::warn!("LayerForward activations too short for token ID");
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            "Invalid activation data",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                i64::from_le_bytes(bytes)
             } else {
                 0i64
             };

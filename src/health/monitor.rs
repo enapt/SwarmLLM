@@ -125,12 +125,25 @@ impl HealthMonitor {
                 .max(0) as u64
         };
 
+        // Populate real system metrics
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let ram_total_mb = (sys.total_memory() / (1024 * 1024)) as u64;
+        let ram_available_mb = (sys.available_memory() / (1024 * 1024)) as u64;
+
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let disk_available_mb: u64 = disks
+            .list()
+            .iter()
+            .map(|d| d.available_space() / (1024 * 1024))
+            .sum();
+
         let cap = crate::types::NodeCapability {
             node_id: node_id.clone(),
             gpu: gpu_info,
-            ram_total_mb: 0,
-            ram_available_mb: 0,
-            disk_available_mb: 0,
+            ram_total_mb,
+            ram_available_mb,
+            disk_available_mb,
             bandwidth_mbps: 0.0,
             hosted_shards: hosted_shards.clone(),
             max_contribution: crate::types::ContributionLevel::Moderate,

@@ -49,6 +49,11 @@ impl ModelManifest {
         let mut hasher = blake3::Hasher::new();
         hasher.update(self.id.0.as_bytes());
         hasher.update(self.name.as_bytes());
+        // Include publisher, license, architecture, quantization in hash
+        hasher.update(&self.publisher.0);
+        hasher.update(self.license.as_bytes());
+        hasher.update(format!("{:?}", self.architecture).as_bytes());
+        hasher.update(format!("{:?}", self.quantization).as_bytes());
         hasher.update(&self.num_layers.to_le_bytes());
         hasher.update(&self.total_size_bytes.to_le_bytes());
         hasher.update(&self.shard_count.to_le_bytes());
