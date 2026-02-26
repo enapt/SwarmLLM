@@ -128,8 +128,8 @@ impl HealthMonitor {
         // Populate real system metrics
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
-        let ram_total_mb = (sys.total_memory() / (1024 * 1024)) as u64;
-        let ram_available_mb = (sys.available_memory() / (1024 * 1024)) as u64;
+        let ram_total_mb = sys.total_memory() / (1024 * 1024);
+        let ram_available_mb = sys.available_memory() / (1024 * 1024);
 
         let disks = sysinfo::Disks::new_with_refreshed_list();
         let disk_available_mb: u64 = disks

@@ -304,16 +304,20 @@ impl PipelineExecutor {
                     })?;
 
                 // Send to remote node via directed tensor protocol
-                if let Err(_) = self.network_tx
+                if self
+                    .network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
                         forward,
                     })
                     .await
+                    .is_err()
                 {
                     // Clean up the pending entry to prevent memory leak
                     self.shared_state.pending_layer_results.remove(&request_id);
-                    return Err(SwarmError::Network("Failed to send LayerForward".to_string()));
+                    return Err(SwarmError::Network(
+                        "Failed to send LayerForward".to_string(),
+                    ));
                 }
 
                 // Wait for response via the oneshot channel (with timeout)

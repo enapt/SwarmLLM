@@ -22,10 +22,14 @@ pub struct NicknameRecord {
 
 impl NicknameRecord {
     /// Build the signing payload: `"swarmllm-nickname|{hex_node_id}|{nickname}|{timestamp}"`
-    pub fn signing_payload(node_id: &NodeId, nickname: &str, timestamp: &chrono::DateTime<chrono::Utc>) -> Vec<u8> {
+    pub fn signing_payload(
+        node_id: &NodeId,
+        nickname: &str,
+        timestamp: &chrono::DateTime<chrono::Utc>,
+    ) -> Vec<u8> {
         format!(
             "swarmllm-nickname|{}|{}|{}",
-            hex::encode(&node_id.0),
+            hex::encode(node_id.0),
             nickname,
             timestamp.to_rfc3339()
         )
@@ -66,17 +70,12 @@ impl NicknameRecord {
 }
 
 /// How a node presents itself on the network.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum VisibilityMode {
+    #[default]
     Anonymous,
     Nickname,
-}
-
-impl Default for VisibilityMode {
-    fn default() -> Self {
-        Self::Anonymous
-    }
 }
 
 /// Local identity preferences stored in sled.
@@ -107,13 +106,13 @@ impl NicknameStore {
 
     /// Save a nickname record to the database.
     pub fn put_record(&self, record: &NicknameRecord) -> Result<(), SwarmError> {
-        let key = hex::encode(&record.node_id.0);
+        let key = hex::encode(record.node_id.0);
         self.db.put_json(TREE_NICKNAMES, &key, record)
     }
 
     /// Remove a nickname record from the database.
     pub fn remove_record(&self, node_id: &NodeId) -> Result<(), SwarmError> {
-        let key = hex::encode(&node_id.0);
+        let key = hex::encode(node_id.0);
         let tree = self.db.tree(TREE_NICKNAMES)?;
         tree.remove(key)?;
         Ok(())
@@ -169,9 +168,9 @@ pub fn display_name(
     let nick = &record.nickname;
 
     // Check for collision: another node_id with the same nickname
-    let collision = registry.iter().any(|entry| {
-        entry.key() != node_id && entry.value().nickname == *nick
-    });
+    let collision = registry
+        .iter()
+        .any(|entry| entry.key() != node_id && entry.value().nickname == *nick);
 
     if collision {
         let suffix = &hex::encode(&node_id.0[..2]); // 4 hex chars

@@ -170,27 +170,40 @@ async fn admin_dashboard_serves_html() {
 }
 
 #[tokio::test]
-async fn governance_issues_empty_initially() {
+async fn identity_nickname_get_returns_anonymous() {
     let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/admin/issues"))
+    let resp = reqwest::get(format!("{base}/api/identity/nickname"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
-    assert!(body.is_empty());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["visibility"], "anonymous");
 }
 
 #[tokio::test]
-async fn governance_proposals_empty_initially() {
+async fn identity_leaderboard_returns_ok() {
     let base = spawn_test_server().await;
-    let resp = reqwest::get(format!("{base}/api/admin/proposals"))
+    let resp = reqwest::get(format!("{base}/api/identity/leaderboard"))
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
-    assert!(body.is_empty());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    // Should return valid JSON (array or object with entries)
+    assert!(body.is_array() || body.is_object());
+}
+
+#[tokio::test]
+async fn pool_state_returns_null_when_not_in_pool() {
+    let base = spawn_test_server().await;
+    let resp = reqwest::get(format!("{base}/api/pool/state"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["pool"].is_null());
 }
 
 #[tokio::test]
