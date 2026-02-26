@@ -277,6 +277,11 @@ pub struct ShardAnnounce {
 pub struct LayerForward {
     pub request_id: uuid::Uuid,
     pub sequence_num: u32,
+    /// The absolute position in the sequence for RoPE and KV-cache indexing.
+    /// For the prefill pass (seq_num=0) this is 0; for subsequent tokens it equals
+    /// the cumulative number of tokens already processed.
+    #[serde(default)]
+    pub index_pos: u32,
     pub activations: Vec<u8>,
     pub format: TensorFormat,
     /// Populated locally after receiving from the network — not serialized over the wire.

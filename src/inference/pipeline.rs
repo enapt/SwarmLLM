@@ -115,38 +115,43 @@ impl PipelineExecutor {
         // Build the initial prompt representation
         let prompt = build_chat_prompt(&self.request.messages);
         let prompt_bytes = prompt.as_bytes().to_vec();
-        let prompt_tokens = (prompt.len() / 4).max(1) as u32;
 
         let mut generated_tokens: Vec<u32> = Vec::new();
-        let mut generated_text = String::new();
         let mut finish_reason = "stop".to_string();
+
+        // Cumulative position for RoPE / KV-cache
+        let mut index_pos: usize = 0;
+        // Will be set after the first forward pass (once the split model is loaded with tokenizer)
+        let mut prompt_token_count: Option<usize> = None;
 
         // Token generation loop
         for seq_num in 0..max_tokens {
             let activations = if seq_num == 0 {
                 prompt_bytes.clone()
             } else {
-                // For subsequent tokens, send the last generated token as activation
-                let last_token = generated_tokens.last().copied().unwrap_or(0);
+                // For subsequent tokens, encode the last generated token ID as i64 LE bytes
+                // so the first segment can embed it directly.
+                let last_token = generated_tokens.last().copied().unwrap_or(0) as i64;
                 last_token.to_le_bytes().to_vec()
             };
 
             // Forward through each segment
             match self
-                .forward_through_segments(request_id, seq_num, activations)
+                .forward_through_segments(request_id, seq_num, index_pos, activations)
                 .await
             {
                 Ok(result) => {
-                    generated_tokens.extend(&result.token_ids);
-
-                    // Decode tokens (stub: use token IDs as ASCII chars)
-                    for &token_id in &result.token_ids {
-                        if token_id < 128 {
-                            generated_text.push(token_id as u8 as char);
-                        } else {
-                            generated_text.push_str(&format!("[{token_id}]"));
-                        }
+                    // After the first forward pass, the split model is loaded with its tokenizer.
+                    // Use it to compute the real prompt token count for correct KV-cache positioning.
+                    if seq_num == 0 {
+                        let ptc = self.compute_prompt_token_count(&prompt).await;
+                        index_pos = ptc;
+                        prompt_token_count = Some(ptc);
+                    } else {
+                        index_pos += 1;
                     }
+
+                    generated_tokens.extend(&result.token_ids);
 
                     if let Some(reason) = result.finish_reason {
                         finish_reason = match reason {
@@ -160,7 +165,6 @@ impl PipelineExecutor {
                     }
                 }
                 Err(e) => {
-                    // Pipeline error — try failover
                     tracing::warn!(
                         request_id = %request_id,
                         error = %e,
@@ -177,13 +181,71 @@ impl PipelineExecutor {
             finish_reason = "length".to_string();
         }
 
+        // Strip EOS tokens before decoding
+        let eos_tokens: &[u32] = &[151643, 151645, 2];
+        let clean_tokens: Vec<u32> = generated_tokens
+            .iter()
+            .copied()
+            .filter(|t| !eos_tokens.contains(t))
+            .collect();
+
+        // Decode generated token IDs to text using the split model's vocabulary
+        let generated_text = self.decode_tokens(&clean_tokens).await;
+
         Ok(InferenceOutput {
             request_id,
             content: generated_text,
-            prompt_tokens,
+            prompt_tokens: prompt_token_count.unwrap_or(prompt.len()) as u32,
             completion_tokens: generated_tokens.len() as u32,
             finish_reason,
         })
+    }
+
+    /// Compute prompt token count using BPE tokenizer if available, else byte-level count.
+    async fn compute_prompt_token_count(&self, prompt: &str) -> usize {
+        let model_id = &self.assignment.segments[0].shard_id.model_id;
+        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+            let model = model_ref.lock().await;
+            if let Some(tokenizer) = model.tokenizer() {
+                return tokenizer.encode(prompt).len();
+            }
+        }
+        prompt.len()
+    }
+
+    /// Decode token IDs to text using the GGUF vocabulary from the split model.
+    async fn decode_tokens(&self, token_ids: &[u32]) -> String {
+        let model_id = &self.assignment.segments[0].shard_id.model_id;
+        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+            let model = model_ref.lock().await;
+            if let Some(vocab) = model.vocab() {
+                // If we have a BPE tokenizer, use its byte decoder for proper decoding
+                if let Some(tokenizer) = model.tokenizer() {
+                    let mut bytes = Vec::new();
+                    for &id in token_ids {
+                        if let Some(token_str) = vocab.get(id as usize) {
+                            bytes.extend(tokenizer.decode_token(token_str));
+                        }
+                    }
+                    return String::from_utf8_lossy(&bytes).to_string();
+                }
+                // Fallback: raw vocab concatenation with GPT-2 byte decode
+                let mut raw = String::new();
+                for &id in token_ids {
+                    if let Some(token_str) = vocab.get(id as usize) {
+                        raw.push_str(token_str);
+                    } else {
+                        raw.push_str(&format!("[{id}]"));
+                    }
+                }
+                return decode_bpe_text(&raw);
+            }
+        }
+        // Last fallback: render token IDs
+        token_ids
+            .iter()
+            .map(|id| format!("[{id}]"))
+            .collect::<String>()
     }
 
     /// Forward activation data through all pipeline segments in order.
@@ -191,6 +253,7 @@ impl PipelineExecutor {
         &mut self,
         request_id: uuid::Uuid,
         sequence_num: u32,
+        index_pos: usize,
         initial_activations: Vec<u8>,
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
@@ -203,6 +266,7 @@ impl PipelineExecutor {
             let forward = LayerForward {
                 request_id,
                 sequence_num,
+                index_pos: index_pos as u32,
                 activations: activations.clone(),
                 format: TensorFormat::FP32,
                 sender_peer_bytes: None,
@@ -210,7 +274,9 @@ impl PipelineExecutor {
 
             // If this is the local node, process locally
             if segment.node_id == *self.shared_state.identity.node_id() {
-                let result = self.process_local_segment(segment, &activations).await?;
+                let result = self
+                    .process_local_segment(segment, sequence_num, index_pos, &activations)
+                    .await?;
                 if is_last {
                     return Ok(result);
                 }
@@ -277,6 +343,8 @@ impl PipelineExecutor {
     async fn process_local_segment(
         &self,
         segment: &PipelineSegment,
+        sequence_num: u32,
+        index_pos: usize,
         activation_bytes: &[u8],
     ) -> Result<LayerResult, SwarmError> {
         use crate::inference::split::{self, SplitModel};
@@ -345,30 +413,48 @@ impl PipelineExecutor {
 
         let mut split_model = split_model_ref.lock().await;
 
+        // Clear KV-cache at the start of a new request (prefill)
+        if sequence_num == 0 {
+            split_model.clear_kv_cache();
+        }
+
         let is_first = split_model.layer_start == 0;
         let is_last = split_model.layer_end == split_model.total_layers;
 
         // Convert activation bytes to a candle Tensor
         let input_tensor = if is_first {
-            // First segment: input is prompt text → tokenize
-            // For now, use the prompt string from the request
-            let prompt = build_chat_prompt(&self.request.messages);
-            // Simple byte-to-token mapping (placeholder tokenizer)
-            // In production, use the model's actual tokenizer
-            let token_ids: Vec<i64> = prompt.bytes().map(|b| b as i64).collect();
-            candle_core::Tensor::from_vec(
-                token_ids.clone(),
-                &[1, token_ids.len()],
-                &candle_core::Device::Cpu,
-            )
-            .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+            if sequence_num == 0 {
+                // Prefill: tokenize the full prompt using BPE tokenizer if available
+                let prompt = build_chat_prompt(&self.request.messages);
+                let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
+                    tokenizer.encode(&prompt)
+                } else {
+                    // Fallback: byte-level tokenization
+                    prompt.bytes().map(|b| b as i64).collect()
+                };
+                candle_core::Tensor::from_vec(
+                    token_ids.clone(),
+                    &[1, token_ids.len()],
+                    &candle_core::Device::Cpu,
+                )
+                .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+            } else {
+                // Decode step: activation_bytes contains a single i64 token ID (8 bytes LE)
+                let token_id = if activation_bytes.len() >= 8 {
+                    i64::from_le_bytes(activation_bytes[..8].try_into().unwrap())
+                } else {
+                    0i64
+                };
+                candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+            }
         } else {
             // Non-first segment: input is hidden states from previous segment
             split::bytes_to_tensor(activation_bytes)?
         };
 
-        // Run the forward pass
-        let output = split_model.forward(&input_tensor, 0)?;
+        // Run the forward pass with correct position
+        let output = split_model.forward(&input_tensor, index_pos)?;
 
         if is_last {
             // Last segment: output is logits → sample token
@@ -378,8 +464,9 @@ impl PipelineExecutor {
                 self.request.sampling_params.top_p,
             )?;
 
-            // Check for EOS (token 2 for many models, or specific stop tokens)
-            let finish = if token_id == 2 || token_id == 0 {
+            // EOS detection: 151643 (<|endoftext|>), 151645 (<|im_end|>) for Qwen2
+            // Generic EOS token 2 for Llama-family models
+            let finish = if token_id == 151643 || token_id == 151645 || token_id == 2 {
                 Some(NetworkFinishReason::Stop)
             } else {
                 None
@@ -458,6 +545,7 @@ impl PipelineExecutor {
                 let forward = LayerForward {
                     request_id,
                     sequence_num,
+                    index_pos: 0, // Failover doesn't track position precisely
                     activations: activations.to_vec(),
                     format: TensorFormat::FP16,
                     sender_peer_bytes: None,
@@ -488,6 +576,67 @@ impl PipelineExecutor {
                 )))
             }
         }
+    }
+}
+
+/// Decode BPE byte-level encoded text.
+/// GPT-2/Qwen2 BPE uses Unicode characters to represent bytes:
+/// - Ġ (U+0120) → space (0x20)
+/// - Ċ (U+010A) → newline (0x0A)
+/// - Other mapped bytes per GPT-2 byte encoder table
+fn decode_bpe_text(text: &str) -> String {
+    // GPT-2 byte encoder maps bytes 0-255 to Unicode chars.
+    // The printable ASCII range (33-126) and some others map to themselves.
+    // Others are shifted: byte 0x00 → U+0100 (Ā), 0x01 → U+0101 (ā), etc.
+    // Space (0x20) → U+0120 (Ġ), newline (0x0A) → U+010A (Ċ), etc.
+    let mut bytes = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        // Printable ASCII and some others map directly
+        match cp {
+            // Standard printable ASCII
+            33..=126 | 161..=172 | 174..=255 => {
+                bytes.push(cp as u8);
+            }
+            // GPT-2 mapped range: U+0100..U+01FF → bytes 0..255
+            0x0100..=0x01FF => {
+                // The GPT-2 byte encoder maps non-printable/special bytes to U+0100+offset
+                // We need to reverse this mapping
+                let byte_val = gpt2_unicode_to_byte(cp);
+                bytes.push(byte_val);
+            }
+            _ => {
+                // Fallback: try UTF-8 encoding of the character
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                bytes.extend_from_slice(s.as_bytes());
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// Reverse the GPT-2 byte-to-unicode mapping for a Unicode codepoint.
+fn gpt2_unicode_to_byte(cp: u32) -> u8 {
+    // Build the reverse mapping: the GPT-2 encoder assigns unicode codepoints
+    // to bytes that aren't in the "printable" set. The mapping is:
+    // printable bytes (33-126, 161-172, 174-255) → themselves
+    // remaining bytes 0-32, 127-160, 173 → 256, 257, ... (U+0100, U+0101, ...)
+    let mut non_printable = Vec::new();
+    for b in 0u16..=255 {
+        let is_printable = (33..=126).contains(&b)
+            || (161..=172).contains(&b)
+            || (174..=255).contains(&b);
+        if !is_printable {
+            non_printable.push(b as u8);
+        }
+    }
+    // non_printable[i] maps to U+0100+i
+    let offset = cp.wrapping_sub(0x0100) as usize;
+    if offset < non_printable.len() {
+        non_printable[offset]
+    } else {
+        b'?'
     }
 }
 

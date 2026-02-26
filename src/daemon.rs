@@ -745,6 +745,10 @@ async fn dispatch_network_messages(
                                     shards = announce.shards.len(),
                                     "Received shard announce from peer"
                                 );
+                                // Refresh last_seen so health monitor doesn't remove active peers
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&announce.node_id) {
+                                    peer.last_seen = chrono::Utc::now();
+                                }
                                 for shard_id in &announce.shards {
                                     shared_state.shard_registry
                                         .entry(shard_id.clone())
@@ -787,6 +791,7 @@ async fn dispatch_network_messages(
                                 );
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
                                     peer.capability = Some(cap.clone());
+                                    peer.last_seen = chrono::Utc::now();
                                 }
                             }
                             // Other messages handled by NetworkManager
@@ -1114,19 +1119,10 @@ async fn handle_layer_forward(
         return;
     }
 
-    // Use GgufTensorMeta to compute our layer range, or fall back to manifest layer_range
-    let (layer_start, layer_end, total_layers) = if let Some(meta) =
-        shared_state.gguf_meta.get(&model_id)
-    {
-        let shard_size = if manifest.shard_count > 0 {
-            manifest.total_size_bytes / manifest.shard_count as u64
-        } else {
-            manifest.total_size_bytes
-        };
-        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
-        (ls, le, meta.block_count)
-    } else if manifest.num_layers > 0 {
-        // Use shard layer_range from manifest
+    // Determine layer range from manifest shard layer_ranges (most reliable),
+    // falling back to byte-offset GgufTensorMeta computation if manifest lacks layer info.
+    let (layer_start, layer_end, total_layers) = if manifest.num_layers > 0 {
+        // Use shard layer_range from manifest — these are authoritative
         let mut ls = manifest.num_layers as usize;
         let mut le = 0usize;
         for shard_info in &manifest.shards {
@@ -1136,6 +1132,14 @@ async fn handle_layer_forward(
             }
         }
         (ls, le, manifest.num_layers as usize)
+    } else if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
+        let shard_size = if manifest.shard_count > 0 {
+            manifest.total_size_bytes / manifest.shard_count as u64
+        } else {
+            manifest.total_size_bytes
+        };
+        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
+        (ls, le, meta.block_count)
     } else {
         send_error_result(
             &network_tx,
@@ -1242,24 +1246,51 @@ async fn handle_layer_forward(
 
     // Convert activation bytes to a candle Tensor
     let input_tensor = if is_first {
-        // First segment: activations are the prompt text → tokenize
-        let prompt = String::from_utf8_lossy(&forward.activations);
-        let token_ids: Vec<i64> = prompt.bytes().map(|b| b as i64).collect();
-        match candle_core::Tensor::from_vec(
-            token_ids.clone(),
-            &[1, token_ids.len()],
-            &candle_core::Device::Cpu,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Tensor: {e}"),
-                )
-                .await;
-                return;
+        if forward.index_pos == 0 {
+            // Prefill: activations are the prompt text → tokenize with BPE if available
+            let prompt = String::from_utf8_lossy(&forward.activations);
+            let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
+                tokenizer.encode(&prompt)
+            } else {
+                prompt.bytes().map(|b| b as i64).collect()
+            };
+            match candle_core::Tensor::from_vec(
+                token_ids.clone(),
+                &[1, token_ids.len()],
+                &candle_core::Device::Cpu,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            // Decode step: activations are a single i64 token ID (8 bytes LE)
+            let token_id = if forward.activations.len() >= 8 {
+                i64::from_le_bytes(forward.activations[..8].try_into().unwrap())
+            } else {
+                0i64
+            };
+            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
             }
         }
     } else {
@@ -1278,8 +1309,13 @@ async fn handle_layer_forward(
         }
     };
 
+    // Clear KV-cache at the start of a new request (prefill)
+    if forward.sequence_num == 0 {
+        split_model.clear_kv_cache();
+    }
+
     // Run the forward pass
-    let output = match split_model.forward(&input_tensor, forward.sequence_num as usize) {
+    let output = match split_model.forward(&input_tensor, forward.index_pos as usize) {
         Ok(o) => o,
         Err(e) => {
             send_error_result(
@@ -1308,7 +1344,9 @@ async fn handle_layer_forward(
                 return;
             }
         };
-        let finish = if token_id == 2 || token_id == 0 {
+        // EOS detection: 151643 (<|endoftext|>), 151645 (<|im_end|>) for Qwen2
+        // Generic EOS token 2 for Llama-family models
+        let finish = if token_id == 151643 || token_id == 151645 || token_id == 2 {
             Some(crate::types::NetworkFinishReason::Stop)
         } else {
             None

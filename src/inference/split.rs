@@ -16,7 +16,263 @@ use candle_transformers::quantized_nn::RmsNorm;
 
 use crate::error::SwarmError;
 
-const MAX_SEQ_LEN: usize = 4096;
+const DEFAULT_MAX_SEQ_LEN: usize = 4096;
+
+// ── BPE Tokenizer from GGUF merges ──
+
+/// GPT-2/Qwen2 BPE tokenizer built from GGUF metadata.
+/// Implements proper pre-tokenization, byte-level encoding, and BPE merging.
+pub struct BpeTokenizer {
+    /// token string → token ID
+    token_to_id: HashMap<String, u32>,
+    /// Merge pair (left, right) → merge rank (lower = higher priority)
+    merge_ranks: HashMap<(String, String), usize>,
+    /// Byte → GPT-2 unicode character mapping
+    byte_encoder: [char; 256],
+    /// GPT-2 unicode char → byte reverse mapping
+    byte_decoder: HashMap<char, u8>,
+    /// Pre-tokenization regex pattern
+    pre_tok_re: fancy_regex::Regex,
+    /// Special tokens sorted by length descending (for matching)
+    special_tokens: Vec<(String, u32)>,
+}
+
+impl BpeTokenizer {
+    /// Build a BPE tokenizer from GGUF vocabulary tokens, merge rules,
+    /// and pre-tokenizer type.
+    fn from_gguf(tokens: &[String], merges_raw: &[String], pre_type: &str) -> Self {
+        let mut token_to_id = HashMap::with_capacity(tokens.len());
+        for (i, tok) in tokens.iter().enumerate() {
+            token_to_id.insert(tok.clone(), i as u32);
+        }
+
+        // Build merge rank lookup: (left, right) → rank
+        let mut merge_ranks = HashMap::with_capacity(merges_raw.len());
+        for (rank, line) in merges_raw.iter().enumerate() {
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                merge_ranks.insert((parts[0].to_string(), parts[1].to_string()), rank);
+            }
+        }
+
+        // Build GPT-2 byte encoder
+        let (byte_encoder, byte_decoder) = build_gpt2_byte_encoder();
+
+        // Pre-tokenization regex based on model type
+        let pattern = match pre_type {
+            "qwen2" => {
+                // Qwen2 pre-tokenization pattern (from HuggingFace tokenizers)
+                r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+            }
+            "gpt-2" | "gpt2" => {
+                r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+            }
+            _ => {
+                // Default fallback: split on whitespace boundaries
+                r"[^\s]+|\s+"
+            }
+        };
+        let pre_tok_re = fancy_regex::Regex::new(pattern)
+            .unwrap_or_else(|_| fancy_regex::Regex::new(r"[^\s]+|\s+").unwrap());
+
+        // Collect special tokens (e.g., <|im_start|>, <|im_end|>)
+        let mut special_tokens: Vec<(String, u32)> = token_to_id
+            .iter()
+            .filter(|(t, _)| t.starts_with("<|") && t.ends_with("|>"))
+            .map(|(t, &id)| (t.clone(), id))
+            .collect();
+        // Sort by length descending for longest-match-first
+        special_tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        Self {
+            token_to_id,
+            merge_ranks,
+            byte_encoder,
+            byte_decoder,
+            pre_tok_re,
+            special_tokens,
+        }
+    }
+
+    /// Encode a string into token IDs.
+    pub fn encode(&self, text: &str) -> Vec<i64> {
+        if text.is_empty() {
+            return vec![];
+        }
+
+        // 1. Split on special tokens first
+        let segments = self.split_special_tokens(text);
+        let mut all_ids = Vec::new();
+
+        for (segment, is_special) in &segments {
+            if *is_special {
+                if let Some(&id) = self.token_to_id.get(segment.as_str()) {
+                    all_ids.push(id as i64);
+                }
+            } else {
+                // 2. Pre-tokenize regular text
+                let pre_tokens = self.pre_tokenize(segment);
+                // 3. BPE encode each pre-token
+                for pre_tok in &pre_tokens {
+                    all_ids.extend(self.bpe_encode_word(pre_tok));
+                }
+            }
+        }
+
+        all_ids
+    }
+
+    /// Split text at special token boundaries.
+    fn split_special_tokens(&self, text: &str) -> Vec<(String, bool)> {
+        let mut result = Vec::new();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            // Check if remaining starts with any special token
+            let mut found = false;
+            for (special, _) in &self.special_tokens {
+                if remaining.starts_with(special.as_str()) {
+                    result.push((special.clone(), true));
+                    remaining = &remaining[special.len()..];
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Find next special token occurrence
+                let next_pos = self
+                    .special_tokens
+                    .iter()
+                    .filter_map(|(s, _)| remaining.find(s.as_str()))
+                    .min();
+                match next_pos {
+                    Some(pos) => {
+                        result.push((remaining[..pos].to_string(), false));
+                        remaining = &remaining[pos..];
+                    }
+                    None => {
+                        result.push((remaining.to_string(), false));
+                        remaining = "";
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Pre-tokenize text using the model's regex pattern.
+    fn pre_tokenize(&self, text: &str) -> Vec<String> {
+        let mut pieces = Vec::new();
+        let mut search_start = 0;
+        while search_start < text.len() {
+            match self.pre_tok_re.find_from_pos(text, search_start) {
+                Ok(Some(m)) => {
+                    pieces.push(m.as_str().to_string());
+                    search_start = m.end();
+                }
+                _ => break,
+            }
+        }
+        pieces
+    }
+
+    /// BPE encode a single pre-token word.
+    /// Converts bytes → GPT-2 unicode chars, then applies BPE merges.
+    fn bpe_encode_word(&self, word: &str) -> Vec<i64> {
+        // Convert each byte to its GPT-2 unicode character
+        let chars: Vec<String> = word
+            .bytes()
+            .map(|b| self.byte_encoder[b as usize].to_string())
+            .collect();
+
+        if chars.is_empty() {
+            return vec![];
+        }
+
+        // Single char: direct lookup
+        if chars.len() == 1 {
+            return vec![self
+                .token_to_id
+                .get(&chars[0])
+                .copied()
+                .unwrap_or(0) as i64];
+        }
+
+        // Apply BPE merges using the standard algorithm:
+        // Repeatedly find the highest-priority (lowest rank) merge pair and apply it.
+        let mut symbols = chars;
+        loop {
+            // Find the pair with the lowest merge rank
+            let mut best_rank = usize::MAX;
+            let mut best_idx = usize::MAX;
+            for i in 0..symbols.len() - 1 {
+                let pair = (symbols[i].clone(), symbols[i + 1].clone());
+                if let Some(&rank) = self.merge_ranks.get(&pair) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_idx = i;
+                    }
+                }
+            }
+
+            if best_idx == usize::MAX {
+                break; // No more merges applicable
+            }
+
+            // Apply the merge: combine symbols[best_idx] and symbols[best_idx+1]
+            let merged = format!("{}{}", symbols[best_idx], symbols[best_idx + 1]);
+            symbols[best_idx] = merged;
+            symbols.remove(best_idx + 1);
+
+            if symbols.len() == 1 {
+                break;
+            }
+        }
+
+        // Convert BPE tokens to IDs
+        symbols
+            .iter()
+            .map(|t| self.token_to_id.get(t).copied().unwrap_or(0) as i64)
+            .collect()
+    }
+
+    /// Decode a BPE token string back to UTF-8 bytes.
+    /// Reverses the GPT-2 unicode byte encoding.
+    pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
+        token_str
+            .chars()
+            .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
+            .collect()
+    }
+}
+
+/// Build the GPT-2 byte encoder mapping.
+/// Maps each byte (0-255) to a unicode character such that:
+/// - Printable bytes map to themselves (as unicode chars)
+/// - Non-printable bytes map to U+0100, U+0101, etc.
+fn build_gpt2_byte_encoder() -> ([char; 256], HashMap<char, u8>) {
+    let mut encoder = ['\0'; 256];
+    let mut decoder = HashMap::new();
+    let mut offset = 0u32;
+
+    for b in 0u16..=255 {
+        let is_printable = (33..=126).contains(&b)
+            || (161..=172).contains(&b)
+            || (174..=255).contains(&b);
+        if is_printable {
+            let ch = char::from_u32(b as u32).unwrap();
+            encoder[b as usize] = ch;
+            decoder.insert(ch, b as u8);
+        } else {
+            let ch = char::from_u32(256 + offset).unwrap();
+            encoder[b as usize] = ch;
+            decoder.insert(ch, b as u8);
+            offset += 1;
+        }
+    }
+
+    (encoder, decoder)
+}
 
 // ── Quantized MatMul wrapper ──
 
@@ -61,6 +317,10 @@ struct LayerWeights {
     attention_wk: QMatMul,
     attention_wv: QMatMul,
     attention_wo: QMatMul,
+    /// Qwen2 has QKV biases; for architectures without biases these are None.
+    attention_bq: Option<Tensor>,
+    attention_bk: Option<Tensor>,
+    attention_bv: Option<Tensor>,
     attention_norm: RmsNorm,
     mlp: Mlp,
     ffn_norm: RmsNorm,
@@ -71,6 +331,8 @@ struct LayerWeights {
     sin: Tensor,
     neg_inf: Tensor,
     kv_cache: Option<(Tensor, Tensor)>,
+    /// If true, use contiguous RoPE (rope); if false, use interleaved (rope_i).
+    use_rope_contiguous: bool,
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> CandleResult<Tensor> {
@@ -83,7 +345,11 @@ impl LayerWeights {
         let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
+        if self.use_rope_contiguous {
+            candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
+        } else {
+            candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
+        }
     }
 
     fn forward_attn(
@@ -93,16 +359,29 @@ impl LayerWeights {
         index_pos: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
-        let q = self.attention_wq.forward(x)?;
-        let k = self.attention_wk.forward(x)?;
-        let v = self.attention_wv.forward(x)?;
+        let mut q = self.attention_wq.forward(x)?;
+        let mut k = self.attention_wk.forward(x)?;
+        let mut v = self.attention_wv.forward(x)?;
+
+        // Apply QKV biases if present (Qwen2 has biases)
+        if let Some(ref bq) = self.attention_bq {
+            q = q.broadcast_add(bq)?;
+        }
+        if let Some(ref bk) = self.attention_bk {
+            k = k.broadcast_add(bk)?;
+        }
+        if let Some(ref bv) = self.attention_bv {
+            v = v.broadcast_add(bv)?;
+        }
 
         let q = q
             .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
         let k = k
             .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
         let v = v
             .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
             .transpose(1, 2)?
@@ -169,6 +448,10 @@ pub struct SplitModel {
     pub hidden_dim: usize,
     /// Device (CPU or CUDA).
     device: Device,
+    /// Vocabulary from GGUF (token ID → string), for decoding generated tokens.
+    vocabulary: Option<Vec<String>>,
+    /// BPE tokenizer built from GGUF merges table.
+    tokenizer: Option<BpeTokenizer>,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -279,6 +562,7 @@ impl GgufTensorMeta {
 fn precompute_freqs_cis(
     head_dim: usize,
     freq_base: f32,
+    max_seq_len: usize,
     device: &Device,
 ) -> CandleResult<(Tensor, Tensor)> {
     let theta: Vec<_> = (0..head_dim)
@@ -286,9 +570,9 @@ fn precompute_freqs_cis(
         .map(|i| 1f32 / freq_base.powf(i as f32 / head_dim as f32))
         .collect();
     let theta = Tensor::new(theta.as_slice(), device)?;
-    let idx_theta = Tensor::arange(0, MAX_SEQ_LEN as u32, device)?
+    let idx_theta = Tensor::arange(0, max_seq_len as u32, device)?
         .to_dtype(DType::F32)?
-        .reshape((MAX_SEQ_LEN, 1))?
+        .reshape((max_seq_len, 1))?
         .matmul(&theta.reshape((1, theta.elem_count()))?)?;
     Ok((idx_theta.cos()?, idx_theta.sin()?))
 }
@@ -310,7 +594,12 @@ impl SplitModel {
         let ct = gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF: {e}")))?;
 
-        let device = Device::Cpu;
+        let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+        if device.is_cuda() {
+            tracing::info!("Split model using CUDA GPU");
+        } else {
+            tracing::info!("Split model using CPU (no CUDA available)");
+        }
 
         // Detect architecture prefix from GGUF metadata
         let arch = ct
@@ -350,9 +639,15 @@ impl SplitModel {
             .get(&format!("{arch}.rope.freq_base"))
             .and_then(|v| v.to_f32().ok())
             .unwrap_or(10000f32);
+        let context_length = md_get("context_length")
+            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
+
+        // Determine RoPE variant: Qwen2 uses contiguous (split), Llama uses interleaved
+        let use_rope_contiguous = matches!(arch.as_str(), "qwen2" | "qwen3");
 
         let head_dim = embedding_length / head_count;
-        let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, &device)
+        let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
@@ -396,7 +691,8 @@ impl SplitModel {
             None
         };
 
-        // Load only the specified layer range
+        // Load only the specified layer range (capped at actual block count)
+        let layer_end = layer_end.min(block_count);
         let mut layers = Vec::with_capacity(layer_end - layer_start);
         for layer_idx in layer_start..layer_end {
             let prefix = format!("blk.{layer_idx}");
@@ -421,6 +717,27 @@ impl SplitModel {
                 .map_err(|e| {
                     SwarmError::Internal(format!("Failed to load {prefix}.attn_output: {e}"))
                 })?;
+
+            // Load QKV biases (present in Qwen2, absent in Llama)
+            let attention_bq = ct
+                .tensor(&mut file, &format!("{prefix}.attn_q.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_q.bias dequant: {e}")))?;
+            let attention_bk = ct
+                .tensor(&mut file, &format!("{prefix}.attn_k.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_k.bias dequant: {e}")))?;
+            let attention_bv = ct
+                .tensor(&mut file, &format!("{prefix}.attn_v.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_v.bias dequant: {e}")))?;
+
             let ffn_gate = ct
                 .tensor(&mut file, &format!("{prefix}.ffn_gate.weight"), &device)
                 .map_err(|e| {
@@ -456,6 +773,9 @@ impl SplitModel {
                     .map_err(|e| SwarmError::Internal(e.to_string()))?,
                 attention_wo: QMatMul::from_qtensor(attention_wo)
                     .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_bq,
+                attention_bk,
+                attention_bv,
                 attention_norm: RmsNorm::from_qtensor(attn_norm, rms_norm_eps)
                     .map_err(|e| SwarmError::Internal(e.to_string()))?,
                 mlp: Mlp {
@@ -475,14 +795,65 @@ impl SplitModel {
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
                 kv_cache: None,
+                use_rope_contiguous,
             });
         }
 
+        // Load vocabulary from GGUF metadata for token decoding
+        let vocabulary = ct
+            .metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect::<Vec<String>>()
+            });
+        if let Some(ref v) = vocabulary {
+            tracing::info!(vocab_size = v.len(), "Loaded GGUF vocabulary");
+        }
+
+        // Load BPE merges, pre-tokenizer type, and build tokenizer
+        let tokenizer = if let Some(ref vocab) = vocabulary {
+            let merges_raw = ct
+                .metadata
+                .get("tokenizer.ggml.merges")
+                .and_then(|v| v.to_vec().ok())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.to_string().ok().cloned())
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let pre_type = ct
+                .metadata
+                .get("tokenizer.ggml.pre")
+                .and_then(|v| v.to_string().ok().cloned())
+                .unwrap_or_else(|| "gpt2".to_string());
+            if !merges_raw.is_empty() {
+                tracing::info!(
+                    merges = merges_raw.len(),
+                    pre_type = %pre_type,
+                    "Loaded BPE tokenizer from GGUF"
+                );
+                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let has_biases = layers.first().map_or(false, |l| l.attention_bq.is_some());
         tracing::info!(
+            arch = %arch,
             layers = format!("[{layer_start}..{layer_end})"),
             total = block_count,
             is_first,
             is_last,
+            has_qkv_biases = has_biases,
+            rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
+            context_length,
             "Loaded split model segment"
         );
 
@@ -497,6 +868,8 @@ impl SplitModel {
             total_layers: block_count,
             hidden_dim: embedding_length,
             device,
+            vocabulary,
+            tokenizer,
         })
     }
 
@@ -524,17 +897,22 @@ impl SplitModel {
         let is_first = self.layer_start == 0;
         let is_last = self.layer_end == self.total_layers;
 
+        // Move input to model's device if needed (e.g. CPU → CUDA)
+        let input = input
+            .to_device(&self.device)
+            .map_err(|e| SwarmError::Internal(format!("Device transfer failed: {e}")))?;
+
         // Determine the hidden state to start from
         let mut layer_in = if is_first {
             // First segment: input is token IDs → apply embedding
             self.tok_embeddings
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
-                .forward(input)
+                .forward(&input)
                 .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?
         } else {
             // Non-first segment: input is already hidden states
-            input.clone()
+            input
         };
 
         // Get seq_len for mask
@@ -607,6 +985,16 @@ impl SplitModel {
         for layer in &mut self.layers {
             layer.kv_cache = None;
         }
+    }
+
+    /// Return a reference to the loaded vocabulary, if available.
+    pub fn vocab(&self) -> Option<&Vec<String>> {
+        self.vocabulary.as_ref()
+    }
+
+    /// Return a reference to the BPE tokenizer, if available.
+    pub fn tokenizer(&self) -> Option<&BpeTokenizer> {
+        self.tokenizer.as_ref()
     }
 }
 

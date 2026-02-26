@@ -60,6 +60,15 @@ enum Commands {
     Version,
     /// Show node status (queries running daemon)
     Status,
+    /// Test split inference locally (no networking, single-node diagnostic)
+    TestSplit {
+        /// Number of tokens to generate
+        #[arg(long, default_value = "20")]
+        max_tokens: u32,
+        /// Prompt text
+        #[arg(long, default_value = "Hello, how are you?")]
+        prompt: String,
+    },
 }
 
 #[tokio::main]
@@ -77,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => {
             let port = cli.port.unwrap_or(8800);
             query_status(port).await
+        }
+        Commands::TestSplit { max_tokens, prompt } => {
+            test_split_inference(cli.model, *max_tokens, prompt).await
         }
     }
 }
@@ -158,6 +170,98 @@ async fn query_status(port: u16) -> anyhow::Result<()> {
     } else {
         println!("{response}");
     }
+
+    Ok(())
+}
+
+async fn test_split_inference(
+    model_path: Option<PathBuf>,
+    max_tokens: u32,
+    prompt: &str,
+) -> anyhow::Result<()> {
+    use swarmllm::inference::split::{SplitModel, sample_token};
+
+    let model_path = model_path.ok_or_else(|| anyhow::anyhow!("--model required for test-split"))?;
+    println!("Loading full model from: {}", model_path.display());
+
+    // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true)
+    let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true)?;
+    let total_layers = model.total_layers;
+    println!("Model loaded: {} layers, hidden_dim={}", total_layers, model.hidden_dim);
+
+    // Build chat prompt
+    let chat_prompt = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+    println!("Chat prompt: {:?}", chat_prompt);
+
+    // Tokenize
+    let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
+        tokenizer.encode(&chat_prompt)
+    } else {
+        chat_prompt.bytes().map(|b| b as i64).collect()
+    };
+    println!("Prompt tokens ({}): {:?}", token_ids.len(), token_ids);
+
+    // Prefill: run all tokens through
+    let input = candle_core::Tensor::from_vec(
+        token_ids.clone(),
+        &[1, token_ids.len()],
+        &candle_core::Device::Cpu,
+    )?;
+
+    let logits = model.forward(&input, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut generated = vec![first_token];
+    print!("Generated: ");
+
+    // Decode and print first token
+    if let Some(vocab) = model.vocab() {
+        if let Some(t) = vocab.get(first_token as usize) {
+            if let Some(tokenizer) = model.tokenizer() {
+                let bytes = tokenizer.decode_token(t);
+                print!("{}", String::from_utf8_lossy(&bytes));
+            } else {
+                print!("{t}");
+            }
+        }
+    }
+
+    // Generate remaining tokens
+    let mut index_pos = token_ids.len();
+    for _ in 1..max_tokens {
+        let last_token = *generated.last().unwrap() as i64;
+        let input = candle_core::Tensor::from_vec(
+            vec![last_token],
+            &[1, 1],
+            &candle_core::Device::Cpu,
+        )?;
+
+        let logits = model.forward(&input, index_pos).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
+        index_pos += 1;
+
+        // Qwen2 EOS tokens
+        if token_id == 151643 || token_id == 151645 {
+            println!(" [EOS:{}]", token_id);
+            break;
+        }
+
+        generated.push(token_id);
+
+        if let Some(vocab) = model.vocab() {
+            if let Some(t) = vocab.get(token_id as usize) {
+                if let Some(tokenizer) = model.tokenizer() {
+                    let bytes = tokenizer.decode_token(t);
+                    print!("{}", String::from_utf8_lossy(&bytes));
+                } else {
+                    print!("{t}");
+                }
+            }
+        }
+    }
+    println!();
+    println!("Total generated: {} tokens", generated.len());
+    println!("Token IDs: {:?}", generated);
 
     Ok(())
 }

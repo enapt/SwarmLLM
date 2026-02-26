@@ -64,7 +64,12 @@ impl PipelineScheduler {
         }
 
         // Greedy layer assignment
-        let segments = self.greedy_assign(num_layers, &candidates)?;
+        let raw_segments = self.greedy_assign(num_layers, &candidates)?;
+
+        // Merge contiguous segments on the same node into a single segment.
+        // This avoids sending multiple LayerForward messages to the same node
+        // when it handles its full layer range in one forward pass.
+        let segments = Self::merge_contiguous(raw_segments);
 
         // Identify standby nodes for each segment
         let standbys = self.find_standbys(&segments, &candidates);
@@ -189,6 +194,22 @@ impl PipelineScheduler {
         }
 
         Ok(segments)
+    }
+
+    /// Merge contiguous segments assigned to the same node into one segment.
+    fn merge_contiguous(segments: Vec<PipelineSegment>) -> Vec<PipelineSegment> {
+        let mut merged: Vec<PipelineSegment> = Vec::new();
+        for seg in segments {
+            if let Some(last) = merged.last_mut() {
+                if last.node_id == seg.node_id && last.layer_range.1 == seg.layer_range.0 {
+                    // Extend the previous segment
+                    last.layer_range.1 = seg.layer_range.1;
+                    continue;
+                }
+            }
+            merged.push(seg);
+        }
+        merged
     }
 
     /// Find standby (backup) nodes for each pipeline segment.

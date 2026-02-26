@@ -256,6 +256,15 @@ impl InferenceRouter {
                     execute_request(shared_state.clone(), network_tx, scheduler, request.clone())
                         .await;
 
+                if let Err(ref e) = output {
+                    tracing::error!(
+                        request_id = %request.id,
+                        model = %request.model_id,
+                        error = %e,
+                        "Inference request failed"
+                    );
+                }
+
                 // Update stats and apply credit events
                 let local_node_id = shared_state.identity.node_id().clone();
                 let is_remote_request = request.requester != local_node_id;
@@ -357,6 +366,22 @@ async fn execute_request(
     );
 
     let assignment = scheduler.assemble_pipeline(model_id, &local_node_id)?;
+
+    tracing::info!(
+        request_id = %request.id,
+        segments = assignment.segments.len(),
+        standbys = assignment.standbys.len(),
+        "Pipeline assembled, starting execution"
+    );
+    for (i, seg) in assignment.segments.iter().enumerate() {
+        tracing::info!(
+            segment = i,
+            node = %seg.node_id,
+            layer_start = seg.layer_range.0,
+            layer_end = seg.layer_range.1,
+            "Pipeline segment"
+        );
+    }
 
     // Store assignment in shared state for monitoring
     shared_state

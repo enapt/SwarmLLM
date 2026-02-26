@@ -115,33 +115,68 @@ libp2p Swarm
 
 ## Inference Pipeline
 
+### Split Inference Engine
+
+The split inference engine (`src/inference/split.rs`) enables true distributed inference
+using candle for direct tensor computation with quantized GGUF weights. Each node loads
+only the transformer layers it owns, forwarding hidden-state activations between nodes.
+
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly
                                               │
                       ┌───────────────────────┘
                       ▼
           ┌──────────────────────┐
-          │   Pipeline Segment   │
-          │ Node A: Layers 0-15  │──── LayerForward ───▶
+          │   Pipeline Segment   │     Token IDs (prefill) or
+          │ Node A: Layers 0-15  │     single token ID (decode)
+          │ (embedding + layers) │──── LayerForward ───▶
           └──────────────────────┘                      │
                                         ┌───────────────┘
                                         ▼
                             ┌──────────────────────┐
-                            │   Pipeline Segment   │
-                            │ Node B: Layers 16-47 │── LayerForward ──▶
-                            └──────────────────────┘                   │
-                                                       ┌───────────────┘
+                            │   Pipeline Segment   │   Hidden states
+                            │ Node B: Layers 16-27 │   [1, seq, 3584]
+                            │ (layers + norm + LM)  │── sample token ──▶
+                            └──────────────────────┘                    │
+                                                       ┌────────────────┘
                                                        ▼
-                                           ┌──────────────────────┐
-                                           │   Pipeline Segment   │
-                                           │ Node C: Layers 48-79 │
-                                           └──────────┬───────────┘
-                                                      │
-                                                LayerResult
-                                                      │
-                                                      ▼
-                                                   Client
+                                                  LayerResult
+                                                  (token IDs)
+                                                       │
+                                                       ▼
+                                                    Client
 ```
+
+### Architecture-Aware Model Loading
+
+The SplitModel loader detects the model architecture from GGUF metadata
+(`general.architecture`) and applies architecture-specific behavior:
+
+| Feature | Llama | Qwen2 |
+|---------|-------|-------|
+| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) |
+| QKV biases | None | `attn_q.bias`, `attn_k.bias`, `attn_v.bias` |
+| Context length | 4096 (default) | 32768 (from metadata) |
+| EOS tokens | 2 | 151643, 151645 |
+
+### BPE Tokenizer
+
+A full GPT-2/Qwen2 BPE tokenizer is built from GGUF metadata at model load time:
+- Vocabulary from `tokenizer.ggml.tokens`
+- Merge rules from `tokenizer.ggml.merges`
+- Pre-tokenization regex from `tokenizer.ggml.pre` (model-specific: qwen2, gpt2, default)
+- GPT-2 byte encoding/decoding for proper UTF-8 handling
+
+### Tensor Wire Format
+
+Hidden states are serialized for network transmission:
+```
+[4B ndim][4B×ndim shape][4B dtype_tag][f32 data]
+```
+
+For a 7B model (hidden_dim=3584):
+- Prefill (14 tokens): 1×14×3584×4 = ~200KB
+- Decode (1 token): 1×1×3584×4 = ~14KB
 
 ### Pipeline Assembly Algorithm
 
@@ -150,8 +185,16 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 3. Fetch node load/latency from peer_registry
 4. Sort candidates by (latency ASC, load ASC, trust DESC)
 5. Greedy assignment: widest contiguous layer range per node
-6. Identify standby nodes per segment
-7. Send PipelineAssignment → all nodes ACK → begin forwarding
+6. Merge contiguous segments assigned to the same node
+7. Identify standby nodes per segment
+8. Send PipelineAssignment → all nodes ACK → begin forwarding
+
+### KV-Cache Management
+
+- Each SplitModel maintains per-layer KV-cache
+- KV-cache is cleared when `sequence_num == 0` (start of new request)
+- `index_pos` travels through the wire protocol so all nodes apply correct RoPE positioning
+- Position tracking: `index_pos = prompt_token_count` after prefill, increments by 1 per decode step
 
 ## Credit System
 

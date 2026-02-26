@@ -23,7 +23,8 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 ## Features
 
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly
+- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2) with correct RoPE, attention biases, and context lengths
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
 - **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal
@@ -138,6 +139,7 @@ swarmllm <COMMAND>
 Commands:
   run         Start the SwarmLLM daemon (default if omitted)
   status      Show node status (queries running daemon)
+  test-split  Test split inference locally (single-node diagnostic)
   version     Print version information
 
 Options:
@@ -146,6 +148,8 @@ Options:
   -d, --data-dir <PATH>     Data directory [default: ~/.swarmllm]
   -m, --model <PATH>        Path to a GGUF model file to load
       --gpu-layers <N>      Number of layers to offload to GPU (0 = CPU only)
+      --bootstrap <ADDR>    Bootstrap peer multiaddr
+      --shards <RANGE>      Claim specific layer range for split inference (e.g. "0-15")
   -v, --verbose             Increase log verbosity (-v, -vv, -vvv)
 ```
 
@@ -189,7 +193,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | Networking | libp2p (QUIC transport) |
 | Serialization | Cap'n Proto (tensors), serde_json (API) |
 | HTTP Server | Axum |
-| Inference | llama.cpp bindings (GGUF) |
+| Inference | candle (split/distributed), llama.cpp (single-node) |
 | Database | sled (embedded) |
 | Cryptography | Ed25519, BLAKE3, Argon2id |
 

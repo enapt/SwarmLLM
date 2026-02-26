@@ -171,11 +171,27 @@ impl HealthMonitor {
         let timeout =
             chrono::Duration::seconds((PING_INTERVAL.as_secs() * MAX_MISSED_PINGS as u64) as i64);
 
+        // Collect node IDs participating in active inference pipelines —
+        // these must not be removed even if they appear stale (long forward passes).
+        let mut active_nodes = std::collections::HashSet::new();
+        for entry in self.shared_state.active_pipelines.iter() {
+            for seg in &entry.value().segments {
+                active_nodes.insert(seg.node_id.clone());
+            }
+        }
+
         let mut stale_peers = Vec::new();
 
         for entry in self.shared_state.peer_registry.iter() {
             let peer = entry.value();
             if now.signed_duration_since(peer.last_seen) > timeout {
+                if active_nodes.contains(entry.key()) {
+                    tracing::debug!(
+                        peer = %entry.key(),
+                        "Peer appears stale but is active in inference pipeline, skipping removal"
+                    );
+                    continue;
+                }
                 stale_peers.push(entry.key().clone());
             }
         }

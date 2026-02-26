@@ -295,7 +295,8 @@ pub const TENSOR_TAG_RESULT: u8 = 0x02;
 /// Encode a LayerForward into a binary tensor envelope.
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
     let data_len = forward.activations.len();
-    let total = 1 + 25 + data_len;
+    // Header: tag(1) + uuid(16) + seq(4) + index_pos(4) + fmt(1) + data_len(4) = 30
+    let total = 1 + 29 + data_len;
     let mut buf = Vec::with_capacity(total);
 
     // Message type tag
@@ -304,6 +305,8 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     buf.extend_from_slice(forward.request_id.as_bytes());
     // sequence_num (4 bytes LE)
     buf.extend_from_slice(&forward.sequence_num.to_le_bytes());
+    // index_pos (4 bytes LE)
+    buf.extend_from_slice(&forward.index_pos.to_le_bytes());
     // format tag (1 byte)
     let fmt_tag: u8 = match forward.format {
         TensorFormat::FP16 => 0,
@@ -329,7 +332,8 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         data
     };
 
-    if data.len() < 25 {
+    // Header: uuid(16) + seq(4) + index_pos(4) + fmt(1) + data_len(4) = 29
+    if data.len() < 29 {
         return Err(SwarmError::Network("Tensor envelope too short".to_string()));
     }
 
@@ -343,7 +347,12 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
             .try_into()
             .map_err(|_| SwarmError::Network("Invalid sequence_num".into()))?,
     );
-    let format = match data[20] {
+    let index_pos = u32::from_le_bytes(
+        data[20..24]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid index_pos".into()))?,
+    );
+    let format = match data[24] {
         0 => TensorFormat::FP16,
         1 => TensorFormat::FP32,
         2 => TensorFormat::INT8,
@@ -354,24 +363,25 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         }
     };
     let data_len = u32::from_le_bytes(
-        data[21..25]
+        data[25..29]
             .try_into()
             .map_err(|_| SwarmError::Network("Invalid data_len".into()))?,
     ) as usize;
 
-    if data.len() < 25 + data_len {
+    if data.len() < 29 + data_len {
         return Err(SwarmError::Network(format!(
             "Tensor data truncated: expected {} bytes, got {}",
             data_len,
-            data.len() - 25
+            data.len() - 29
         )));
     }
 
-    let activations = data[25..25 + data_len].to_vec();
+    let activations = data[29..29 + data_len].to_vec();
 
     Ok(LayerForward {
         request_id,
         sequence_num,
+        index_pos,
         activations,
         format,
         sender_peer_bytes: None,
