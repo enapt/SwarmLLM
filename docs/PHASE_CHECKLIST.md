@@ -124,4 +124,24 @@
 - [x] MoE-optimized sharding
 
 
-> **Note**: Phase 7 (Self-Governance) was removed. Issues, proposals, releases, and project management are handled via the GitHub repository.
+## Phase 7: Security, Identity & Device Pools
+
+**Goal**: End-to-end encryption, user identity with nicknames/leaderboard, multi-device pooling.
+
+- [x] `src/crypto/session.rs` — X25519 ECDH + ChaCha20-Poly1305 pairwise session encryption
+- [x] `src/crypto/pipeline_seal.rs` — Per-request prompt sealing for multi-node pipelines
+- [x] `src/crypto/gossip_seal.rs` — Epoch-based group key encryption for GossipSub
+- [x] `src/crypto/key_rotation.rs` — Background key rotation (10min sessions, 1hr group keys)
+- [x] `src/identity/nickname.rs` — Signed nicknames, leaderboard, anonymous-by-default
+- [x] `src/api/identity.rs` — Nickname CRUD + leaderboard + peer identity endpoints
+- [x] `src/pool/types.rs` — Pool data structures with dual-sig invitation protocol
+- [x] `src/pool/crypto.rs` — Pool invitation/acceptance/removal/forward signing
+- [x] `src/pool/manager.rs` — PoolManager subsystem (9th Tokio task)
+- [x] `src/pool/forward.rs` — Credit forwarding from pool members to owner
+- [x] `src/api/pool.rs` — 8 pool management endpoints
+- [x] Security hardening: path traversal fix, SSRF blocklist, CORS lockdown, key permissions, input validation
+- [x] Bug fixes: failover peer_id, pending_layer_results leak, OOM cap, shutdown DB flush, credit race
+
+**Acceptance test**: Two nodes. Set nicknames. Create device pool. Member earns credits that forward to owner. Tensor traffic is encrypted. Leaderboard shows pool ranking.
+
+> **Note**: Self-governance was removed. Issues, proposals, releases, and project management are handled via the GitHub repository.
