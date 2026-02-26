@@ -87,11 +87,13 @@ impl ModelExecutor {
             )));
         }
 
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        // Prefer friendly name from GGUF metadata, fall back to filename stem
+        let name = extract_gguf_name(path).unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
 
         tracing::info!(
             path = %path.display(),
@@ -438,6 +440,17 @@ pub fn build_chat_prompt(messages: &[crate::types::ChatMessage]) -> String {
     }
     prompt.push_str("<|im_start|>assistant\n");
     prompt
+}
+
+/// Extract the friendly model name from GGUF `general.name` metadata.
+/// Returns None if the file can't be read or the field is absent.
+fn extract_gguf_name(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
+    ct.metadata
+        .get("general.name")
+        .and_then(|v| v.to_string().ok().cloned())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

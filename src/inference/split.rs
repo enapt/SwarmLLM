@@ -456,6 +456,8 @@ pub struct GgufTensorMeta {
     pub tensors: HashMap<String, TensorLocation>,
     /// Offset in the GGUF file where tensor data begins.
     pub tensor_data_offset: u64,
+    /// Friendly model name from GGUF `general.name` metadata.
+    pub model_name: Option<String>,
     /// Model hyperparameters extracted from GGUF metadata.
     pub head_count: usize,
     pub head_count_kv: usize,
@@ -482,6 +484,12 @@ impl GgufTensorMeta {
         let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
         let ct = gguf_file::Content::read(&mut file)
             .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+
+        // Extract friendly model name from GGUF metadata
+        let model_name = ct
+            .metadata
+            .get("general.name")
+            .and_then(|v| v.to_string().ok().cloned());
 
         // Detect architecture prefix from general.architecture metadata
         let arch = ct
@@ -543,6 +551,7 @@ impl GgufTensorMeta {
         Ok(GgufTensorMeta {
             tensors,
             tensor_data_offset: ct.tensor_data_offset,
+            model_name,
             head_count,
             head_count_kv,
             block_count,
@@ -1241,6 +1250,7 @@ mod tests {
         let meta = GgufTensorMeta {
             tensors,
             tensor_data_offset: 0,
+            model_name: None,
             head_count: 8,
             head_count_kv: 8,
             block_count: 4,
