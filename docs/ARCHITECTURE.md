@@ -24,8 +24,6 @@ Single Rust binary, three simultaneous functions:
 │  │  RwLock<NodeStats>              — node statistics    │  │
 │  │  SharedExecutor                 — llama.cpp model    │  │
 │  │  DashMap<Blake3Hash, VoteTally> — model votes       │  │
-│  │  RwLock<GovernanceParams>       — gov parameters    │  │
-│  │  RwLock<NetworkStats>           — network-wide data │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -63,7 +61,7 @@ Single Rust binary, three simultaneous functions:
 | AcquisitionManager | NetworkManager | `network_tx` | ShardAnnounce (shard requests) |
 | CreditLedger | NetworkManager | `network_tx` | CreditGossip, CreditTransaction |
 
-The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by governance, and Phase 7 governance messages (Proposal, ProposalVote, Issue, ReleaseCandidate, etc.) are persisted directly to sled.
+The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and ModelVote is processed by the model governance module.
 
 ## Startup Sequence
 
@@ -98,11 +96,7 @@ libp2p Swarm
 ├── GossipSub (pub/sub)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
 │   ├── swarm/governance              → ModelVote
-│   ├── swarm/health                  → trust summaries
-│   ├── swarm/gov/proposals           → Proposals, amendments
-│   ├── swarm/gov/votes               → ProposalVote
-│   ├── swarm/gov/issues              → Issues, comments
-│   └── swarm/gov/releases            → ReleaseCandidates, TestReports
+│   └── swarm/health                  → trust summaries
 │
 ├── request_response
 │   └── Direct inference messages (LayerForward, LayerResult, ShardRequest)
@@ -288,15 +282,6 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | shard_meta | {model_id}/{shard_index} | ShardInfo + path |
 | model_meta | {model_id} | ModelManifest |
 | sessions | {session_id} | KV-cache metadata |
-| issues | {issue_hash_hex} | Issue |
-| issue_comments | {issue_hash_hex}/{timestamp_ms} | IssueComment |
-| issue_upvotes | {issue_hash_hex}/{voter_hex} | IssueUpvote |
-| proposals | {proposal_hash_hex} | Proposal |
-| proposal_votes | {proposal_hash}/{voter_hex} | ProposalVote |
-| releases | {version_string} | ReleaseCandidate |
-| release_approvals | {version_key}/{approver_hex} | ReleaseApproval |
-| test_reports | {version_key}/{tester_hex} | TestReport |
-| gov_params | "params" | GovernanceParams |
 
 ## HTTP API Routes
 
@@ -316,21 +301,14 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 - `GET     /api/admin/credits` — Credit balance and tier info
 - `GET     /api/admin/ws` — WebSocket for live updates
 
-### Governance API (Phase 7)
-- `GET/POST /api/admin/issues` — List/create issues
-- `GET      /api/admin/issues/:hash` — Issue details + comments
-- `POST     /api/admin/issues/:hash/comment` — Add comment to issue
-- `POST     /api/admin/issues/:hash/upvote` — Upvote issue
-- `GET/POST /api/admin/proposals` — List/create proposals
-- `GET      /api/admin/proposals/:hash` — Proposal details + vote tally
-- `POST     /api/admin/proposals/:hash/vote` — Cast vote on proposal
-- `GET      /api/admin/releases` — List releases with canary phase info
-- `GET      /api/admin/releases/latest` — Latest stable release
-- `GET      /api/admin/governance/role` — Current node's governance role
-- `GET      /api/admin/governance/params` — Governance parameters
+### HuggingFace Integration
+- `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models
+- `POST /api/admin/hf/download` — Start downloading a GGUF model
 
-### Static & Utility
-- `/admin` — Dashboard SPA
+### Utility
+- `POST /api/admin/shutdown` — Gracefully shut down the node
+### Static
+- `/admin` — Dashboard SPA (single-page app — all routes serve index.html)
 - `/chat` — Chat interface
 - `/setup` — First-run wizard
 - `/static/*path` — Embedded static assets (CSS, JS)

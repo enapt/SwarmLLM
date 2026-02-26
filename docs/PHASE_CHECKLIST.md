@@ -95,9 +95,7 @@
 
 **Goal**: Polished web interface with setup wizard, dashboard, and chat.
 
-- [x] `frontend/setup.html` + `frontend/js/setup.js` — First-run wizard
-- [x] `frontend/index.html` + `frontend/js/app.js` — Admin dashboard
-- [x] `frontend/chat.html` + `frontend/js/chat.js` — Chat interface
+- [x] `frontend/index.html` + `frontend/js/app.js` — Single-page app (dashboard + chat + setup wizard)
 - [x] `frontend/css/style.css` — Dark theme styling
 - [x] `build.rs` — Embed frontend assets with include_dir
 - [x] `src/ui/mod.rs` + `src/ui/assets.rs` — Serve embedded files
@@ -125,23 +123,5 @@
 - [x] Speculative decoding groundwork
 - [x] MoE-optimized sharding
 
----
 
-## Phase 7: Self-Governance
-
-**Goal**: Fully decentralized development lifecycle — no central repository needed.
-
-- [x] `src/governance/mod.rs` — Module structure
-- [x] `src/governance/proposals.rs` — RFC creation, validation, lifecycle management
-- [x] `src/governance/voting.rs` — Weighted voting, quorum calculation, tallying
-- [x] `src/governance/issues.rs` — Bug reports, feature requests, prioritization
-- [x] `src/governance/releases.rs` — Release candidate management, threshold signing
-- [x] `src/governance/testing.rs` — Distributed test coordination, canary rollouts
-- [x] `src/governance/changelog.rs` — Auto-generated changelog from merged proposals
-- [x] Wire governance messages into NetworkManager (new GossipSub topics)
-- [x] Wire governance into ApiServer (new admin endpoints)
-- [x] Wire governance into admin dashboard (new tabs)
-- [x] `UpdateManager` integration into daemon.rs
-- [x] Genesis period bootstrap logic
-
-**Acceptance test**: Full lifecycle from issue filing through proposal, vote, build, test, approve, and canary rollout — with no central coordination.
+> **Note**: Phase 7 (Self-Governance) was removed. Issues, proposals, releases, and project management are handled via the GitHub repository.
