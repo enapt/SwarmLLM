@@ -17,7 +17,7 @@ use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, GovernanceParams, NetworkCommand, NetworkStats, NodeId, NodeStats, PeerInfo,
+    CreditBalance, NetworkCommand, NodeId, NodeStats, PeerInfo,
     PipelineAssignment, RebalanceEvent, ShardId, SwarmMessage,
 };
 
@@ -47,10 +47,6 @@ pub struct SharedState {
     pub gpu_info: Option<crate::inference::executor::GpuInfo>,
     /// Model governance vote tallies.
     pub model_vote_tallies: DashMap<crate::types::Blake3Hash, crate::model::governance::VoteTally>,
-    /// Governance parameters (tunable via GovernanceChange proposals).
-    pub governance_params: RwLock<GovernanceParams>,
-    /// Network-wide statistics for governance role calculation.
-    pub network_stats: RwLock<NetworkStats>,
     /// Live acquisition progress — written by AcquisitionManager, read by API/WebSocket.
     pub acquisition_progress:
         DashMap<crate::types::ModelId, crate::model::acquisition::AcquisitionStatus>,
@@ -104,11 +100,6 @@ impl SharedState {
             loaded_model_info: RwLock::new(None),
             gpu_info,
             model_vote_tallies: DashMap::new(),
-            governance_params: RwLock::new(
-                // Load from DB or use defaults (genesis params if early network)
-                GovernanceParams::default(),
-            ),
-            network_stats: RwLock::new(NetworkStats::default()),
             acquisition_progress: DashMap::new(),
             pending_layer_results: DashMap::new(),
             split_models: DashMap::new(),
@@ -676,100 +667,6 @@ async fn dispatch_network_messages(
                                     Err(e) => {
                                         tracing::warn!(error = %e, "Failed to process model vote");
                                     }
-                                }
-                            }
-                            // Governance Phase 7 messages — store in DB
-                            SwarmMessage::Proposal(proposal) => {
-                                tracing::info!(
-                                    hash = hex::encode(&proposal.hash[..8]),
-                                    title = %proposal.title,
-                                    "Received governance proposal"
-                                );
-                                let key = hex::encode(proposal.hash);
-                                if let Err(e) = shared_state.db.put_json("proposals", &key, &proposal) {
-                                    tracing::warn!(error = %e, "Failed to store proposal");
-                                }
-                            }
-                            SwarmMessage::ProposalVote(vote) => {
-                                tracing::debug!(
-                                    voter = %vote.voter,
-                                    proposal = hex::encode(&vote.proposal_hash[..8]),
-                                    "Received proposal vote"
-                                );
-                                let key = format!(
-                                    "{}/{}",
-                                    hex::encode(vote.proposal_hash),
-                                    hex::encode(&vote.voter.0[..8])
-                                );
-                                if let Err(e) = shared_state.db.put_json("proposal_votes", &key, &vote) {
-                                    tracing::warn!(error = %e, "Failed to store proposal vote");
-                                }
-                            }
-                            SwarmMessage::Issue(issue) => {
-                                tracing::info!(
-                                    hash = hex::encode(&issue.hash[..8]),
-                                    title = %issue.title,
-                                    "Received governance issue"
-                                );
-                                let key = hex::encode(issue.hash);
-                                if let Err(e) = shared_state.db.put_json("issues", &key, &issue) {
-                                    tracing::warn!(error = %e, "Failed to store issue");
-                                }
-                            }
-                            SwarmMessage::IssueComment(comment) => {
-                                let key = format!(
-                                    "{}/{}",
-                                    hex::encode(comment.issue_hash),
-                                    comment.created_at.timestamp_millis()
-                                );
-                                if let Err(e) = shared_state.db.put_json("issue_comments", &key, &comment) {
-                                    tracing::warn!(error = %e, "Failed to store issue comment");
-                                }
-                            }
-                            SwarmMessage::IssueUpvote(upvote) => {
-                                let key = format!(
-                                    "{}/{}",
-                                    hex::encode(upvote.issue_hash),
-                                    hex::encode(&upvote.voter.0[..8])
-                                );
-                                if let Err(e) = shared_state.db.put_json("issue_upvotes", &key, &upvote) {
-                                    tracing::warn!(error = %e, "Failed to store issue upvote");
-                                }
-                            }
-                            SwarmMessage::ReleaseCandidate(rc) => {
-                                tracing::info!(
-                                    version = %rc.version,
-                                    builder = %rc.builder,
-                                    "Received release candidate"
-                                );
-                                let key = rc.version.to_key();
-                                if let Err(e) = shared_state.db.put_json("releases", &key, &rc) {
-                                    tracing::warn!(error = %e, "Failed to store release candidate");
-                                }
-                            }
-                            SwarmMessage::ReleaseApproval(approval) => {
-                                let key = format!(
-                                    "{}/{}",
-                                    approval.release_version.to_key(),
-                                    hex::encode(&approval.approver.0[..8])
-                                );
-                                if let Err(e) = shared_state.db.put_json("release_approvals", &key, &approval) {
-                                    tracing::warn!(error = %e, "Failed to store release approval");
-                                }
-                            }
-                            SwarmMessage::TestReport(report) => {
-                                let key = format!(
-                                    "{}/{}",
-                                    report.release_version.to_key(),
-                                    hex::encode(&report.tester.0[..8])
-                                );
-                                if let Err(e) = shared_state.db.put_json("test_reports", &key, &report) {
-                                    tracing::warn!(error = %e, "Failed to store test report");
-                                }
-                            }
-                            SwarmMessage::ChangelogEntry(ref entry) => {
-                                if let Err(e) = crate::governance::changelog::store_changelog(&shared_state.db, entry) {
-                                    tracing::warn!(error = %e, "Failed to store changelog");
                                 }
                             }
                             SwarmMessage::CreditTransaction(tx) => {

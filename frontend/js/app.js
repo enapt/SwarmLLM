@@ -313,7 +313,7 @@ var SwarmLLM = (function() {
   };
 
   // ========================================================================
-  // Dashboard Module — stats, models, governance, network
+  // Dashboard Module — stats, models, network
   // ========================================================================
   var dashboard = {
     loadInitial: async function() {
@@ -340,7 +340,6 @@ var SwarmLLM = (function() {
         dashboard.renderModelsTable(models);
       } catch (e) {}
 
-      dashboard.loadGovernanceData();
       dashboard.loadNetworkData();
     },
 
@@ -493,45 +492,6 @@ var SwarmLLM = (function() {
       });
     },
 
-    loadGovernanceData: async function() {
-      try {
-        var resp = await fetch('/api/admin/governance/role');
-        var role = await resp.json();
-        if (role.role) document.getElementById('governance-role').textContent = capitalize(role.role);
-      } catch (e) {}
-
-      try {
-        var resp = await fetch('/api/admin/proposals');
-        var proposals = await resp.json();
-        var list = document.getElementById('proposals-list');
-        if (proposals && proposals.length > 0) {
-          list.innerHTML = '';
-          proposals.slice(0, 5).forEach(function(p) {
-            var div = document.createElement('div');
-            div.className = 'flex-between mb-1';
-            div.innerHTML = '<span style="font-size:0.85rem">' + escapeHtml(p.title || 'Proposal') + '</span>' +
-              '<span class="mono text-muted" style="font-size:0.8rem">' + (p.votes_for || 0) + '/' + (p.votes_against || 0) + '</span>';
-            list.appendChild(div);
-          });
-        }
-      } catch (e) {}
-
-      try {
-        var resp = await fetch('/api/admin/issues');
-        var issues = await resp.json();
-        var list = document.getElementById('issues-list');
-        if (issues && issues.length > 0) {
-          list.innerHTML = '';
-          issues.slice(0, 5).forEach(function(issue) {
-            var div = document.createElement('div');
-            div.className = 'flex-between mb-1';
-            div.innerHTML = '<span style="font-size:0.85rem">' + escapeHtml(issue.title || 'Issue') + '</span>' +
-              '<span class="mono text-muted" style="font-size:0.8rem">' + (issue.upvotes || 0) + ' upvotes</span>';
-            list.appendChild(div);
-          });
-        }
-      } catch (e) {}
-    },
 
     loadNetworkData: async function() {
       try {
@@ -553,16 +513,6 @@ var SwarmLLM = (function() {
         }
       } catch (e) {}
 
-      try {
-        var resp = await fetch('/api/admin/releases/latest');
-        if (resp.ok) {
-          var release = await resp.json();
-          var el = document.getElementById('latest-release');
-          el.textContent = release && release.version ? 'v' + release.version : 'No releases yet';
-        }
-      } catch (e) {
-        document.getElementById('latest-release').textContent = 'No releases yet';
-      }
     },
 
     updateAcquisitionProgress: function(acquisitions) {

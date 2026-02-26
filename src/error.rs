@@ -53,21 +53,6 @@ pub enum SwarmError {
     #[error("Insufficient disk space: need {need_mb}MB, have {have_mb}MB")]
     InsufficientDisk { need_mb: u64, have_mb: u64 },
 
-    // Governance
-    #[error("Governance error: {0}")]
-    Governance(String),
-    #[error("Insufficient permissions: {action} requires role {required_role}")]
-    InsufficientPermissions {
-        action: String,
-        required_role: String,
-    },
-    #[error("Proposal not found: {0}")]
-    ProposalNotFound(String),
-    #[error("Issue not found: {0}")]
-    IssueNotFound(String),
-    #[error("Release not found: {0}")]
-    ReleaseNotFound(String),
-
     // Config
     #[error("Configuration error: {0}")]
     Config(String),
@@ -100,13 +85,6 @@ impl IntoResponse for ApiError {
                 (StatusCode::TOO_MANY_REQUESTS, self.0.to_string())
             }
             SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
-            SwarmError::Governance(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
-            SwarmError::InsufficientPermissions { .. } => {
-                (StatusCode::FORBIDDEN, self.0.to_string())
-            }
-            SwarmError::ProposalNotFound(_)
-            | SwarmError::IssueNotFound(_)
-            | SwarmError::ReleaseNotFound(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
         };
         (

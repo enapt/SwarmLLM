@@ -20,23 +20,8 @@ pub const TENSOR_PROTOCOL_ID: &str = "/swarmllm/tensor/1.0.0";
 /// GossipSub topic for model coordination (shard announcements, capacity updates).
 pub const TOPIC_MODELS: &str = "swarm/models";
 
-/// GossipSub topic for governance (model voting, legacy).
+/// GossipSub topic for model governance (voting on model additions).
 pub const TOPIC_GOVERNANCE: &str = "swarm/governance";
-
-/// GossipSub topic for governance proposals.
-pub const TOPIC_GOV_PROPOSALS: &str = "swarm/gov/proposals";
-
-/// GossipSub topic for governance votes.
-pub const TOPIC_GOV_VOTES: &str = "swarm/gov/votes";
-
-/// GossipSub topic for governance issues.
-pub const TOPIC_GOV_ISSUES: &str = "swarm/gov/issues";
-
-/// GossipSub topic for governance releases.
-pub const TOPIC_GOV_RELEASES: &str = "swarm/gov/releases";
-
-/// GossipSub topic for governance changelog.
-pub const TOPIC_GOV_CHANGELOG: &str = "swarm/gov/changelog";
 
 /// GossipSub topic for credit balance gossip.
 pub const TOPIC_CREDITS: &str = "swarm/credits";

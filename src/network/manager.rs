@@ -531,21 +531,6 @@ impl NetworkManager {
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
                 crate::network::protocol::TOPIC_HEALTH
             }
-            // Governance Phase 7 messages
-            SwarmMessage::Proposal(_)
-            | SwarmMessage::ProposalAmendment(_)
-            | SwarmMessage::ProposalStatusChange(_) => {
-                crate::network::protocol::TOPIC_GOV_PROPOSALS
-            }
-            SwarmMessage::ProposalVote(_) => crate::network::protocol::TOPIC_GOV_VOTES,
-            SwarmMessage::Issue(_)
-            | SwarmMessage::IssueComment(_)
-            | SwarmMessage::IssueStatusChange(_)
-            | SwarmMessage::IssueUpvote(_) => crate::network::protocol::TOPIC_GOV_ISSUES,
-            SwarmMessage::ReleaseCandidate(_)
-            | SwarmMessage::TestReport(_)
-            | SwarmMessage::ReleaseApproval(_) => crate::network::protocol::TOPIC_GOV_RELEASES,
-            SwarmMessage::ChangelogEntry(_) => crate::network::protocol::TOPIC_GOV_CHANGELOG,
             // Inference and credit transaction messages go via request_response, not gossipsub
             _ => return,
         };

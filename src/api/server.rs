@@ -51,36 +51,6 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/admin/peers", get(admin::list_peers))
         .route("/api/admin/credits", get(admin::credit_info))
-        // Governance: Issues
-        .route(
-            "/api/admin/issues",
-            get(admin::list_issues).post(admin::create_issue),
-        )
-        .route("/api/admin/issues/:hash", get(admin::get_issue))
-        .route(
-            "/api/admin/issues/:hash/comment",
-            post(admin::add_issue_comment),
-        )
-        .route("/api/admin/issues/:hash/upvote", post(admin::upvote_issue))
-        // Governance: Proposals
-        .route(
-            "/api/admin/proposals",
-            get(admin::list_proposals).post(admin::create_proposal),
-        )
-        .route("/api/admin/proposals/:hash", get(admin::get_proposal))
-        .route(
-            "/api/admin/proposals/:hash/vote",
-            post(admin::vote_proposal),
-        )
-        // Governance: Releases
-        .route("/api/admin/releases", get(admin::list_releases))
-        .route("/api/admin/releases/latest", get(admin::get_latest_release))
-        // Governance: Role & Params
-        .route("/api/admin/governance/role", get(admin::governance_role))
-        .route(
-            "/api/admin/governance/params",
-            get(admin::governance_params),
-        )
         // HuggingFace model browsing
         .route("/api/admin/hf/search", get(admin::hf_search))
         .route("/api/admin/hf/download", post(admin::hf_download))

@@ -3,7 +3,6 @@ pub mod config;
 pub mod credit;
 pub mod daemon;
 pub mod error;
-pub mod governance;
 pub mod health;
 pub mod identity;
 pub mod inference;
