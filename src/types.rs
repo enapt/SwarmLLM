@@ -251,6 +251,19 @@ pub enum SwarmMessage {
     // Governance
     ModelVote(ModelVote),
 
+    // Identity
+    NicknameGossip(NicknameGossip),
+
+    // Device Pools
+    PoolMessage(PoolMessage),
+
+    // Encryption
+    SealedInferenceRequest(crate::crypto::SealedPrompt),
+    PeerKeyAdvertise {
+        node_id: NodeId,
+        x25519_public: [u8; 32],
+        signature: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -318,6 +331,12 @@ pub struct CreditGossip {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+/// Nickname announcement gossiped across the network.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NicknameGossip {
+    pub record: crate::identity::nickname::NicknameRecord,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelVote {
     pub voter: NodeId,
@@ -325,6 +344,18 @@ pub struct ModelVote {
     pub vote: bool,
     pub weight: u64,
     pub signature: Vec<u8>,
+}
+
+// ---- Pool Messages ----
+/// Messages related to device pool management, sent over GossipSub.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PoolMessage {
+    Invitation(crate::pool::types::PoolInvitation),
+    Acceptance(crate::pool::types::PoolAcceptance),
+    StateGossip(crate::pool::types::PoolState),
+    CreditForward(crate::pool::types::PoolCreditForward),
+    Removal(crate::pool::types::PoolRemoval),
+    MemberLeft { pool_id: NodeId, node_id: NodeId },
 }
 
 // ---- Network Commands ----

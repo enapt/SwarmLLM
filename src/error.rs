@@ -41,11 +41,23 @@ pub enum SwarmError {
     #[error("Invalid transaction signature")]
     InvalidSignature,
 
+    // Encryption
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    #[error("Decryption failed (invalid key, corrupted data, or tampered ciphertext)")]
+    DecryptionFailed,
+    #[error("No encryption session for peer: {0}")]
+    NoSession(NodeId),
+    #[error("Nonce counter overflow — session must be re-established")]
+    NonceOverflow,
+
     // Identity
     #[error("Keystore error: {0}")]
     Keystore(String),
     #[error("Wrong passphrase")]
     WrongPassphrase,
+    #[error("Invalid nickname: {0}")]
+    InvalidNickname(String),
 
     // Storage
     #[error("Database error: {0}")]
@@ -85,6 +97,7 @@ impl IntoResponse for ApiError {
                 (StatusCode::TOO_MANY_REQUESTS, self.0.to_string())
             }
             SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
+            SwarmError::InvalidNickname(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
         };
         (

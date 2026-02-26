@@ -189,20 +189,28 @@ impl NetworkManager {
                 propagation_source,
                 message,
                 ..
-            })) => match protocol::decode_message(&message.data) {
-                Ok(msg) => {
-                    tracing::debug!(
-                        source = %propagation_source,
-                        "Received GossipSub message"
-                    );
-                    if let Err(e) = self.outbound_tx.send(msg).await {
-                        tracing::warn!(error = %e, "Failed to forward gossipsub message");
+            })) => {
+                // Try to unseal gossip (encrypted), fall back to plaintext for pre-upgrade nodes
+                let data = match self.shared_state.gossip_sealer.open(&message.data) {
+                    Ok(plaintext) => plaintext,
+                    Err(_) => message.data.clone(),
+                };
+
+                match protocol::decode_message(&data) {
+                    Ok(msg) => {
+                        tracing::debug!(
+                            source = %propagation_source,
+                            "Received GossipSub message"
+                        );
+                        if let Err(e) = self.outbound_tx.send(msg).await {
+                            tracing::warn!(error = %e, "Failed to forward gossipsub message");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Failed to decode gossipsub message");
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(error = %e, "Failed to decode gossipsub message");
-                }
-            },
+            }
 
             // ── JSON request/response (control messages, shard transfers) ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
@@ -255,6 +263,43 @@ impl NetworkManager {
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, "Failed to decode tensor result");
+                                }
+                            }
+                        }
+                        protocol::TENSOR_TAG_ENCRYPTED => {
+                            tracing::debug!(%peer, "Received encrypted tensor");
+                            match protocol::decode_layer_forward_encrypted(&request.payload) {
+                                Ok((mut forward, sealed, aad)) => {
+                                    // Find the sender's NodeId to decrypt
+                                    let sender_node_id = self.find_node_id_for_peer(&peer);
+                                    if let Some(node_id) = sender_node_id {
+                                        match self.shared_state.session_manager.open(
+                                            &node_id, &sealed, &aad,
+                                        ) {
+                                            Ok(plaintext) => {
+                                                forward.activations = plaintext;
+                                                forward.sender_peer_bytes = Some(peer.to_bytes());
+                                                let _ = self.outbound_tx.send(
+                                                    SwarmMessage::LayerForward(forward),
+                                                ).await;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    %peer,
+                                                    "Failed to decrypt tensor — dropping"
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            %peer,
+                                            "Encrypted tensor from unknown peer — dropping"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Failed to decode encrypted tensor");
                                 }
                             }
                         }
@@ -333,6 +378,17 @@ impl NetworkManager {
                     let hash = blake3::hash(&peer_id.to_bytes());
                     crate::types::NodeId(*hash.as_bytes())
                 };
+
+                // Establish encryption session from the peer's Ed25519 public key
+                if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
+                    if let Some(x25519_pub) =
+                        crate::crypto::session::ed25519_pubkey_to_x25519(&ed_key.to_bytes())
+                    {
+                        self.shared_state
+                            .session_manager
+                            .establish_session(&node_id, x25519_pub);
+                    }
+                }
 
                 let peer_info = PeerInfo {
                     node_id: node_id.clone(),
@@ -531,18 +587,27 @@ impl NetworkManager {
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
                 crate::network::protocol::TOPIC_HEALTH
             }
+            SwarmMessage::NicknameGossip(_) => crate::network::protocol::TOPIC_IDENTITY,
+            SwarmMessage::PoolMessage(_) => crate::network::protocol::TOPIC_POOLS,
             // Inference and credit transaction messages go via request_response, not gossipsub
             _ => return,
         };
 
         match protocol::encode_message(&msg) {
             Ok(data) => {
+                // Seal gossip with epoch-based group key (backward-compatible: receivers
+                // try decryption first, fall back to plaintext decode).
+                let publish_data = match self.shared_state.gossip_sealer.seal(&data) {
+                    Ok(sealed) => sealed,
+                    Err(_) => data, // Fall back to plaintext if sealing fails
+                };
+
                 let gossip_topic = IdentTopic::new(topic);
                 match self
                     .swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(gossip_topic, data)
+                    .publish(gossip_topic, publish_data)
                 {
                     Ok(_) => tracing::debug!(topic, "Published message to GossipSub"),
                     Err(e) => tracing::debug!(topic, error = %e, "Failed to publish to GossipSub"),
@@ -555,6 +620,7 @@ impl NetworkManager {
     }
 
     /// Send a tensor forward to a specific peer via the Cap'n Proto tensor protocol.
+    /// Encrypts activations when an encryption session exists, falls back to plaintext.
     fn handle_send_tensor(
         &mut self,
         target_peer_bytes: Vec<u8>,
@@ -568,24 +634,73 @@ impl NetworkManager {
             }
         };
 
-        match protocol::encode_layer_forward(&forward) {
-            Ok(payload) => {
-                let req = TensorRequest { payload };
-                self.swarm
-                    .behaviour_mut()
-                    .tensor_rr
-                    .send_request(&peer_id, req);
-                tracing::debug!(
-                    %peer_id,
-                    request_id = %forward.request_id,
-                    seq = forward.sequence_num,
-                    "Sent tensor forward"
-                );
+        // Try to find the peer's NodeId for encryption
+        let peer_node_id = self.find_node_id_for_peer(&peer_id);
+        let use_encryption = peer_node_id
+            .as_ref()
+            .is_some_and(|nid| self.shared_state.session_manager.has_session(nid));
+
+        let payload = if use_encryption {
+            let node_id = peer_node_id.unwrap();
+            // Build the AAD from the cleartext header fields
+            let mut aad = Vec::with_capacity(25);
+            aad.extend_from_slice(forward.request_id.as_bytes());
+            aad.extend_from_slice(&forward.sequence_num.to_le_bytes());
+            aad.extend_from_slice(&forward.index_pos.to_le_bytes());
+            let fmt_tag: u8 = match forward.format {
+                crate::types::TensorFormat::FP16 => 0,
+                crate::types::TensorFormat::FP32 => 1,
+                crate::types::TensorFormat::INT8 => 2,
+            };
+            aad.push(fmt_tag);
+
+            match self
+                .shared_state
+                .session_manager
+                .seal(&node_id, &forward.activations, &aad)
+            {
+                Ok(sealed) => {
+                    match protocol::encode_layer_forward_encrypted(&forward, sealed) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to encode encrypted tensor");
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Encryption failed, falling back to plaintext");
+                    match protocol::encode_layer_forward(&forward) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to encode tensor forward");
+                            return;
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to encode tensor forward");
+        } else {
+            match protocol::encode_layer_forward(&forward) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to encode tensor forward");
+                    return;
+                }
             }
-        }
+        };
+
+        let req = TensorRequest { payload };
+        self.swarm
+            .behaviour_mut()
+            .tensor_rr
+            .send_request(&peer_id, req);
+        tracing::debug!(
+            %peer_id,
+            request_id = %forward.request_id,
+            seq = forward.sequence_num,
+            encrypted = use_encryption,
+            "Sent tensor forward"
+        );
     }
 
     /// Send a tensor result to a specific peer via the Cap'n Proto tensor protocol.
@@ -816,5 +931,18 @@ impl NetworkManager {
         if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
             stats.peers_connected = count;
         }
+    }
+
+    /// Look up the NodeId for a libp2p PeerId by searching the peer registry.
+    fn find_node_id_for_peer(&self, peer_id: &libp2p::PeerId) -> Option<crate::types::NodeId> {
+        let peer_bytes = peer_id.to_bytes();
+        for entry in self.shared_state.peer_registry.iter() {
+            if let Some(ref stored_bytes) = entry.value().peer_id_bytes {
+                if stored_bytes == &peer_bytes {
+                    return Some(entry.key().clone());
+                }
+            }
+        }
+        None
     }
 }

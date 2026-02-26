@@ -444,7 +444,7 @@ impl Daemon {
         });
 
         // Spawn CreditLedger — shares the same Arc<RwLock<CreditBalance>> as SharedState
-        let credit_ledger = CreditLedger::new(
+        let mut credit_ledger = CreditLedger::new(
             shared_state.identity.node_id().clone(),
             shared_state.credit_balance.clone(),
             self.db.clone(),
@@ -452,6 +452,7 @@ impl Daemon {
             shutdown_rx.clone(),
             dispatcher_credit_balances.clone(),
         );
+        credit_ledger.set_shared_state(shared_state.clone());
 
         let credit_handle = tokio::spawn(async move {
             if let Err(e) = credit_ledger.run().await {

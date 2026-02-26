@@ -4909,8 +4909,10 @@ dependencies = [
  "candle-transformers",
  "capnp",
  "capnpc",
+ "chacha20poly1305",
  "chrono",
  "clap",
+ "curve25519-dalek",
  "dashmap",
  "dirs",
  "ed25519-dalek",
@@ -4919,6 +4921,7 @@ dependencies = [
  "futures",
  "half",
  "hex",
+ "hkdf",
  "hyper 1.8.1",
  "include_dir",
  "libp2p",
@@ -4929,6 +4932,7 @@ dependencies = [
  "safetensors 0.7.0",
  "serde",
  "serde_json",
+ "sha2",
  "sled",
  "sysinfo",
  "tempfile",
@@ -4943,6 +4947,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+ "x25519-dalek",
 ]
 
 [[package]]

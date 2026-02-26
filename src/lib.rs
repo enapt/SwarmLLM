@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod credit;
+pub mod crypto;
 pub mod daemon;
 pub mod error;
 pub mod health;
@@ -8,6 +9,7 @@ pub mod identity;
 pub mod inference;
 pub mod model;
 pub mod network;
+pub mod pool;
 pub mod storage;
 pub mod types;
 pub mod ui;

@@ -32,6 +32,9 @@ pub const TOPIC_HEALTH: &str = "swarm/health";
 /// GossipSub topic for identity/nickname announcements.
 pub const TOPIC_IDENTITY: &str = "swarm/identity";
 
+/// GossipSub topic for device pool management.
+pub const TOPIC_POOLS: &str = "swarm/pools";
+
 /// Codec for SwarmLLM request/response protocol using serde_json.
 #[derive(Debug, Clone, Default)]
 pub struct SwarmCodec;
