@@ -179,15 +179,19 @@ async fn test_split_inference(
     max_tokens: u32,
     prompt: &str,
 ) -> anyhow::Result<()> {
-    use swarmllm::inference::split::{SplitModel, sample_token};
+    use swarmllm::inference::split::{sample_token, SplitModel};
 
-    let model_path = model_path.ok_or_else(|| anyhow::anyhow!("--model required for test-split"))?;
+    let model_path =
+        model_path.ok_or_else(|| anyhow::anyhow!("--model required for test-split"))?;
     println!("Loading full model from: {}", model_path.display());
 
     // Load as a single split covering ALL layers (0..N, is_first=true, is_last=true)
     let mut model = SplitModel::load_from_gguf(&model_path, 0, 999, true, true)?;
     let total_layers = model.total_layers;
-    println!("Model loaded: {} layers, hidden_dim={}", total_layers, model.hidden_dim);
+    println!(
+        "Model loaded: {} layers, hidden_dim={}",
+        total_layers, model.hidden_dim
+    );
 
     // Build chat prompt
     let chat_prompt = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
@@ -208,7 +212,9 @@ async fn test_split_inference(
         &candle_core::Device::Cpu,
     )?;
 
-    let logits = model.forward(&input, 0).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let logits = model
+        .forward(&input, 0)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut generated = vec![first_token];
@@ -230,13 +236,12 @@ async fn test_split_inference(
     let mut index_pos = token_ids.len();
     for _ in 1..max_tokens {
         let last_token = *generated.last().unwrap() as i64;
-        let input = candle_core::Tensor::from_vec(
-            vec![last_token],
-            &[1, 1],
-            &candle_core::Device::Cpu,
-        )?;
+        let input =
+            candle_core::Tensor::from_vec(vec![last_token], &[1, 1], &candle_core::Device::Cpu)?;
 
-        let logits = model.forward(&input, index_pos).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let logits = model
+            .forward(&input, index_pos)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
         index_pos += 1;
 

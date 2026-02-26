@@ -191,11 +191,7 @@ impl BpeTokenizer {
 
         // Single char: direct lookup
         if chars.len() == 1 {
-            return vec![self
-                .token_to_id
-                .get(&chars[0])
-                .copied()
-                .unwrap_or(0) as i64];
+            return vec![self.token_to_id.get(&chars[0]).copied().unwrap_or(0) as i64];
         }
 
         // Apply BPE merges using the standard algorithm:
@@ -256,9 +252,8 @@ fn build_gpt2_byte_encoder() -> ([char; 256], HashMap<char, u8>) {
     let mut offset = 0u32;
 
     for b in 0u16..=255 {
-        let is_printable = (33..=126).contains(&b)
-            || (161..=172).contains(&b)
-            || (174..=255).contains(&b);
+        let is_printable =
+            (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
         if is_printable {
             let ch = char::from_u32(b as u32).unwrap();
             encoder[b as usize] = ch;
@@ -844,7 +839,7 @@ impl SplitModel {
             None
         };
 
-        let has_biases = layers.first().map_or(false, |l| l.attention_bq.is_some());
+        let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
             arch = %arch,
             layers = format!("[{layer_start}..{layer_end})"),

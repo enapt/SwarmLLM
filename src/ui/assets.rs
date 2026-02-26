@@ -5,25 +5,15 @@ use include_dir::{include_dir, Dir};
 /// Embedded frontend directory (compiled into the binary).
 static FRONTEND_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/frontend");
 
-/// Serve the admin dashboard page.
+/// Serve the main single-page application (index.html).
+/// All page routes (/, /admin, /chat, /setup) serve the same HTML.
 pub async fn serve_dashboard() -> Html<&'static str> {
     Html(get_file_content("index.html").unwrap_or("<!-- missing index.html -->"))
 }
 
-/// Serve the chat page.
-pub async fn serve_chat() -> Html<&'static str> {
-    Html(get_file_content("chat.html").unwrap_or("<!-- missing chat.html -->"))
-}
-
-/// Serve the setup wizard page.
-pub async fn serve_setup() -> Html<&'static str> {
-    Html(get_file_content("setup.html").unwrap_or("<!-- missing setup.html -->"))
-}
-
 /// Serve static files from the embedded frontend directory.
-/// Handles paths like `/frontend/css/style.css` or `/frontend/js/app.js`.
+/// Handles paths like `/static/css/style.css` or `/static/js/app.js`.
 pub async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> Response {
-    // The path comes from the route wildcard, strip leading slash if any
     let path = path.trim_start_matches('/');
 
     match FRONTEND_DIR.get_file(path) {
@@ -71,12 +61,8 @@ mod tests {
     #[test]
     fn embedded_files_exist() {
         assert!(FRONTEND_DIR.get_file("index.html").is_some());
-        assert!(FRONTEND_DIR.get_file("chat.html").is_some());
-        assert!(FRONTEND_DIR.get_file("setup.html").is_some());
         assert!(FRONTEND_DIR.get_file("css/style.css").is_some());
         assert!(FRONTEND_DIR.get_file("js/app.js").is_some());
-        assert!(FRONTEND_DIR.get_file("js/chat.js").is_some());
-        assert!(FRONTEND_DIR.get_file("js/setup.js").is_some());
     }
 
     #[test]

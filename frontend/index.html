@@ -3,215 +3,385 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SwarmLLM — Dashboard</title>
+  <title>SwarmLLM</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+  <!-- Setup wizard modal (first-run only) -->
+  <div class="modal-overlay hidden" id="setup-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Welcome to SwarmLLM</h2>
+        <span class="text-muted">First-Run Setup</span>
+      </div>
+      <div class="wizard-steps" id="step-indicators">
+        <div class="wizard-step active" data-step="1">1</div>
+        <div class="wizard-connector"></div>
+        <div class="wizard-step" data-step="2">2</div>
+        <div class="wizard-connector"></div>
+        <div class="wizard-step" data-step="3">3</div>
+        <div class="wizard-connector"></div>
+        <div class="wizard-step" data-step="4">4</div>
+      </div>
+      <div class="wizard-body" id="step-1">
+        <h3>Hardware Detection</h3>
+        <p class="text-muted mb-2">We detected the following hardware on your system.</p>
+        <div id="hw-loading" class="flex gap-1" style="align-items:center">
+          <div class="spinner"></div>
+          <span class="text-muted">Detecting hardware...</span>
+        </div>
+        <div id="hw-results" class="hidden">
+          <div class="grid grid-2 mt-1">
+            <div><label>GPU</label><div class="mono" id="hw-gpu">---</div></div>
+            <div><label>VRAM</label><div class="mono" id="hw-vram">---</div></div>
+            <div><label>System RAM</label><div class="mono" id="hw-ram">---</div></div>
+            <div><label>Disk Available</label><div class="mono" id="hw-disk">---</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="wizard-body hidden" id="step-2">
+        <h3>Resource Contribution</h3>
+        <p class="text-muted mb-2">How much of your resources should SwarmLLM use?</p>
+        <div class="form-group mt-2">
+          <div class="flex-between mb-1">
+            <span>Minimal</span>
+            <span class="mono" id="contribution-label">Moderate</span>
+            <span>Maximum</span>
+          </div>
+          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="1">
+        </div>
+        <div class="mt-2 text-muted" id="contribution-desc">Balanced: uses ~50% of available resources. Good for most users.</div>
+      </div>
+      <div class="wizard-body hidden" id="step-3">
+        <h3>Model Selection</h3>
+        <p class="text-muted mb-2">Choose which models to download and host.</p>
+        <div id="setup-model-list"><p class="text-muted">Loading available models...</p></div>
+      </div>
+      <div class="wizard-body hidden" id="step-4">
+        <h3>Ready to Start</h3>
+        <p class="text-muted mb-2">Review your configuration:</p>
+        <div class="mt-1">
+          <div class="flex-between mb-1"><span class="text-muted">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">GPU</span><span class="mono" id="summary-gpu">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">RAM Allocated</span><span class="mono" id="summary-ram">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">Disk Allocated</span><span class="mono" id="summary-disk">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">Models</span><span class="mono" id="summary-models">---</span></div>
+        </div>
+      </div>
+      <div class="wizard-footer">
+        <button class="btn hidden" id="btn-prev" onclick="SwarmLLM.setup.prevStep()">Back</button>
+        <div></div>
+        <button class="btn btn-primary btn-lg" id="btn-next" onclick="SwarmLLM.setup.nextStep()">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div class="modal-overlay hidden" id="settings-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeSettings()">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Contribution Level</label>
+        <select id="settings-contribution">
+          <option value="minimal">Minimal</option>
+          <option value="moderate" selected>Moderate</option>
+          <option value="maximum">Maximum</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Max Concurrent Requests</label>
+        <input type="number" id="settings-max-requests" value="10" min="1" max="100">
+      </div>
+      <details class="settings-advanced">
+        <summary>Advanced Settings</summary>
+        <div class="mt-2">
+          <div class="form-group">
+            <label>Max Bandwidth (Mbps, 0 = unlimited)</label>
+            <input type="number" id="settings-bandwidth" value="0" min="0">
+          </div>
+          <div class="form-group">
+            <label>Max Disk (MB)</label>
+            <input type="number" id="settings-disk" value="50000" min="1000">
+          </div>
+          <div class="form-group">
+            <label>Auto-Manage Shards</label>
+            <select id="settings-auto-shards">
+              <option value="off">Off</option>
+              <option value="on">On - Download popular shards automatically</option>
+            </select>
+          </div>
+        </div>
+      </details>
+      <div class="mt-2">
+        <button class="btn btn-primary" onclick="SwarmLLM.settings.save()">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model browser modal -->
+  <div class="modal-overlay hidden" id="model-browser-modal">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h2>Browse Models</h2>
+        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeModelBrowser()">&times;</button>
+      </div>
+      <div class="model-browser-search">
+        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, mistral)..." onkeydown="if(event.key==='Enter')SwarmLLM.hf.search()">
+        <button class="btn btn-primary" onclick="SwarmLLM.hf.search()">Search</button>
+      </div>
+      <div class="model-browser-filters">
+        <select id="hf-filter-quant">
+          <option value="">All quantizations</option>
+          <option value="Q4_K_M">Q4_K_M</option>
+          <option value="Q5_K_M">Q5_K_M</option>
+          <option value="Q6_K">Q6_K</option>
+          <option value="Q8_0">Q8_0</option>
+        </select>
+        <select id="hf-filter-size">
+          <option value="">All sizes</option>
+          <option value="small">Small (&lt;4GB)</option>
+          <option value="medium">Medium (4-10GB)</option>
+          <option value="large">Large (10-30GB)</option>
+          <option value="xlarge">XLarge (&gt;30GB)</option>
+        </select>
+      </div>
+      <div id="hf-results">
+        <div class="empty-state"><p>Search for GGUF models on HuggingFace to get started</p></div>
+      </div>
+      <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
+        <div class="spinner"></div>
+        <span class="text-muted ml-1">Searching HuggingFace...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Header -->
   <header class="app-header">
-    <div class="logo">SwarmLLM</div>
-    <nav>
-      <a href="/admin" class="active">Dashboard</a>
-      <a href="/chat">Chat</a>
-    </nav>
-    <div class="node-info">
-      <span class="pulse-dot"></span>
-      <span class="mono" id="node-id">...</span>
-      <span class="tier-badge silver" id="tier-badge">...</span>
+    <div class="header-left">
+      <div class="logo">SwarmLLM</div>
+    </div>
+    <div class="header-center">
+      <button class="tab-btn" data-tab="chat" onclick="SwarmLLM.ui.switchTab('chat')">Chat</button>
+      <button class="tab-btn active" data-tab="dashboard" onclick="SwarmLLM.ui.switchTab('dashboard')">Dashboard</button>
+    </div>
+    <div class="header-right">
+      <div class="model-selector">
+        <select id="model-select" title="Active model">
+          <option value="">No model loaded</option>
+        </select>
+        <button class="btn btn-sm" onclick="SwarmLLM.ui.openModelBrowser()" title="Browse models">+</button>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.openSettings()" title="Settings">&#9881;</button>
+      <div class="node-info">
+        <span class="pulse-dot"></span>
+        <span class="mono" id="node-id" title="Node ID">...</span>
+        <span class="tier-badge silver" id="tier-badge">...</span>
+      </div>
+      <button class="btn btn-ghost btn-sm btn-shutdown" onclick="SwarmLLM.shutdown()" title="Shutdown node">&#9211;</button>
     </div>
   </header>
 
-  <div class="container">
-    <!-- Status banner -->
-    <div id="status-banner"></div>
+  <!-- Main layout: sidebar + content -->
+  <div class="app-layout">
+    <!-- Sidebar: chat sessions -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Sessions</span>
+        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.chat.newSession()" title="New chat">+</button>
+      </div>
+      <div class="session-list" id="session-list"></div>
+      <div class="sidebar-footer">
+        <button class="btn btn-ghost btn-sm sidebar-toggle" onclick="SwarmLLM.ui.toggleSidebar()" title="Collapse sidebar">&#9664;</button>
+      </div>
+    </aside>
 
-    <!-- Stat cards -->
-    <div class="grid grid-4 mb-2" id="stats-row">
-      <div class="stat-card">
-        <div class="stat-icon blue">&#9901;</div>
-        <div class="stat-value" id="stat-peers">0</div>
-        <div class="stat-label">Connected Peers</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon green">&#9733;</div>
-        <div class="stat-value" id="stat-credits">0</div>
-        <div class="stat-label">Credit Balance</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon purple">&#9889;</div>
-        <div class="stat-value" id="stat-served">0</div>
-        <div class="stat-label">Requests Served</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-icon orange">&#9203;</div>
-        <div class="stat-value" id="stat-active">0</div>
-        <div class="stat-label">Active Requests</div>
-      </div>
-    </div>
-
-    <div class="grid grid-2">
-      <!-- Node panel -->
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Node</h2>
-          <span class="mono text-muted" id="version" style="font-size:0.8rem">v...</span>
-        </div>
-        <div class="form-group">
-          <label>CPU</label>
-          <div class="mono" id="node-cpu" style="font-size:0.85rem">...</div>
-        </div>
-        <div class="form-group">
-          <label>GPU</label>
-          <div class="mono" id="node-gpu" style="font-size:0.85rem">Detecting...</div>
-          <div class="mono text-muted" id="node-vram" style="font-size:0.8rem"></div>
-        </div>
-        <div class="form-group">
-          <label>RAM</label>
-          <div class="flex-between mb-1">
-            <span class="mono" id="ram-used" style="font-size:0.85rem">...</span>
-            <span class="text-muted" id="ram-total" style="font-size:0.85rem">/ ...</span>
+    <!-- Content area -->
+    <main class="content">
+      <!-- Chat view -->
+      <div class="view" id="view-chat" style="display:none">
+        <div class="chat-container">
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-empty" id="chat-empty">
+              <div class="chat-empty-icon">&#11088;</div>
+              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>
+              <div>Send a message to start a conversation</div>
+            </div>
           </div>
-          <div class="progress-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
-        </div>
-        <div class="form-group">
-          <label>Disk</label>
-          <div class="flex-between mb-1">
-            <span class="mono" id="disk-used" style="font-size:0.85rem">...</span>
-            <span class="text-muted" id="disk-total" style="font-size:0.85rem">/ ...</span>
+          <div class="chat-input-area">
+            <div class="chat-input-wrap">
+              <textarea id="chat-input" placeholder="Type a message..." rows="1"
+                        onkeydown="SwarmLLM.chat.handleKey(event)"></textarea>
+              <button class="btn btn-primary" id="send-btn" onclick="SwarmLLM.chat.send()">Send</button>
+            </div>
           </div>
-          <div class="progress-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
-        </div>
-        <div class="flex-between">
-          <label style="margin:0">Hosted Shards</label>
-          <span class="mono" id="hosted-shards">0</span>
-        </div>
-        <div class="flex-between mt-1">
-          <label style="margin:0">Uptime</label>
-          <span class="mono" id="uptime">...</span>
         </div>
       </div>
 
-      <!-- Credits panel -->
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Credits</h2>
-          <span class="tier-badge silver" id="credit-tier">...</span>
-        </div>
-        <div style="font-family:var(--font-mono);font-size:2.5rem;font-weight:700;margin:8px 0 16px" id="credit-balance">0</div>
-        <div class="grid grid-2">
-          <div>
-            <div class="stat-label">Lifetime Earned</div>
-            <div class="mono text-green" style="font-size:1.1rem;font-weight:600" id="credit-earned">+0</div>
-          </div>
-          <div>
-            <div class="stat-label">Lifetime Spent</div>
-            <div class="mono text-red" style="font-size:1.1rem;font-weight:600" id="credit-spent">-0</div>
-          </div>
-        </div>
-        <div class="mt-2">
-          <label>Activity</label>
-          <div class="sparkline" id="credit-sparkline"></div>
-        </div>
-      </div>
-    </div>
+      <!-- Dashboard view -->
+      <div class="view" id="view-dashboard">
+        <div class="container">
+          <!-- Status banner -->
+          <div id="status-banner"></div>
 
-    <!-- Models table -->
-    <div class="panel mt-2">
-      <div class="panel-header">
-        <h2>Models</h2>
-      </div>
-      <div id="models-container">
-        <table class="data-table" id="models-table" style="display:none">
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>Source</th>
-              <th>Size</th>
-              <th>Availability</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="models-table-body"></tbody>
-        </table>
-        <div class="empty-state" id="models-empty">
-          <div class="empty-icon">&#128229;</div>
-          <p>No models available. Load a model locally or connect to peers to discover network models.</p>
-        </div>
-      </div>
-    </div>
+          <!-- Stat cards -->
+          <div class="grid grid-4 mb-2" id="stats-row">
+            <div class="stat-card">
+              <div class="stat-icon blue">&#9901;</div>
+              <div class="stat-value" id="stat-peers">0</div>
+              <div class="stat-label">Connected Peers</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon green">&#9733;</div>
+              <div class="stat-value" id="stat-credits">0</div>
+              <div class="stat-label">Credit Balance</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon purple">&#9889;</div>
+              <div class="stat-value" id="stat-served">0</div>
+              <div class="stat-label">Requests Served</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon orange">&#9203;</div>
+              <div class="stat-value" id="stat-active">0</div>
+              <div class="stat-label">Active Requests</div>
+            </div>
+          </div>
 
-    <!-- Governance -->
-    <div class="grid grid-2 mt-2">
-      <!-- Proposals -->
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Governance</h2>
-          <span class="mono text-muted" id="governance-role" style="font-size:0.8rem">...</span>
-        </div>
-        <div class="form-group">
-          <label>Active Proposals</label>
-          <div id="proposals-list">
-            <div class="text-muted" style="font-size:0.85rem">No active proposals</div>
+          <div class="grid grid-2">
+            <!-- Node panel -->
+            <div class="panel">
+              <div class="panel-header">
+                <h2>Node</h2>
+                <span class="mono text-muted" id="version" style="font-size:0.8rem">v...</span>
+              </div>
+              <div class="form-group">
+                <label>CPU</label>
+                <div class="mono" id="node-cpu" style="font-size:0.85rem">...</div>
+              </div>
+              <div class="form-group">
+                <label>GPU</label>
+                <div class="mono" id="node-gpu" style="font-size:0.85rem">Detecting...</div>
+                <div class="mono text-muted" id="node-vram" style="font-size:0.8rem"></div>
+              </div>
+              <div class="form-group">
+                <label>RAM</label>
+                <div class="flex-between mb-1">
+                  <span class="mono" id="ram-used" style="font-size:0.85rem">...</span>
+                  <span class="text-muted" id="ram-total" style="font-size:0.85rem">/ ...</span>
+                </div>
+                <div class="progress-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
+              </div>
+              <div class="form-group">
+                <label>Disk</label>
+                <div class="flex-between mb-1">
+                  <span class="mono" id="disk-used" style="font-size:0.85rem">...</span>
+                  <span class="text-muted" id="disk-total" style="font-size:0.85rem">/ ...</span>
+                </div>
+                <div class="progress-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+              </div>
+              <div class="flex-between">
+                <label style="margin:0">Hosted Shards</label>
+                <span class="mono" id="hosted-shards">0</span>
+              </div>
+              <div class="flex-between mt-1">
+                <label style="margin:0">Uptime</label>
+                <span class="mono" id="uptime">...</span>
+              </div>
+            </div>
+
+            <!-- Credits panel -->
+            <div class="panel">
+              <div class="panel-header">
+                <h2>Credits</h2>
+                <span class="tier-badge silver" id="credit-tier">...</span>
+              </div>
+              <div style="font-family:var(--font-mono);font-size:2.5rem;font-weight:700;margin:8px 0 16px" id="credit-balance">0</div>
+              <div class="grid grid-2">
+                <div>
+                  <div class="stat-label">Lifetime Earned</div>
+                  <div class="mono text-green" style="font-size:1.1rem;font-weight:600" id="credit-earned">+0</div>
+                </div>
+                <div>
+                  <div class="stat-label">Lifetime Spent</div>
+                  <div class="mono text-red" style="font-size:1.1rem;font-weight:600" id="credit-spent">-0</div>
+                </div>
+              </div>
+              <div class="mt-2">
+                <label>Activity</label>
+                <div class="sparkline" id="credit-sparkline"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Models table -->
+          <div class="panel mt-2">
+            <div class="panel-header">
+              <h2>Models</h2>
+              <button class="btn btn-sm" onclick="SwarmLLM.ui.openModelBrowser()">Browse HuggingFace</button>
+            </div>
+            <div id="models-container">
+              <table class="data-table" id="models-table" style="display:none">
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>Source</th>
+                    <th>Size</th>
+                    <th>Availability</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="models-table-body"></tbody>
+              </table>
+              <div class="empty-state" id="models-empty">
+                <div class="empty-icon">&#128229;</div>
+                <p>No models available. <a href="#" onclick="SwarmLLM.ui.openModelBrowser();return false">Browse HuggingFace</a> to find models, or connect to peers.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Network & Governance -->
+          <div class="grid grid-2 mt-2">
+            <div class="panel">
+              <div class="panel-header">
+                <h2>Network</h2>
+              </div>
+              <div class="form-group">
+                <label>Connected Peers</label>
+                <div id="peers-list">
+                  <div class="text-muted" style="font-size:0.85rem">No peers connected (standalone mode)</div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Latest Release</label>
+                <div id="latest-release" class="mono" style="font-size:0.85rem">...</div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h2>Governance</h2>
+                <span class="mono text-muted" id="governance-role" style="font-size:0.8rem">...</span>
+              </div>
+              <div class="form-group">
+                <label>Active Proposals</label>
+                <div id="proposals-list">
+                  <div class="text-muted" style="font-size:0.85rem">No active proposals</div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Open Issues</label>
+                <div id="issues-list">
+                  <div class="text-muted" style="font-size:0.85rem">No open issues</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="form-group">
-          <label>Open Issues</label>
-          <div id="issues-list">
-            <div class="text-muted" style="font-size:0.85rem">No open issues</div>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Governance Params</label>
-          <div id="gov-params" class="mono" style="font-size:0.8rem">...</div>
-        </div>
       </div>
-
-      <!-- Network / Peers -->
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Network</h2>
-        </div>
-        <div class="form-group">
-          <label>Connected Peers</label>
-          <div id="peers-list">
-            <div class="text-muted" style="font-size:0.85rem">No peers connected (standalone mode)</div>
-          </div>
-        </div>
-        <div class="form-group">
-          <label>Latest Release</label>
-          <div id="latest-release" class="mono" style="font-size:0.85rem">...</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Settings -->
-    <div class="panel mt-2">
-      <div class="panel-header">
-        <h2>Settings</h2>
-      </div>
-      <div class="grid grid-2">
-        <div class="form-group">
-          <label>Contribution Level</label>
-          <select id="settings-contribution">
-            <option value="minimal">Minimal</option>
-            <option value="moderate" selected>Moderate</option>
-            <option value="maximum">Maximum</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Max Concurrent Requests</label>
-          <input type="number" id="settings-max-requests" value="10" min="1" max="100">
-        </div>
-        <div class="form-group">
-          <label>Max Bandwidth (Mbps, 0 = unlimited)</label>
-          <input type="number" id="settings-bandwidth" value="0" min="0">
-        </div>
-        <div class="form-group">
-          <label>Max Disk (MB)</label>
-          <input type="number" id="settings-disk" value="50000" min="1000">
-        </div>
-      </div>
-      <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
-    </div>
+    </main>
   </div>
 
   <script src="/static/js/app.js"></script>

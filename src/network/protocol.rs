@@ -646,6 +646,7 @@ mod tests {
         let forward = LayerForward {
             request_id: uuid::Uuid::new_v4(),
             sequence_num: 42,
+            index_pos: 0,
             activations: vec![1, 2, 3, 4, 5, 6, 7, 8],
             format: TensorFormat::FP16,
             sender_peer_bytes: None,
@@ -670,12 +671,13 @@ mod tests {
             let forward = LayerForward {
                 request_id: uuid::Uuid::nil(),
                 sequence_num: 0,
+                index_pos: 0,
                 activations: vec![],
                 format: fmt,
                 sender_peer_bytes: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
-            assert_eq!(encoded[21], tag); // +1 for the message type tag byte
+            assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
             let decoded = decode_layer_forward(&encoded).unwrap();
             assert!(matches!(
                 (&forward.format, &decoded.format),
@@ -692,6 +694,7 @@ mod tests {
         let forward = LayerForward {
             request_id: uuid::Uuid::new_v4(),
             sequence_num: 100,
+            index_pos: 0,
             activations: data.clone(),
             format: TensorFormat::FP32,
             sender_peer_bytes: None,

@@ -804,6 +804,213 @@ pub struct ConfigUpdate {
     pub models: Vec<String>,
 }
 
+// ---- HuggingFace Endpoints ----
+
+/// GET /api/admin/hf/search?q=... — Search HuggingFace for GGUF models.
+pub async fn hf_search(
+    axum::extract::Query(params): axum::extract::Query<HfSearchParams>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let results = crate::model::huggingface::search_gguf_models(&query)
+        .await
+        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e)))?;
+
+    let values: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "repo_id": r.repo_id,
+                "filename": r.filename,
+                "size_bytes": r.size_bytes,
+                "downloads": r.downloads,
+            })
+        })
+        .collect();
+
+    Ok(Json(values))
+}
+
+/// POST /api/admin/hf/download — Start downloading a GGUF model from HuggingFace.
+pub async fn hf_download(
+    State(state): State<AppState>,
+    Json(body): Json<HfDownloadRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repo_id = body.repo_id;
+    let filename = body.filename;
+
+    if repo_id.is_empty() || filename.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": "repo_id and filename are required",
+        })));
+    }
+
+    let dest_dir = state
+        .config
+        .node
+        .data_dir
+        .join("models")
+        .join(repo_id.replace('/', "_"));
+
+    tracing::info!(repo = %repo_id, file = %filename, "Starting HuggingFace download");
+
+    // Spawn download in background
+    let repo_clone = repo_id.clone();
+    let file_clone = filename.clone();
+    let shared = state.shared_state.clone();
+    let model_id_str = format!("hf:{}/{}", repo_id, filename);
+    let mid = crate::types::ModelId(model_id_str.clone());
+
+    // Create initial acquisition progress entry
+    let status = crate::model::acquisition::AcquisitionStatus {
+        model_id: mid.clone(),
+        state: crate::model::acquisition::AcquisitionState::Downloading,
+        total_shards: 1,
+        downloaded_shards: 0,
+        verified_shards: 0,
+        failed_shards: 0,
+        total_bytes: 0,
+        downloaded_bytes: 0,
+        shard_progress: std::collections::HashMap::new(),
+        speed_bytes_per_sec: 0,
+        started_at: Some(chrono::Utc::now()),
+        log: vec![format!("Downloading {} from HuggingFace...", filename)],
+    };
+    shared.acquisition_progress.insert(mid.clone(), status);
+
+    tokio::spawn(async move {
+        let (ptx, mut prx) =
+            tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
+
+        let download_mid = mid.clone();
+        let download_shared = shared.clone();
+
+        // Spawn progress updater
+        let progress_mid = mid.clone();
+        let progress_shared = shared.clone();
+        tokio::spawn(async move {
+            let mut last_bytes = 0u64;
+            let mut last_time = std::time::Instant::now();
+            while let Some(prog) = prx.recv().await {
+                if let Some(mut entry) = progress_shared.acquisition_progress.get_mut(&progress_mid)
+                {
+                    entry.downloaded_bytes = prog.downloaded_bytes;
+                    entry.total_bytes = prog.total_bytes;
+                    let now = std::time::Instant::now();
+                    let dt = now.duration_since(last_time).as_secs_f64();
+                    if dt > 0.5 {
+                        let speed = ((prog.downloaded_bytes - last_bytes) as f64 / dt) as u64;
+                        entry.speed_bytes_per_sec = speed;
+                        last_bytes = prog.downloaded_bytes;
+                        last_time = now;
+                    }
+                }
+            }
+        });
+
+        match crate::model::huggingface::download_model(
+            &repo_clone,
+            &file_clone,
+            &dest_dir,
+            Some(ptx),
+        )
+        .await
+        {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), "HuggingFace download complete");
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                {
+                    entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                    entry.downloaded_shards = 1;
+                    entry.verified_shards = 1;
+                    entry
+                        .log
+                        .push(format!("Download complete: {}", path.display()));
+                }
+
+                // Try to load the downloaded model
+                let executor = download_shared.executor.clone();
+                let gpu_layers = download_shared.config.inference.gpu_layers;
+                let model_name = format!("{}/{}", repo_clone, file_clone);
+
+                let mut exec = executor.lock().await;
+                match exec.load_model(&path, gpu_layers) {
+                    Ok(()) => {
+                        let size = exec.model_size_bytes().unwrap_or(0);
+                        *download_shared.loaded_model_info.write().await =
+                            Some(crate::daemon::LoadedModelInfo {
+                                name: model_name.clone(),
+                                size_bytes: size,
+                            });
+                        if let Some(mut entry) =
+                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        {
+                            entry.log.push(format!("Model loaded: {}", model_name));
+                        }
+                        tracing::info!(model = %model_name, "HF model loaded for inference");
+                    }
+                    Err(e) => {
+                        if let Some(mut entry) =
+                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        {
+                            entry.log.push(format!("Model load failed: {}", e));
+                        }
+                        tracing::error!(error = %e, "Failed to load HF model");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "HuggingFace download failed");
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                {
+                    entry.state =
+                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                    entry.failed_shards = 1;
+                    entry.log.push(format!("Download failed: {}", e));
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "started",
+        "model_id": model_id_str,
+    })))
+}
+
+/// POST /api/admin/shutdown — Gracefully shut down the node.
+pub async fn shutdown_node(State(state): State<AppState>) -> Json<serde_json::Value> {
+    tracing::info!("Shutdown requested via API");
+
+    // Signal all subsystems to shut down
+    state.shared_state.shutdown();
+
+    // Give a moment for the response to send, then exit
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
+
+    Json(serde_json::json!({ "status": "shutting_down" }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HfSearchParams {
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HfDownloadRequest {
+    pub repo_id: String,
+    pub filename: String,
+    #[serde(default)]
+    pub mode: String,
+}
+
 // ---- Hardware detection ----
 
 fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {

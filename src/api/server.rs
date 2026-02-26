@@ -81,12 +81,17 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/governance/params",
             get(admin::governance_params),
         )
+        // HuggingFace model browsing
+        .route("/api/admin/hf/search", get(admin::hf_search))
+        .route("/api/admin/hf/download", post(admin::hf_download))
+        // Shutdown
+        .route("/api/admin/shutdown", post(admin::shutdown_node))
         // WebSocket
         .route("/api/admin/ws", get(websocket::handler))
         // Static files (embedded frontend)
         .route("/admin", get(assets::serve_dashboard))
-        .route("/chat", get(assets::serve_chat))
-        .route("/setup", get(assets::serve_setup))
+        .route("/chat", get(assets::serve_dashboard))
+        .route("/setup", get(assets::serve_dashboard))
         .route("/static/*path", get(assets::serve_static))
         // Root redirect
         .route("/", get(|| async { Redirect::to("/admin") }))

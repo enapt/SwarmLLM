@@ -624,9 +624,8 @@ fn gpt2_unicode_to_byte(cp: u32) -> u8 {
     // remaining bytes 0-32, 127-160, 173 → 256, 257, ... (U+0100, U+0101, ...)
     let mut non_printable = Vec::new();
     for b in 0u16..=255 {
-        let is_printable = (33..=126).contains(&b)
-            || (161..=172).contains(&b)
-            || (174..=255).contains(&b);
+        let is_printable =
+            (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
         if !is_printable {
             non_printable.push(b as u8);
         }
