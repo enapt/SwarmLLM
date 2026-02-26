@@ -340,6 +340,43 @@ impl CreditLedger {
     }
 }
 
+/// Apply credit operations directly on shared state (for use outside the CreditLedger task).
+///
+/// This replicates what `CreditLedger::apply_credit` + `persist_balance` do, so that
+/// callers like `InferenceRouter` and `PipelineExecutor` don't bypass persistence and
+/// proper accounting.
+pub async fn apply_credit_direct(
+    balance: &Arc<RwLock<CreditBalance>>,
+    db: &crate::storage::db::Database,
+    delta: i64,
+    is_earning: bool,
+) -> Result<(), SwarmError> {
+    {
+        let mut bal = balance.write().await;
+        bal.balance += delta;
+        bal.last_updated = chrono::Utc::now();
+
+        if is_earning {
+            bal.lifetime_earned += delta.unsigned_abs();
+        } else {
+            bal.lifetime_spent += delta.unsigned_abs();
+        }
+
+        tracing::debug!(
+            balance = bal.balance,
+            delta,
+            lifetime_earned = bal.lifetime_earned,
+            lifetime_spent = bal.lifetime_spent,
+            "Credit balance updated (direct)"
+        );
+
+        // Persist while we still hold the balance data (clone for serialization)
+        db.put_json(TREE_CREDITS, KEY_BALANCE, &*bal)?;
+    }
+
+    Ok(())
+}
+
 /// Bucket a balance value for privacy-preserving gossip.
 /// Rounds to the nearest 100.
 fn bucket_balance(balance: i64) -> i64 {

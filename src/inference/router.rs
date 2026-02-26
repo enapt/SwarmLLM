@@ -80,6 +80,9 @@ pub struct InferenceRouter {
     kv_cache: KvCacheManager,
     max_concurrent: usize,
     active_count: Arc<AtomicUsize>,
+    /// Notify used to wake the drain loop when a new request is queued,
+    /// replacing the fixed 50ms polling interval.
+    queue_notify: Arc<tokio::sync::Notify>,
 }
 
 impl InferenceRouter {
@@ -107,16 +110,13 @@ impl InferenceRouter {
             kv_cache: KvCacheManager::new(kv_cache_ttl),
             max_concurrent,
             active_count: Arc::new(AtomicUsize::new(0)),
+            queue_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     /// Run the router event loop.
     pub async fn run(mut self) -> Result<(), SwarmError> {
         tracing::info!("InferenceRouter running");
-
-        // Drain interval — process queued requests periodically
-        let mut drain_interval = tokio::time::interval(std::time::Duration::from_millis(50));
-        drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // KV-cache cleanup interval
         let mut cache_cleanup = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -134,6 +134,10 @@ impl InferenceRouter {
                     match cmd {
                         Some(RouterCommand::Submit { request, result_tx }) => {
                             self.handle_submit(request, result_tx);
+                            // Drain immediately after a submission instead of
+                            // waiting for a notify (the submit already notifies,
+                            // but draining inline avoids a wakeup round-trip).
+                            self.drain_queue().await;
                         }
                         Some(RouterCommand::NetworkMessage(msg)) => {
                             self.handle_network_message(msg).await;
@@ -144,7 +148,7 @@ impl InferenceRouter {
                         }
                     }
                 }
-                _ = drain_interval.tick() => {
+                _ = self.queue_notify.notified() => {
                     self.drain_queue().await;
                 }
                 _ = cache_cleanup.tick() => {
@@ -199,6 +203,9 @@ impl InferenceRouter {
             request: adjusted_request,
             result_tx,
         });
+
+        // Wake the drain loop immediately instead of waiting for 50ms poll.
+        self.queue_notify.notify_one();
     }
 
     /// Handle network messages (LayerResult, InferenceError, etc.)
@@ -280,12 +287,18 @@ impl InferenceRouter {
                     // - Here we debit the local API consumer for requesting inference
                     if is_local_api_request {
                         let total_tokens = result.prompt_tokens + result.completion_tokens;
-                        let mut bal = shared_state.credit_balance.write().await;
                         let spent =
                             crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
-                        bal.balance -= spent;
-                        bal.lifetime_spent += spent as u64;
-                        bal.last_updated = chrono::Utc::now();
+                        if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                            &shared_state.credit_balance,
+                            &shared_state.db,
+                            -spent,
+                            false,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "Failed to persist credit spend");
+                        }
                         tracing::debug!(
                             spent,
                             total_tokens,
@@ -316,14 +329,17 @@ async fn execute_request(
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
 
-    // Check if we can handle this entirely locally
+    // Check if we can handle this entirely locally.
+    // Use the atomic flag to avoid locking the executor mutex just to check readiness.
     let local_node_id = shared_state.identity.node_id().clone();
-    let mut executor = shared_state.executor.lock().await;
-
-    // Only use local executor when the full model is loaded (not in split/shard mode)
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
-    if executor.is_loaded() && !is_split_mode {
+    if shared_state
+        .model_loaded
+        .load(std::sync::atomic::Ordering::Acquire)
+        && !is_split_mode
+    {
         // Local-only inference path (single node has the model loaded)
+        let mut executor = shared_state.executor.lock().await;
         tracing::info!(
             request_id = %request.id,
             model = %model_id,
@@ -341,7 +357,6 @@ async fn execute_request(
             finish_reason: gen_result.finish_reason.as_str().to_string(),
         });
     }
-    drop(executor);
 
     // Distributed inference path: assemble pipeline across nodes
     tracing::info!(
