@@ -390,6 +390,14 @@ pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Valu
     }))
 }
 
+/// GET /api/admin/api-key — Return the current API key.
+/// This endpoint requires authentication itself (Bearer token).
+pub async fn get_api_key(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "api_key": state.shared_state.api_key,
+    }))
+}
+
 // ---- Request types ----
 
 #[derive(Debug, Deserialize)]
@@ -543,7 +551,11 @@ pub async fn hf_download(
                             Some(crate::daemon::LoadedModelInfo {
                                 name: model_name.clone(),
                                 size_bytes: size,
+                                eos_tokens: vec![2],
                             });
+                        download_shared
+                            .model_loaded
+                            .store(true, std::sync::atomic::Ordering::Release);
                         if let Some(mut entry) =
                             download_shared.acquisition_progress.get_mut(&download_mid)
                         {

@@ -181,8 +181,8 @@ impl PipelineExecutor {
             finish_reason = "length".to_string();
         }
 
-        // Strip EOS tokens before decoding
-        let eos_tokens: &[u32] = &[151643, 151645, 2];
+        // Strip EOS tokens before decoding (loaded from GGUF metadata)
+        let eos_tokens = self.get_eos_tokens().await;
         let clean_tokens: Vec<u32> = generated_tokens
             .iter()
             .copied()
@@ -246,6 +246,16 @@ impl PipelineExecutor {
             .iter()
             .map(|id| format!("[{id}]"))
             .collect::<String>()
+    }
+
+    /// Get EOS token IDs from the loaded split model, falling back to [2].
+    async fn get_eos_tokens(&self) -> Vec<u32> {
+        let model_id = &self.assignment.segments[0].shard_id.model_id;
+        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+            let model = model_ref.lock().await;
+            return model.eos_tokens().to_vec();
+        }
+        vec![2]
     }
 
     /// Forward activation data through all pipeline segments in order.
@@ -472,11 +482,17 @@ impl PipelineExecutor {
             if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
                 stats.forwards_served += 1;
             }
-            let mut bal = self.shared_state.credit_balance.write().await;
             let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-            bal.balance += earned;
-            bal.lifetime_earned += earned as u64;
-            bal.last_updated = chrono::Utc::now();
+            if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                &self.shared_state.credit_balance,
+                &self.shared_state.db,
+                earned,
+                true,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to persist credit earn");
+            }
         }
 
         if is_last {
@@ -487,9 +503,9 @@ impl PipelineExecutor {
                 self.request.sampling_params.top_p,
             )?;
 
-            // EOS detection: 151643 (<|endoftext|>), 151645 (<|im_end|>) for Qwen2
-            // Generic EOS token 2 for Llama-family models
-            let finish = if token_id == 151643 || token_id == 151645 || token_id == 2 {
+            // EOS detection: use tokens loaded from GGUF metadata
+            let eos_tokens = split_model.eos_tokens();
+            let finish = if eos_tokens.contains(&token_id) {
                 Some(NetworkFinishReason::Stop)
             } else {
                 None

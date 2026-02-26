@@ -62,6 +62,9 @@ impl HealthMonitor {
                     self.broadcast_capabilities().await;
                     self.broadcast_manifests().await;
                     self.check_peer_health().await;
+                    self.cleanup_acquisition_progress();
+                    // Cleanup expired anti-gaming rate limit entries
+                    self.shared_state.anti_gaming.lock().await.cleanup();
                 }
             }
         }
@@ -216,6 +219,38 @@ impl HealthMonitor {
             let _ = self
                 .rebalance_tx
                 .try_send(RebalanceEvent::PeerLeft(peer_id));
+        }
+    }
+
+    /// Remove completed/failed acquisition entries older than 1 hour.
+    fn cleanup_acquisition_progress(&self) {
+        use crate::model::acquisition::AcquisitionState;
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        let to_remove: Vec<_> = self
+            .shared_state
+            .acquisition_progress
+            .iter()
+            .filter(|entry| {
+                let status = entry.value();
+                match &status.state {
+                    AcquisitionState::Complete | AcquisitionState::Failed { .. } => {
+                        status.started_at.map_or(true, |s| s < cutoff)
+                    }
+                    _ => false,
+                }
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if !to_remove.is_empty() {
+            tracing::debug!(
+                count = to_remove.len(),
+                "Cleaning up stale acquisition progress entries"
+            );
+            for key in to_remove {
+                self.shared_state.acquisition_progress.remove(&key);
+            }
         }
     }
 }

@@ -27,6 +27,8 @@ use crate::types::{
 pub struct LoadedModelInfo {
     pub name: String,
     pub size_bytes: u64,
+    /// EOS token IDs loaded from GGUF metadata.
+    pub eos_tokens: Vec<u32>,
 }
 
 pub struct SharedState {
@@ -76,6 +78,14 @@ pub struct SharedState {
     pub pool_registry: DashMap<crate::pool::types::PoolId, crate::pool::types::PoolState>,
     /// Channel to send commands to the PoolManager task.
     pub pool_tx: RwLock<Option<mpsc::Sender<crate::pool::types::PoolCommand>>>,
+    /// API Bearer token for authentication.
+    pub api_key: String,
+    /// Lock-free flag indicating a full model is loaded in the executor.
+    /// Set after `executor.load_model()` succeeds; checked by InferenceRouter
+    /// to avoid locking the executor mutex just to check readiness.
+    pub model_loaded: std::sync::atomic::AtomicBool,
+    /// Anti-gaming system for credit transaction validation.
+    pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -87,6 +97,8 @@ impl SharedState {
         executor: SharedExecutor,
         gpu_info: Option<crate::inference::executor::GpuInfo>,
     ) -> (Arc<Self>, watch::Receiver<bool>) {
+        // Resolve API key: config > persisted in DB > generate new
+        let api_key = resolve_api_key(&config, &db);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
@@ -159,6 +171,9 @@ impl SharedState {
             pool_state: RwLock::new(None),
             pool_registry: DashMap::new(),
             pool_tx: RwLock::new(None),
+            api_key,
+            model_loaded: std::sync::atomic::AtomicBool::new(false),
+            anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
             shutdown_tx,
         });
 
@@ -205,6 +220,7 @@ impl Daemon {
             Some(LoadedModelInfo {
                 name: executor.model_name().to_string(),
                 size_bytes: executor.model_size_bytes().unwrap_or(0),
+                eos_tokens: vec![2], // Default; updated when split model loads with GGUF metadata
             })
         } else {
             None
@@ -244,6 +260,14 @@ impl Daemon {
 
         // Set the cached model info (lock-free for admin reads)
         *shared_state.loaded_model_info.write().await = cached_info;
+
+        // Set the model_loaded atomic for lock-free readiness checks in InferenceRouter.
+        // Only true when a full model is loaded (not split mode).
+        if model_info.is_some() && self.config.inference.shard_range.is_none() {
+            shared_state
+                .model_loaded
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
 
         // Generate a ModelManifest for the locally loaded model so peers can discover it.
         // This is needed even in split mode so the shard registry gets populated.
@@ -776,14 +800,36 @@ async fn dispatch_network_messages(
                                     amount = tx.amount,
                                     "Received credit transaction"
                                 );
+                                // Anti-gaming validation for network transactions
+                                {
+                                    let mut ag = shared_state.anti_gaming.lock().await;
+                                    match ag.check_transaction(&tx.from, &tx.to, tx.amount) {
+                                        Ok(_decision) => {
+                                            ag.record_transaction(&tx.from);
+                                        }
+                                        Err(violation) => {
+                                            tracing::warn!(
+                                                tx_id = %tx.id,
+                                                violation = %violation,
+                                                "Anti-gaming rejected credit transaction"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
                                 // Record the transaction and apply balance change
                                 // if we are the recipient
                                 let local_id = shared_state.identity.node_id().clone();
                                 if tx.to == local_id {
-                                    let mut bal = shared_state.credit_balance.write().await;
-                                    bal.balance += tx.amount;
-                                    bal.lifetime_earned += tx.amount as u64;
-                                    bal.last_updated = chrono::Utc::now();
+                                    if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                                        &shared_state.credit_balance,
+                                        &shared_state.db,
+                                        tx.amount,
+                                        true,
+                                    ).await {
+                                        tracing::warn!(error = %e, "Failed to apply credit transaction");
+                                    }
+                                    let bal = shared_state.credit_balance.read().await;
                                     tracing::info!(
                                         amount = tx.amount,
                                         balance = bal.balance,
@@ -946,6 +992,45 @@ async fn dispatch_network_messages(
             }
         }
     }
+}
+
+/// Resolve the API key: config > DB > generate new.
+/// Returns the key and persists it to the DB if newly generated.
+fn resolve_api_key(config: &Config, db: &Database) -> String {
+    // 1. Explicit key in config takes priority
+    if let Some(ref key) = config.api.api_key {
+        if !key.is_empty() {
+            tracing::info!("Using API key from configuration");
+            return key.clone();
+        }
+    }
+
+    // 2. Check persisted key in database
+    if let Ok(Some(key)) = db.get_json::<String>("config", "api_key") {
+        if !key.is_empty() {
+            tracing::info!("Using persisted API key from database");
+            return key;
+        }
+    }
+
+    // 3. Generate a new 32-byte hex key
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    let key = hex::encode(bytes);
+
+    // Persist to DB
+    if let Err(e) = db.put_json("config", "api_key", &key) {
+        tracing::warn!(error = %e, "Failed to persist API key to database");
+    }
+
+    tracing::info!(
+        api_key = %key,
+        "Generated new API key (save this for API access)"
+    );
+
+    key
 }
 
 /// Generate a ModelManifest for a locally loaded GGUF file and register it.
@@ -1525,9 +1610,9 @@ async fn handle_layer_forward(
                 return;
             }
         };
-        // EOS detection: 151643 (<|endoftext|>), 151645 (<|im_end|>) for Qwen2
-        // Generic EOS token 2 for Llama-family models
-        let finish = if token_id == 151643 || token_id == 151645 || token_id == 2 {
+        // EOS detection: use tokens loaded from GGUF metadata
+        let eos_tokens = split_model.eos_tokens();
+        let finish = if eos_tokens.contains(&token_id) {
             Some(crate::types::NetworkFinishReason::Stop)
         } else {
             None

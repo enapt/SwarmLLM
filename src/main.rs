@@ -245,8 +245,8 @@ async fn test_split_inference(
         let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
         index_pos += 1;
 
-        // Qwen2 EOS tokens
-        if token_id == 151643 || token_id == 151645 {
+        // Check EOS tokens loaded from GGUF metadata
+        if model.eos_tokens().contains(&token_id) {
             println!(" [EOS:{}]", token_id);
             break;
         }

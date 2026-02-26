@@ -447,6 +447,8 @@ pub struct SplitModel {
     vocabulary: Option<Vec<String>>,
     /// BPE tokenizer built from GGUF merges table.
     tokenizer: Option<BpeTokenizer>,
+    /// EOS token IDs loaded from GGUF metadata.
+    eos_tokens: Vec<u32>,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -848,6 +850,39 @@ impl SplitModel {
             None
         };
 
+        // Extract EOS token IDs from GGUF metadata
+        let mut eos_tokens = Vec::new();
+        if let Some(eos_id) = ct
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok())
+        {
+            eos_tokens.push(eos_id);
+        }
+        // Some models define additional EOS tokens; add architecture-specific defaults
+        match arch.as_str() {
+            "qwen2" => {
+                // Qwen2 uses 151643 (<|endoftext|>) and 151645 (<|im_end|>)
+                for &id in &[151643u32, 151645] {
+                    if !eos_tokens.contains(&id) {
+                        eos_tokens.push(id);
+                    }
+                }
+            }
+            _ => {
+                // Common fallback EOS token for LLaMA-family models
+                if !eos_tokens.contains(&2) {
+                    eos_tokens.push(2);
+                }
+            }
+        }
+        if eos_tokens.is_empty() {
+            tracing::warn!("No EOS token found in GGUF metadata, using default [2]");
+            eos_tokens.push(2);
+        } else {
+            tracing::info!(eos_tokens = ?eos_tokens, "Loaded EOS tokens from GGUF");
+        }
+
         let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
             arch = %arch,
@@ -874,6 +909,7 @@ impl SplitModel {
             device,
             vocabulary,
             tokenizer,
+            eos_tokens,
         })
     }
 
@@ -999,6 +1035,11 @@ impl SplitModel {
     /// Return a reference to the BPE tokenizer, if available.
     pub fn tokenizer(&self) -> Option<&BpeTokenizer> {
         self.tokenizer.as_ref()
+    }
+
+    /// Return the EOS token IDs loaded from GGUF metadata.
+    pub fn eos_tokens(&self) -> &[u32] {
+        &self.eos_tokens
     }
 }
 

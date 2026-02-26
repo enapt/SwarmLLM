@@ -669,6 +669,7 @@ impl AcquisitionManager {
                         Some(crate::daemon::LoadedModelInfo {
                             name: model_name.clone(),
                             size_bytes: size,
+                            eos_tokens: vec![2],
                         });
 
                     // Generate manifest for the reconstructed model so we can serve shards
@@ -677,6 +678,7 @@ impl AcquisitionManager {
                         &crate::daemon::LoadedModelInfo {
                             name: model_name.clone(),
                             size_bytes: size,
+                            eos_tokens: vec![2],
                         },
                         &gguf_path,
                     );
