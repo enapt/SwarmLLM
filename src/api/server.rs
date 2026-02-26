@@ -5,13 +5,14 @@ use axum::routing::{get, post};
 use axum::Router;
 use tokio::sync::mpsc;
 
-use crate::api::{admin, middleware, openai, websocket};
+use crate::api::{admin, identity, middleware, openai, pool, websocket};
 use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
 use crate::inference::router::RouterCommand;
 use crate::model::acquisition::AcquisitionCommand;
 use crate::storage::db::Database;
+use crate::types::NetworkCommand;
 use crate::ui::assets;
 
 /// Shared application state passed to all Axum handlers.
@@ -24,6 +25,8 @@ pub struct AppState {
     pub router_tx: Option<mpsc::Sender<RouterCommand>>,
     /// Channel to submit model acquisition requests.
     pub acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
+    /// Channel to broadcast messages to the P2P network.
+    pub network_tx: Option<mpsc::Sender<NetworkCommand>>,
     /// Full daemon shared state for admin endpoints.
     pub shared_state: Arc<SharedState>,
 }
@@ -56,6 +59,24 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/hf/download", post(admin::hf_download))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
+        // Identity & Nickname
+        .route(
+            "/api/identity/nickname",
+            get(identity::get_nickname)
+                .put(identity::set_nickname)
+                .delete(identity::delete_nickname),
+        )
+        .route("/api/identity/leaderboard", get(identity::leaderboard))
+        .route("/api/identity/peers", get(identity::peers_with_names))
+        // Device Pool
+        .route("/api/pool/state", get(pool::pool_state))
+        .route("/api/pool/create", post(pool::pool_create))
+        .route("/api/pool/invite", post(pool::pool_invite))
+        .route("/api/pool/accept", post(pool::pool_accept))
+        .route("/api/pool/remove", post(pool::pool_remove))
+        .route("/api/pool/leave", post(pool::pool_leave))
+        .route("/api/pool/invitations", get(pool::pool_invitations))
+        .route("/api/pool/leaderboard", get(pool::pool_leaderboard))
         // WebSocket
         .route("/api/admin/ws", get(websocket::handler))
         // Static files (embedded frontend)
@@ -95,6 +116,7 @@ pub async fn run_server(
         executor,
         router_tx: None,
         acquisition_tx: None,
+        network_tx: None,
         shared_state,
     };
 
@@ -114,6 +136,7 @@ pub async fn run_server_with_state(
     shared_state: Arc<SharedState>,
     router_tx: mpsc::Sender<RouterCommand>,
     acquisition_tx: mpsc::Sender<AcquisitionCommand>,
+    network_tx: mpsc::Sender<NetworkCommand>,
 ) -> anyhow::Result<()> {
     let port = shared_state.config.node.listen_port;
     let state = AppState {
@@ -122,6 +145,7 @@ pub async fn run_server_with_state(
         executor: shared_state.executor.clone(),
         router_tx: Some(router_tx),
         acquisition_tx: Some(acquisition_tx),
+        network_tx: Some(network_tx),
         shared_state,
     };
 

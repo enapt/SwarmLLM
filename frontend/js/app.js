@@ -19,6 +19,13 @@ var SwarmLLM = (function() {
   var ACTIVE_SESSION_KEY = 'swarmllm_active_session';
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
 
+  // --- HELPERS ---
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
   // ========================================================================
   // UI Module — tab switching, sidebar, modals
   // ========================================================================
@@ -30,9 +37,14 @@ var SwarmLLM = (function() {
       });
       document.getElementById('view-chat').style.display = tab === 'chat' ? '' : 'none';
       document.getElementById('view-dashboard').style.display = tab === 'dashboard' ? '' : 'none';
+      var lbView = document.getElementById('view-leaderboard');
+      if (lbView) lbView.style.display = tab === 'leaderboard' ? '' : 'none';
       if (tab === 'chat') {
         chat.scrollToBottom();
         document.getElementById('chat-input').focus();
+      }
+      if (tab === 'leaderboard') {
+        identity.loadLeaderboard();
       }
     },
 
@@ -683,6 +695,9 @@ var SwarmLLM = (function() {
       } catch (e) {
         ui.showBanner('error', 'Error: ' + e.message);
       }
+
+      // Save nickname if provided
+      await identity.saveNickname();
     }
   };
 
@@ -989,6 +1004,89 @@ var SwarmLLM = (function() {
   }
 
   // ========================================================================
+  // Identity Module — nickname, leaderboard
+  // ========================================================================
+  var identity = {
+    loadNickname: async function() {
+      try {
+        var resp = await fetch('/api/identity/nickname');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        var nickEl = document.getElementById('settings-nickname');
+        var visEl = document.getElementById('settings-visibility');
+        if (nickEl && data.nickname) nickEl.value = data.nickname;
+        if (visEl && data.visibility) visEl.value = data.visibility;
+      } catch (e) {
+        // ignore
+      }
+    },
+
+    saveNickname: async function() {
+      var nickEl = document.getElementById('settings-nickname');
+      var visEl = document.getElementById('settings-visibility');
+      if (!nickEl) return;
+      var nickname = nickEl.value.trim();
+
+      if (!nickname) {
+        // Delete nickname (go anonymous)
+        try {
+          await fetch('/api/identity/nickname', { method: 'DELETE' });
+        } catch (e) { /* ignore */ }
+        return;
+      }
+
+      try {
+        var resp = await fetch('/api/identity/nickname', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nickname: nickname,
+            visibility: visEl ? visEl.value : 'nickname',
+          }),
+        });
+        if (!resp.ok) {
+          var err = await resp.json().catch(function() { return {}; });
+          ui.showBanner('error', err.error ? err.error.message : 'Failed to set nickname');
+        }
+      } catch (e) {
+        ui.showBanner('error', 'Error saving nickname: ' + e.message);
+      }
+    },
+
+    loadLeaderboard: async function() {
+      var tbody = document.getElementById('leaderboard-body');
+      if (!tbody) return;
+
+      try {
+        var resp = await fetch('/api/identity/leaderboard?limit=50');
+        if (!resp.ok) { tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Failed to load</td></tr>'; return; }
+        var data = await resp.json();
+        var entries = data.leaderboard || [];
+
+        if (entries.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">No data yet</td></tr>';
+          return;
+        }
+
+        var html = '';
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
+          var tierClass = (e.tier || 'silver').toLowerCase();
+          html += '<tr>'
+            + '<td class="mono">' + (e.rank || i+1) + '</td>'
+            + '<td>' + escapeHtml(e.display_name) + ' <span class="text-muted mono" style="font-size:0.75rem">' + escapeHtml(e.node_id) + '</span></td>'
+            + '<td class="mono">' + (e.credits || 0) + '</td>'
+            + '<td><span class="tier-badge ' + tierClass + '">' + escapeHtml(e.tier || 'Silver') + '</span></td>'
+            + '</tr>';
+        }
+        tbody.innerHTML = html;
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Error: ' + escapeHtml(e.message) + '</td></tr>';
+      }
+    }
+  };
+
+  // ========================================================================
   // Init
   // ========================================================================
   function init() {
@@ -1003,6 +1101,7 @@ var SwarmLLM = (function() {
     dashboard.loadInitial();
     loadModels();
     connectWebSocket();
+    identity.loadNickname();
 
     setInterval(dashboard.loadInitial, 30000);
     setInterval(loadModels, 30000);
@@ -1023,6 +1122,7 @@ var SwarmLLM = (function() {
     hf: hf,
     settings: settings,
     setup: setup,
+    identity: identity,
     requestModel: requestModel,
     shutdown: shutdown,
   };

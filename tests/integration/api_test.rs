@@ -31,6 +31,7 @@ async fn spawn_test_server() -> String {
         executor,
         router_tx: None,
         acquisition_tx: None,
+        network_tx: None,
         shared_state,
     };
 

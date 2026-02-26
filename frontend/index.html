@@ -84,6 +84,18 @@
         <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeSettings()">&times;</button>
       </div>
       <div class="form-group">
+        <label>Nickname</label>
+        <input type="text" id="settings-nickname" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
+        <span class="text-muted" style="font-size:0.75rem">1-32 chars, letters/numbers/underscore/dash only</span>
+      </div>
+      <div class="form-group">
+        <label>Visibility</label>
+        <select id="settings-visibility">
+          <option value="anonymous">Anonymous (show node ID only)</option>
+          <option value="nickname">Nickname (show name to peers)</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>Contribution Level</label>
         <select id="settings-contribution">
           <option value="minimal">Minimal</option>
@@ -166,6 +178,7 @@
     <div class="header-center">
       <button class="tab-btn" data-tab="chat" onclick="SwarmLLM.ui.switchTab('chat')">Chat</button>
       <button class="tab-btn active" data-tab="dashboard" onclick="SwarmLLM.ui.switchTab('dashboard')">Dashboard</button>
+      <button class="tab-btn" data-tab="leaderboard" onclick="SwarmLLM.ui.switchTab('leaderboard')">Leaderboard</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -368,6 +381,31 @@
               </div>
             </div>
 
+          </div>
+        </div>
+      </div>
+
+      <!-- Leaderboard view -->
+      <div class="view" id="view-leaderboard" style="display:none">
+        <div class="container">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Network Leaderboard</h2>
+              <button class="btn btn-sm" onclick="SwarmLLM.identity.loadLeaderboard()">Refresh</button>
+            </div>
+            <table class="data-table" id="leaderboard-table">
+              <thead>
+                <tr>
+                  <th style="width:60px">#</th>
+                  <th>Node</th>
+                  <th>Credits</th>
+                  <th>Tier</th>
+                </tr>
+              </thead>
+              <tbody id="leaderboard-body">
+                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Loading...</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
