@@ -57,9 +57,15 @@ async fn build_stats_message(state: &SharedState) -> String {
         "type": "stats_update",
         "data": {
             "peers": stats.peers_connected,
-            "credits": credit.balance,
+            "credits": {
+                "balance": credit.balance,
+                "lifetime_earned": credit.lifetime_earned,
+                "lifetime_spent": credit.lifetime_spent,
+            },
             "active_requests": state.active_pipelines.len(),
             "requests_served": stats.requests_served,
+            "requests_made": stats.requests_made,
+            "forwards_served": stats.forwards_served,
             "acquisitions": acquisitions,
         }
     });

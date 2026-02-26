@@ -207,6 +207,67 @@ impl Daemon {
             }
         }
 
+        // Restore persisted manifests from the DB and register shard holders.
+        // This handles the case where a node restarts with --shards but no --model:
+        // the manifest was generated in a previous run and persisted, so we restore
+        // it and re-register ourselves as holder of our shard range.
+        {
+            let node_id = shared_state.identity.node_id().clone();
+            let shard_range = self.config.inference.shard_range;
+            if let Ok(manifests) = self.db.iter_json::<crate::types::ModelManifest>("model_meta") {
+                for manifest in manifests {
+                    let model_id = manifest.id.clone();
+                    // Register the manifest if not already in-memory
+                    if shared_state.model_registry.get_manifest(&model_id).is_none() {
+                        shared_state.model_registry.register_manifest(manifest.clone());
+                        tracing::info!(
+                            model = %model_id,
+                            shards = manifest.shard_count,
+                            "Restored manifest from DB"
+                        );
+                    }
+                    // Register ourselves as holder of our shard range
+                    for shard_info in &manifest.shards {
+                        let in_range = match shard_range {
+                            Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
+                            None => true,
+                        };
+                        if in_range {
+                            let shard_id = crate::types::ShardId {
+                                model_id: model_id.clone(),
+                                index: shard_info.index,
+                            };
+                            shared_state
+                                .model_registry
+                                .record_shard_holder(shard_id.clone(), node_id.clone());
+                            shared_state
+                                .shard_registry
+                                .entry(shard_id)
+                                .or_default()
+                                .push(node_id.clone());
+                        }
+                    }
+                    // Load GGUF metadata for the model if we have a source path
+                    if !shared_state.gguf_meta.contains_key(&model_id) {
+                        let shard_store_tmp = ShardStore::new(&self.config.node.data_dir);
+                        let model_dir = shard_store_tmp.models_dir().join(&model_id.0);
+                        let source_path_file = model_dir.join("source_path");
+                        if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
+                            let path = std::path::Path::new(path_str.trim());
+                            if let Ok(meta) = crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
+                                tracing::info!(
+                                    model = %model_id,
+                                    layers = meta.block_count,
+                                    "Loaded GGUF metadata from source path"
+                                );
+                                shared_state.gguf_meta.insert(model_id.clone(), meta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Scan local shards and register them + their manifests
         let shard_store = ShardStore::new(&self.config.node.data_dir);
         match shard_store.load_all_local() {
@@ -817,13 +878,39 @@ pub fn generate_and_register_local_manifest(
 ) {
     let model_id = crate::types::ModelId(info.name.clone());
 
-    // Check if we already have a manifest for this model
-    if shared_state
-        .model_registry
-        .get_manifest(&model_id)
-        .is_some()
-    {
-        tracing::debug!(model = %model_id, "Manifest already registered, skipping generation");
+    // Check if we already have a manifest for this model (e.g. persisted from a previous run).
+    // Even if the manifest exists, we must still register ourselves as shard holders.
+    if let Some(existing) = shared_state.model_registry.get_manifest(&model_id) {
+        tracing::debug!(model = %model_id, "Manifest already registered, registering shard holders");
+        let node_id = shared_state.identity.node_id().clone();
+        let shard_range = shared_state.config.inference.shard_range;
+        for shard_info in &existing.shards {
+            let in_range = match shard_range {
+                Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
+                None => true,
+            };
+            if in_range {
+                let shard_id = crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: shard_info.index,
+                };
+                shared_state
+                    .model_registry
+                    .record_shard_holder(shard_id.clone(), node_id.clone());
+                shared_state
+                    .shard_registry
+                    .entry(shard_id)
+                    .or_default()
+                    .push(node_id.clone());
+            }
+        }
+        // Also load GGUF metadata if not already cached
+        if !shared_state.gguf_meta.contains_key(&model_id) {
+            let path = std::path::Path::new(model_path);
+            if let Ok(meta) = crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
+                shared_state.gguf_meta.insert(model_id.clone(), meta);
+            }
+        }
         return;
     }
 
@@ -1387,6 +1474,25 @@ async fn handle_layer_forward(
         is_last,
         "LayerForward processed, sending result back"
     );
+
+    // Track participation: increment forwards_served and earn credits
+    {
+        if let Ok(mut stats) = shared_state.node_stats.try_write() {
+            stats.forwards_served += 1;
+        }
+        let layers_processed = (layer_end - layer_start) as i64;
+        let mut bal = shared_state.credit_balance.write().await;
+        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+        bal.balance += earned;
+        bal.lifetime_earned += earned as u64;
+        bal.last_updated = chrono::Utc::now();
+        tracing::debug!(
+            earned,
+            layers = layers_processed,
+            request_id = %request_id,
+            "Earned credits for layer-forward processing"
+        );
+    }
 
     // Send back via tensor protocol
     if let Err(e) = network_tx

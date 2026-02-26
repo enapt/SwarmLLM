@@ -61,6 +61,22 @@ impl Database {
         }
     }
 
+    /// Iterate all values in a named tree, deserializing each as JSON.
+    pub fn iter_json<T: serde::de::DeserializeOwned>(
+        &self,
+        tree_name: &str,
+    ) -> Result<Vec<T>, SwarmError> {
+        let tree = self.tree(tree_name)?;
+        let mut results = Vec::new();
+        for entry in tree.iter() {
+            let (_, bytes) = entry?;
+            if let Ok(val) = serde_json::from_slice(&bytes) {
+                results.push(val);
+            }
+        }
+        Ok(results)
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), SwarmError> {
         self.inner.flush()?;

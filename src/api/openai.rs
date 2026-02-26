@@ -154,6 +154,11 @@ pub async fn chat_completions(
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
 
+    // Track requests made by this node
+    if let Ok(mut stats) = state.shared_state.node_stats.try_write() {
+        stats.requests_made += 1;
+    }
+
     tracing::info!(
         request_id = %request_id,
         model = %req.model,
@@ -180,11 +185,23 @@ pub async fn chat_completions(
             tracing::info!(
                 request_id = %request_id,
                 model = %req.model,
+                stream = req.stream,
                 "All shards available across pool — using distributed inference"
             );
 
             if let Some(router_tx) = &state.router_tx {
-                return router_inference(router_tx.clone(), &req, request_id, created).await;
+                if req.stream {
+                    return router_inference_stream(
+                        router_tx.clone(),
+                        &state,
+                        &req,
+                        request_id,
+                        created,
+                    )
+                    .await;
+                } else {
+                    return router_inference(router_tx.clone(), &req, request_id, created).await;
+                }
             } else {
                 return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
             }
@@ -444,10 +461,8 @@ async fn router_inference(
 /// Route streaming inference through the InferenceRouter.
 ///
 /// Submits the request to the router for priority queueing and pipeline assembly,
-/// then streams the result back via SSE. Currently unused — streaming goes through
-/// the direct executor path for real token-by-token SSE. Will be used for distributed
-/// inference streaming across nodes.
-#[allow(dead_code)]
+/// then streams the result back via SSE as word-by-word chunks. Used for distributed
+/// inference when no single node has the full model loaded.
 async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     _state: &AppState,
@@ -787,6 +802,19 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
             created: 0,
             owned_by: "local".into(),
         });
+    }
+
+    // Include models from the model registry (restored from DB or received via gossip)
+    for manifest in state.shared_state.model_registry.models() {
+        let name = manifest.name.clone();
+        if seen.insert(name.clone()) {
+            data.push(ModelInfo {
+                id: name,
+                object: "model",
+                created: manifest.publish_date.timestamp(),
+                owned_by: "registry".into(),
+            });
+        }
     }
 
     // Include models available from peers (so chat can offer them)

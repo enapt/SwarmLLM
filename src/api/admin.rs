@@ -30,6 +30,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "tier": tier,
         "peers": stats.peers_connected,
         "requests_served": stats.requests_served,
+        "forwards_served": stats.forwards_served,
         "requests_made": stats.requests_made,
         "active_requests": state.shared_state.active_pipelines.len(),
         "hosted_shards": hosted_shards,

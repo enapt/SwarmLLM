@@ -227,7 +227,7 @@
           <div id="status-banner"></div>
 
           <!-- Stat cards -->
-          <div class="grid grid-4 mb-2" id="stats-row">
+          <div class="grid grid-3 mb-2" id="stats-row">
             <div class="stat-card">
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-value" id="stat-peers">0</div>
@@ -238,13 +238,23 @@
               <div class="stat-value" id="stat-credits">0</div>
               <div class="stat-label">Credit Balance</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" title="Chat requests sent from this node's API">
+              <div class="stat-icon orange">&#9650;</div>
+              <div class="stat-value" id="stat-requests-made">0</div>
+              <div class="stat-label">Requests Made</div>
+            </div>
+            <div class="stat-card" title="Full inference requests completed by this node (orchestrator)">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-value" id="stat-served">0</div>
               <div class="stat-label">Requests Served</div>
             </div>
+            <div class="stat-card" title="Layer forward passes processed for distributed inference (earns credits)">
+              <div class="stat-icon teal">&#9881;</div>
+              <div class="stat-value" id="stat-forwards">0</div>
+              <div class="stat-label">Forwards Processed</div>
+            </div>
             <div class="stat-card">
-              <div class="stat-icon orange">&#9203;</div>
+              <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
               <div class="stat-value" id="stat-active">0</div>
               <div class="stat-label">Active Requests</div>
             </div>
@@ -303,10 +313,12 @@
                 <div>
                   <div class="stat-label">Lifetime Earned</div>
                   <div class="mono text-green" style="font-size:1.1rem;font-weight:600" id="credit-earned">+0</div>
+                  <div class="text-muted" style="font-size:0.7rem;margin-top:2px">10 credits/layer processed</div>
                 </div>
                 <div>
                   <div class="stat-label">Lifetime Spent</div>
                   <div class="mono text-red" style="font-size:1.1rem;font-weight:600" id="credit-spent">-0</div>
+                  <div class="text-muted" style="font-size:0.7rem;margin-top:2px">8 credits/token consumed</div>
                 </div>
               </div>
               <div class="mt-2">

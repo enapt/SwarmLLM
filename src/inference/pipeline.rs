@@ -456,6 +456,19 @@ impl PipelineExecutor {
         // Run the forward pass with correct position
         let output = split_model.forward(&input_tensor, index_pos)?;
 
+        // Track local layer-forward participation and earn credits
+        {
+            let layers_processed = (layer_end - layer_start) as i64;
+            if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                stats.forwards_served += 1;
+            }
+            let mut bal = self.shared_state.credit_balance.write().await;
+            let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+            bal.balance += earned;
+            bal.lifetime_earned += earned as u64;
+            bal.last_updated = chrono::Utc::now();
+        }
+
         if is_last {
             // Last segment: output is logits → sample token
             let token_id = split::sample_token(

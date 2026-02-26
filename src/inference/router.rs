@@ -266,44 +266,30 @@ impl InferenceRouter {
                 }
 
                 // Update stats and apply credit events
-                let local_node_id = shared_state.identity.node_id().clone();
-                let is_remote_request = request.requester != local_node_id;
+                // Local API requests use NodeId([0; 32]) as requester sentinel
+                let is_local_api_request =
+                    request.requester == crate::types::NodeId([0u8; 32]);
 
                 if let Ok(ref result) = output {
                     if let Ok(mut stats) = shared_state.node_stats.try_write() {
                         stats.requests_served += 1;
                     }
 
-                    // Credit operations: earn if we served a remote request,
-                    // spend if we consumed inference as the requester
-                    let total_tokens = result.prompt_tokens + result.completion_tokens;
-                    let layers = 1u32; // Local path = 1 logical layer pass
-
-                    if is_remote_request {
-                        // We served someone else — earn credits
+                    // Credit operations:
+                    // - Per-layer earn credits are handled in process_local_segment
+                    //   and handle_layer_forward (each node earns for layers it processed)
+                    // - Here we debit the local API consumer for requesting inference
+                    if is_local_api_request {
+                        let total_tokens = result.prompt_tokens + result.completion_tokens;
                         let mut bal = shared_state.credit_balance.write().await;
-                        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE
-                            * layers as i64
-                            * total_tokens as i64;
-                        bal.balance += earned;
-                        bal.lifetime_earned += earned as u64;
-                        bal.last_updated = chrono::Utc::now();
-                        tracing::debug!(
-                            earned,
-                            request_id = %request.id,
-                            "Earned credits for serving inference"
-                        );
-                    } else {
-                        // We requested inference — spend credits
-                        let mut bal = shared_state.credit_balance.write().await;
-                        let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME
-                            * layers as i64
-                            * total_tokens as i64;
+                        let spent =
+                            crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
                         bal.balance -= spent;
                         bal.lifetime_spent += spent as u64;
                         bal.last_updated = chrono::Utc::now();
                         tracing::debug!(
                             spent,
+                            total_tokens,
                             request_id = %request.id,
                             "Spent credits for consuming inference"
                         );

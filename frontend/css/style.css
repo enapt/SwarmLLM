@@ -441,6 +441,7 @@ a:hover { color: var(--accent-hover); }
 .stat-card .stat-icon.green { background: var(--green-dim); color: var(--green); }
 .stat-card .stat-icon.orange { background: var(--orange-dim); color: var(--orange); }
 .stat-card .stat-icon.purple { background: var(--purple-dim); color: var(--purple); }
+.stat-card .stat-icon.teal { background: rgba(0, 210, 190, 0.12); color: #00d2be; }
 
 .stat-card .stat-value {
   font-family: var(--font-mono);

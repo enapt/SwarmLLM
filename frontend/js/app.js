@@ -384,25 +384,32 @@ var SwarmLLM = (function() {
       }
 
       if (data.hosted_shards !== undefined) document.getElementById('hosted-shards').textContent = data.hosted_shards;
-
-      if (data.credits) {
-        document.getElementById('credit-balance').textContent = data.credits.balance.toLocaleString();
-        document.getElementById('stat-credits').textContent = data.credits.balance.toLocaleString();
-        document.getElementById('credit-earned').textContent = '+' + (data.credits.lifetime_earned || 0).toLocaleString();
-        document.getElementById('credit-spent').textContent = '-' + (data.credits.lifetime_spent || 0).toLocaleString();
-      }
     },
 
     updateStats: function(data) {
       if (data.peers !== undefined) document.getElementById('stat-peers').textContent = data.peers;
       if (data.credits !== undefined) {
-        var bal = typeof data.credits === 'object' ? data.credits.balance : data.credits;
+        var bal, earned, spent;
+        if (typeof data.credits === 'object') {
+          bal = data.credits.balance;
+          earned = data.credits.lifetime_earned || 0;
+          spent = data.credits.lifetime_spent || 0;
+        } else {
+          bal = data.credits;
+          earned = 0;
+          spent = 0;
+        }
         document.getElementById('stat-credits').textContent = bal.toLocaleString();
+        document.getElementById('credit-balance').textContent = bal.toLocaleString();
+        document.getElementById('credit-earned').textContent = '+' + earned.toLocaleString();
+        document.getElementById('credit-spent').textContent = '-' + spent.toLocaleString();
         creditHistory.push(Math.abs(bal));
         if (creditHistory.length > 30) creditHistory.shift();
         renderSparkline('credit-sparkline', creditHistory);
       }
       if (data.requests_served !== undefined) document.getElementById('stat-served').textContent = data.requests_served;
+      if (data.requests_made !== undefined) document.getElementById('stat-requests-made').textContent = data.requests_made;
+      if (data.forwards_served !== undefined) document.getElementById('stat-forwards').textContent = data.forwards_served;
       if (data.active_requests !== undefined) document.getElementById('stat-active').textContent = data.active_requests;
     },
 
