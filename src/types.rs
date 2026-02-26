@@ -242,8 +242,14 @@ pub enum SwarmMessage {
     CreditTransaction(CreditTransaction),
 
     // Health
-    HealthPing { nonce: u64, timestamp: u64 },
-    HealthPong { nonce: u64, timestamp: u64 },
+    HealthPing {
+        nonce: u64,
+        timestamp: u64,
+    },
+    HealthPong {
+        nonce: u64,
+        timestamp: u64,
+    },
 
     // Credits — gossip
     CreditGossip(CreditGossip),

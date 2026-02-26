@@ -581,8 +581,17 @@ pub async fn hf_download(
 }
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.
-pub async fn shutdown_node(State(state): State<AppState>) -> Json<serde_json::Value> {
-    tracing::info!("Shutdown requested via API");
+/// Only accepts requests from localhost (127.0.0.1 or ::1) for safety.
+pub async fn shutdown_node(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !addr.ip().is_loopback() {
+        return Err(ApiError(crate::error::SwarmError::Internal(
+            "Shutdown only allowed from localhost".into(),
+        )));
+    }
+    tracing::info!("Shutdown requested via API from {}", addr);
 
     // Signal all subsystems to shut down
     state.shared_state.shutdown();
@@ -597,7 +606,7 @@ pub async fn shutdown_node(State(state): State<AppState>) -> Json<serde_json::Va
         std::process::exit(0);
     });
 
-    Json(serde_json::json!({ "status": "shutting_down" }))
+    Ok(Json(serde_json::json!({ "status": "shutting_down" })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -7,8 +7,7 @@ use crate::types::{ModelId, ShardInfo};
 /// Sanitize a path component to prevent path traversal attacks.
 /// Strips directory separators and rejects `..` sequences.
 fn sanitize_path_component(s: &str) -> String {
-    s.replace(['/', '\\'], "_")
-        .replace("..", "_")
+    s.replace(['/', '\\'], "_").replace("..", "_")
 }
 
 /// Manages shard files on disk — loading, verification, and storage.

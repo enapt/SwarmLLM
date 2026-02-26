@@ -37,13 +37,8 @@ pub async fn forward_credits_to_owner(
 
     // Create member-signed credit forward
     let my_id = shared_state.identity.node_id();
-    let forward = crypto::create_credit_forward(
-        &shared_state.identity,
-        &pool_id,
-        my_id,
-        &owner_id,
-        amount,
-    );
+    let forward =
+        crypto::create_credit_forward(&shared_state.identity, &pool_id, my_id, &owner_id, amount);
 
     // Send to pool manager for processing + broadcasting
     if let Some(ref tx) = *shared_state.pool_tx.read().await {

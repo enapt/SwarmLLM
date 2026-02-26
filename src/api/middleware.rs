@@ -1,10 +1,10 @@
 use axum::extract::Request;
-use axum::http::HeaderValue;
+use axum::http::{HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::Response;
 use tower_http::cors::CorsLayer;
 
-/// Create a CORS layer restricted to localhost origins by default.
+/// Create a CORS layer restricted to localhost origins and specific methods/headers.
 pub fn cors_layer() -> CorsLayer {
     let origins = [
         "http://localhost:8800".parse::<HeaderValue>().unwrap(),
@@ -16,8 +16,12 @@ pub fn cors_layer() -> CorsLayer {
     ];
     CorsLayer::new()
         .allow_origin(origins.to_vec())
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+        ])
 }
 
 /// Request logging middleware using tracing.

@@ -101,11 +101,7 @@ pub async fn pool_accept(
 
     // Look up the invitation from the pool manager
     let (inv_tx, inv_rx) = tokio::sync::oneshot::channel();
-    send_pool_command(
-        &state,
-        PoolCommand::GetInvitations { reply: inv_tx },
-    )
-    .await?;
+    send_pool_command(&state, PoolCommand::GetInvitations { reply: inv_tx }).await?;
 
     let invitations = inv_rx.await.map_err(|_| {
         ApiError(crate::error::SwarmError::Internal(
@@ -151,14 +147,7 @@ pub async fn pool_remove(
     let node_id = parse_node_id(&body.node_id)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
 
-    send_pool_command(
-        &state,
-        PoolCommand::RemoveMember {
-            node_id,
-            reply: tx,
-        },
-    )
-    .await?;
+    send_pool_command(&state, PoolCommand::RemoveMember { node_id, reply: tx }).await?;
 
     match rx.await {
         Ok(Ok(())) => Ok(Json(serde_json::json!({
@@ -250,10 +239,7 @@ pub async fn pool_leaderboard(
 
 // ---- Helpers ----
 
-async fn send_pool_command(
-    state: &AppState,
-    cmd: PoolCommand,
-) -> Result<(), ApiError> {
+async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), ApiError> {
     let tx_lock = state.shared_state.pool_tx.read().await;
     let tx = tx_lock.as_ref().ok_or_else(|| {
         ApiError(crate::error::SwarmError::Internal(

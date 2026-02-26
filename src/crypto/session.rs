@@ -29,7 +29,7 @@ impl CachedSession {
 
     fn next_nonce(&self) -> Result<[u8; 12], SwarmError> {
         let counter = self.send_nonce.fetch_add(1, Ordering::SeqCst);
-        if counter >= u64::MAX - 1 {
+        if counter == u64::MAX {
             return Err(SwarmError::NonceOverflow);
         }
         let mut nonce = [0u8; 12];
@@ -65,8 +65,13 @@ impl SessionManager {
     /// Establish a session with a peer given their X25519 public key.
     pub fn establish_session(&self, peer: &NodeId, peer_x25519_pub: PublicKey) {
         let shared_secret = self.local_secret.diffie_hellman(&peer_x25519_pub);
-        let cipher_key = derive_cipher_key(shared_secret.as_bytes(), &self.local_public, &peer_x25519_pub);
-        self.sessions.insert(peer.clone(), CachedSession::new(cipher_key));
+        let cipher_key = derive_cipher_key(
+            shared_secret.as_bytes(),
+            &self.local_public,
+            &peer_x25519_pub,
+        );
+        self.sessions
+            .insert(peer.clone(), CachedSession::new(cipher_key));
         tracing::debug!(peer = %peer, "Established encryption session");
     }
 
@@ -78,14 +83,20 @@ impl SessionManager {
     /// Seal (encrypt) data for a specific peer.
     /// `aad` is additional authenticated data (e.g., the cleartext header).
     pub fn seal(&self, peer: &NodeId, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, SwarmError> {
-        let session = self.sessions.get(peer).ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
+        let session = self
+            .sessions
+            .get(peer)
+            .ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
         let nonce_bytes = session.next_nonce()?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key)
             .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
-        let payload = chacha20poly1305::aead::Payload { msg: plaintext, aad };
+        let payload = chacha20poly1305::aead::Payload {
+            msg: plaintext,
+            aad,
+        };
         let ciphertext = cipher
             .encrypt(nonce, payload)
             .map_err(|e| SwarmError::Encryption(format!("Seal failed: {e}")))?;
@@ -102,7 +113,10 @@ impl SessionManager {
         if sealed.len() < 12 {
             return Err(SwarmError::DecryptionFailed);
         }
-        let session = self.sessions.get(peer).ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
+        let session = self
+            .sessions
+            .get(peer)
+            .ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
 
         let nonce = Nonce::from_slice(&sealed[..12]);
         let ciphertext = &sealed[12..];
@@ -110,7 +124,10 @@ impl SessionManager {
         let cipher = ChaCha20Poly1305::new_from_slice(&session.cipher_key)
             .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
-        let payload = chacha20poly1305::aead::Payload { msg: ciphertext, aad };
+        let payload = chacha20poly1305::aead::Payload {
+            msg: ciphertext,
+            aad,
+        };
         cipher
             .decrypt(nonce, payload)
             .map_err(|_| SwarmError::DecryptionFailed)
@@ -152,7 +169,10 @@ pub fn ephemeral_seal(
     let nonce_bytes = [0u8; 12]; // Single-use key, nonce=0 is safe
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let payload = chacha20poly1305::aead::Payload { msg: plaintext, aad };
+    let payload = chacha20poly1305::aead::Payload {
+        msg: plaintext,
+        aad,
+    };
     let ciphertext = cipher
         .encrypt(nonce, payload)
         .map_err(|e| SwarmError::Encryption(format!("Ephemeral seal failed: {e}")))?;
@@ -176,7 +196,10 @@ pub fn ephemeral_open(
         .map_err(|e| SwarmError::Encryption(format!("Cipher init failed: {e}")))?;
 
     let nonce = Nonce::from_slice(&[0u8; 12]);
-    let payload = chacha20poly1305::aead::Payload { msg: ciphertext, aad };
+    let payload = chacha20poly1305::aead::Payload {
+        msg: ciphertext,
+        aad,
+    };
     cipher
         .decrypt(nonce, payload)
         .map_err(|_| SwarmError::DecryptionFailed)

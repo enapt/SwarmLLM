@@ -525,7 +525,8 @@ impl AcquisitionManager {
                             self.shared_state
                                 .model_registry
                                 .record_shard_holder(shard_id.clone(), node_id.clone());
-                            let mut holders = self.shared_state
+                            let mut holders = self
+                                .shared_state
                                 .shard_registry
                                 .entry(shard_id)
                                 .or_default();

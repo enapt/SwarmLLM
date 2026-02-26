@@ -356,11 +356,11 @@ fn is_private_ip(ip: &str) -> bool {
             || (octets[0] == 192 && octets[1] == 168)                       // 192.168.0.0/16
             || octets[0] == 127                                             // 127.0.0.0/8
             || (octets[0] == 169 && octets[1] == 254)                       // 169.254.0.0/16
-            || octets[0] == 0;                                              // 0.0.0.0/8
+            || octets[0] == 0; // 0.0.0.0/8
     }
     if let Ok(addr) = ip.parse::<std::net::Ipv6Addr>() {
         return addr.is_loopback()                                           // ::1
-            || (addr.segments()[0] & 0xfe00) == 0xfc00;                     // fc00::/7
+            || (addr.segments()[0] & 0xfe00) == 0xfc00; // fc00::/7
     }
     true // block unparseable addresses
 }

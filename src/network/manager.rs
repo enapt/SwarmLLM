@@ -273,15 +273,18 @@ impl NetworkManager {
                                     // Find the sender's NodeId to decrypt
                                     let sender_node_id = self.find_node_id_for_peer(&peer);
                                     if let Some(node_id) = sender_node_id {
-                                        match self.shared_state.session_manager.open(
-                                            &node_id, &sealed, &aad,
-                                        ) {
+                                        match self
+                                            .shared_state
+                                            .session_manager
+                                            .open(&node_id, &sealed, &aad)
+                                        {
                                             Ok(plaintext) => {
                                                 forward.activations = plaintext;
                                                 forward.sender_peer_bytes = Some(peer.to_bytes());
-                                                let _ = self.outbound_tx.send(
-                                                    SwarmMessage::LayerForward(forward),
-                                                ).await;
+                                                let _ = self
+                                                    .outbound_tx
+                                                    .send(SwarmMessage::LayerForward(forward))
+                                                    .await;
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -659,15 +662,13 @@ impl NetworkManager {
                 .session_manager
                 .seal(&node_id, &forward.activations, &aad)
             {
-                Ok(sealed) => {
-                    match protocol::encode_layer_forward_encrypted(&forward, sealed) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to encode encrypted tensor");
-                            return;
-                        }
+                Ok(sealed) => match protocol::encode_layer_forward_encrypted(&forward, sealed) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to encode encrypted tensor");
+                        return;
                     }
-                }
+                },
                 Err(e) => {
                     tracing::debug!(error = %e, "Encryption failed, falling back to plaintext");
                     match protocol::encode_layer_forward(&forward) {

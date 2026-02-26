@@ -267,8 +267,7 @@ impl InferenceRouter {
 
                 // Update stats and apply credit events
                 // Local API requests use NodeId([0; 32]) as requester sentinel
-                let is_local_api_request =
-                    request.requester == crate::types::NodeId([0u8; 32]);
+                let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
 
                 if let Ok(ref result) = output {
                     if let Ok(mut stats) = shared_state.node_stats.try_write() {

@@ -57,8 +57,8 @@ impl Identity {
             // SECURITY: Write key file with restricted permissions (owner-only)
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
                 use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
@@ -66,11 +66,13 @@ impl Identity {
                     .mode(0o600)
                     .open(&key_path)
                     .map_err(SwarmError::Io)?;
-                file.write_all(&identity.signing_key.to_bytes()).map_err(SwarmError::Io)?;
+                file.write_all(&identity.signing_key.to_bytes())
+                    .map_err(SwarmError::Io)?;
             }
             #[cfg(not(unix))]
             {
-                std::fs::write(&key_path, identity.signing_key.to_bytes()).map_err(SwarmError::Io)?;
+                std::fs::write(&key_path, identity.signing_key.to_bytes())
+                    .map_err(SwarmError::Io)?;
             }
             tracing::info!(node_id = %identity.node_id, "Generated new identity");
             Ok(identity)

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 
+use ed25519_dalek::Verifier;
+
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::pool::crypto;
@@ -167,9 +169,9 @@ impl PoolManager {
             PoolCommand::GetMembership { reply } => {
                 let state = self.shared_state.pool_state.read().await;
                 let my_id = self.shared_state.identity.node_id();
-                let membership = state.as_ref().and_then(|s| {
-                    s.members.iter().find(|m| m.node_id == *my_id).cloned()
-                });
+                let membership = state
+                    .as_ref()
+                    .and_then(|s| s.members.iter().find(|m| m.node_id == *my_id).cloned());
                 let _ = reply.send(membership);
             }
             PoolCommand::GetLeaderboard { reply } => {
@@ -180,6 +182,18 @@ impl PoolManager {
     }
 
     async fn handle_create_pool(&mut self, name: String) -> Result<PoolState, SwarmError> {
+        // Validate pool name: 1-64 chars, printable ASCII, no control chars
+        if name.is_empty() || name.len() > 64 {
+            return Err(SwarmError::Internal(
+                "Pool name must be 1-64 characters".into(),
+            ));
+        }
+        if !name.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+            return Err(SwarmError::Internal(
+                "Pool name may only contain printable ASCII characters".into(),
+            ));
+        }
+
         // Check we're not already in a pool
         if self.shared_state.pool_state.read().await.is_some() {
             return Err(SwarmError::Internal("Already in a pool".into()));
@@ -221,9 +235,7 @@ impl PoolManager {
         // Persist and update shared state
         self.persist_pool_state(&state)?;
         *self.shared_state.pool_state.write().await = Some(state.clone());
-        self.shared_state
-            .pool_registry
-            .insert(my_id, state.clone());
+        self.shared_state.pool_registry.insert(my_id, state.clone());
 
         tracing::info!(
             pool_id = %state.pool_id,
@@ -247,7 +259,9 @@ impl PoolManager {
 
             let my_id = self.shared_state.identity.node_id();
             if state.pool_id != *my_id {
-                return Err(SwarmError::Internal("Only the pool owner can invite".into()));
+                return Err(SwarmError::Internal(
+                    "Only the pool owner can invite".into(),
+                ));
             }
 
             let max_size = self.shared_state.config.pool.max_pool_size;
@@ -269,12 +283,8 @@ impl PoolManager {
         }
 
         let ttl = self.shared_state.config.pool.invitation_ttl_hours;
-        let invitation = crypto::create_invitation(
-            &self.shared_state.identity,
-            &pool_id,
-            &invitee,
-            ttl,
-        );
+        let invitation =
+            crypto::create_invitation(&self.shared_state.identity, &pool_id, &invitee, ttl);
 
         self.shared_state.db.put_json(
             TREE_POOL_INVITATIONS,
@@ -284,13 +294,9 @@ impl PoolManager {
         self.pending_invitations
             .insert(invitation.id, invitation.clone());
 
-        let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::Invitation(
-            invitation.clone(),
-        ));
-        let _ = self
-            .network_tx
-            .send(NetworkCommand::Broadcast(msg))
-            .await;
+        let msg =
+            SwarmMessage::PoolMessage(crate::types::PoolMessage::Invitation(invitation.clone()));
+        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!(
             invitee = %invitee,
@@ -313,7 +319,9 @@ impl PoolManager {
         // Verify the invitation is for us
         let my_id = self.shared_state.identity.node_id();
         if invitation.invitee_node_id != *my_id {
-            return Err(SwarmError::Internal("Invitation is not for this node".into()));
+            return Err(SwarmError::Internal(
+                "Invitation is not for this node".into(),
+            ));
         }
 
         // Check expiry
@@ -357,10 +365,7 @@ impl PoolManager {
 
         // Broadcast acceptance to the network
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::Acceptance(acceptance));
-        let _ = self
-            .network_tx
-            .send(NetworkCommand::Broadcast(msg))
-            .await;
+        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         // Remove from pending
         self.pending_invitations.remove(&invitation.id);
@@ -374,6 +379,11 @@ impl PoolManager {
     }
 
     async fn handle_remove_member(&mut self, node_id: NodeId) -> Result<(), SwarmError> {
+        // Check rate limit before mutating state
+        if !self.rate_limiter.check_and_record() {
+            return Err(SwarmError::Internal("Rate limit exceeded".into()));
+        }
+
         let (removal, state_clone) = {
             let mut guard = self.shared_state.pool_state.write().await;
             let ps = guard
@@ -382,11 +392,15 @@ impl PoolManager {
 
             let my_id = self.shared_state.identity.node_id();
             if ps.pool_id != *my_id {
-                return Err(SwarmError::Internal("Only the pool owner can remove members".into()));
+                return Err(SwarmError::Internal(
+                    "Only the pool owner can remove members".into(),
+                ));
             }
 
             if node_id == *my_id {
-                return Err(SwarmError::Internal("Owner cannot remove themselves".into()));
+                return Err(SwarmError::Internal(
+                    "Owner cannot remove themselves".into(),
+                ));
             }
 
             let before = ps.members.len();
@@ -395,11 +409,8 @@ impl PoolManager {
                 return Err(SwarmError::Internal("Node is not a pool member".into()));
             }
 
-            if !self.rate_limiter.check_and_record() {
-                return Err(SwarmError::Internal("Rate limit exceeded".into()));
-            }
-
-            let removal = crypto::create_removal(&self.shared_state.identity, &ps.pool_id, &node_id);
+            let removal =
+                crypto::create_removal(&self.shared_state.identity, &ps.pool_id, &node_id);
             let clone = ps.clone();
             (removal, clone)
         };
@@ -407,10 +418,7 @@ impl PoolManager {
         self.persist_pool_state(&state_clone)?;
 
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::Removal(removal));
-        let _ = self
-            .network_tx
-            .send(NetworkCommand::Broadcast(msg))
-            .await;
+        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!(removed = %node_id, "Removed member from pool");
 
@@ -441,11 +449,9 @@ impl PoolManager {
 
         // Clear our pool state
         *self.shared_state.pool_state.write().await = None;
-        self.shared_state.db.put_json(
-            TREE_POOL_STATE,
-            KEY_MY_POOL,
-            &Option::<PoolState>::None,
-        )?;
+        self.shared_state
+            .db
+            .put_json(TREE_POOL_STATE, KEY_MY_POOL, &Option::<PoolState>::None)?;
 
         // Broadcast member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
@@ -453,10 +459,7 @@ impl PoolManager {
             pool_id,
             node_id: my_id,
         });
-        let _ = self
-            .network_tx
-            .send(NetworkCommand::Broadcast(msg))
-            .await;
+        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!("Left device pool");
 
@@ -464,19 +467,53 @@ impl PoolManager {
     }
 
     async fn handle_credit_forward(&mut self, forward: PoolCreditForward) {
+        // Verify member signature before accepting
+        let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&forward.from_node_id.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!(from = %forward.from_node_id, "Invalid member key in credit forward");
+                return;
+            }
+        };
+        let payload = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"pool_credit_forward_v1");
+            hasher.update(forward.id.as_bytes());
+            hasher.update(&forward.pool_id.0);
+            hasher.update(&forward.from_node_id.0);
+            hasher.update(&forward.to_node_id.0);
+            hasher.update(&forward.amount.to_le_bytes());
+            hasher.update(forward.timestamp.to_rfc3339().as_bytes());
+            hasher.finalize().as_bytes().to_vec()
+        };
+        if forward.member_signature.len() != 64 {
+            tracing::warn!("Credit forward has invalid signature length");
+            return;
+        }
+        let sig = ed25519_dalek::Signature::from_bytes(
+            forward.member_signature.as_slice().try_into().unwrap(),
+        );
+        if member_key.verify(&payload, &sig).is_err() {
+            tracing::warn!(from = %forward.from_node_id, "Invalid member signature on credit forward");
+            return;
+        }
+
         // Store in audit log
-        if let Err(e) = self.shared_state.db.put_json(
-            TREE_POOL_FORWARDS,
-            &forward.id.to_string(),
-            &forward,
-        ) {
+        if let Err(e) =
+            self.shared_state
+                .db
+                .put_json(TREE_POOL_FORWARDS, &forward.id.to_string(), &forward)
+        {
             tracing::warn!(error = %e, "Failed to persist credit forward");
         }
 
         // Update the member's contribution in pool state
         let mut state = self.shared_state.pool_state.write().await;
         if let Some(ref mut ps) = *state {
-            if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == forward.from_node_id)
+            if let Some(member) = ps
+                .members
+                .iter_mut()
+                .find(|m| m.node_id == forward.from_node_id)
             {
                 member.credits_contributed += forward.amount;
             }
@@ -488,13 +525,9 @@ impl PoolManager {
         }
 
         // Broadcast the credit forward
-        let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::CreditForward(
-            forward.clone(),
-        ));
-        let _ = self
-            .network_tx
-            .send(NetworkCommand::Broadcast(msg))
-            .await;
+        let msg =
+            SwarmMessage::PoolMessage(crate::types::PoolMessage::CreditForward(forward.clone()));
+        let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::debug!(
             from = %forward.from_node_id,
@@ -504,6 +537,35 @@ impl PoolManager {
     }
 
     async fn handle_pool_state_gossip(&mut self, state: PoolState) {
+        // Verify owner signature before inserting into registry
+        let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&state.pool_id.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!("Invalid owner key in pool state gossip");
+                return;
+            }
+        };
+        // Reconstruct the pool creation signing payload and verify
+        let payload = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"pool_create_v1");
+            h.update(&state.pool_id.0);
+            h.update(state.name.as_bytes());
+            h.update(state.created_at.to_rfc3339().as_bytes());
+            h.finalize().as_bytes().to_vec()
+        };
+        if state.owner_signature.len() != 64 {
+            tracing::warn!("Pool state gossip has invalid signature length");
+            return;
+        }
+        let sig = ed25519_dalek::Signature::from_bytes(
+            state.owner_signature.as_slice().try_into().unwrap(),
+        );
+        if owner_key.verify(&payload, &sig).is_err() {
+            tracing::warn!(pool_id = %state.pool_id, "Invalid owner signature in pool state gossip");
+            return;
+        }
+
         // Store in registry for network-wide visibility
         self.shared_state
             .pool_registry
@@ -513,6 +575,25 @@ impl PoolManager {
     async fn handle_inbound_invitation(&mut self, invitation: PoolInvitation) {
         let my_id = self.shared_state.identity.node_id();
         if invitation.invitee_node_id == *my_id {
+            // Verify owner signature before storing
+            let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&invitation.pool_id.0) {
+                Ok(k) => k,
+                Err(_) => {
+                    tracing::warn!("Invalid owner key in inbound invitation");
+                    return;
+                }
+            };
+            if crypto::verify_invitation(&invitation, &owner_key).is_err() {
+                tracing::warn!(pool_id = %invitation.pool_id, "Invalid owner signature on inbound invitation");
+                return;
+            }
+
+            // Check expiry
+            if invitation.expires_at < chrono::Utc::now() {
+                tracing::debug!(invitation_id = %invitation.id, "Ignoring expired invitation");
+                return;
+            }
+
             // This invitation is for us — store as pending
             self.pending_invitations
                 .insert(invitation.id, invitation.clone());
@@ -550,7 +631,10 @@ impl PoolManager {
         }
 
         // Check invitation replay
-        if !self.pending_invitations.contains_key(&acceptance.invitation_id) {
+        if !self
+            .pending_invitations
+            .contains_key(&acceptance.invitation_id)
+        {
             tracing::warn!("Acceptance for unknown invitation");
             return;
         }
@@ -645,12 +729,8 @@ impl PoolManager {
     async fn gossip_pool_state(&self) {
         let state = self.shared_state.pool_state.read().await;
         if let Some(ref ps) = *state {
-            let msg =
-                SwarmMessage::PoolMessage(crate::types::PoolMessage::StateGossip(ps.clone()));
-            let _ = self
-                .network_tx
-                .send(NetworkCommand::Broadcast(msg))
-                .await;
+            let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::StateGossip(ps.clone()));
+            let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
         }
     }
 

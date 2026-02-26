@@ -2,9 +2,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::error::SwarmError;
 use crate::identity::Identity;
-use crate::pool::types::{
-    PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolRemoval,
-};
+use crate::pool::types::{PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolRemoval};
 use crate::types::NodeId;
 
 // Domain-separated BLAKE3 prefixes per the plan.
@@ -52,10 +50,7 @@ pub fn verify_invitation(
 }
 
 /// Create an acceptance signed by the invitee.
-pub fn create_acceptance(
-    identity: &Identity,
-    invitation: &PoolInvitation,
-) -> PoolAcceptance {
+pub fn create_acceptance(identity: &Identity, invitation: &PoolInvitation) -> PoolAcceptance {
     let now = chrono::Utc::now();
     let payload = acceptance_payload(
         &invitation.id,
@@ -87,11 +82,7 @@ pub fn verify_acceptance(
 }
 
 /// Create a removal notice signed by the pool owner.
-pub fn create_removal(
-    identity: &Identity,
-    pool_id: &PoolId,
-    removed_node: &NodeId,
-) -> PoolRemoval {
+pub fn create_removal(identity: &Identity, pool_id: &PoolId, removed_node: &NodeId) -> PoolRemoval {
     let now = chrono::Utc::now();
     let payload = removal_payload(pool_id, removed_node, &now);
     let signature = identity.sign(&payload);
@@ -105,11 +96,12 @@ pub fn create_removal(
 }
 
 /// Verify a removal notice's owner signature.
-pub fn verify_removal(
-    removal: &PoolRemoval,
-    owner_key: &VerifyingKey,
-) -> Result<(), SwarmError> {
-    let payload = removal_payload(&removal.pool_id, &removal.removed_node_id, &removal.removed_at);
+pub fn verify_removal(removal: &PoolRemoval, owner_key: &VerifyingKey) -> Result<(), SwarmError> {
+    let payload = removal_payload(
+        &removal.pool_id,
+        &removal.removed_node_id,
+        &removal.removed_at,
+    );
     verify_sig(&removal.owner_signature, &payload, owner_key)
 }
 
@@ -177,11 +169,7 @@ fn invitation_payload(
     hasher.finalize().as_bytes().to_vec()
 }
 
-fn acceptance_payload(
-    invitation_id: &uuid::Uuid,
-    pool_id: &PoolId,
-    invitee: &NodeId,
-) -> Vec<u8> {
+fn acceptance_payload(invitation_id: &uuid::Uuid, pool_id: &PoolId, invitee: &NodeId) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_ACCEPTANCE);
     hasher.update(invitation_id.as_bytes());
@@ -285,13 +273,8 @@ mod tests {
         let member = Identity::generate();
         let pool_id = owner.node_id().clone();
 
-        let mut forward = create_credit_forward(
-            &member,
-            &pool_id,
-            member.node_id(),
-            owner.node_id(),
-            100,
-        );
+        let mut forward =
+            create_credit_forward(&member, &pool_id, member.node_id(), owner.node_id(), 100);
 
         assert!(forward.owner_signature.is_empty());
 
@@ -307,13 +290,8 @@ mod tests {
         let imposter = Identity::generate();
         let pool_id = owner.node_id().clone();
 
-        let mut forward = create_credit_forward(
-            &member,
-            &pool_id,
-            member.node_id(),
-            owner.node_id(),
-            100,
-        );
+        let mut forward =
+            create_credit_forward(&member, &pool_id, member.node_id(), owner.node_id(), 100);
 
         // Owner tries to co-sign but uses wrong member key
         assert!(cosign_credit_forward(&owner, &mut forward, &imposter.verifying_key()).is_err());

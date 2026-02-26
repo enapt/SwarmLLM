@@ -450,7 +450,9 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
 
     // SECURITY: Cap num_tokens to prevent OOM from crafted messages
     if num_tokens > 65536 {
-        return Err(SwarmError::Network("num_tokens exceeds maximum (65536)".into()));
+        return Err(SwarmError::Network(
+            "num_tokens exceeds maximum (65536)".into(),
+        ));
     }
 
     let tokens_end = 20 + num_tokens * 4;

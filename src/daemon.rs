@@ -17,8 +17,8 @@ use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, NetworkCommand, NodeId, NodeStats, PeerInfo,
-    PipelineAssignment, RebalanceEvent, ShardId, SwarmMessage,
+    CreditBalance, NetworkCommand, NodeId, NodeStats, PeerInfo, PipelineAssignment, RebalanceEvent,
+    ShardId, SwarmMessage,
 };
 
 /// Thread-safe shared state accessible by all daemon tasks.
@@ -103,12 +103,31 @@ impl SharedState {
         let node_id = identity.node_id().clone();
 
         // Initialize E2E encryption subsystem
-        let session_manager = Arc::new(
-            crate::crypto::SessionManager::from_ed25519_key(&identity.signing_key_bytes()),
-        );
-        let gossip_sealer = Arc::new(
-            crate::crypto::GossipSealer::new(b"swarmllm-default-network"),
-        );
+        let session_manager = Arc::new(crate::crypto::SessionManager::from_ed25519_key(
+            &identity.signing_key_bytes(),
+        ));
+        // Derive gossip network ID from sorted bootstrap addresses so nodes on the
+        // same network share gossip encryption keys. Standalone nodes use the default.
+        let gossip_network_id = {
+            let mut bootstraps: Vec<String> = config
+                .network
+                .bootstrap_peers
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            bootstraps.sort();
+            if bootstraps.is_empty() {
+                b"swarmllm-default-network".to_vec()
+            } else {
+                let mut h = blake3::Hasher::new();
+                h.update(b"swarmllm-network-id-v1");
+                for b in &bootstraps {
+                    h.update(b.as_bytes());
+                }
+                h.finalize().as_bytes().to_vec()
+            }
+        };
+        let gossip_sealer = Arc::new(crate::crypto::GossipSealer::new(&gossip_network_id));
 
         let state = Arc::new(Self {
             config,
@@ -241,12 +260,21 @@ impl Daemon {
         {
             let node_id = shared_state.identity.node_id().clone();
             let shard_range = self.config.inference.shard_range;
-            if let Ok(manifests) = self.db.iter_json::<crate::types::ModelManifest>("model_meta") {
+            if let Ok(manifests) = self
+                .db
+                .iter_json::<crate::types::ModelManifest>("model_meta")
+            {
                 for manifest in manifests {
                     let model_id = manifest.id.clone();
                     // Register the manifest if not already in-memory
-                    if shared_state.model_registry.get_manifest(&model_id).is_none() {
-                        shared_state.model_registry.register_manifest(manifest.clone());
+                    if shared_state
+                        .model_registry
+                        .get_manifest(&model_id)
+                        .is_none()
+                    {
+                        shared_state
+                            .model_registry
+                            .register_manifest(manifest.clone());
                         tracing::info!(
                             model = %model_id,
                             shards = manifest.shard_count,
@@ -256,7 +284,9 @@ impl Daemon {
                     // Register ourselves as holder of our shard range
                     for shard_info in &manifest.shards {
                         let in_range = match shard_range {
-                            Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
+                            Some((start, end)) => {
+                                shard_info.index >= start && shard_info.index <= end
+                            }
                             None => true,
                         };
                         if in_range {
@@ -267,10 +297,8 @@ impl Daemon {
                             shared_state
                                 .model_registry
                                 .record_shard_holder(shard_id.clone(), node_id.clone());
-                            let mut holders = shared_state
-                                .shard_registry
-                                .entry(shard_id)
-                                .or_default();
+                            let mut holders =
+                                shared_state.shard_registry.entry(shard_id).or_default();
                             if !holders.contains(&node_id) {
                                 holders.push(node_id.clone());
                             }
@@ -283,7 +311,9 @@ impl Daemon {
                         let source_path_file = model_dir.join("source_path");
                         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
                             let path = std::path::Path::new(path_str.trim());
-                            if let Ok(meta) = crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
+                            if let Ok(meta) =
+                                crate::inference::split::GgufTensorMeta::from_gguf_file(path)
+                            {
                                 tracing::info!(
                                     model = %model_id,
                                     layers = meta.block_count,
@@ -337,10 +367,7 @@ impl Daemon {
                     shared_state
                         .model_registry
                         .record_shard_holder(shard_id.clone(), node_id.clone());
-                    let mut holders = shared_state
-                        .shard_registry
-                        .entry(shard_id)
-                        .or_default();
+                    let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
                     if !holders.contains(&node_id) {
                         holders.push(node_id);
                     }
@@ -475,8 +502,7 @@ impl Daemon {
         });
 
         // Spawn PoolManager (9th subsystem task)
-        let (pool_cmd_tx, pool_cmd_rx) =
-            mpsc::channel::<crate::pool::types::PoolCommand>(64);
+        let (pool_cmd_tx, pool_cmd_rx) = mpsc::channel::<crate::pool::types::PoolCommand>(64);
         {
             *shared_state.pool_tx.write().await = Some(pool_cmd_tx);
         }
@@ -953,10 +979,7 @@ pub fn generate_and_register_local_manifest(
                 shared_state
                     .model_registry
                     .record_shard_holder(shard_id.clone(), node_id.clone());
-                let mut holders = shared_state
-                    .shard_registry
-                    .entry(shard_id)
-                    .or_default();
+                let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
                 if !holders.contains(&node_id) {
                     holders.push(node_id.clone());
                 }
@@ -1093,10 +1116,7 @@ pub fn generate_and_register_local_manifest(
         shared_state
             .model_registry
             .record_shard_holder(shard_id.clone(), node_id.clone());
-        let mut holders = shared_state
-            .shard_registry
-            .entry(shard_id)
-            .or_default();
+        let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
         if !holders.contains(&node_id) {
             holders.push(node_id.clone());
         }
