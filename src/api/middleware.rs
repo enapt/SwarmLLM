@@ -58,8 +58,10 @@ fn is_exempt_path(path: &str) -> bool {
     if path == "/api/admin/api-key" {
         return false;
     }
-    matches!(path, "/" | "/health" | "/admin" | "/chat" | "/setup")
-        || path.starts_with("/static/")
+    matches!(
+        path,
+        "/" | "/health" | "/admin" | "/chat" | "/setup" | "/v1/models"
+    ) || path.starts_with("/static/")
         || path.starts_with("/api/admin/")
         || path.starts_with("/api/identity/")
         || path.starts_with("/api/pool/")
@@ -138,7 +140,7 @@ mod tests {
     #[test]
     fn non_exempt_paths() {
         assert!(!is_exempt_path("/v1/chat/completions"));
-        assert!(!is_exempt_path("/v1/models"));
+        assert!(is_exempt_path("/v1/models")); // read-only model list, needed by frontend
         assert!(!is_exempt_path("/api/admin/api-key")); // sensitive — requires auth
     }
 }

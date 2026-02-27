@@ -222,8 +222,34 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
         seen_ids.insert(info.name.clone());
 
+        // Try both the display name and the slugified ID to avoid duplicates.
+        // The registry may use a slug like "qwen2.5-coder-7b-instruct" while
+        // loaded_model_info.name is "Qwen2.5 Coder 7B Instruct".
+        let slug = info
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        seen_ids.insert(slug.clone());
+
         let mid = crate::types::ModelId(info.name.clone());
-        let manifest = state.shared_state.model_registry.get_manifest(&mid);
+        let manifest = state
+            .shared_state
+            .model_registry
+            .get_manifest(&mid)
+            .or_else(|| {
+                // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
+                let slug_id = crate::types::ModelId(slug.clone());
+                let m = state
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&slug_id);
+                if m.is_some() {
+                    // Also mark the slug's model ID as seen
+                    seen_ids.insert(slug_id.0);
+                }
+                m
+            });
         let (shard_count, hosted_shards, shard_detail) = match manifest {
             Some(ref m) => {
                 let detail = build_shard_detail(m, &state);

@@ -818,27 +818,23 @@ pub async fn check_and_load_model(
         return;
     }
 
-    // Already loaded?
-    if shared.split_models.iter().any(|e| e.key().0 == *model_id) {
-        tracing::debug!(model = %model_id, "Model already loaded in split_models");
-        return;
-    }
+    // Note: we don't short-circuit here even if some segments are already loaded,
+    // because the node may have additional non-contiguous ranges to load.
 
     let has_all = local_shard_indices.len() == manifest.shard_count as usize;
 
-    // Determine the layer range covered by our local shards using actual GGUF tensor
-    // metadata.  The manifest's layer_range per shard is approximate (computed from
-    // byte-offset division) and may claim a layer is available when some of its tensors
-    // actually reside in the next shard.  compute_local_layer_range() checks every
-    // tensor of every layer against the real byte ranges of our local shards.
-    let (layer_start, layer_end, is_first, is_last) = if has_all {
-        (0, manifest.num_layers as usize, true, true)
+    // Determine ALL layer ranges covered by our local shards.  GGUF files store
+    // tensors in alphabetical order (blk.10 before blk.2), so byte-range shards
+    // may contain non-contiguous layers.  We load every contiguous run as a
+    // separate split model segment.
+    let ranges: Vec<(usize, usize)> = if has_all {
+        vec![(0, manifest.num_layers as usize)]
     } else {
         let shard_size = shared.config.model.shard_size_bytes();
 
-        // Try GGUF tensor metadata first (accurate), fall back to header file, then manifest
-        let range = if let Some(meta) = shared.gguf_meta.get(model_id) {
-            crate::inference::split::compute_local_layer_range(
+        // Try GGUF tensor metadata first (accurate), fall back to header file
+        if let Some(meta) = shared.gguf_meta.get(model_id) {
+            crate::inference::split::compute_available_layer_ranges(
                 &meta,
                 shard_size,
                 &local_shard_indices,
@@ -849,95 +845,111 @@ pub async fn check_and_load_model(
             if header_path.exists() {
                 match crate::inference::split::GgufTensorMeta::from_gguf_file(&header_path) {
                     Ok(meta) => {
-                        let range = crate::inference::split::compute_local_layer_range(
+                        let ranges = crate::inference::split::compute_available_layer_ranges(
                             &meta,
                             shard_size,
                             &local_shard_indices,
                         );
                         // Cache for future use
                         shared.gguf_meta.insert(model_id.clone(), meta);
-                        range
+                        ranges
                     }
                     Err(e) => {
                         tracing::warn!(model = %model_id, error = %e, "Failed to parse GGUF header for layer range");
-                        (0, 0)
+                        vec![]
                     }
                 }
             } else {
                 tracing::warn!(model = %model_id, "No GGUF metadata available for accurate layer range");
-                (0, 0)
+                vec![]
             }
-        };
-
-        if range.0 >= range.1 {
-            tracing::warn!(
-                model = %model_id,
-                local_shards = ?local_shard_indices,
-                "No complete layers available in local shards"
-            );
-            return;
         }
-
-        let is_first = range.0 == 0;
-        let is_last = range.1 >= manifest.num_layers as usize;
-        (range.0, range.1, is_first, is_last)
     };
+
+    if ranges.is_empty() {
+        tracing::warn!(
+            model = %model_id,
+            local_shards = ?local_shard_indices,
+            "No complete layers available in local shards"
+        );
+        return;
+    }
 
     tracing::info!(
         model = %model_id,
         local_shards = local_shard_indices.len(),
         total_shards = manifest.shard_count,
-        layers = format!("[{}..{})", layer_start, layer_end),
-        is_first,
-        is_last,
-        "Loading model segment for inference"
+        ranges = ?ranges,
+        "Loading model segments for inference"
     );
 
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
-    let params = crate::daemon::ShardLoadParams {
-        model_dir: &model_dir,
-        shard_store: &shard_store,
-        model_id,
-        layer_start,
-        layer_end,
-        is_first,
-        is_last,
-    };
+    let mut any_loaded = false;
 
-    match crate::daemon::try_load_from_shards(&params) {
-        Ok(split_model) => {
-            let eos_tokens = split_model.eos_tokens().to_vec();
-            let chat_template = split_model.chat_template().map(|s| s.to_string());
-            let bos_token = split_model.bos_token().to_string();
-            let eos_token = split_model.eos_token_str().to_string();
-            shared.split_models.insert(
-                (model_id.clone(), layer_start, layer_end),
-                std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
-            );
-
-            // Update loaded_model_info so the API knows the model is available
-            *shared.loaded_model_info.write().await = Some(crate::daemon::LoadedModelInfo {
-                name: manifest.name.clone(),
-                size_bytes: manifest.total_size_bytes,
-                eos_tokens,
-                chat_template,
-                bos_token,
-                eos_token,
-            });
-
-            tracing::info!(
-                model = %model_id,
-                name = %manifest.name,
-                layers = format!("[{}..{})", layer_start, layer_end),
-                "Auto-manage: model segment loaded and ready for inference"
-            );
+    for &(layer_start, layer_end) in &ranges {
+        if layer_start >= layer_end {
+            continue;
         }
-        Err(e) => {
-            tracing::error!(
-                model = %model_id,
-                error = %e,
-                "Auto-manage: failed to load model from shards"
-            );
+
+        let split_key = (model_id.clone(), layer_start, layer_end);
+        if shared.split_models.contains_key(&split_key) {
+            any_loaded = true;
+            continue; // Already loaded this segment
+        }
+
+        let is_first = layer_start == 0;
+        let is_last = layer_end >= manifest.num_layers as usize;
+
+        let params = crate::daemon::ShardLoadParams {
+            model_dir: &model_dir,
+            shard_store: &shard_store,
+            model_id,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+        };
+
+        match crate::daemon::try_load_from_shards(&params) {
+            Ok(split_model) => {
+                let eos_tokens = split_model.eos_tokens().to_vec();
+                let chat_template = split_model.chat_template().map(|s| s.to_string());
+                let bos_token = split_model.bos_token().to_string();
+                let eos_token = split_model.eos_token_str().to_string();
+                shared.split_models.insert(
+                    split_key,
+                    std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
+                );
+
+                // Update loaded_model_info so the API knows the model is available
+                if !any_loaded {
+                    *shared.loaded_model_info.write().await =
+                        Some(crate::daemon::LoadedModelInfo {
+                            name: manifest.name.clone(),
+                            size_bytes: manifest.total_size_bytes,
+                            eos_tokens,
+                            chat_template,
+                            bos_token,
+                            eos_token,
+                        });
+                }
+                any_loaded = true;
+
+                tracing::info!(
+                    model = %model_id,
+                    name = %manifest.name,
+                    layers = format!("[{}..{})", layer_start, layer_end),
+                    "Auto-manage: model segment loaded and ready for inference"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    model = %model_id,
+                    layers = format!("[{}..{})", layer_start, layer_end),
+                    error = %e,
+                    "Auto-manage: failed to load model segment from shards"
+                );
+            }
         }
     }
 }

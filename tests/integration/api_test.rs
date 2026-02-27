@@ -269,8 +269,13 @@ async fn completions_without_model_returns_503() {
 #[tokio::test]
 async fn unauthenticated_api_returns_401() {
     let (base, _key) = spawn_test_server().await;
-    // No Bearer token — should get 401
-    let resp = reqwest::get(format!("{base}/v1/models")).await.unwrap();
+    // No Bearer token — should get 401 on inference endpoint
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({"model":"test","messages":[]}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -282,7 +287,8 @@ async fn wrong_api_key_returns_401() {
     let (base, _key) = spawn_test_server().await;
     let client = auth_client("wrong-key-12345");
     let resp = client
-        .get(format!("{base}/v1/models"))
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({"model":"test","messages":[]}))
         .send()
         .await
         .unwrap();

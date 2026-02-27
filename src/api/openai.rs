@@ -869,6 +869,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
     // Use cached model info (lock-free, no executor contention)
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
         seen.insert(info.name.clone());
+        // Also mark the slug form as seen to prevent duplicates
+        let slug = info
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        seen.insert(slug);
         data.push(ModelInfo {
             id: info.name.clone(),
             object: "model",
