@@ -247,12 +247,48 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "available"
         };
 
+        // Check acquisition progress for this model
+        let acq_state = state
+            .shared_state
+            .acquisition_progress
+            .get(&m.id)
+            .map(|entry| {
+                let s = &entry.state;
+                match s {
+                    crate::model::acquisition::AcquisitionState::Downloading => "downloading",
+                    crate::model::acquisition::AcquisitionState::Complete => "complete",
+                    crate::model::acquisition::AcquisitionState::Failed { .. } => "failed",
+                    _ => "unknown",
+                }
+            });
+        let acq_progress = state.shared_state.acquisition_progress.get(&m.id).map(|entry| {
+            serde_json::json!({
+                "downloaded_bytes": entry.downloaded_bytes,
+                "total_bytes": entry.total_bytes,
+                "downloaded_shards": entry.downloaded_shards,
+            })
+        });
+
+        // Compute global shard availability (any holder, not just local)
+        let global_available = (0..m.shard_count)
+            .filter(|&idx| {
+                let shard_id = crate::types::ShardId {
+                    model_id: m.id.clone(),
+                    index: idx,
+                };
+                !state.shared_state.model_registry.shard_holders(&shard_id).is_empty()
+            })
+            .count();
+
+        let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes);
+
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
             "total_size_bytes": m.total_size_bytes,
             "shard_count": m.shard_count,
             "hosted_shards": hosted_count,
+            "global_available": global_available,
             "healthy": hosted_count == m.shard_count as usize,
             "status": status,
             "mode": mode,
@@ -260,6 +296,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "local": hosted_count > 0,
             "peers_hosting": peer_count,
             "shards": shard_detail,
+            "estimated_vram_mb": estimated_vram,
+            "acquisition": acq_state,
+            "acquisition_progress": acq_progress,
         }));
     }
 
@@ -478,7 +517,7 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
 
     // Compute global VRAM pool
     let pool_vram_mb = crate::model::auto_manage::global_pool_vram_mb(&state.shared_state);
-    let local_vram_mb = state.shared_state.gpu_info.as_ref().map(|g| g.vram_total_mb).unwrap_or(0);
+    let local_vram_mb = crate::model::auto_manage::local_vram_mb(&state.shared_state);
 
     Json(serde_json::json!({
         "models": model_storage,

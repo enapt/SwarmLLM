@@ -48,9 +48,16 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 }
 
 /// Paths exempt from Bearer token authentication.
-/// These are frontend routes, health checks, and static assets.
+/// Frontend routes, health checks, static assets, and admin dashboard APIs
+/// are exempt — they're for the embedded UI and already protected by CORS
+/// (localhost only). The Bearer token protects external-facing endpoints
+/// like the OpenAI-compatible inference API (`/v1/...`).
 fn is_exempt_path(path: &str) -> bool {
-    matches!(path, "/" | "/health" | "/admin" | "/chat" | "/setup") || path.starts_with("/static/")
+    matches!(path, "/" | "/health" | "/admin" | "/chat" | "/setup")
+        || path.starts_with("/static/")
+        || path.starts_with("/api/admin/")
+        || path.starts_with("/api/identity/")
+        || path.starts_with("/api/pool/")
 }
 
 /// Bearer token authentication middleware.
@@ -116,14 +123,17 @@ mod tests {
         assert!(is_exempt_path("/setup"));
         assert!(is_exempt_path("/static/css/style.css"));
         assert!(is_exempt_path("/static/js/app.js"));
+        assert!(is_exempt_path("/api/admin/stats"));
+        assert!(is_exempt_path("/api/admin/api-key"));
+        assert!(is_exempt_path("/api/admin/config"));
+        assert!(is_exempt_path("/api/admin/shard-storage"));
+        assert!(is_exempt_path("/api/identity/nickname"));
+        assert!(is_exempt_path("/api/pool/state"));
     }
 
     #[test]
     fn non_exempt_paths() {
         assert!(!is_exempt_path("/v1/chat/completions"));
-        assert!(!is_exempt_path("/api/admin/stats"));
-        assert!(!is_exempt_path("/api/admin/api-key"));
-        assert!(!is_exempt_path("/api/pool/state"));
         assert!(!is_exempt_path("/v1/models"));
     }
 }

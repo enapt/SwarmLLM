@@ -369,25 +369,14 @@
             </div>
           </div>
 
-          <!-- Models table -->
+          <!-- Models -->
           <div class="panel mt-2">
             <div class="panel-header">
               <h2>Models</h2>
               <button class="btn btn-sm" onclick="SwarmLLM.ui.openModelBrowser()">Browse HuggingFace</button>
             </div>
             <div id="models-container">
-              <table class="data-table" id="models-table" style="display:none">
-                <thead>
-                  <tr>
-                    <th>Model</th>
-                    <th>Source</th>
-                    <th>Size</th>
-                    <th>Availability</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="models-table-body"></tbody>
-              </table>
+              <div id="models-list"></div>
               <div class="empty-state" id="models-empty">
                 <div class="empty-icon">&#128229;</div>
                 <p>No models available. <a href="#" onclick="SwarmLLM.ui.openModelBrowser();return false">Browse HuggingFace</a> to find models, or connect to peers.</p>

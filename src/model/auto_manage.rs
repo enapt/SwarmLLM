@@ -21,10 +21,8 @@ pub fn estimate_model_vram_mb(total_size_bytes: u64) -> u64 {
 pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
     let mut total = 0u64;
 
-    // Local GPU
-    if let Some(ref gpu) = shared.gpu_info {
-        total += gpu.vram_total_mb;
-    }
+    // Local GPU — use gpu_info if available, fallback to nvidia-smi
+    total += local_vram_mb(shared);
 
     // All known peers
     for peer in shared.peer_registry.iter() {
@@ -36,6 +34,28 @@ pub fn global_pool_vram_mb(shared: &SharedState) -> u64 {
     }
 
     total
+}
+
+/// Get local VRAM in MB, with nvidia-smi fallback when gpu_info is None.
+pub fn local_vram_mb(shared: &SharedState) -> u64 {
+    if let Some(ref gpu) = shared.gpu_info {
+        return gpu.vram_total_mb;
+    }
+    // Fallback: detect via nvidia-smi
+    detect_vram_nvidia_smi().unwrap_or(0)
+}
+
+/// Fallback GPU VRAM detection via nvidia-smi.
+fn detect_vram_nvidia_smi() -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<u64>().ok()
 }
 
 /// Auto-manages shard downloads to improve network health.
@@ -318,6 +338,20 @@ impl AutoShardManager {
 
         // Sort by score descending (best candidates first)
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // If any configured-range shards are missing, focus exclusively on those first.
+        // Don't download extra shards until our assigned range is complete.
+        if configured_range.is_some() {
+            let has_configured_missing = candidates.iter().any(|c| {
+                let (start, end) = configured_range.unwrap();
+                c.shard_index >= start && c.shard_index <= end
+            });
+            if has_configured_missing {
+                let (start, end) = configured_range.unwrap();
+                candidates.retain(|c| c.shard_index >= start && c.shard_index <= end);
+            }
+        }
+
         candidates
     }
 

@@ -1308,13 +1308,25 @@ pub fn generate_and_register_local_manifest(
 
     // Register ourselves as holder of our shards.
     // If --shards range is set, only claim those indices; otherwise claim all.
+    // Only register shards that actually exist on disk.
     let shard_range = shared_state.config.inference.shard_range;
+    let shard_store_check = ShardStore::new(&shared_state.config.node.data_dir);
     for shard_info in &manifest.shards {
         let in_range = match shard_range {
             Some((start, end)) => shard_info.index >= start && shard_info.index <= end,
             None => true,
         };
         if !in_range {
+            continue;
+        }
+        // Verify file exists on disk before registering
+        let shard_path = shard_store_check.shard_path(&model_id, shard_info.index);
+        if !shard_path.exists() {
+            tracing::warn!(
+                model = %model_id,
+                shard = shard_info.index,
+                "Shard file missing on disk — skipping registration"
+            );
             continue;
         }
         let shard_id = crate::types::ShardId {

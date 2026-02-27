@@ -350,7 +350,7 @@ var SwarmLLM = (function() {
       try {
         var resp = await fetch('/api/admin/models');
         var models = await resp.json();
-        dashboard.renderModelsTable(models);
+        dashboard.renderModels(models);
       } catch (e) {}
 
       dashboard.loadNetworkData();
@@ -425,83 +425,122 @@ var SwarmLLM = (function() {
       if (data.active_requests !== undefined) document.getElementById('stat-active').textContent = data.active_requests;
     },
 
-    renderModelsTable: function(models) {
-      var table = document.getElementById('models-table');
+    renderModels: function(models) {
+      var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
-      var tbody = document.getElementById('models-table-body');
 
       if (!models || models.length === 0) {
-        table.style.display = 'none';
+        list.innerHTML = '';
         empty.style.display = '';
         return;
       }
 
-      table.style.display = '';
       empty.style.display = 'none';
-      tbody.innerHTML = '';
+      list.innerHTML = '';
 
       models.forEach(function(m) {
-        var source = m.source || 'local';
         var shards = m.shards || [];
         var shardCount = m.shard_count || 0;
         var hostedShards = m.hosted_shards || 0;
-        var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
+        var globalAvail = m.global_available || hostedShards;
+        var isDownloading = m.acquisition === 'downloading';
+        var isReady = m.status === 'loaded' || (hostedShards === shardCount && shardCount > 0);
+        var isPartial = hostedShards > 0 && hostedShards < shardCount;
 
-        var tr = document.createElement('tr');
+        var card = document.createElement('div');
+        card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
 
-        var sourceBadge = '<span class="source-badge ' + source + '">' + source + '</span>';
-        if (shardCount > 1) {
-          sourceBadge += ' <span class="text-muted" style="font-size:0.7rem">' + hostedShards + '/' + shardCount + ' shards</span>';
-        }
-
-        // Shard map
-        var shardMap = '';
-        if (shardCount > 1 && shards.length > 0) {
-          shardMap = '<div class="shard-map" style="display:flex;gap:2px;margin-top:4px">';
-          shards.forEach(function(s) {
-            var color = s.local ? 'var(--green)' : (s.holders > 0 ? 'var(--accent)' : 'var(--border)');
-            var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')' + (s.local ? ' - Local' : '') + (s.holders > 0 ? ' - ' + s.holders + ' holder(s)' : ' - Unavailable');
-            shardMap += '<div title="' + title + '" style="width:' + Math.max(6, Math.floor(80 / shardCount)) + 'px;height:14px;border-radius:2px;background:' + color + ';cursor:help"></div>';
-          });
-          shardMap += '</div>';
-        }
-
-        // Availability
-        var availability = '';
-        if (m.local && m.status === 'loaded') {
-          availability = '<span class="status-dot online"></span><span class="text-green" style="font-size:0.8rem">Loaded</span>';
-        } else if (hostedShards > 0 && hostedShards === shardCount) {
-          availability = '<span class="status-dot online"></span><span style="font-size:0.8rem">All shards local</span>';
-        } else if (hostedShards > 0) {
-          availability = '<span class="status-dot degraded"></span><span style="font-size:0.8rem">' + hostedShards + '/' + shardCount + ' shards</span>';
-        } else if (m.peers_hosting > 0) {
-          availability = '<span class="status-dot online"></span><span style="font-size:0.8rem">' + m.peers_hosting + ' peer' + (m.peers_hosting > 1 ? 's' : '') + '</span>';
-        } else {
-          availability = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
-        }
-        availability += shardMap;
-
-        // Action
-        var action = '';
+        // Status badge
+        var statusHtml = '';
         if (m.status === 'loaded') {
-          action = '<span class="text-green" style="font-size:0.8rem;font-weight:600">Active</span>';
-        } else if (activeAcquisitions[m.id]) {
-          action = '<span class="text-muted" style="font-size:0.8rem">Acquiring...</span>';
-        } else if (source === 'network' || m.status === 'available' || m.status === 'partial') {
-          action = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download</button>';
-        } else if (source === 'local' && m.status !== 'loaded') {
-          action = '<span class="text-muted" style="font-size:0.8rem">Stored</span>';
+          statusHtml = '<span style="color:var(--green);font-weight:600;font-size:0.8rem">Ready</span>';
+        } else if (isReady) {
+          statusHtml = '<span style="color:var(--green);font-size:0.8rem">All shards local</span>';
+        } else if (isDownloading) {
+          statusHtml = '<span style="color:var(--accent);font-size:0.8rem"><span class="spinner" style="width:12px;height:12px;border-width:1.5px;margin-right:4px;vertical-align:middle"></span>Downloading</span>';
+        } else if (isPartial) {
+          statusHtml = '<span style="color:var(--orange);font-size:0.8rem">' + hostedShards + '/' + shardCount + ' local</span>';
+        } else {
+          statusHtml = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
+        }
+
+        // Meta info
+        var metaParts = [];
+        metaParts.push(formatBytes(m.total_size_bytes || 0));
+        if (shardCount > 1) metaParts.push(shardCount + ' shards');
+        if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
+        if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
+
+        // Shard grid
+        var shardHtml = '';
+        if (shardCount > 1 && shards.length > 0) {
+          shardHtml = '<div class="shard-grid">';
+          var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
+          shards.forEach(function(s) {
+            var cls = 'missing';
+            var label = s.index;
+            if (s.local) { cls = 'local'; localCount++; }
+            else if (s.holders > 0) { cls = 'peer'; peerCount++; }
+            else { missingCount++; }
+
+            // Check if this shard is being downloaded
+            if (isDownloading && !s.local && m.acquisition_progress) {
+              cls = 'downloading'; dlCount++;
+            }
+
+            var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')';
+            if (cls === 'local') title += ' — Stored locally';
+            else if (cls === 'peer') title += ' — Available from ' + s.holders + ' peer(s)';
+            else if (cls === 'downloading') title += ' — Downloading...';
+            else title += ' — Not available';
+
+            shardHtml += '<div class="shard-cell ' + cls + '" title="' + title + '">' + label + '</div>';
+          });
+          shardHtml += '</div>';
+
+          // Legend
+          var legendParts = [];
+          if (localCount > 0) legendParts.push('<span class="leg-local">Local (' + localCount + ')</span>');
+          if (peerCount > 0) legendParts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
+          if (dlCount > 0) legendParts.push('<span class="leg-dl">Downloading</span>');
+          if (missingCount > 0) legendParts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
+          if (legendParts.length > 0) shardHtml += '<div class="shard-legend">' + legendParts.join('') + '</div>';
+        }
+
+        // Download progress bar
+        var progressHtml = '';
+        if (isDownloading && m.acquisition_progress) {
+          var ap = m.acquisition_progress;
+          var pct = ap.total_bytes > 0 ? Math.round((ap.downloaded_bytes / ap.total_bytes) * 100) : 0;
+          progressHtml = '<div class="dl-progress">' +
+            '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
+            '<span class="text-muted">Downloading shard</span>' +
+            '<span class="mono">' + formatBytes(ap.downloaded_bytes) + ' / ' + formatBytes(ap.total_bytes) + ' (' + pct + '%)</span>' +
+            '</div>' +
+            '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>' +
+            '</div>';
+        }
+
+        // Action button
+        var actionHtml = '';
+        if (m.status === 'loaded') {
+          // already ready
+        } else if (isDownloading) {
+          // downloading
+        } else if (!isReady && (m.source === 'network' || m.status === 'available' || m.status === 'partial')) {
+          actionHtml = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download</button>';
         }
 
         var name = m.name || m.id;
-        if (name.length > 40) name = name.substring(0, 40) + '...';
+        card.innerHTML =
+          '<div class="model-header">' +
+            '<span class="model-name">' + escapeHtml(name) + '</span>' +
+            '<span>' + statusHtml + (actionHtml ? ' ' + actionHtml : '') + '</span>' +
+          '</div>' +
+          '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + '</div>' +
+          shardHtml + progressHtml;
 
-        tr.innerHTML = '<td><strong>' + escapeHtml(name) + '</strong></td>' +
-          '<td>' + sourceBadge + '</td>' +
-          '<td>' + formatBytes(m.total_size_bytes || 0) + '</td>' +
-          '<td>' + availability + '</td>' +
-          '<td>' + action + '</td>';
-        tbody.appendChild(tr);
+        list.appendChild(card);
       });
     },
 
