@@ -524,6 +524,7 @@ impl PipelineExecutor {
                     layer_end,
                     is_first,
                     is_last,
+                    shard_size_bytes: self.shared_state.config.model.shard_size_bytes(),
                 };
                 tracing::info!(
                     model = %model_id,

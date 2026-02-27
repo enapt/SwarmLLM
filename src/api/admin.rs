@@ -1113,7 +1113,20 @@ pub async fn hf_download_shards(
     let model_id_str = safe_name.clone();
     let mid = crate::types::ModelId(model_id_str.clone());
 
-    // Create initial acquisition progress entry
+    // Create initial acquisition progress entry with per-shard progress so that
+    // auto-manage can detect these downloads are already in flight and skip them.
+    let mut initial_shard_progress = std::collections::HashMap::new();
+    for &idx in &shard_indices {
+        initial_shard_progress.insert(
+            idx,
+            crate::model::acquisition::ShardProgress {
+                index: idx,
+                total_bytes: 0,
+                downloaded_bytes: 0,
+                state: crate::model::acquisition::ShardState::Downloading,
+            },
+        );
+    }
     let status = crate::model::acquisition::AcquisitionStatus {
         model_id: mid.clone(),
         state: crate::model::acquisition::AcquisitionState::Downloading,
@@ -1123,7 +1136,7 @@ pub async fn hf_download_shards(
         failed_shards: 0,
         total_bytes: 0,
         downloaded_bytes: 0,
-        shard_progress: std::collections::HashMap::new(),
+        shard_progress: initial_shard_progress,
         speed_bytes_per_sec: 0,
         started_at: Some(chrono::Utc::now()),
         log: vec![format!(
@@ -1403,6 +1416,18 @@ pub async fn hf_download_shards(
                 shards = ?shard_indices,
                 "All shard downloads complete"
             );
+
+            // Regenerate manifest with correct BLAKE3 hashes now that shard files
+            // exist on disk. The early manifest had [0u8; 32] placeholders.
+            let _ = generate_manifest_from_header(&ManifestGenParams {
+                header_path: &header_path,
+                model_id_str: &model_id_str,
+                filename: &filename,
+                total_size: info.total_size,
+                shard_count: info.shard_count,
+                shard_indices: &shard_indices,
+                shared: &download_shared,
+            });
 
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
                 entry.state = crate::model::acquisition::AcquisitionState::Complete;

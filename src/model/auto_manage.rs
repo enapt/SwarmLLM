@@ -493,12 +493,57 @@ impl AutoShardManager {
             .join("models")
             .join(&candidate.model_id.0);
 
-        // Check if we already have the shard file locally
+        // Check if we already have the shard file locally.
+        // Guard: only treat it as complete if there is NO active download for this
+        // shard AND the file size matches expected.  A partially-downloaded file
+        // will exist on disk but be smaller than `shard_size_bytes`.
         let shard_path = model_dir.join(format!("shard_{:03}.bin", candidate.shard_index));
         if shard_path.exists() {
-            self.register_local_shard(candidate);
-            self.check_model_complete(&candidate.model_id).await;
-            return;
+            // Check if this shard is currently being downloaded (by API handler or another cycle)
+            let is_downloading = self
+                .shared_state
+                .acquisition_progress
+                .get(&candidate.model_id)
+                .map(|entry| {
+                    entry
+                        .shard_progress
+                        .get(&candidate.shard_index)
+                        .map(|sp| sp.state == crate::model::acquisition::ShardState::Downloading)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+
+            if is_downloading {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Shard file exists but download is in progress, skipping"
+                );
+                return;
+            }
+
+            // Verify file size is plausible (at least 90% of expected, to handle last-shard truncation)
+            let file_ok = std::fs::metadata(&shard_path)
+                .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
+                .unwrap_or(false);
+
+            if file_ok {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Shard file already exists on disk, registering"
+                );
+                self.register_local_shard(candidate);
+                self.check_model_complete(&candidate.model_id).await;
+                return;
+            } else {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Shard file exists but is too small (partial download?), re-downloading"
+                );
+                // Fall through to download
+            }
         }
 
         let mid = candidate.model_id.clone();
@@ -523,26 +568,48 @@ impl AutoShardManager {
                     state: crate::model::acquisition::ShardState::Downloading,
                 },
             );
-            let status = crate::model::acquisition::AcquisitionStatus {
-                model_id: mid.clone(),
-                state: crate::model::acquisition::AcquisitionState::Downloading,
-                total_shards: 1,
-                downloaded_shards: 0,
-                verified_shards: 0,
-                failed_shards: 0,
-                total_bytes: candidate.shard_size_bytes,
-                downloaded_bytes: 0,
-                shard_progress,
-                speed_bytes_per_sec: 0,
-                started_at: Some(chrono::Utc::now()),
-                log: vec![format!(
-                    "Auto-manage: downloading shard {} of {} (score: {:.1})",
-                    candidate.shard_index, candidate.model_name, candidate.score
-                )],
-            };
-            self.shared_state
-                .acquisition_progress
-                .insert(mid.clone(), status);
+            // Merge with existing progress entry rather than overwriting.
+            // Multiple shards of the same model may be downloading concurrently
+            // and each needs its own shard_progress entry tracked.
+            if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(&mid) {
+                entry.state = crate::model::acquisition::AcquisitionState::Downloading;
+                entry.total_shards += 1;
+                entry.total_bytes += candidate.shard_size_bytes;
+                entry.shard_progress.insert(
+                    candidate.shard_index,
+                    crate::model::acquisition::ShardProgress {
+                        index: candidate.shard_index,
+                        total_bytes: candidate.shard_size_bytes,
+                        downloaded_bytes: 0,
+                        state: crate::model::acquisition::ShardState::Downloading,
+                    },
+                );
+                entry.log.push(format!(
+                    "Auto-manage: downloading shard {} (score: {:.1})",
+                    candidate.shard_index, candidate.score
+                ));
+            } else {
+                let status = crate::model::acquisition::AcquisitionStatus {
+                    model_id: mid.clone(),
+                    state: crate::model::acquisition::AcquisitionState::Downloading,
+                    total_shards: 1,
+                    downloaded_shards: 0,
+                    verified_shards: 0,
+                    failed_shards: 0,
+                    total_bytes: candidate.shard_size_bytes,
+                    downloaded_bytes: 0,
+                    shard_progress,
+                    speed_bytes_per_sec: 0,
+                    started_at: Some(chrono::Utc::now()),
+                    log: vec![format!(
+                        "Auto-manage: downloading shard {} of {} (score: {:.1})",
+                        candidate.shard_index, candidate.model_name, candidate.score
+                    )],
+                };
+                self.shared_state
+                    .acquisition_progress
+                    .insert(mid.clone(), status);
+            }
             let repo_id = hf_source.repo_id.clone();
             let filename = hf_source.filename.clone();
             drop(hf_source); // release DashMap ref
@@ -808,7 +875,12 @@ pub async fn check_and_load_model(
     let local_node_id = shared.identity.node_id().clone();
     let model_dir = shared.config.node.data_dir.join("models").join(&model_id.0);
 
-    // Find which shards we actually have on disk
+    // Find which shards we actually have on disk and are fully downloaded.
+    // A shard is considered ready only when:
+    //  1. It's in the shard registry for our node
+    //  2. The file exists on disk
+    //  3. Its size is at least 90% of the manifest's expected size (handles last-shard)
+    //  4. There's no active download in progress for it
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let mut local_shard_indices: Vec<u32> = manifest
         .shards
@@ -822,8 +894,31 @@ pub async fn check_and_load_model(
                 .model_registry
                 .shard_holders(&sid)
                 .contains(&local_node_id);
-            let on_disk = shard_store.shard_path(model_id, s.index).exists();
-            in_registry && on_disk
+            let path = shard_store.shard_path(model_id, s.index);
+            let on_disk = path.exists();
+            if !in_registry || !on_disk {
+                return false;
+            }
+            // Check file is fully downloaded (not a partial write)
+            let size_ok = std::fs::metadata(&path)
+                .map(|m| m.len() >= s.size_bytes * 9 / 10)
+                .unwrap_or(false);
+            if !size_ok {
+                return false;
+            }
+            // Check no active download for this shard
+            let is_downloading = shared
+                .acquisition_progress
+                .get(model_id)
+                .map(|entry| {
+                    entry
+                        .shard_progress
+                        .get(&s.index)
+                        .map(|sp| sp.state == crate::model::acquisition::ShardState::Downloading)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            !is_downloading
         })
         .map(|s| s.index)
         .collect();
@@ -928,6 +1023,7 @@ pub async fn check_and_load_model(
             layer_end,
             is_first,
             is_last,
+            shard_size_bytes: shared.config.model.shard_size_bytes(),
         };
 
         match crate::daemon::try_load_from_shards(&params) {

@@ -185,6 +185,17 @@ impl PipelineScheduler {
             });
         }
 
+        // Log candidates for debugging
+        for c in &candidates {
+            tracing::debug!(
+                node = %c.node_id,
+                ranges = ?c.available_ranges,
+                can_be_first = c.can_be_first,
+                can_be_last = c.can_be_last,
+                "Pipeline candidate"
+            );
+        }
+
         // Sort: latency ASC, load ASC, trust DESC
         candidates.sort_by(|a, b| {
             a.latency_ms

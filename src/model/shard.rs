@@ -60,7 +60,12 @@ impl ShardStore {
         }
 
         let actual = *hasher.finalize().as_bytes();
-        if actual != info.hash {
+
+        // Skip verification if the manifest hash is all-zeros (unknown).
+        // This happens when the manifest was generated from a GGUF header before
+        // shard data was downloaded — the hash is set to [0u8; 32] as a placeholder.
+        let hash_unknown = info.hash == [0u8; 32];
+        if !hash_unknown && actual != info.hash {
             // Quarantine the bad shard
             let quarantine_path = path.with_extension("bin.quarantine");
             let _ = std::fs::rename(&path, &quarantine_path);

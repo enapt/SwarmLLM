@@ -1786,6 +1786,9 @@ pub struct ShardLoadParams<'a> {
     pub layer_end: usize,
     pub is_first: bool,
     pub is_last: bool,
+    /// Configured shard size in bytes (from [model].shard_size_mb config).
+    /// Used for byte-range calculations instead of actual file sizes.
+    pub shard_size_bytes: u64,
 }
 
 /// Try to load a SplitModel from shard files + gguf_header.bin.
@@ -1830,16 +1833,11 @@ pub fn try_load_from_shards(
         )));
     }
 
-    // Determine shard size from the first non-last shard (last shard may be smaller)
-    let shard_size = if shard_files.len() > 1 {
-        std::fs::metadata(&shard_files[0].1)
-            .map(|m| m.len())
-            .unwrap_or(512 * 1024 * 1024)
-    } else {
-        std::fs::metadata(&shard_files[0].1)
-            .map(|m| m.len())
-            .unwrap_or(512 * 1024 * 1024)
-    };
+    // Use configured shard size rather than file size on disk.
+    // File sizes may differ from configured shard_size when downloaded from HF
+    // (CDN edge caching, partial downloads, etc.). The configured value is what
+    // the manifest and layer-range computations are based on.
+    let shard_size: u64 = params.shard_size_bytes;
 
     tracing::info!(
         model = %model_id,
@@ -2046,6 +2044,7 @@ async fn handle_layer_forward(
                             layer_end,
                             is_first,
                             is_last,
+                            shard_size_bytes: shared_state.config.model.shard_size_bytes(),
                         })
                     }
                 }
@@ -2061,6 +2060,7 @@ async fn handle_layer_forward(
                 layer_end,
                 is_first,
                 is_last,
+                shard_size_bytes: shared_state.config.model.shard_size_bytes(),
             })
         };
 
