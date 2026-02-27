@@ -897,8 +897,13 @@ pub async fn check_and_load_model(
             continue; // Already loaded this segment
         }
 
-        let is_first = layer_start == 0;
-        let is_last = layer_end >= manifest.num_layers as usize;
+        // is_first requires shard 0 (token_embd.weight is always at tensor offset 0)
+        // is_last requires the final shard (output.weight spans to the end of the file)
+        let has_shard_0 = local_shard_indices.contains(&0);
+        let last_shard_idx = manifest.shard_count.saturating_sub(1);
+        let has_last_shard = local_shard_indices.contains(&(last_shard_idx as u32));
+        let is_first = layer_start == 0 && has_shard_0;
+        let is_last = layer_end >= manifest.num_layers as usize && has_last_shard;
 
         let params = crate::daemon::ShardLoadParams {
             model_dir: &model_dir,

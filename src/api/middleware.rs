@@ -16,6 +16,8 @@ pub fn cors_layer() -> CorsLayer {
         "http://127.0.0.1:8801".parse::<HeaderValue>().unwrap(),
         "http://localhost:8802".parse::<HeaderValue>().unwrap(),
         "http://127.0.0.1:8802".parse::<HeaderValue>().unwrap(),
+        "http://localhost:8803".parse::<HeaderValue>().unwrap(),
+        "http://127.0.0.1:8803".parse::<HeaderValue>().unwrap(),
     ];
     CorsLayer::new()
         .allow_origin(origins.to_vec())
@@ -60,8 +62,9 @@ fn is_exempt_path(path: &str) -> bool {
     }
     matches!(
         path,
-        "/" | "/health" | "/admin" | "/chat" | "/setup" | "/v1/models"
-    ) || path.starts_with("/static/")
+        "/" | "/health" | "/admin" | "/chat" | "/setup"
+    ) || path.starts_with("/v1/")
+        || path.starts_with("/static/")
         || path.starts_with("/api/admin/")
         || path.starts_with("/api/identity/")
         || path.starts_with("/api/pool/")
@@ -135,12 +138,13 @@ mod tests {
         assert!(is_exempt_path("/api/admin/shard-storage"));
         assert!(is_exempt_path("/api/identity/nickname"));
         assert!(is_exempt_path("/api/pool/state"));
+        assert!(is_exempt_path("/v1/models"));
+        assert!(is_exempt_path("/v1/chat/completions"));
+        assert!(is_exempt_path("/v1/completions"));
     }
 
     #[test]
     fn non_exempt_paths() {
-        assert!(!is_exempt_path("/v1/chat/completions"));
-        assert!(is_exempt_path("/v1/models")); // read-only model list, needed by frontend
         assert!(!is_exempt_path("/api/admin/api-key")); // sensitive — requires auth
     }
 }

@@ -24,6 +24,10 @@ struct NodeCandidate {
     latency_ms: u32,
     load: f32,
     trust_score: f32,
+    /// True if this node has shard 0 (token_embd.weight, needed for is_first).
+    can_be_first: bool,
+    /// True if this node has the final shard (output head, needed for is_last).
+    can_be_last: bool,
 }
 
 impl PipelineScheduler {
@@ -164,6 +168,11 @@ impl PipelineScheduler {
             };
             let (latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
 
+            // Determine if this node can serve as first/last segment
+            let can_be_first = shard_indices.contains(&0);
+            let last_shard_idx = manifest.shard_count.saturating_sub(1);
+            let can_be_last = shard_indices.contains(&last_shard_idx);
+
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -171,6 +180,8 @@ impl PipelineScheduler {
                 latency_ms,
                 load: 0.0, // TODO: track active requests per node
                 trust_score,
+                can_be_first,
+                can_be_last,
             });
         }
 
@@ -212,6 +223,12 @@ impl PipelineScheduler {
     /// the current layer, preferring those that cover the widest contiguous range.
     /// A single node may appear multiple times in the pipeline if it has
     /// non-contiguous layer ranges (e.g., layers [0,2) and [10,14)).
+    ///
+    /// Constraints:
+    /// - The first segment (layer 0) must be assigned to a node with `can_be_first`
+    ///   (has shard 0 for token_embd.weight)
+    /// - The last segment (ending at num_layers) must be assigned to a node with
+    ///   `can_be_last` (has the final shard for output.weight)
     fn greedy_assign(
         &self,
         num_layers: u32,
@@ -221,9 +238,10 @@ impl PipelineScheduler {
         let mut current_layer = 0u32;
 
         while current_layer < num_layers {
-            // Find the best (candidate, range) pair that covers current_layer.
-            // We search across all available_ranges of every candidate.
-            let best = candidates
+            let is_first_segment = current_layer == 0;
+
+            // Find all (candidate, range) pairs that cover current_layer
+            let mut options: Vec<(&NodeCandidate, (u32, u32))> = candidates
                 .iter()
                 .flat_map(|c| {
                     c.available_ranges
@@ -231,10 +249,48 @@ impl PipelineScheduler {
                         .filter(|r| r.0 <= current_layer && r.1 > current_layer)
                         .map(move |r| (c, *r))
                 })
-                .max_by_key(|(_c, r)| {
-                    // Prefer wider coverage from current_layer
-                    r.1 - current_layer
-                });
+                .collect();
+
+            // First segment must be assigned to a node that can serve as first
+            if is_first_segment {
+                let first_capable: Vec<_> =
+                    options.iter().filter(|(c, _)| c.can_be_first).cloned().collect();
+                if !first_capable.is_empty() {
+                    options = first_capable;
+                }
+                // If no can_be_first candidates, fall through (best-effort)
+            }
+
+            // If this range could reach the end, prefer nodes that can be last.
+            // Check if any candidate can reach num_layers from current position.
+            let any_reaches_end = options.iter().any(|(_, r)| r.1 >= num_layers);
+            if any_reaches_end {
+                let last_capable: Vec<_> = options
+                    .iter()
+                    .filter(|(c, r)| r.1 >= num_layers && c.can_be_last)
+                    .cloned()
+                    .collect();
+                if !last_capable.is_empty() {
+                    // Prefer candidates that can be the final segment
+                    options = last_capable;
+                }
+                // If no can_be_last candidates reach the end, let others that DON'T
+                // reach the end take over so a can_be_last node can finish later
+                else {
+                    let not_reaching_end: Vec<_> = options
+                        .iter()
+                        .filter(|(_, r)| r.1 < num_layers)
+                        .cloned()
+                        .collect();
+                    if !not_reaching_end.is_empty() {
+                        options = not_reaching_end;
+                    }
+                }
+            }
+
+            let best = options
+                .into_iter()
+                .max_by_key(|(_c, r)| r.1 - current_layer);
 
             match best {
                 Some((candidate, range)) => {

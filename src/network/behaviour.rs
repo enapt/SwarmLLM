@@ -55,6 +55,13 @@ pub fn build_behaviour(
         .heartbeat_interval(Duration::from_secs(10))
         .validation_mode(gossipsub::ValidationMode::Strict)
         .message_id_fn(message_id_fn)
+        // Lower mesh thresholds so small clusters (2-3 nodes) can form a mesh.
+        // Defaults are mesh_n=6, mesh_n_low=4, mesh_n_high=12 — too high for
+        // dev/small deployments.
+        .mesh_n(2)
+        .mesh_n_low(1)
+        .mesh_n_high(4)
+        .mesh_outbound_min(0)
         .build()
         .map_err(|e| format!("GossipSub config error: {e}"))?;
     let gossipsub = gossipsub::Behaviour::new(

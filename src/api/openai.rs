@@ -228,6 +228,27 @@ pub async fn chat_completions(
 
     let model_name = model_name.unwrap();
 
+    // In split/shard mode, the local executor only has a partial model.
+    // Route ALL requests (streaming and non-streaming) through the distributed
+    // inference router, which assembles a multi-node pipeline.
+    let is_split_mode = state.shared_state.config.inference.shard_range.is_some();
+    if is_split_mode {
+        if let Some(router_tx) = &state.router_tx {
+            if req.stream {
+                return router_inference_stream(
+                    router_tx.clone(),
+                    &state,
+                    &req,
+                    request_id,
+                    created,
+                )
+                .await;
+            } else {
+                return router_inference(router_tx.clone(), &req, request_id, created).await;
+            }
+        }
+    }
+
     // Build prompt using chat template from GGUF if available, else ChatML fallback.
     let (tmpl, bos, eos) = {
         let info = state.shared_state.loaded_model_info.read().await;
@@ -862,6 +883,11 @@ pub async fn completions(
 }
 
 /// GET /v1/models
+///
+/// Only lists models that are actually usable for inference: either loaded
+/// locally (full model via --model) or with all shards covered across the
+/// network for distributed inference. Models that are partially available
+/// or still downloading are excluded — the admin dashboard shows those.
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelListResponse> {
     let mut data = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -869,50 +895,58 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
     // Use cached model info (lock-free, no executor contention)
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
         seen.insert(info.name.clone());
-        // Also mark the slug form as seen to prevent duplicates
         let slug = info
             .name
             .to_lowercase()
             .replace(' ', "-")
             .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
-        seen.insert(slug);
+        seen.insert(slug.clone());
+        // Use the slug as the model ID — the inference endpoint resolves by registry
+        // slug, not display name. Check if the registry has this model under the slug.
+        let model_id = if state
+            .shared_state
+            .model_registry
+            .get_manifest(&crate::types::ModelId(slug.clone()))
+            .is_some()
+        {
+            slug
+        } else {
+            info.name.clone()
+        };
         data.push(ModelInfo {
-            id: info.name.clone(),
+            id: model_id,
             object: "model",
             created: 0,
             owned_by: "local".into(),
         });
     }
 
-    // Include models from the model registry (restored from DB or received via gossip)
-    // Use the model ID (slug) as the primary identifier so inference routing works.
+    // Include models from the registry only if ALL shards are covered (usable)
     for manifest in state.shared_state.model_registry.models() {
         let id = manifest.id.0.clone();
-        if seen.insert(id.clone()) {
+        if seen.contains(&id) {
+            continue;
+        }
+        // Check that every shard has at least one holder
+        let all_covered = (0..manifest.shard_count).all(|idx| {
+            let shard_id = crate::types::ShardId {
+                model_id: manifest.id.clone(),
+                index: idx,
+            };
+            !state
+                .shared_state
+                .model_registry
+                .shard_holders(&shard_id)
+                .is_empty()
+        });
+        if all_covered && manifest.num_layers > 0 {
+            seen.insert(id.clone());
             data.push(ModelInfo {
                 id,
                 object: "model",
                 created: manifest.publish_date.timestamp(),
                 owned_by: "network".into(),
             });
-        }
-    }
-
-    // Include models available from peers (so chat can offer them)
-    for entry in state.shared_state.peer_registry.iter() {
-        let peer = entry.value();
-        if let Some(ref cap) = peer.capability {
-            for shard in &cap.hosted_shards {
-                let name = shard.model_id.0.clone();
-                if seen.insert(name.clone()) {
-                    data.push(ModelInfo {
-                        id: name,
-                        object: "model",
-                        created: 0,
-                        owned_by: "network".into(),
-                    });
-                }
-            }
         }
     }
 

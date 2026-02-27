@@ -149,6 +149,10 @@ impl PipelineExecutor {
         // Will be set after the first forward pass (once the split model is loaded with tokenizer)
         let mut prompt_token_count: Option<usize> = None;
 
+        // Cache EOS tokens and vocab after the first forward pass (avoids Mutex
+        // acquisition every token — saves ~1ms per token on contended GPU).
+        let mut cached_eos: Option<Vec<u32>> = None;
+
         // Token generation loop
         for seq_num in 0..max_tokens {
             let activations = if seq_num == 0 {
@@ -172,6 +176,8 @@ impl PipelineExecutor {
                         let ptc = self.compute_prompt_token_count(&prompt).await;
                         index_pos = ptc;
                         prompt_token_count = Some(ptc);
+                        // Cache EOS tokens now that the model is loaded
+                        cached_eos = Some(self.get_eos_tokens().await);
                     } else {
                         index_pos += 1;
                     }
@@ -180,7 +186,7 @@ impl PipelineExecutor {
 
                     // Stream each non-EOS token as it arrives
                     if let Some(ref tx) = token_tx {
-                        let eos = self.get_eos_tokens().await;
+                        let eos = cached_eos.as_deref().unwrap_or(&[2]);
                         for &tid in &result.token_ids {
                             if !eos.contains(&tid) {
                                 let text = self.decode_tokens(&[tid]).await;
@@ -240,7 +246,7 @@ impl PipelineExecutor {
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
-        let eos_tokens = self.get_eos_tokens().await;
+        let eos_tokens = cached_eos.unwrap_or_else(|| vec![2]);
         let clean_tokens: Vec<u32> = generated_tokens
             .iter()
             .copied()
@@ -452,48 +458,82 @@ impl PipelineExecutor {
         // Ensure the split model is loaded for this model's layer range
         let split_key = (model_id.clone(), layer_start, layer_end);
         if !self.shared_state.split_models.contains_key(&split_key) {
-            // Find the GGUF file (reconstructed or original)
             let shard_store =
                 crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
             let model_dir = shard_store.models_dir().join(&model_id.0);
-            let gguf_path = model_dir.join("model.gguf");
 
-            // If no reconstructed GGUF, try the source_path file
-            let gguf_path = if gguf_path.exists() {
-                gguf_path
-            } else {
-                let source_path_file = model_dir.join("source_path");
-                if source_path_file.exists() {
-                    let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
-                    std::path::PathBuf::from(p.trim())
-                } else {
-                    return Err(SwarmError::Internal(
-                        "No GGUF file found for split model".into(),
-                    ));
-                }
-            };
-
-            // Determine if this is the first/last segment
             let manifest = self
                 .shared_state
                 .model_registry
                 .get_manifest(model_id)
                 .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
             let total_layers = manifest.num_layers as usize;
-            let is_first = layer_start == 0;
-            let is_last = layer_end >= total_layers;
 
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{layer_start}..{layer_end})"),
-                total = total_layers,
-                path = %gguf_path.display(),
-                "Loading split model segment"
-            );
+            // Determine is_first/is_last with shard-awareness
+            let local_node_id = self.shared_state.identity.node_id().clone();
+            let local_shards: Vec<u32> = manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    let sid = crate::types::ShardId {
+                        model_id: model_id.clone(),
+                        index: s.index,
+                    };
+                    self.shared_state
+                        .model_registry
+                        .shard_holders(&sid)
+                        .contains(&local_node_id)
+                })
+                .map(|s| s.index)
+                .collect();
+            let has_shard_0 = local_shards.contains(&0);
+            let last_shard_idx = manifest.shard_count.saturating_sub(1);
+            let has_last_shard = local_shards.contains(&last_shard_idx);
+            let is_first = layer_start == 0 && has_shard_0;
+            let is_last = layer_end >= total_layers && has_last_shard;
 
-            let split_model =
-                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)?;
+            // Try loading: GGUF file → source_path → shard files
+            let gguf_path = model_dir.join("model.gguf");
+            let source_path_file = model_dir.join("source_path");
 
+            let load_result = if gguf_path.exists() {
+                tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    "Loading split model from GGUF"
+                );
+                SplitModel::load_from_gguf(
+                    &gguf_path, layer_start, layer_end, is_first, is_last,
+                )
+            } else if source_path_file.exists() {
+                let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
+                let path = std::path::PathBuf::from(p.trim());
+                tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    "Loading split model from source_path"
+                );
+                SplitModel::load_from_gguf(&path, layer_start, layer_end, is_first, is_last)
+            } else {
+                // Shard-only loading path
+                let params = crate::daemon::ShardLoadParams {
+                    model_dir: &model_dir,
+                    shard_store: &shard_store,
+                    model_id,
+                    layer_start,
+                    layer_end,
+                    is_first,
+                    is_last,
+                };
+                tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    "Loading split model from shard files"
+                );
+                crate::daemon::try_load_from_shards(&params)
+            };
+
+            let split_model = load_result?;
             self.shared_state.split_models.insert(
                 split_key.clone(),
                 std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
@@ -519,12 +559,12 @@ impl PipelineExecutor {
         // Convert activation bytes to a candle Tensor
         let input_tensor = if is_first {
             if sequence_num == 0 {
-                // Prefill: tokenize the full prompt using BPE tokenizer if available
-                let prompt = self.build_prompt().await;
+                // Prefill: activation_bytes contain the prompt text from execute_distributed.
+                // Tokenize directly from bytes — no need to rebuild the prompt.
+                let prompt = String::from_utf8_lossy(activation_bytes);
                 let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
                     tokenizer.encode(&prompt)
                 } else {
-                    // Fallback: byte-level tokenization
                     prompt.bytes().map(|b| b as i64).collect()
                 };
                 candle_core::Tensor::from_vec(
@@ -551,22 +591,15 @@ impl PipelineExecutor {
         // Run the forward pass with correct position
         let output = split_model.forward(&input_tensor, index_pos)?;
 
-        // Track local layer-forward participation and earn credits
+        // Track local layer-forward participation (credit persist deferred to request end)
         {
             let layers_processed = (layer_end - layer_start) as i64;
             if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
                 stats.forwards_served += 1;
             }
             let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-            if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                &self.shared_state.credit_balance,
-                &self.shared_state.db,
-                earned,
-                true,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "Failed to persist credit earn");
+            if let Ok(mut bal) = self.shared_state.credit_balance.try_write() {
+                bal.balance += earned;
             }
         }
 

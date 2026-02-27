@@ -1990,8 +1990,13 @@ async fn handle_layer_forward(
         return;
     }
 
-    let is_first = layer_start == 0;
-    let is_last = layer_end >= total_layers;
+    // is_first requires shard 0 (token_embd.weight is at tensor offset 0)
+    // is_last requires the final shard (output.weight spans to the end of the file)
+    let has_shard_0 = local_shard_indices.contains(&0);
+    let last_shard_idx = manifest.shard_count.saturating_sub(1);
+    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
+    let is_first = layer_start == 0 && has_shard_0;
+    let is_last = layer_end >= total_layers && has_last_shard;
 
     // Ensure the split model is loaded
     let split_key = (model_id.clone(), layer_start, layer_end);
@@ -2248,23 +2253,18 @@ async fn handle_layer_forward(
         "LayerForward processed, sending result back"
     );
 
-    // Track participation: increment forwards_served and earn credits
+    // Track participation: increment forwards_served and earn credits (non-blocking)
     {
         if let Ok(mut stats) = shared_state.node_stats.try_write() {
             stats.forwards_served += 1;
         }
         let layers_processed = (layer_end - layer_start) as i64;
-        let mut bal = shared_state.credit_balance.write().await;
         let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-        bal.balance += earned;
-        bal.lifetime_earned += earned as u64;
-        bal.last_updated = chrono::Utc::now();
-        tracing::debug!(
-            earned,
-            layers = layers_processed,
-            request_id = %request_id,
-            "Earned credits for layer-forward processing"
-        );
+        if let Ok(mut bal) = shared_state.credit_balance.try_write() {
+            bal.balance += earned;
+            bal.lifetime_earned += earned as u64;
+            bal.last_updated = chrono::Utc::now();
+        }
     }
 
     // Send back via tensor protocol
