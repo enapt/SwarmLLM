@@ -485,20 +485,31 @@ var SwarmLLM = (function() {
           var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
           shards.forEach(function(s) {
             var cls = 'missing';
-            var label = s.index;
+            var label = '' + s.index;
             if (s.local) { cls = 'local'; localCount++; }
             else if (s.holders > 0) { cls = 'peer'; peerCount++; }
             else { missingCount++; }
 
-            // Check if this shard is being downloaded
-            if (isDownloading && !s.local && m.acquisition_progress) {
+            // Check per-shard download state (only marks THIS specific shard)
+            if (s.download && s.download.state === 'Downloading') {
               cls = 'downloading'; dlCount++;
+              if (s.download.progress_pct > 0 && s.download.progress_pct < 100) {
+                label = s.download.progress_pct + '%';
+              }
+            }
+            // Check if a peer is downloading this shard
+            if (s.peer_downloads && s.peer_downloads.length > 0) {
+              if (cls !== 'local' && cls !== 'downloading') {
+                cls = 'peer-downloading'; dlCount++;
+                label = 'P:' + s.peer_downloads[0].progress_pct + '%';
+              }
             }
 
             var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')';
             if (cls === 'local') title += ' — Stored locally';
             else if (cls === 'peer') title += ' — Available from ' + s.holders + ' peer(s)';
-            else if (cls === 'downloading') title += ' — Downloading...';
+            else if (cls === 'downloading') title += ' — Downloading' + (s.download ? ' (' + s.download.progress_pct + '%)' : '');
+            else if (cls === 'peer-downloading') title += ' — Peer downloading (' + s.peer_downloads[0].progress_pct + '%)';
             else title += ' — Not available';
 
             shardHtml += '<div class="shard-cell ' + cls + '" data-shard="' + safeId + '-' + s.index + '" title="' + title + '">' + label + '</div>';
@@ -552,8 +563,8 @@ var SwarmLLM = (function() {
     },
 
     /// Live-update shard cells and progress bars from WebSocket data without full re-render.
-    updateShardsLive: function(acquisitions, shardRegistry) {
-      if (!acquisitions && !shardRegistry) return;
+    updateShardsLive: function(acquisitions, shardRegistry, peerDownloads) {
+      if (!acquisitions && !shardRegistry && !peerDownloads) return;
 
       // Update shard cells from acquisition progress (per-shard detail)
       if (acquisitions) {
@@ -678,6 +689,24 @@ var SwarmLLM = (function() {
               cell.setAttribute('title', 'Shard ' + s.index + ' — Available from ' + s.holders + ' peer(s)');
             }
           });
+        });
+      }
+
+      // Update shard cells with peer download progress (from gossip)
+      if (peerDownloads && peerDownloads.length > 0) {
+        peerDownloads.forEach(function(pd) {
+          var safeId = pd.model_id.replace(/[^a-zA-Z0-9]/g, '_');
+          var cellId = safeId + '-' + pd.shard_index;
+          var cell = document.querySelector('[data-shard="' + cellId + '"]');
+          if (!cell) return;
+
+          // Don't overwrite local or our-own-download state
+          var current = cell.className;
+          if (current.indexOf('local') >= 0 || current.indexOf(' downloading') >= 0) return;
+
+          cell.className = 'shard-cell peer-downloading';
+          cell.textContent = 'P:' + pd.progress_pct + '%';
+          cell.setAttribute('title', 'Shard ' + pd.shard_index + ' — Peer ' + pd.node_id.substring(0, 8) + ' downloading (' + pd.progress_pct + '%)');
         });
       }
     },
@@ -1155,7 +1184,7 @@ var SwarmLLM = (function() {
           dashboard.updateStats(msg.data);
           if (msg.data.acquisitions) dashboard.updateAcquisitionProgress(msg.data.acquisitions);
           // Live-update shard grid cells and progress bars without full re-render
-          dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null);
+          dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
           if (msg.data.region_summary && activeTab === 'network-map') {
             networkMap.updateFromWs(msg.data.region_summary);
           }

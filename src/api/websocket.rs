@@ -170,6 +170,25 @@ async fn build_stats_message(
         data["shard_registry"] = registry;
     }
 
+    // Peer shard download progress (from gossip)
+    {
+        let mut peer_dl: Vec<serde_json::Value> = Vec::new();
+        for entry in state.peer_shard_downloads.iter() {
+            let shard_id = entry.key();
+            for (nid, pct) in entry.value().iter() {
+                peer_dl.push(serde_json::json!({
+                    "model_id": shard_id.model_id.0,
+                    "shard_index": shard_id.index,
+                    "node_id": format!("{}", nid),
+                    "progress_pct": pct,
+                }));
+            }
+        }
+        if !peer_dl.is_empty() {
+            data["peer_downloads"] = serde_json::json!(peer_dl);
+        }
+    }
+
     // Region summary for network map
     {
         let mut region_counts: HashMap<String, u64> = HashMap::new();

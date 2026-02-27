@@ -190,13 +190,14 @@ impl NetworkManager {
                 message,
                 ..
             })) => {
-                // Try to unseal gossip (encrypted), fall back to plaintext for pre-upgrade nodes
-                let data = match self.shared_state.gossip_sealer.open(&message.data) {
-                    Ok(plaintext) => plaintext,
-                    Err(_) => message.data.clone(),
-                };
+                // Try to unseal gossip (encrypted), then try plaintext JSON decode.
+                // This handles key mismatches between bootstrap and joining nodes
+                // as well as pre-encryption upgrade nodes.
+                let decoded = self.shared_state.gossip_sealer.open(&message.data)
+                    .and_then(|plaintext| protocol::decode_message(&plaintext).map_err(|e| e.into()))
+                    .or_else(|_| protocol::decode_message(&message.data));
 
-                match protocol::decode_message(&data) {
+                match decoded {
                     Ok(msg) => {
                         tracing::debug!(
                             source = %propagation_source,
@@ -604,12 +605,10 @@ impl NetworkManager {
 
         match protocol::encode_message(&msg) {
             Ok(data) => {
-                // Seal gossip with epoch-based group key (backward-compatible: receivers
-                // try decryption first, fall back to plaintext decode).
-                let publish_data = match self.shared_state.gossip_sealer.seal(&data) {
-                    Ok(sealed) => sealed,
-                    Err(_) => data, // Fall back to plaintext if sealing fails
-                };
+                // Publish plaintext JSON — gossip messages (shard announces, health,
+                // nicknames) are inherently public. Unicast messages use pairwise
+                // session encryption for privacy.
+                let publish_data = data;
 
                 let gossip_topic = IdentTopic::new(topic);
                 match self
