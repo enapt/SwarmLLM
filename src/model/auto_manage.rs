@@ -520,12 +520,14 @@ impl AutoShardManager {
                     }
                 });
 
+                let configured_shard_size = shared.config.model.shard_size_bytes();
                 match crate::model::huggingface::download_shards(
                     &repo_id,
                     &filename,
                     &dest,
                     &[shard_idx],
                     Some(ptx),
+                    Some(configured_shard_size),
                 )
                 .await
                 {
@@ -759,6 +761,9 @@ async fn check_and_load_model(
     match crate::daemon::try_load_from_shards(&params) {
         Ok(split_model) => {
             let eos_tokens = split_model.eos_tokens().to_vec();
+            let chat_template = split_model.chat_template().map(|s| s.to_string());
+            let bos_token = split_model.bos_token().to_string();
+            let eos_token = split_model.eos_token_str().to_string();
             shared.split_models.insert(
                 model_id.clone(),
                 std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
@@ -770,6 +775,9 @@ async fn check_and_load_model(
                     name: manifest.name.clone(),
                     size_bytes: manifest.total_size_bytes,
                     eos_tokens,
+                    chat_template,
+                    bos_token,
+                    eos_token,
                 });
 
             tracing::info!(

@@ -802,12 +802,13 @@ input[type="range"]::-webkit-slider-thumb {
   width: 28px; height: 22px; border-radius: 3px; cursor: help;
   display: flex; align-items: center; justify-content: center;
   font-size: 0.6rem; font-weight: 600; color: rgba(255,255,255,0.7);
-  transition: transform 0.15s, box-shadow 0.15s;
+  transition: transform 0.15s, box-shadow 0.15s, background-color 0.4s ease, border-color 0.4s ease, color 0.3s ease;
+  position: relative;
 }
 .model-card .shard-cell:hover { transform: scale(1.15); box-shadow: 0 0 8px rgba(0,0,0,0.3); z-index: 1; }
 .model-card .shard-cell.local { background: var(--green); }
 .model-card .shard-cell.peer { background: var(--accent); }
-.model-card .shard-cell.downloading { background: var(--accent); animation: pulse-shard 1.5s ease-in-out infinite; }
+.model-card .shard-cell.downloading { background: var(--accent); animation: pulse-shard 1.5s ease-in-out infinite; font-size: 0.55rem; }
 .model-card .shard-cell.missing { background: var(--bg-tertiary); border: 1px dashed var(--border-light); color: var(--text-secondary); }
 @keyframes pulse-shard { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 .model-card .shard-legend { display: flex; gap: 12px; font-size: 0.7rem; color: var(--text-secondary); margin-top: 6px; }
@@ -857,3 +858,61 @@ input[type="range"]::-webkit-slider-thumb {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+/* ---- World Map ---- */
+.world-map-container {
+  position: relative;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+}
+.world-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.world-svg .map-region {
+  cursor: pointer;
+  transition: fill 0.3s, filter 0.3s;
+}
+.world-svg .map-region:hover {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.map-tooltip {
+  position: absolute;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  z-index: 10;
+  pointer-events: none;
+  min-width: 140px;
+  max-width: 260px;
+}
+.map-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  justify-content: center;
+}
+.legend-gradient {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend-bar {
+  width: 120px;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg-tertiary), #1446b4, #3b82f6, #60a5fa);
+}
+.map-stats {
+  text-align: center;
+  margin-top: 8px;
+}

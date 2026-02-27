@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::inference::executor::build_chat_prompt;
+use crate::inference::chat_template;
 use crate::inference::kv_cache::KvCacheManager;
 use crate::inference::pipeline::PipelineExecutor;
 use crate::inference::scheduler::PipelineScheduler;
@@ -19,6 +19,8 @@ pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>
 struct QueuedRequest {
     request: InferenceRequest,
     result_tx: InferenceResultTx,
+    /// If set, tokens are sent incrementally for SSE streaming.
+    token_tx: Option<StreamingTokenTx>,
 }
 
 impl Eq for QueuedRequest {}
@@ -55,12 +57,30 @@ pub struct InferenceOutput {
     pub finish_reason: String,
 }
 
+/// Sender for incremental streaming tokens from distributed inference.
+pub type StreamingTokenTx = mpsc::Sender<StreamingTokenEvent>;
+
+/// A single token event sent during streaming distributed inference.
+#[derive(Debug, Clone)]
+pub struct StreamingTokenEvent {
+    pub text: String,
+    pub finish_reason: Option<String>,
+}
+
 /// Command sent to the InferenceRouter from the API layer or network.
 pub enum RouterCommand {
     /// Submit a new inference request with a channel for the result.
     Submit {
         request: InferenceRequest,
         result_tx: InferenceResultTx,
+    },
+    /// Submit a streaming inference request. Tokens are sent incrementally
+    /// on `token_tx`. The final `InferenceOutput` is still sent on `result_tx`
+    /// for stats/credit accounting.
+    StreamSubmit {
+        request: InferenceRequest,
+        result_tx: InferenceResultTx,
+        token_tx: StreamingTokenTx,
     },
     /// A network message relevant to inference (LayerForward, LayerResult, etc.)
     NetworkMessage(SwarmMessage),
@@ -70,6 +90,10 @@ pub enum RouterCommand {
 ///
 /// It receives inference requests, places them in a priority queue,
 /// assembles pipelines using the scheduler, and kicks off execution.
+///
+/// When `max_batch_size > 1`, compatible requests (same model) are
+/// grouped into batches and executed together — sharing the model lock
+/// for local inference to reduce contention.
 pub struct InferenceRouter {
     shared_state: Arc<SharedState>,
     command_rx: mpsc::Receiver<RouterCommand>,
@@ -83,6 +107,8 @@ pub struct InferenceRouter {
     /// Notify used to wake the drain loop when a new request is queued,
     /// replacing the fixed 50ms polling interval.
     queue_notify: Arc<tokio::sync::Notify>,
+    max_batch_size: usize,
+    batch_timeout: std::time::Duration,
 }
 
 impl InferenceRouter {
@@ -100,6 +126,10 @@ impl InferenceRouter {
                 .unwrap_or(600),
         );
         let max_concurrent = shared_state.config.inference.max_concurrent_requests as usize;
+        let max_batch_size = (shared_state.config.inference.max_batch_size as usize).max(1);
+        let batch_timeout = std::time::Duration::from_millis(
+            shared_state.config.inference.batch_timeout_ms,
+        );
         Self {
             shared_state: shared_state.clone(),
             command_rx,
@@ -111,12 +141,18 @@ impl InferenceRouter {
             max_concurrent,
             active_count: Arc::new(AtomicUsize::new(0)),
             queue_notify: Arc::new(tokio::sync::Notify::new()),
+            max_batch_size,
+            batch_timeout,
         }
     }
 
     /// Run the router event loop.
     pub async fn run(mut self) -> Result<(), SwarmError> {
-        tracing::info!("InferenceRouter running");
+        tracing::info!(
+            max_batch_size = self.max_batch_size,
+            batch_timeout_ms = self.batch_timeout.as_millis() as u64,
+            "InferenceRouter running"
+        );
 
         // KV-cache cleanup interval
         let mut cache_cleanup = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -133,10 +169,11 @@ impl InferenceRouter {
                 cmd = self.command_rx.recv() => {
                     match cmd {
                         Some(RouterCommand::Submit { request, result_tx }) => {
-                            self.handle_submit(request, result_tx);
-                            // Drain immediately after a submission instead of
-                            // waiting for a notify (the submit already notifies,
-                            // but draining inline avoids a wakeup round-trip).
+                            self.handle_submit(request, result_tx, None);
+                            self.drain_queue().await;
+                        }
+                        Some(RouterCommand::StreamSubmit { request, result_tx, token_tx }) => {
+                            self.handle_submit(request, result_tx, Some(token_tx));
                             self.drain_queue().await;
                         }
                         Some(RouterCommand::NetworkMessage(msg)) => {
@@ -166,7 +203,12 @@ impl InferenceRouter {
     /// Handle a new inference submission.
     ///
     /// Checks credit balance / priority tier before queueing.
-    fn handle_submit(&mut self, request: InferenceRequest, result_tx: InferenceResultTx) {
+    fn handle_submit(
+        &mut self,
+        request: InferenceRequest,
+        result_tx: InferenceResultTx,
+        token_tx: Option<StreamingTokenTx>,
+    ) {
         // Check credit balance — Bronze tier nodes are deprioritized but not blocked
         // per spec: "Credit errors: degrade priority tier, never block"
         let balance = {
@@ -202,6 +244,7 @@ impl InferenceRouter {
         self.queue.push(QueuedRequest {
             request: adjusted_request,
             result_tx,
+            token_tx,
         });
 
         // Wake the drain loop immediately instead of waiting for 50ms poll.
@@ -242,81 +285,361 @@ impl InferenceRouter {
         }
     }
 
-    /// Drain the priority queue and execute requests.
+    /// Collect a batch of compatible requests (same model) from the priority queue.
+    ///
+    /// Returns up to `max_batch_size` requests that all target the same model_id.
+    /// Incompatible requests (different model) are pushed back into the queue.
+    fn collect_batch(&mut self, max_size: usize) -> Vec<QueuedRequest> {
+        let first = match self.queue.pop() {
+            Some(q) => q,
+            None => return vec![],
+        };
+
+        if max_size <= 1 {
+            return vec![first];
+        }
+
+        let target_model = first.request.model_id.clone();
+        let mut batch = vec![first];
+        let mut deferred = Vec::new();
+
+        while batch.len() < max_size {
+            match self.queue.pop() {
+                Some(q) => {
+                    if q.request.model_id == target_model {
+                        batch.push(q);
+                    } else {
+                        deferred.push(q);
+                    }
+                }
+                None => break,
+            }
+        }
+
+        // Push back incompatible requests
+        for q in deferred {
+            self.queue.push(q);
+        }
+
+        batch
+    }
+
+    /// Drain the priority queue and execute requests, batching when possible.
+    ///
+    /// When `max_batch_size > 1`, multiple compatible requests (same model) are
+    /// collected and dispatched together. For local inference, the batch shares
+    /// a single model lock acquisition — requests are processed sequentially
+    /// within the batch but without re-acquiring the lock between them.
     async fn drain_queue(&mut self) {
         while self.active_count.load(Ordering::Relaxed) < self.max_concurrent {
-            let queued = match self.queue.pop() {
-                Some(q) => q,
-                None => break,
-            };
+            if self.queue.is_empty() {
+                break;
+            }
 
-            self.active_count.fetch_add(1, Ordering::Relaxed);
+            // If batching is enabled and we have a partial batch, wait briefly
+            // for more requests to arrive before dispatching.
+            if self.max_batch_size > 1
+                && self.queue.len() < self.max_batch_size
+                && !self.batch_timeout.is_zero()
+            {
+                let notify = self.queue_notify.clone();
+                let timeout = self.batch_timeout;
+                // Wait for either more requests or timeout
+                let _ = tokio::time::timeout(timeout, notify.notified()).await;
+                // After waiting, drain any new commands that arrived
+                self.drain_pending_commands().await;
+            }
+
+            let batch = self.collect_batch(self.max_batch_size);
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_size = batch.len();
+
+            // For single-request batches, use the original unbatched path
+            if batch_size == 1 {
+                let mut batch = batch;
+                let queued = batch.pop().unwrap();
+                self.dispatch_single(queued);
+                continue;
+            }
+
+            // Multi-request batch: dispatch as a group
+            tracing::info!(
+                batch_size,
+                "Dispatching inference batch"
+            );
+
+            // Each request in the batch counts toward active_count
+            self.active_count.fetch_add(batch_size, Ordering::Relaxed);
+
             let active_count = self.active_count.clone();
             let shared_state = self.shared_state.clone();
             let network_tx = self.network_tx.clone();
             let scheduler = self.scheduler.clone();
-            let request = queued.request;
-            let result_tx = queued.result_tx;
 
             tokio::spawn(async move {
-                let output =
-                    execute_request(shared_state.clone(), network_tx, scheduler, request.clone())
-                        .await;
-
-                if let Err(ref e) = output {
-                    tracing::error!(
-                        request_id = %request.id,
-                        model = %request.model_id,
-                        error = %e,
-                        "Inference request failed"
-                    );
-                }
-
-                // Update stats and apply credit events
-                // Local API requests use NodeId([0; 32]) as requester sentinel
-                let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
-
-                if let Ok(ref result) = output {
-                    if let Ok(mut stats) = shared_state.node_stats.try_write() {
-                        stats.requests_served += 1;
-                    }
-
-                    // Credit operations:
-                    // - Per-layer earn credits are handled in process_local_segment
-                    //   and handle_layer_forward (each node earns for layers it processed)
-                    // - Here we debit the local API consumer for requesting inference
-                    if is_local_api_request {
-                        let total_tokens = result.prompt_tokens + result.completion_tokens;
-                        let spent =
-                            crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
-                        if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                            &shared_state.credit_balance,
-                            &shared_state.db,
-                            -spent,
-                            false,
-                        )
-                        .await
-                        {
-                            tracing::warn!(error = %e, "Failed to persist credit spend");
-                        }
-                        tracing::debug!(
-                            spent,
-                            total_tokens,
-                            request_id = %request.id,
-                            "Spent credits for consuming inference"
-                        );
-                    }
-                }
-
-                // Remove from active pipelines
-                shared_state.active_pipelines.remove(&request.id);
-
-                // Decrement active count so new requests can be dispatched
-                active_count.fetch_sub(1, Ordering::Relaxed);
-
-                let _ = result_tx.send(output);
+                execute_batch(
+                    shared_state,
+                    network_tx,
+                    scheduler,
+                    batch,
+                    active_count,
+                )
+                .await;
             });
         }
+    }
+
+    /// Drain any pending commands from the command channel without blocking.
+    /// Used during batch assembly to pick up requests that arrived while waiting.
+    async fn drain_pending_commands(&mut self) {
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(RouterCommand::Submit { request, result_tx }) => {
+                    self.handle_submit(request, result_tx, None);
+                }
+                Ok(RouterCommand::StreamSubmit {
+                    request,
+                    result_tx,
+                    token_tx,
+                }) => {
+                    self.handle_submit(request, result_tx, Some(token_tx));
+                }
+                Ok(RouterCommand::NetworkMessage(msg)) => {
+                    self.handle_network_message(msg).await;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Dispatch a single request (non-batched path, identical to previous behavior).
+    fn dispatch_single(&mut self, queued: QueuedRequest) {
+        self.active_count.fetch_add(1, Ordering::Relaxed);
+        let active_count = self.active_count.clone();
+        let shared_state = self.shared_state.clone();
+        let network_tx = self.network_tx.clone();
+        let scheduler = self.scheduler.clone();
+        let request = queued.request;
+        let result_tx = queued.result_tx;
+        let token_tx = queued.token_tx;
+
+        tokio::spawn(async move {
+            let output = execute_request(
+                shared_state.clone(),
+                network_tx,
+                scheduler,
+                request.clone(),
+                token_tx,
+            )
+            .await;
+
+            finalize_request(&shared_state, &request, &output).await;
+
+            // Remove from active pipelines
+            shared_state.active_pipelines.remove(&request.id);
+
+            // Decrement active count so new requests can be dispatched
+            active_count.fetch_sub(1, Ordering::Relaxed);
+
+            let _ = result_tx.send(output);
+        });
+    }
+}
+
+/// Finalize a completed request: update stats and apply credit charges.
+async fn finalize_request(
+    shared_state: &SharedState,
+    request: &InferenceRequest,
+    output: &Result<InferenceOutput, SwarmError>,
+) {
+    if let Err(ref e) = output {
+        tracing::error!(
+            request_id = %request.id,
+            model = %request.model_id,
+            error = %e,
+            "Inference request failed"
+        );
+    }
+
+    // Local API requests use NodeId([0; 32]) as requester sentinel
+    let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
+
+    if let Ok(ref result) = output {
+        if let Ok(mut stats) = shared_state.node_stats.try_write() {
+            stats.requests_served += 1;
+        }
+
+        // Credit operations:
+        // - Per-layer earn credits are handled in process_local_segment
+        //   and handle_layer_forward (each node earns for layers it processed)
+        // - Here we debit the local API consumer for requesting inference
+        if is_local_api_request {
+            let total_tokens = result.prompt_tokens + result.completion_tokens;
+            let spent =
+                crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
+            if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                &shared_state.credit_balance,
+                &shared_state.db,
+                -spent,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to persist credit spend");
+            }
+            tracing::debug!(
+                spent,
+                total_tokens,
+                request_id = %request.id,
+                "Spent credits for consuming inference"
+            );
+        }
+    }
+}
+
+/// Execute a batch of requests that target the same model.
+///
+/// For local inference (full model loaded), the batch shares a single executor
+/// lock acquisition — requests are processed sequentially within the lock,
+/// avoiding repeated lock acquire/release overhead.
+///
+/// For distributed inference, each request gets its own pipeline and they
+/// execute concurrently.
+async fn execute_batch(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    scheduler: PipelineScheduler,
+    batch: Vec<QueuedRequest>,
+    active_count: Arc<AtomicUsize>,
+) {
+    let batch_size = batch.len();
+    let is_split_mode = shared_state.config.inference.shard_range.is_some();
+    let model_loaded = shared_state
+        .model_loaded
+        .load(std::sync::atomic::Ordering::Acquire);
+
+    if model_loaded && !is_split_mode {
+        // Local inference batch: hold the executor lock once, process all requests
+        execute_local_batch(shared_state, batch, active_count).await;
+    } else {
+        // Distributed inference batch: spawn each request independently
+        // They'll assemble their own pipelines and run concurrently.
+        execute_distributed_batch(shared_state, network_tx, scheduler, batch, active_count).await;
+    }
+
+    tracing::debug!(batch_size, "Batch execution complete");
+}
+
+/// Execute a batch of requests locally, sharing the model lock.
+///
+/// Acquires the executor mutex once and processes all requests sequentially.
+/// Each request gets its own generation call and independent output.
+async fn execute_local_batch(
+    shared_state: Arc<SharedState>,
+    batch: Vec<QueuedRequest>,
+    active_count: Arc<AtomicUsize>,
+) {
+    let mut executor = shared_state.executor.lock().await;
+    let batch_size = batch.len();
+
+    tracing::info!(
+        batch_size,
+        "Executing local inference batch"
+    );
+
+    for queued in batch {
+        let request = queued.request;
+        let result_tx = queued.result_tx;
+
+        let output = if executor.is_loaded() {
+            let prompt = {
+                let info = shared_state.loaded_model_info.read().await;
+                match info.as_ref() {
+                    Some(i) => chat_template::build_prompt(
+                        &request.messages,
+                        i.chat_template.as_deref(),
+                        &i.bos_token,
+                        &i.eos_token,
+                    ),
+                    None => chat_template::chatml_fallback(&request.messages),
+                }
+            };
+
+            tracing::info!(
+                request_id = %request.id,
+                model = %request.model_id,
+                "Executing inference locally (batched)"
+            );
+
+            match executor.generate(&prompt, &request.sampling_params) {
+                Ok((content, gen_result)) => Ok(InferenceOutput {
+                    request_id: request.id,
+                    content,
+                    prompt_tokens: gen_result.prompt_tokens,
+                    completion_tokens: gen_result.completion_tokens,
+                    finish_reason: gen_result.finish_reason.as_str().to_string(),
+                }),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(SwarmError::NoModelLoaded)
+        };
+
+        finalize_request(&shared_state, &request, &output).await;
+        shared_state.active_pipelines.remove(&request.id);
+        active_count.fetch_sub(1, Ordering::Relaxed);
+        let _ = result_tx.send(output);
+    }
+
+    tracing::debug!(batch_size, "Local batch complete");
+}
+
+/// Execute a batch of distributed inference requests concurrently.
+///
+/// Each request gets its own pipeline. They share the active_count
+/// and are finalized independently.
+async fn execute_distributed_batch(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    scheduler: PipelineScheduler,
+    batch: Vec<QueuedRequest>,
+    active_count: Arc<AtomicUsize>,
+) {
+    let mut handles = Vec::with_capacity(batch.len());
+
+    for queued in batch {
+        let shared_state = shared_state.clone();
+        let network_tx = network_tx.clone();
+        let scheduler = scheduler.clone();
+        let active_count = active_count.clone();
+
+        handles.push(tokio::spawn(async move {
+            let request = queued.request;
+            let result_tx = queued.result_tx;
+            let token_tx = queued.token_tx;
+
+            let output = execute_request(
+                shared_state.clone(),
+                network_tx,
+                scheduler,
+                request.clone(),
+                token_tx,
+            )
+            .await;
+
+            finalize_request(&shared_state, &request, &output).await;
+            shared_state.active_pipelines.remove(&request.id);
+            active_count.fetch_sub(1, Ordering::Relaxed);
+            let _ = result_tx.send(output);
+        }));
+    }
+
+    // Wait for all requests in the batch to complete
+    for handle in handles {
+        let _ = handle.await;
     }
 }
 
@@ -326,6 +649,7 @@ async fn execute_request(
     network_tx: mpsc::Sender<NetworkCommand>,
     scheduler: PipelineScheduler,
     request: InferenceRequest,
+    token_tx: Option<StreamingTokenTx>,
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
 
@@ -346,7 +670,18 @@ async fn execute_request(
             "Executing inference locally"
         );
 
-        let prompt = build_chat_prompt(&request.messages);
+        let prompt = {
+            let info = shared_state.loaded_model_info.read().await;
+            match info.as_ref() {
+                Some(i) => chat_template::build_prompt(
+                    &request.messages,
+                    i.chat_template.as_deref(),
+                    &i.bos_token,
+                    &i.eos_token,
+                ),
+                None => chat_template::chatml_fallback(&request.messages),
+            }
+        };
         let (content, gen_result) = executor.generate(&prompt, &request.sampling_params)?;
 
         return Ok(InferenceOutput {
@@ -396,7 +731,7 @@ async fn execute_request(
         assignment,
     );
 
-    pipeline.execute().await
+    pipeline.execute(token_tx).await
 }
 
 #[cfg(test)]
@@ -420,6 +755,22 @@ mod tests {
         }
     }
 
+    fn make_request_with_model(priority: PriorityTier, model: &str) -> InferenceRequest {
+        InferenceRequest {
+            id: uuid::Uuid::new_v4(),
+            model_id: ModelId(model.into()),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: "hello".into(),
+            }],
+            sampling_params: SamplingParams::default(),
+            stream: false,
+            requester: crate::types::NodeId([0u8; 32]),
+            priority,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     #[test]
     fn priority_ordering() {
         let (tx_a, _) = oneshot::channel();
@@ -430,14 +781,17 @@ mod tests {
         queue.push(QueuedRequest {
             request: make_request(PriorityTier::Bronze),
             result_tx: tx_a,
+            token_tx: None,
         });
         queue.push(QueuedRequest {
             request: make_request(PriorityTier::Platinum),
             result_tx: tx_b,
+            token_tx: None,
         });
         queue.push(QueuedRequest {
             request: make_request(PriorityTier::Silver),
             result_tx: tx_c,
+            token_tx: None,
         });
 
         // Highest priority should come out first
@@ -447,5 +801,167 @@ mod tests {
         assert_eq!(second.request.priority, PriorityTier::Silver);
         let third = queue.pop().unwrap();
         assert_eq!(third.request.priority, PriorityTier::Bronze);
+    }
+
+    #[test]
+    fn collect_batch_groups_same_model() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let mut config = Config::default();
+        config.inference.max_batch_size = 4;
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let _ = cmd_tx; // keep alive
+        let _ = shutdown_tx;
+
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+
+        // Add 3 requests for model "alpha", 2 for model "beta"
+        for _ in 0..3 {
+            let (tx, _) = oneshot::channel();
+            router.queue.push(QueuedRequest {
+                request: make_request_with_model(PriorityTier::Silver, "alpha"),
+                result_tx: tx,
+                token_tx: None,
+            });
+        }
+        for _ in 0..2 {
+            let (tx, _) = oneshot::channel();
+            router.queue.push(QueuedRequest {
+                request: make_request_with_model(PriorityTier::Silver, "beta"),
+                result_tx: tx,
+                token_tx: None,
+            });
+        }
+
+        // Collect batch of max 4 — should get all from one model
+        let batch = router.collect_batch(4);
+        // All items in the batch should have the same model
+        let model = &batch[0].request.model_id;
+        assert!(batch.iter().all(|q| &q.request.model_id == model));
+        // The remaining queue should have the other model's requests
+        assert!(!router.queue.is_empty());
+    }
+
+    #[test]
+    fn collect_batch_single_returns_one() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let config = Config::default(); // max_batch_size = 1
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+
+        // Add 3 requests
+        for _ in 0..3 {
+            let (tx, _) = oneshot::channel();
+            router.queue.push(QueuedRequest {
+                request: make_request(PriorityTier::Silver),
+                result_tx: tx,
+                token_tx: None,
+            });
+        }
+
+        // With max_batch_size=1, should only get 1
+        let batch = router.collect_batch(1);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(router.queue.len(), 2);
+    }
+
+    #[test]
+    fn collect_batch_respects_max_size() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let mut config = Config::default();
+        config.inference.max_batch_size = 2;
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+
+        // Add 5 requests all same model
+        for _ in 0..5 {
+            let (tx, _) = oneshot::channel();
+            router.queue.push(QueuedRequest {
+                request: make_request(PriorityTier::Silver),
+                result_tx: tx,
+                token_tx: None,
+            });
+        }
+
+        // With max_batch_size=2, should only get 2
+        let batch = router.collect_batch(2);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(router.queue.len(), 3);
+    }
+
+    #[test]
+    fn collect_batch_empty_queue() {
+        use crate::config::Config;
+        use crate::identity::Identity;
+        use crate::inference::executor::ModelExecutor;
+        use crate::storage::db::Database;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let config = Config::default();
+        let identity = Identity::generate();
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(temp.path()).unwrap();
+        let executor = Arc::new(Mutex::new(ModelExecutor::new()));
+        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (net_tx, _net_rx) = mpsc::channel(64);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+
+        let batch = router.collect_batch(4);
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn default_batch_config() {
+        let config = crate::config::Config::default();
+        assert_eq!(config.inference.max_batch_size, 1);
+        assert_eq!(config.inference.batch_timeout_ms, 50);
     }
 }

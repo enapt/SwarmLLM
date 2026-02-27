@@ -203,13 +203,24 @@ pub struct GgufFileInfo {
     pub shard_size: u64,
 }
 
-const SHARD_SIZE: u64 = 512 * 1024 * 1024; // 512MB — matches daemon.rs
+/// Default shard size in bytes (512MB) — used when no config is available.
+const DEFAULT_SHARD_SIZE: u64 = 512 * 1024 * 1024;
 
 /// Probe a remote GGUF file on HuggingFace to determine its size and shard layout.
 ///
 /// Uses a HEAD request for total size, then a Range GET for the first 16MB to parse
 /// the GGUF header and extract `tensor_data_offset`.
+/// Uses the default 512MB shard size. For custom shard sizes, use `probe_gguf_file_with_shard_size`.
 pub async fn probe_gguf_file(repo_id: &str, filename: &str) -> Result<GgufFileInfo, String> {
+    probe_gguf_file_with_shard_size(repo_id, filename, DEFAULT_SHARD_SIZE).await
+}
+
+/// Probe a remote GGUF file with a specific shard size.
+pub async fn probe_gguf_file_with_shard_size(
+    repo_id: &str,
+    filename: &str,
+    shard_size: u64,
+) -> Result<GgufFileInfo, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -268,7 +279,7 @@ pub async fn probe_gguf_file(repo_id: &str, filename: &str) -> Result<GgufFileIn
         .map_err(|e| format!("Failed to parse GGUF header from probe: {e}"))?;
 
     let header_size = ct.tensor_data_offset;
-    let shard_count = total_size.div_ceil(SHARD_SIZE).max(1) as u32;
+    let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
 
     tracing::info!(
         repo = %repo_id,
@@ -276,6 +287,7 @@ pub async fn probe_gguf_file(repo_id: &str, filename: &str) -> Result<GgufFileIn
         total_size,
         header_size,
         shard_count,
+        shard_size_mb = shard_size / (1024 * 1024),
         "Probed remote GGUF file"
     );
 
@@ -283,7 +295,7 @@ pub async fn probe_gguf_file(repo_id: &str, filename: &str) -> Result<GgufFileIn
         total_size,
         header_size,
         shard_count,
-        shard_size: SHARD_SIZE,
+        shard_size,
     })
 }
 
@@ -337,14 +349,15 @@ pub async fn download_gguf_header(
 
 /// Download a specific shard (byte range) of a remote GGUF file from HuggingFace.
 ///
-/// Each shard is a 512MB slice of the GGUF's tensor data region. The byte range
-/// is computed from the shard index and the standard shard size.
+/// Each shard is a slice of the GGUF file. The byte range is computed from the
+/// shard index and the shard size stored in `GgufFileInfo`.
 pub async fn download_shard(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
     shard_index: u32,
     total_file_size: u64,
+    shard_size: u64,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
@@ -356,8 +369,8 @@ pub async fn download_shard(
 
     // Shards are byte ranges of the FULL GGUF file (not just tensor data),
     // because that's how the shard hashes and the ShardReader work.
-    let range_start = (shard_index as u64) * SHARD_SIZE;
-    let range_end = ((shard_index as u64 + 1) * SHARD_SIZE - 1).min(total_file_size - 1);
+    let range_start = (shard_index as u64) * shard_size;
+    let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
     let expected_size = range_end - range_start + 1;
 
     let resp = client
@@ -418,17 +431,23 @@ pub async fn download_shard(
 /// This is the main entry point for shard-level downloads. It:
 /// 1. Probes the remote file to get size and GGUF header offset
 /// 2. Downloads the GGUF header (~6MB)
-/// 3. Downloads each requested shard via Range requests (~512MB each)
+/// 3. Downloads each requested shard via Range requests
 /// 4. Returns the model directory containing header + shard files
+///
+/// The `shard_size_bytes` parameter controls the shard granularity. Pass `None`
+/// to use the default 512MB size.
 pub async fn download_shards(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
     shard_indices: &[u32],
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
+    shard_size_bytes: Option<u64>,
 ) -> Result<(std::path::PathBuf, GgufFileInfo), String> {
-    // Step 1: Probe the remote GGUF
-    let info = probe_gguf_file(repo_id, filename).await?;
+    let shard_sz = shard_size_bytes.unwrap_or(DEFAULT_SHARD_SIZE);
+
+    // Step 1: Probe the remote GGUF with the configured shard size
+    let info = probe_gguf_file_with_shard_size(repo_id, filename, shard_sz).await?;
 
     // Step 2: Download the GGUF header
     download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
@@ -437,8 +456,8 @@ pub async fn download_shards(
     let total_shard_bytes: u64 = shard_indices
         .iter()
         .map(|&idx| {
-            let start = (idx as u64) * SHARD_SIZE;
-            let end = ((idx as u64 + 1) * SHARD_SIZE).min(info.total_size);
+            let start = (idx as u64) * info.shard_size;
+            let end = ((idx as u64 + 1) * info.shard_size).min(info.total_size);
             end - start
         })
         .sum();
@@ -478,6 +497,7 @@ pub async fn download_shards(
             dest_dir,
             shard_idx,
             info.total_size,
+            info.shard_size,
             Some(shard_tx),
         )
         .await?;
@@ -485,8 +505,8 @@ pub async fn download_shards(
         progress_task.abort();
 
         // Update cumulative for next shard
-        let start = (shard_idx as u64) * SHARD_SIZE;
-        let end = ((shard_idx as u64 + 1) * SHARD_SIZE).min(info.total_size);
+        let start = (shard_idx as u64) * info.shard_size;
+        let end = ((shard_idx as u64 + 1) * info.shard_size).min(info.total_size);
         cumulative_downloaded += end - start;
     }
 
@@ -552,15 +572,28 @@ mod tests {
     }
 
     #[test]
-    fn shard_size_constant() {
-        assert_eq!(SHARD_SIZE, 512 * 1024 * 1024);
+    fn default_shard_size_constant() {
+        assert_eq!(DEFAULT_SHARD_SIZE, 512 * 1024 * 1024);
     }
 
     #[test]
     fn gguf_file_info_shard_count() {
         let total_size: u64 = 4_683_074_048; // Qwen2.5-Coder-7B Q4
-        let shard_count = total_size.div_ceil(SHARD_SIZE).max(1) as u32;
+        let shard_count = total_size.div_ceil(DEFAULT_SHARD_SIZE).max(1) as u32;
         assert_eq!(shard_count, 9);
+    }
+
+    #[test]
+    fn gguf_file_info_custom_shard_size() {
+        let total_size: u64 = 4_683_074_048;
+        // 256MB shards should produce more shards
+        let small_shard: u64 = 256 * 1024 * 1024;
+        let shard_count = total_size.div_ceil(small_shard).max(1) as u32;
+        assert_eq!(shard_count, 18);
+        // 1024MB shards should produce fewer shards
+        let big_shard: u64 = 1024 * 1024 * 1024;
+        let shard_count = total_size.div_ceil(big_shard).max(1) as u32;
+        assert_eq!(shard_count, 5);
     }
 
     #[test]
@@ -569,7 +602,7 @@ mod tests {
             total_size: 4_000_000_000,
             header_size: 5_954_048,
             shard_count: 8,
-            shard_size: SHARD_SIZE,
+            shard_size: DEFAULT_SHARD_SIZE,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: GgufFileInfo = serde_json::from_str(&json).unwrap();

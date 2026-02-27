@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::inference::executor::build_chat_prompt;
-use crate::inference::router::InferenceOutput;
+use crate::inference::chat_template;
+use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
 use crate::types::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkCommand,
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
@@ -47,6 +47,20 @@ impl PipelineExecutor {
         }
     }
 
+    /// Build chat prompt using the template from the loaded model (if available).
+    async fn build_prompt(&self) -> String {
+        let info = self.shared_state.loaded_model_info.read().await;
+        match info.as_ref() {
+            Some(i) => chat_template::build_prompt(
+                &self.request.messages,
+                i.chat_template.as_deref(),
+                &i.bos_token,
+                &i.eos_token,
+            ),
+            None => chat_template::chatml_fallback(&self.request.messages),
+        }
+    }
+
     /// Execute the pipeline end-to-end.
     ///
     /// For each token:
@@ -54,7 +68,12 @@ impl PipelineExecutor {
     /// 2. Each segment processes its layers and forwards to the next
     /// 3. The last segment samples a token and returns a LayerResult
     /// 4. Repeat until stop condition or max_tokens
-    pub async fn execute(&mut self) -> Result<InferenceOutput, SwarmError> {
+    ///
+    /// If `token_tx` is provided, tokens are sent incrementally for SSE streaming.
+    pub async fn execute(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+    ) -> Result<InferenceOutput, SwarmError> {
         let request_id = self.request.id;
         let num_segments = self.assignment.segments.len();
 
@@ -78,7 +97,7 @@ impl PipelineExecutor {
         }
 
         // Distributed execution path
-        self.execute_distributed().await
+        self.execute_distributed(token_tx).await
     }
 
     /// Execute entirely on the local node (we have all layers).
@@ -89,7 +108,7 @@ impl PipelineExecutor {
             return Err(SwarmError::NoModelLoaded);
         }
 
-        let prompt = build_chat_prompt(&self.request.messages);
+        let prompt = self.build_prompt().await;
         let (content, gen_result) = executor.generate(&prompt, &self.request.sampling_params)?;
 
         Ok(InferenceOutput {
@@ -108,12 +127,18 @@ impl PipelineExecutor {
     /// 2. Send LayerForward to each segment in sequence
     /// 3. Wait for the result from the last segment
     /// 4. Collect tokens until finish condition
-    async fn execute_distributed(&mut self) -> Result<InferenceOutput, SwarmError> {
+    ///
+    /// If `token_tx` is provided, each decoded token is sent on the channel
+    /// as it arrives, enabling true SSE streaming for distributed inference.
+    async fn execute_distributed(
+        &mut self,
+        token_tx: Option<StreamingTokenTx>,
+    ) -> Result<InferenceOutput, SwarmError> {
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
 
         // Build the initial prompt representation
-        let prompt = build_chat_prompt(&self.request.messages);
+        let prompt = self.build_prompt().await;
         let prompt_bytes = prompt.as_bytes().to_vec();
 
         let mut generated_tokens: Vec<u32> = Vec::new();
@@ -153,6 +178,22 @@ impl PipelineExecutor {
 
                     generated_tokens.extend(&result.token_ids);
 
+                    // Stream each non-EOS token as it arrives
+                    if let Some(ref tx) = token_tx {
+                        let eos = self.get_eos_tokens().await;
+                        for &tid in &result.token_ids {
+                            if !eos.contains(&tid) {
+                                let text = self.decode_tokens(&[tid]).await;
+                                let _ = tx
+                                    .send(StreamingTokenEvent {
+                                        text,
+                                        finish_reason: None,
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
                     if let Some(reason) = result.finish_reason {
                         finish_reason = match reason {
                             NetworkFinishReason::Stop => "stop".to_string(),
@@ -161,6 +202,15 @@ impl PipelineExecutor {
                                 return Err(SwarmError::Inference(e));
                             }
                         };
+                        // Send finish event on streaming channel
+                        if let Some(ref tx) = token_tx {
+                            let _ = tx
+                                .send(StreamingTokenEvent {
+                                    text: String::new(),
+                                    finish_reason: Some(finish_reason.clone()),
+                                })
+                                .await;
+                        }
                         break;
                     }
                 }
@@ -179,6 +229,14 @@ impl PipelineExecutor {
         // If we ran out of tokens without a stop signal
         if generated_tokens.len() as u32 >= max_tokens {
             finish_reason = "length".to_string();
+            if let Some(ref tx) = token_tx {
+                let _ = tx
+                    .send(StreamingTokenEvent {
+                        text: String::new(),
+                        finish_reason: Some("length".to_string()),
+                    })
+                    .await;
+            }
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
@@ -445,7 +503,7 @@ impl PipelineExecutor {
         let input_tensor = if is_first {
             if sequence_num == 0 {
                 // Prefill: tokenize the full prompt using BPE tokenizer if available
-                let prompt = build_chat_prompt(&self.request.messages);
+                let prompt = self.build_prompt().await;
                 let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
                     tokenizer.encode(&prompt)
                 } else {
@@ -605,12 +663,13 @@ impl PipelineExecutor {
                         )));
                     }
                 };
-                if let Err(_) = self.network_tx
+                if self.network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
                         forward,
                     })
                     .await
+                    .is_err()
                 {
                     self.shared_state.pending_layer_results.remove(&request_id);
                     return Err(SwarmError::Network("Failed to send to standby node".to_string()));
@@ -766,7 +825,7 @@ mod tests {
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);
-        let result = executor.execute().await;
+        let result = executor.execute(None).await;
         assert!(result.is_err());
     }
 
@@ -792,7 +851,7 @@ mod tests {
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);
-        let result = executor.execute().await;
+        let result = executor.execute(None).await;
         // Without a loaded model, this should return a stub result
         // The local path falls through to the stub
         assert!(result.is_err()); // NoModelLoaded

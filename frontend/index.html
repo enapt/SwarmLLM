@@ -207,6 +207,7 @@
       <button class="tab-btn" data-tab="chat" onclick="SwarmLLM.ui.switchTab('chat')">Chat</button>
       <button class="tab-btn active" data-tab="dashboard" onclick="SwarmLLM.ui.switchTab('dashboard')">Dashboard</button>
       <button class="tab-btn" data-tab="leaderboard" onclick="SwarmLLM.ui.switchTab('leaderboard')">Leaderboard</button>
+      <button class="tab-btn" data-tab="network-map" onclick="SwarmLLM.ui.switchTab('network-map')">Network Map</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -398,6 +399,37 @@
               </div>
             </div>
 
+          </div>
+        </div>
+      </div>
+
+      <!-- Network Map view -->
+      <div class="view" id="view-network-map" style="display:none">
+        <div class="container">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Network Map</h2>
+              <div class="flex gap-1" style="align-items:center">
+                <select id="map-model-filter" onchange="SwarmLLM.networkMap.applyFilter()" style="width:auto;min-width:120px;padding:5px 10px;font-size:0.78rem">
+                  <option value="">All models</option>
+                </select>
+                <button class="btn btn-sm" onclick="SwarmLLM.networkMap.refresh()">Refresh</button>
+              </div>
+            </div>
+            <div id="world-map-container" class="world-map-container">
+              <div id="world-map"></div>
+            </div>
+            <div id="map-legend" class="map-legend">
+              <span class="text-muted" style="font-size:0.75rem">Node density:</span>
+              <div class="legend-gradient">
+                <span class="text-muted" style="font-size:0.7rem">0</span>
+                <div class="legend-bar"></div>
+                <span class="text-muted" style="font-size:0.7rem" id="map-legend-max">0</span>
+              </div>
+            </div>
+            <div id="map-stats" class="map-stats">
+              <span class="text-muted" style="font-size:0.8rem"><span class="mono" id="map-total-nodes">0</span> nodes across <span class="mono" id="map-total-regions">0</span> regions</span>
+            </div>
           </div>
         </div>
       </div>

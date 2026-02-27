@@ -95,6 +95,9 @@ pub struct NodeCapability {
     pub max_contribution: ContributionLevel,
     pub uptime_seconds: u64,
     pub version: String,
+    /// Voluntary ISO 3166-1 alpha-2 country code (e.g. "US", "DE").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -263,6 +266,9 @@ pub enum SwarmMessage {
     // Device Pools
     PoolMessage(PoolMessage),
 
+    // Streaming — incremental token from the final pipeline node back to the originator
+    StreamingToken(StreamingToken),
+
     // Encryption
     SealedInferenceRequest(crate::crypto::SealedPrompt),
     PeerKeyAdvertise {
@@ -312,6 +318,15 @@ pub struct LayerResult {
     /// Empty for the final segment (which returns token_ids instead).
     #[serde(default)]
     pub activations: Vec<u8>,
+}
+
+/// A single token streamed back from the final pipeline node to the originator.
+/// Used for SSE streaming in distributed inference.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamingToken {
+    pub request_id: uuid::Uuid,
+    pub token_id: u32,
+    pub finish_reason: Option<NetworkFinishReason>,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
@@ -383,6 +398,11 @@ pub enum NetworkCommand {
     SendTensorResult {
         target_peer_bytes: Vec<u8>,
         result: LayerResult,
+    },
+    /// Send a streaming token to a specific peer (originator of the request).
+    SendStreamingToken {
+        target_peer_bytes: Vec<u8>,
+        token: StreamingToken,
     },
     /// Send a shard transfer request to a specific peer.
     SendShardRequest {

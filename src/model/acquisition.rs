@@ -665,21 +665,21 @@ impl AcquisitionManager {
             match exec.load_model(&gguf_path, gpu_layers) {
                 Ok(()) => {
                     let size = exec.model_size_bytes().unwrap_or(0);
-                    *shared_state.loaded_model_info.write().await =
-                        Some(crate::daemon::LoadedModelInfo {
-                            name: model_name.clone(),
-                            size_bytes: size,
-                            eos_tokens: vec![2],
-                        });
+                    let gguf_meta = crate::inference::executor::extract_gguf_metadata(&gguf_path);
+                    let info = crate::daemon::LoadedModelInfo {
+                        name: model_name.clone(),
+                        size_bytes: size,
+                        eos_tokens: vec![2],
+                        chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
+                        bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
+                        eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
+                    };
+                    *shared_state.loaded_model_info.write().await = Some(info.clone());
 
                     // Generate manifest for the reconstructed model so we can serve shards
                     crate::daemon::generate_and_register_local_manifest(
                         &shared_state,
-                        &crate::daemon::LoadedModelInfo {
-                            name: model_name.clone(),
-                            size_bytes: size,
-                            eos_tokens: vec![2],
-                        },
+                        &info,
                         &gguf_path,
                     );
 

@@ -570,6 +570,12 @@ impl NetworkManager {
             } => {
                 self.handle_send_tensor_result(target_peer_bytes, result);
             }
+            NetworkCommand::SendStreamingToken {
+                target_peer_bytes,
+                token,
+            } => {
+                self.handle_send_streaming_token(target_peer_bytes, token);
+            }
             NetworkCommand::SendShardRequest {
                 target_peer_bytes,
                 request,
@@ -921,6 +927,28 @@ impl NetworkManager {
             .insert(peer_id, request.shard_id.clone());
 
         let req = SwarmRequest::ShardTransfer(request);
+        self.swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, req);
+    }
+
+    /// Send a StreamingToken to a specific peer via the JSON request_response protocol.
+    fn handle_send_streaming_token(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        token: crate::types::StreamingToken,
+    ) {
+        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, "Invalid peer ID bytes for streaming token");
+                return;
+            }
+        };
+
+        let msg = SwarmMessage::StreamingToken(token);
+        let req = SwarmRequest::Message(Box::new(msg));
         self.swarm
             .behaviour_mut()
             .request_response

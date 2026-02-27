@@ -152,6 +152,7 @@ impl HealthMonitor {
             max_contribution: crate::types::ContributionLevel::Moderate,
             uptime_seconds,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            region: self.shared_state.config.identity.region.clone(),
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));

@@ -21,6 +21,8 @@ session_timeout_seconds = 600
 max_concurrent_requests = 10
 # model_path = "/path/to/model.gguf"  # Uncomment and set to load a model
 gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
+max_batch_size = 1             # 1 = no batching (sequential); >1 enables continuous batching
+batch_timeout_ms = 50          # Max ms to wait for a full batch before dispatching
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error
@@ -38,6 +40,9 @@ keep_versions = 3
 
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
+
+[model]
+shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)
 
 [pool]
 max_pool_size = 10             # Maximum devices in a single pool

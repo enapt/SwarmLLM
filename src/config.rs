@@ -26,6 +26,10 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub auto_manage: AutoManageConfig,
+    #[serde(default)]
+    pub model: ModelConfig,
+    #[serde(default)]
+    pub identity: IdentityConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +133,13 @@ pub struct InferenceConfig {
     /// When set, the node only claims these shard indices instead of all shards.
     #[serde(skip)]
     pub shard_range: Option<(u32, u32)>,
+    /// Maximum number of requests to batch together for inference.
+    /// Default 1 means no batching (sequential, backward-compatible).
+    #[serde(default = "default_max_batch_size")]
+    pub max_batch_size: u32,
+    /// How long (ms) to wait for additional requests before dispatching a partial batch.
+    #[serde(default = "default_batch_timeout_ms")]
+    pub batch_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -284,6 +295,66 @@ fn default_auto_manage_interval() -> u32 {
     60
 }
 
+/// Configuration for model storage and sharding.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Size of each shard in megabytes when splitting a model for distribution.
+    /// Must be between 64 and 2048 (inclusive). Default: 512.
+    /// Changing this only affects newly created shards — existing shards keep their original size.
+    #[serde(default = "default_shard_size_mb")]
+    pub shard_size_mb: u64,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            shard_size_mb: default_shard_size_mb(),
+        }
+    }
+}
+
+fn default_shard_size_mb() -> u64 {
+    512
+}
+
+/// Minimum allowed shard size in MB.
+pub const SHARD_SIZE_MIN_MB: u64 = 64;
+/// Maximum allowed shard size in MB.
+pub const SHARD_SIZE_MAX_MB: u64 = 2048;
+
+impl ModelConfig {
+    /// Return the configured shard size in bytes.
+    pub fn shard_size_bytes(&self) -> u64 {
+        self.shard_size_mb * 1024 * 1024
+    }
+
+    /// Validate and clamp shard_size_mb to allowed range.
+    pub fn validate(&self) -> Result<(), SwarmError> {
+        if self.shard_size_mb < SHARD_SIZE_MIN_MB || self.shard_size_mb > SHARD_SIZE_MAX_MB {
+            return Err(SwarmError::Config(format!(
+                "shard_size_mb must be between {} and {} (got {})",
+                SHARD_SIZE_MIN_MB, SHARD_SIZE_MAX_MB, self.shard_size_mb
+            )));
+        }
+        if !self.shard_size_mb.is_power_of_two() {
+            tracing::warn!(
+                shard_size_mb = self.shard_size_mb,
+                "shard_size_mb is not a power of 2 — this may cause suboptimal alignment"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Identity configuration (voluntary self-reported metadata).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct IdentityConfig {
+    /// Optional ISO 3166-1 alpha-2 country code (e.g. "US", "DE", "JP").
+    /// Voluntarily self-reported; used for the network map visualization.
+    #[serde(default)]
+    pub region: Option<String>,
+}
+
 fn default_theme() -> String {
     "dark".into()
 }
@@ -330,6 +401,14 @@ fn default_kv_cache_ttl() -> Option<u64> {
 
 fn default_speculative_gamma() -> u32 {
     4
+}
+
+fn default_max_batch_size() -> u32 {
+    1
+}
+
+fn default_batch_timeout_ms() -> u64 {
+    50
 }
 
 fn default_relay_circuit_duration() -> u64 {
@@ -416,6 +495,8 @@ impl Default for InferenceConfig {
             speculative_decoding: false,
             speculative_gamma: default_speculative_gamma(),
             shard_range: None,
+            max_batch_size: default_max_batch_size(),
+            batch_timeout_ms: default_batch_timeout_ms(),
         }
     }
 }
@@ -519,6 +600,9 @@ impl Config {
             }
         }
 
+        // Validate model/shard config
+        self.model.validate()?;
+
         Ok(())
     }
 }
@@ -577,5 +661,68 @@ max_concurrent_requests = 5
         )
         .unwrap();
         assert_eq!(config.node.listen_port, 9999);
+    }
+
+    #[test]
+    fn default_shard_size_mb() {
+        let config = Config::default();
+        assert_eq!(config.model.shard_size_mb, 512);
+        assert_eq!(config.model.shard_size_bytes(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_custom_shard_size() {
+        let toml_str = r#"
+[model]
+shard_size_mb = 256
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.shard_size_mb, 256);
+        assert_eq!(config.model.shard_size_bytes(), 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn shard_size_validation_rejects_too_small() {
+        let model_config = ModelConfig { shard_size_mb: 32 };
+        assert!(model_config.validate().is_err());
+    }
+
+    #[test]
+    fn shard_size_validation_rejects_too_large() {
+        let model_config = ModelConfig { shard_size_mb: 4096 };
+        assert!(model_config.validate().is_err());
+    }
+
+    #[test]
+    fn shard_size_validation_accepts_valid() {
+        let model_config = ModelConfig { shard_size_mb: 512 };
+        assert!(model_config.validate().is_ok());
+        let model_config = ModelConfig { shard_size_mb: 64 };
+        assert!(model_config.validate().is_ok());
+        let model_config = ModelConfig { shard_size_mb: 2048 };
+        assert!(model_config.validate().is_ok());
+    }
+
+    #[test]
+    fn shard_size_non_power_of_two_warns_but_passes() {
+        let model_config = ModelConfig { shard_size_mb: 300 };
+        // Should succeed (only a warning, not an error)
+        assert!(model_config.validate().is_ok());
+    }
+
+    #[test]
+    fn identity_region_defaults_to_none() {
+        let config = Config::default();
+        assert!(config.identity.region.is_none());
+    }
+
+    #[test]
+    fn parse_identity_region() {
+        let toml_str = r#"
+[identity]
+region = "US"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.identity.region.as_deref(), Some("US"));
     }
 }

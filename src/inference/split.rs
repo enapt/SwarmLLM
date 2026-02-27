@@ -450,6 +450,12 @@ pub struct SplitModel {
     tokenizer: Option<BpeTokenizer>,
     /// EOS token IDs loaded from GGUF metadata.
     eos_tokens: Vec<u32>,
+    /// Chat template from GGUF `tokenizer.chat_template` (Jinja2 format).
+    chat_template: Option<String>,
+    /// BOS token string from GGUF metadata.
+    bos_token: String,
+    /// EOS token string from GGUF metadata.
+    eos_token: String,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -1109,6 +1115,38 @@ impl SplitModel {
             tracing::info!(eos_tokens = ?eos_tokens, "Loaded EOS tokens from GGUF");
         }
 
+        // Extract chat template from GGUF metadata
+        let chat_template = ct
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.to_string().ok().cloned())
+            .filter(|s| !s.is_empty());
+
+        // Resolve BOS/EOS token strings from their IDs + vocabulary
+        let bos_id = ct
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.to_u32().ok());
+        let eos_str_id = ct
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok());
+        let vocab_ref = vocabulary.as_deref().unwrap_or(&[]);
+        let bos_token = bos_id
+            .and_then(|id| vocab_ref.get(id as usize).cloned())
+            .unwrap_or_default();
+        let eos_token = eos_str_id
+            .and_then(|id| vocab_ref.get(id as usize).cloned())
+            .unwrap_or_default();
+
+        if chat_template.is_some() {
+            tracing::info!(
+                bos = %bos_token,
+                eos = %eos_token,
+                "Loaded chat template from GGUF"
+            );
+        }
+
         let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
             arch = %arch,
@@ -1136,6 +1174,9 @@ impl SplitModel {
             vocabulary,
             tokenizer,
             eos_tokens,
+            chat_template,
+            bos_token,
+            eos_token,
         })
     }
 
@@ -1438,6 +1479,37 @@ impl SplitModel {
             eos_tokens.push(2);
         }
 
+        // Extract chat template from GGUF header metadata
+        let chat_template = ct
+            .metadata
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.to_string().ok().cloned())
+            .filter(|s| !s.is_empty());
+
+        let bos_id = ct
+            .metadata
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.to_u32().ok());
+        let eos_str_id = ct
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok());
+        let vocab_ref = vocabulary.as_deref().unwrap_or(&[]);
+        let bos_token = bos_id
+            .and_then(|id| vocab_ref.get(id as usize).cloned())
+            .unwrap_or_default();
+        let eos_token = eos_str_id
+            .and_then(|id| vocab_ref.get(id as usize).cloned())
+            .unwrap_or_default();
+
+        if chat_template.is_some() {
+            tracing::info!(
+                bos = %bos_token,
+                eos = %eos_token,
+                "Loaded chat template from GGUF header"
+            );
+        }
+
         let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
             arch = %arch,
@@ -1465,6 +1537,9 @@ impl SplitModel {
             vocabulary,
             tokenizer,
             eos_tokens,
+            chat_template,
+            bos_token,
+            eos_token,
         })
     }
 
@@ -1595,6 +1670,21 @@ impl SplitModel {
     /// Return the EOS token IDs loaded from GGUF metadata.
     pub fn eos_tokens(&self) -> &[u32] {
         &self.eos_tokens
+    }
+
+    /// Return the chat template from GGUF metadata, if available.
+    pub fn chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
+
+    /// Return the BOS token string from GGUF metadata.
+    pub fn bos_token(&self) -> &str {
+        &self.bos_token
+    }
+
+    /// Return the EOS token string from GGUF metadata.
+    pub fn eos_token_str(&self) -> &str {
+        &self.eos_token
     }
 }
 

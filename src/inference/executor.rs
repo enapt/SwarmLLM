@@ -417,40 +417,94 @@ impl FinishReason {
     }
 }
 
-/// Build the chat prompt from messages using the model's chat template if available,
-/// or a simple fallback format.
+/// Build the chat prompt from messages using ChatML format (legacy fallback).
+///
+/// Prefer `crate::inference::chat_template::build_prompt()` which applies
+/// the GGUF chat template when available and falls back to ChatML.
 pub fn build_chat_prompt(messages: &[crate::types::ChatMessage]) -> String {
-    use crate::types::Role;
-    let mut prompt = String::new();
-    for msg in messages {
-        match msg.role {
-            Role::System => {
-                prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
-            }
-            Role::User => {
-                prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n", msg.content));
-            }
-            Role::Assistant => {
-                prompt.push_str(&format!(
-                    "<|im_start|>assistant\n{}<|im_end|>\n",
-                    msg.content
-                ));
-            }
-        }
+    crate::inference::chat_template::chatml_fallback(messages)
+}
+
+/// Metadata extracted from a GGUF file for model info caching.
+#[derive(Clone, Debug, Default)]
+pub struct GgufModelMeta {
+    /// Friendly model name from `general.name`.
+    pub name: Option<String>,
+    /// Chat template from `tokenizer.chat_template` (Jinja2 format).
+    pub chat_template: Option<String>,
+    /// BOS token string (resolved from token ID + vocabulary).
+    pub bos_token: String,
+    /// EOS token string (resolved from token ID + vocabulary).
+    pub eos_token: String,
+}
+
+/// Extract metadata from a GGUF file (name, chat template, special tokens).
+/// Returns None if the file can't be read.
+pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
+
+    let name = ct
+        .metadata
+        .get("general.name")
+        .and_then(|v| v.to_string().ok().cloned())
+        .filter(|s| !s.is_empty());
+
+    let chat_template = ct
+        .metadata
+        .get("tokenizer.chat_template")
+        .and_then(|v| v.to_string().ok().cloned())
+        .filter(|s| !s.is_empty());
+
+    // Resolve BOS/EOS token strings from their IDs + vocabulary
+    let vocab: Vec<String> = ct
+        .metadata
+        .get("tokenizer.ggml.tokens")
+        .and_then(|v| v.to_vec().ok())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.to_string().ok().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let bos_id = ct
+        .metadata
+        .get("tokenizer.ggml.bos_token_id")
+        .and_then(|v| v.to_u32().ok());
+    let eos_id = ct
+        .metadata
+        .get("tokenizer.ggml.eos_token_id")
+        .and_then(|v| v.to_u32().ok());
+
+    let bos_token = bos_id
+        .and_then(|id| vocab.get(id as usize).cloned())
+        .unwrap_or_default();
+    let eos_token = eos_id
+        .and_then(|id| vocab.get(id as usize).cloned())
+        .unwrap_or_default();
+
+    if chat_template.is_some() {
+        tracing::info!(
+            has_template = true,
+            bos = %bos_token,
+            eos = %eos_token,
+            "Extracted chat template from GGUF"
+        );
     }
-    prompt.push_str("<|im_start|>assistant\n");
-    prompt
+
+    Some(GgufModelMeta {
+        name,
+        chat_template,
+        bos_token,
+        eos_token,
+    })
 }
 
 /// Extract the friendly model name from GGUF `general.name` metadata.
 /// Returns None if the file can't be read or the field is absent.
 fn extract_gguf_name(path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(path).ok()?;
-    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
-    ct.metadata
-        .get("general.name")
-        .and_then(|v| v.to_string().ok().cloned())
-        .filter(|s| !s.is_empty())
+    extract_gguf_metadata(path).and_then(|m| m.name)
 }
 
 #[cfg(test)]

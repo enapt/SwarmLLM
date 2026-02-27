@@ -9,8 +9,8 @@ use tokio_stream::StreamExt;
 
 use crate::api::server::AppState;
 use crate::error::ApiError;
-use crate::inference::executor::build_chat_prompt;
-use crate::inference::router::RouterCommand;
+use crate::inference::chat_template;
+use crate::inference::router::{RouterCommand, StreamingTokenEvent};
 use crate::types::{ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams};
 
 // ---- Request types ----
@@ -228,7 +228,15 @@ pub async fn chat_completions(
 
     let model_name = model_name.unwrap();
 
-    let prompt = build_chat_prompt(&req.messages);
+    // Build prompt using chat template from GGUF if available, else ChatML fallback.
+    let (tmpl, bos, eos) = {
+        let info = state.shared_state.loaded_model_info.read().await;
+        match info.as_ref() {
+            Some(i) => (i.chat_template.clone(), i.bos_token.clone(), i.eos_token.clone()),
+            None => (None, String::new(), String::new()),
+        }
+    };
+    let prompt = chat_template::build_prompt(&req.messages, tmpl.as_deref(), &bos, &eos);
     let params = req.to_sampling_params();
 
     if req.stream {
@@ -482,9 +490,9 @@ async fn router_inference(
 
 /// Route streaming inference through the InferenceRouter.
 ///
-/// Submits the request to the router for priority queueing and pipeline assembly,
-/// then streams the result back via SSE as word-by-word chunks. Used for distributed
-/// inference when no single node has the full model loaded.
+/// Submits the request via `StreamSubmit` so the pipeline executor sends decoded
+/// tokens incrementally. Each token is forwarded as an SSE chunk, providing true
+/// token-by-token streaming for distributed inference.
 async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     _state: &AppState,
@@ -493,6 +501,7 @@ async fn router_inference_stream(
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
 
     let inference_req = InferenceRequest {
         id: uuid::Uuid::new_v4(),
@@ -506,9 +515,10 @@ async fn router_inference_stream(
     };
 
     router_tx
-        .send(RouterCommand::Submit {
+        .send(RouterCommand::StreamSubmit {
             request: inference_req,
             result_tx,
+            token_tx,
         })
         .await
         .map_err(|_| {
@@ -520,12 +530,12 @@ async fn router_inference_stream(
     let model_name = req.model.clone();
     let rid = request_id.clone();
 
-    // Spawn a task that waits for the router result and streams it as SSE chunks
-    let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+    // Bridge the streaming token channel into SSE events
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
 
     tokio::spawn(async move {
         // Send initial role delta
-        let _ = tx
+        let _ = sse_tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: Some("assistant".into()),
@@ -533,74 +543,111 @@ async fn router_inference_stream(
             })
             .await;
 
-        match result_rx.await {
-            Ok(Ok(output)) => {
-                // Stream the content word by word for SSE compatibility
-                for word in output.content.split_inclusive(' ') {
-                    if tx
+        // Read tokens from the pipeline as they arrive
+        let mut got_finish = false;
+        while let Some(event) = token_rx.recv().await {
+            if let Some(ref reason) = event.finish_reason {
+                got_finish = true;
+                if !event.text.is_empty() {
+                    let _ = sse_tx
                         .send(StreamEvent::Delta {
-                            content: Some(word.to_string()),
+                            content: Some(event.text),
                             role: None,
                             finish_reason: None,
                         })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                        .await;
                 }
-                let _ = tx
+                let _ = sse_tx
                     .send(StreamEvent::Delta {
                         content: None,
                         role: None,
-                        finish_reason: Some(output.finish_reason),
+                        finish_reason: Some(reason.clone()),
                     })
                     .await;
+                break;
             }
-            Ok(Err(e)) => {
-                let _ = tx
+            if !event.text.is_empty()
+                && sse_tx
                     .send(StreamEvent::Delta {
-                        content: Some(format!("Error: {e}")),
+                        content: Some(event.text),
                         role: None,
-                        finish_reason: Some("error".into()),
+                        finish_reason: None,
                     })
-                    .await;
-            }
-            Err(_) => {
-                let _ = tx
-                    .send(StreamEvent::Delta {
-                        content: None,
-                        role: None,
-                        finish_reason: Some("error".into()),
-                    })
-                    .await;
+                    .await
+                    .is_err()
+            {
+                break;
             }
         }
-        let _ = tx.send(StreamEvent::Done).await;
+
+        // Fallback: if pipeline finished without sending streaming events
+        // (e.g., local-only path or error), read the final result.
+        if !got_finish {
+            match result_rx.await {
+                Ok(Ok(output)) => {
+                    if !output.content.is_empty() {
+                        let _ = sse_tx
+                            .send(StreamEvent::Delta {
+                                content: Some(output.content),
+                                role: None,
+                                finish_reason: None,
+                            })
+                            .await;
+                    }
+                    let _ = sse_tx
+                        .send(StreamEvent::Delta {
+                            content: None,
+                            role: None,
+                            finish_reason: Some(output.finish_reason),
+                        })
+                        .await;
+                }
+                Ok(Err(e)) => {
+                    let _ = sse_tx
+                        .send(StreamEvent::Delta {
+                            content: Some(format!("Error: {e}")),
+                            role: None,
+                            finish_reason: Some("error".into()),
+                        })
+                        .await;
+                }
+                Err(_) => {
+                    let _ = sse_tx
+                        .send(StreamEvent::Delta {
+                            content: None,
+                            role: None,
+                            finish_reason: Some("error".into()),
+                        })
+                        .await;
+                }
+            }
+        }
+        let _ = sse_tx.send(StreamEvent::Done).await;
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
-        StreamEvent::Delta {
-            content,
-            role,
-            finish_reason,
-        } => {
-            let chunk = ChatCompletionChunk {
-                id: rid.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model_name.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta { role, content },
-                    finish_reason,
-                }],
-            };
-            let json = serde_json::to_string(&chunk).unwrap_or_default();
-            Ok::<_, Infallible>(Event::default().data(json))
-        }
-        StreamEvent::Done => Ok(Event::default().data("[DONE]")),
-    });
+    let stream =
+        tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| match event {
+            StreamEvent::Delta {
+                content,
+                role,
+                finish_reason,
+            } => {
+                let chunk = ChatCompletionChunk {
+                    id: rid.clone(),
+                    object: "chat.completion.chunk",
+                    created,
+                    model: model_name.clone(),
+                    choices: vec![ChunkChoice {
+                        index: 0,
+                        delta: Delta { role, content },
+                        finish_reason,
+                    }],
+                };
+                let json = serde_json::to_string(&chunk).unwrap_or_default();
+                Ok::<_, Infallible>(Event::default().data(json))
+            }
+            StreamEvent::Done => Ok(Event::default().data("[DONE]")),
+        });
 
     Ok(Sse::new(stream).into_response())
 }

@@ -29,6 +29,12 @@ pub struct LoadedModelInfo {
     pub size_bytes: u64,
     /// EOS token IDs loaded from GGUF metadata.
     pub eos_tokens: Vec<u32>,
+    /// Chat template from GGUF `tokenizer.chat_template` metadata (Jinja2 format).
+    pub chat_template: Option<String>,
+    /// BOS token string from GGUF metadata.
+    pub bos_token: String,
+    /// EOS token string from GGUF metadata.
+    pub eos_token: String,
 }
 
 pub struct SharedState {
@@ -86,6 +92,11 @@ pub struct SharedState {
     pub model_loaded: std::sync::atomic::AtomicBool,
     /// Anti-gaming system for credit transaction validation.
     pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
+    /// Streaming token channels for distributed inference SSE.
+    /// Keyed by request_id. The pipeline executor registers a sender so that
+    /// incoming StreamingToken messages can be forwarded to the SSE stream.
+    pub streaming_token_txs:
+        DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     /// HuggingFace source info for models downloaded from HF, for re-download.
     pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
     shutdown_tx: watch::Sender<bool>,
@@ -199,6 +210,7 @@ impl SharedState {
             api_key,
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
+            streaming_token_txs: DashMap::new(),
             hf_sources,
             shutdown_tx,
         });
@@ -242,11 +254,22 @@ impl Daemon {
         }
 
         // Gather model info for manifest generation and admin display.
+        // Extract GGUF metadata (chat template, special tokens) if available.
+        let gguf_meta = self
+            .config
+            .inference
+            .model_path
+            .as_ref()
+            .and_then(|p| crate::inference::executor::extract_gguf_metadata(p));
+
         let model_info = if executor.is_loaded() {
             Some(LoadedModelInfo {
                 name: executor.model_name().to_string(),
                 size_bytes: executor.model_size_bytes().unwrap_or(0),
                 eos_tokens: vec![2], // Default; updated when split model loads with GGUF metadata
+                chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
+                bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
+                eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
             })
         } else {
             None
@@ -813,6 +836,21 @@ async fn dispatch_network_messages(
                                     handle_layer_forward(ss, ntx, forward).await;
                                 });
                             }
+                            // StreamingToken: route to registered streaming channel
+                            SwarmMessage::StreamingToken(ref token) => {
+                                if let Some(tx) = shared_state
+                                    .streaming_token_txs
+                                    .get(&token.request_id)
+                                {
+                                    if tx.send(token.clone()).await.is_err() {
+                                        tracing::debug!(
+                                            request_id = %token.request_id,
+                                            "Streaming token channel closed"
+                                        );
+                                        shared_state.streaming_token_txs.remove(&token.request_id);
+                                    }
+                                }
+                            }
                             msg @ SwarmMessage::InferenceRequest(_)
                             | msg @ SwarmMessage::PipelineAssignment(_)
                             | msg @ SwarmMessage::InferenceError(_) => {
@@ -1175,14 +1213,14 @@ pub fn generate_and_register_local_manifest(
         .map(|m| m.len())
         .unwrap_or(info.size_bytes);
 
-    // Split model into multiple shards (~512MB each) for torrent-style distribution.
-    // Each shard is a byte range of the original GGUF file.
-    const SHARD_SIZE: u64 = 512 * 1024 * 1024; // 512MB per shard
+    // Split model into shards for torrent-style distribution.
+    // Shard size is configurable via [model].shard_size_mb (default 512MB).
+    let shard_size: u64 = shared_state.config.model.shard_size_bytes();
     let node_id = shared_state.identity.node_id().clone();
-    let shard_count = file_size.div_ceil(SHARD_SIZE).max(1) as u32;
+    let shard_count = file_size.div_ceil(shard_size).max(1) as u32;
 
     // Compute per-shard BLAKE3 hashes by reading byte ranges
-    let mut shards = match compute_shard_hashes(path, file_size, SHARD_SIZE) {
+    let mut shards = match compute_shard_hashes(path, file_size, shard_size) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to compute shard hashes");

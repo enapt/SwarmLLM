@@ -39,12 +39,17 @@ var SwarmLLM = (function() {
       document.getElementById('view-dashboard').style.display = tab === 'dashboard' ? '' : 'none';
       var lbView = document.getElementById('view-leaderboard');
       if (lbView) lbView.style.display = tab === 'leaderboard' ? '' : 'none';
+      var mapView = document.getElementById('view-network-map');
+      if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
       if (tab === 'chat') {
         chat.scrollToBottom();
         document.getElementById('chat-input').focus();
       }
       if (tab === 'leaderboard') {
         identity.loadLeaderboard();
+      }
+      if (tab === 'network-map') {
+        networkMap.refresh();
       }
     },
 
@@ -446,9 +451,11 @@ var SwarmLLM = (function() {
         var isDownloading = m.acquisition === 'downloading';
         var isReady = m.status === 'loaded' || (hostedShards === shardCount && shardCount > 0);
         var isPartial = hostedShards > 0 && hostedShards < shardCount;
+        var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
 
         var card = document.createElement('div');
         card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
+        card.setAttribute('data-model-id', m.id);
 
         // Status badge
         var statusHtml = '';
@@ -474,7 +481,7 @@ var SwarmLLM = (function() {
         // Shard grid
         var shardHtml = '';
         if (shardCount > 1 && shards.length > 0) {
-          shardHtml = '<div class="shard-grid">';
+          shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
           shards.forEach(function(s) {
             var cls = 'missing';
@@ -494,7 +501,7 @@ var SwarmLLM = (function() {
             else if (cls === 'downloading') title += ' — Downloading...';
             else title += ' — Not available';
 
-            shardHtml += '<div class="shard-cell ' + cls + '" title="' + title + '">' + label + '</div>';
+            shardHtml += '<div class="shard-cell ' + cls + '" data-shard="' + safeId + '-' + s.index + '" title="' + title + '">' + label + '</div>';
           });
           shardHtml += '</div>';
 
@@ -504,7 +511,7 @@ var SwarmLLM = (function() {
           if (peerCount > 0) legendParts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
           if (dlCount > 0) legendParts.push('<span class="leg-dl">Downloading</span>');
           if (missingCount > 0) legendParts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
-          if (legendParts.length > 0) shardHtml += '<div class="shard-legend">' + legendParts.join('') + '</div>';
+          if (legendParts.length > 0) shardHtml += '<div class="shard-legend" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>';
         }
 
         // Download progress bar
@@ -512,10 +519,10 @@ var SwarmLLM = (function() {
         if (isDownloading && m.acquisition_progress) {
           var ap = m.acquisition_progress;
           var pct = ap.total_bytes > 0 ? Math.round((ap.downloaded_bytes / ap.total_bytes) * 100) : 0;
-          progressHtml = '<div class="dl-progress">' +
+          progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '">' +
             '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
             '<span class="text-muted">Downloading shard</span>' +
-            '<span class="mono">' + formatBytes(ap.downloaded_bytes) + ' / ' + formatBytes(ap.total_bytes) + ' (' + pct + '%)</span>' +
+            '<span class="mono dl-progress-text">' + formatBytes(ap.downloaded_bytes) + ' / ' + formatBytes(ap.total_bytes) + ' (' + pct + '%)</span>' +
             '</div>' +
             '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>' +
             '</div>';
@@ -542,6 +549,137 @@ var SwarmLLM = (function() {
 
         list.appendChild(card);
       });
+    },
+
+    /// Live-update shard cells and progress bars from WebSocket data without full re-render.
+    updateShardsLive: function(acquisitions, shardRegistry) {
+      if (!acquisitions && !shardRegistry) return;
+
+      // Update shard cells from acquisition progress (per-shard detail)
+      if (acquisitions) {
+        acquisitions.forEach(function(acq) {
+          var modelId = acq.model_id;
+          if (!modelId) return;
+          var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+
+          // Update per-shard cells
+          var shardDetails = acq.shard_details || [];
+          var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
+          shardDetails.forEach(function(sd) {
+            var cellId = safeId + '-' + sd.index;
+            var cell = document.querySelector('[data-shard="' + cellId + '"]');
+            if (!cell) return;
+
+            var oldClass = cell.className.replace(/shard-cell\s*/, '').trim().split(/\s+/)[0] || 'missing';
+            var newClass = 'missing';
+            var label = '' + sd.index;
+
+            if (sd.state === 'complete') { newClass = 'local'; localCount++; }
+            else if (sd.state === 'downloading' || sd.state === 'verifying') {
+              newClass = 'downloading'; dlCount++;
+              if (sd.progress_pct > 0 && sd.progress_pct < 100) {
+                label = sd.progress_pct + '%';
+              }
+            } else if (sd.state === 'failed') { newClass = 'missing'; missingCount++; }
+            else if (sd.state === 'pending') { newClass = 'missing'; missingCount++; }
+
+            // Only update DOM if something changed
+            if (oldClass !== newClass || cell.textContent !== label) {
+              cell.className = 'shard-cell ' + newClass;
+              cell.textContent = label;
+
+              // Update title
+              var title = 'Shard ' + sd.index;
+              if (newClass === 'local') title += ' — Complete';
+              else if (newClass === 'downloading') title += ' — Downloading (' + sd.progress_pct + '%)';
+              else if (sd.state === 'failed') title += ' — Failed';
+              else title += ' — Pending';
+              cell.setAttribute('title', title);
+            }
+          });
+
+          // Update progress bar
+          var progressEl = document.querySelector('[data-model-progress="' + safeId + '"]');
+          if (progressEl && acq.total_bytes > 0) {
+            var pct = Math.round((acq.downloaded_bytes / acq.total_bytes) * 100);
+            var speed = acq.speed_bytes_per_sec || 0;
+            var textEl = progressEl.querySelector('.dl-progress-text');
+            if (textEl) {
+              textEl.textContent = formatBytes(acq.downloaded_bytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct + '%)' +
+                (speed > 0 ? ' - ' + formatSpeed(speed) : '');
+            }
+            var fillEl = progressEl.querySelector('.dl-fill');
+            if (fillEl) {
+              fillEl.style.width = pct + '%';
+            }
+          } else if (!progressEl && acq.total_bytes > 0 && acq.downloaded_bytes > 0) {
+            // Insert progress bar if card exists but has no progress bar yet
+            var card = document.querySelector('[data-model-id="' + modelId + '"]');
+            if (card && !card.querySelector('.dl-progress')) {
+              var pct2 = Math.round((acq.downloaded_bytes / acq.total_bytes) * 100);
+              var speed2 = acq.speed_bytes_per_sec || 0;
+              var progDiv = document.createElement('div');
+              progDiv.className = 'dl-progress';
+              progDiv.setAttribute('data-model-progress', safeId);
+              progDiv.innerHTML =
+                '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
+                '<span class="text-muted">Downloading shard</span>' +
+                '<span class="mono dl-progress-text">' + formatBytes(acq.downloaded_bytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' +
+                (speed2 > 0 ? ' - ' + formatSpeed(speed2) : '') + '</span></div>' +
+                '<div class="dl-bar"><div class="dl-fill" style="width:' + pct2 + '%"></div></div>';
+              card.appendChild(progDiv);
+              // Also add downloading class to card
+              if (!card.classList.contains('downloading')) {
+                card.classList.remove('partial');
+                card.classList.add('downloading');
+              }
+            }
+          }
+
+          // Update legend if present
+          var legendEl = document.querySelector('[data-model-legend="' + safeId + '"]');
+          if (legendEl && shardDetails.length > 0) {
+            var counts = { local: 0, peer: 0, dl: 0, missing: 0 };
+            shardDetails.forEach(function(sd) {
+              if (sd.state === 'complete') counts.local++;
+              else if (sd.state === 'downloading' || sd.state === 'verifying') counts.dl++;
+              else counts.missing++;
+            });
+            var parts = [];
+            if (counts.local > 0) parts.push('<span class="leg-local">Local (' + counts.local + ')</span>');
+            if (counts.peer > 0) parts.push('<span class="leg-peer">Peer (' + counts.peer + ')</span>');
+            if (counts.dl > 0) parts.push('<span class="leg-dl">Downloading (' + counts.dl + ')</span>');
+            if (counts.missing > 0) parts.push('<span class="leg-missing">Pending (' + counts.missing + ')</span>');
+            legendEl.innerHTML = parts.join('');
+          }
+        });
+      }
+
+      // Update shard cells from shard registry changes (new shards from peers)
+      if (shardRegistry) {
+        Object.keys(shardRegistry).forEach(function(modelId) {
+          var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+          var shards = shardRegistry[modelId] || [];
+          shards.forEach(function(s) {
+            var cellId = safeId + '-' + s.index;
+            var cell = document.querySelector('[data-shard="' + cellId + '"]');
+            if (!cell) return;
+
+            // Only update to peer/local if not already downloading or local
+            var current = cell.className;
+            if (current.indexOf('downloading') >= 0 || current.indexOf('local') >= 0) return;
+
+            if (s.local) {
+              cell.className = 'shard-cell local';
+              cell.textContent = '' + s.index;
+              cell.setAttribute('title', 'Shard ' + s.index + ' — Stored locally');
+            } else if (s.holders > 0 && current.indexOf('peer') < 0) {
+              cell.className = 'shard-cell peer';
+              cell.setAttribute('title', 'Shard ' + s.index + ' — Available from ' + s.holders + ' peer(s)');
+            }
+          });
+        });
+      }
     },
 
 
@@ -1016,6 +1154,11 @@ var SwarmLLM = (function() {
         if (msg.type === 'stats_update') {
           dashboard.updateStats(msg.data);
           if (msg.data.acquisitions) dashboard.updateAcquisitionProgress(msg.data.acquisitions);
+          // Live-update shard grid cells and progress bars without full re-render
+          dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null);
+          if (msg.data.region_summary && activeTab === 'network-map') {
+            networkMap.updateFromWs(msg.data.region_summary);
+          }
         }
       } catch (e) {}
     };
@@ -1251,6 +1394,266 @@ var SwarmLLM = (function() {
   };
 
   // ========================================================================
+  // Network Map Module — SVG world heatmap
+  // ========================================================================
+  var networkMap = {
+    data: null,
+    mapRendered: false,
+
+    // Simplified world map: ISO alpha-2 → SVG path (low-res country outlines)
+    // Paths are in equirectangular projection, viewBox 0 0 1000 500
+    paths: {
+      US:'M55,165L55,195L135,195L135,210L170,210L170,195L265,195L265,165Z',
+      CA:'M55,90L55,165L265,165L265,105L200,90Z',
+      MX:'M90,210L90,250L170,250L170,210Z',
+      BR:'M260,280L260,380L360,380L360,280Z',
+      AR:'M270,380L270,440L330,440L330,380Z',
+      CL:'M255,340L255,450L275,450L275,340Z',
+      CO:'M225,255L225,290L265,290L265,255Z',
+      GB:'M440,130L440,155L458,155L458,130Z',
+      FR:'M445,155L445,185L478,185L478,155Z',
+      DE:'M478,140L478,170L505,170L505,140Z',
+      ES:'M430,180L430,200L465,200L465,180Z',
+      IT:'M478,170L478,205L498,205L498,170Z',
+      NL:'M468,135L468,150L482,150L482,135Z',
+      SE:'M490,80L490,135L508,135L508,80Z',
+      NO:'M472,70L472,130L490,130L490,70Z',
+      FI:'M510,70L510,125L530,125L530,70Z',
+      PL:'M505,140L505,165L535,165L535,140Z',
+      UA:'M535,140L535,170L580,170L580,140Z',
+      RU:'M540,60L540,145L750,145L750,60Z',
+      TR:'M540,170L540,195L590,195L590,170Z',
+      IN:'M650,210L650,310L720,310L720,210Z',
+      CN:'M700,130L700,230L800,230L800,130Z',
+      JP:'M830,155L830,210L855,210L855,155Z',
+      KR:'M810,170L810,200L830,200L830,170Z',
+      AU:'M780,330L780,420L890,420L890,330Z',
+      NZ:'M910,390L910,430L935,430L935,390Z',
+      ZA:'M510,370L510,420L560,420L560,370Z',
+      NG:'M470,275L470,305L505,305L505,275Z',
+      EG:'M530,210L530,250L565,250L565,210Z',
+      KE:'M555,285L555,320L580,320L580,285Z',
+      SG:'M735,290L735,300L745,300L745,290Z',
+      ID:'M740,290L740,330L820,330L820,290Z',
+      TH:'M720,240L720,280L740,280L740,240Z',
+      VN:'M740,230L740,280L755,280L755,230Z',
+      PH:'M790,240L790,280L810,280L810,240Z',
+      TW:'M800,215L800,235L815,235L815,215Z',
+      IL:'M545,200L545,220L555,220L555,200Z',
+      AE:'M600,230L600,250L625,250L625,230Z',
+      SA:'M565,215L565,265L610,265L610,215Z',
+      CH:'M470,162L470,175L488,175L488,162Z',
+      AT:'M490,160L490,172L515,172L515,160Z',
+      CZ:'M490,148L490,160L515,160L515,148Z',
+      RO:'M520,160L520,178L548,178L548,160Z',
+      IE:'M425,130L425,155L440,155L440,130Z',
+      PT:'M420,180L420,205L432,205L432,180Z',
+      DK:'M478,120L478,137L492,137L492,120Z',
+      BE:'M458,148L458,162L472,162L472,148Z',
+    },
+
+    buildSvg: function() {
+      var container = document.getElementById('world-map');
+      if (!container) return;
+      var svg = '<svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg" class="world-svg">';
+      // Background
+      svg += '<rect width="1000" height="500" fill="var(--bg-primary)" rx="4"/>';
+      // Grid lines
+      for (var x = 0; x <= 1000; x += 100) {
+        svg += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="500" stroke="var(--border)" stroke-width="0.3" opacity="0.5"/>';
+      }
+      for (var y = 0; y <= 500; y += 100) {
+        svg += '<line x1="0" y1="' + y + '" x2="1000" y2="' + y + '" stroke="var(--border)" stroke-width="0.3" opacity="0.5"/>';
+      }
+      // Country paths
+      var codes = Object.keys(networkMap.paths);
+      for (var i = 0; i < codes.length; i++) {
+        var code = codes[i];
+        var d = networkMap.paths[code];
+        svg += '<path id="region-' + code + '" d="' + d + '" fill="var(--bg-tertiary)" stroke="var(--border)" stroke-width="0.5" class="map-region" data-code="' + code + '"/>';
+      }
+      svg += '</svg>';
+      container.innerHTML = svg;
+
+      // Add hover tooltip handlers
+      container.querySelectorAll('.map-region').forEach(function(el) {
+        el.addEventListener('mouseenter', function(e) { networkMap.showTooltip(e, el.dataset.code); });
+        el.addEventListener('mouseleave', function() { networkMap.hideTooltip(); });
+      });
+
+      networkMap.mapRendered = true;
+    },
+
+    refresh: async function() {
+      if (!networkMap.mapRendered) networkMap.buildSvg();
+      try {
+        var resp = await fetch('/api/admin/network-map');
+        var data = await resp.json();
+        networkMap.data = data;
+        networkMap.render(data);
+        networkMap.populateModelFilter(data);
+      } catch (e) {
+        // silent
+      }
+    },
+
+    render: function(data) {
+      if (!data || !data.regions) return;
+      var regions = data.regions;
+      var filter = (document.getElementById('map-model-filter') || {}).value || '';
+
+      // Compute counts per region
+      var counts = {};
+      var maxCount = 0;
+      var totalNodes = 0;
+      var totalRegions = 0;
+      var codes = Object.keys(regions);
+      for (var i = 0; i < codes.length; i++) {
+        var code = codes[i];
+        var r = regions[code];
+        var count;
+        if (filter && r.models) {
+          count = r.models[filter] || 0;
+        } else {
+          count = r.total || 0;
+        }
+        if (count > 0) {
+          counts[code] = count;
+          totalNodes += count;
+          totalRegions++;
+          if (count > maxCount) maxCount = count;
+        }
+      }
+
+      // Color all regions
+      var allCodes = Object.keys(networkMap.paths);
+      for (var j = 0; j < allCodes.length; j++) {
+        var c = allCodes[j];
+        var el = document.getElementById('region-' + c);
+        if (!el) continue;
+        var n = counts[c] || 0;
+        if (n === 0) {
+          el.style.fill = 'var(--bg-tertiary)';
+          el.style.filter = '';
+        } else {
+          var intensity = Math.max(0.2, n / Math.max(maxCount, 1));
+          var r2 = Math.round(20 + intensity * 20);
+          var g = Math.round(70 + intensity * 60);
+          var b = Math.round(180 + intensity * 75);
+          el.style.fill = 'rgb(' + r2 + ',' + g + ',' + b + ')';
+          el.style.filter = 'drop-shadow(0 0 ' + Math.round(intensity * 6) + 'px rgba(59,130,246,' + (intensity * 0.5).toFixed(2) + '))';
+        }
+      }
+
+      document.getElementById('map-total-nodes').textContent = totalNodes;
+      document.getElementById('map-total-regions').textContent = totalRegions;
+      document.getElementById('map-legend-max').textContent = maxCount;
+    },
+
+    applyFilter: function() {
+      if (networkMap.data) networkMap.render(networkMap.data);
+    },
+
+    populateModelFilter: function(data) {
+      var sel = document.getElementById('map-model-filter');
+      if (!sel || !data || !data.regions) return;
+      var models = {};
+      var codes = Object.keys(data.regions);
+      for (var i = 0; i < codes.length; i++) {
+        var r = data.regions[codes[i]];
+        if (r.models) {
+          var mids = Object.keys(r.models);
+          for (var j = 0; j < mids.length; j++) models[mids[j]] = true;
+        }
+      }
+      var current = sel.value;
+      sel.innerHTML = '<option value="">All models</option>';
+      var sorted = Object.keys(models).sort();
+      for (var k = 0; k < sorted.length; k++) {
+        var opt = document.createElement('option');
+        opt.value = sorted[k];
+        opt.textContent = sorted[k].length > 30 ? sorted[k].substring(0, 30) + '...' : sorted[k];
+        if (sorted[k] === current) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    },
+
+    updateFromWs: function(regionSummary) {
+      // Quick update region counts from WebSocket without full API fetch
+      if (!networkMap.mapRendered) return;
+      var maxCount = 0;
+      var totalNodes = 0;
+      var totalRegions = 0;
+      var codes = Object.keys(regionSummary);
+      for (var i = 0; i < codes.length; i++) {
+        var count = regionSummary[codes[i]];
+        if (count > 0) {
+          totalNodes += count;
+          totalRegions++;
+          if (count > maxCount) maxCount = count;
+        }
+      }
+      var allCodes = Object.keys(networkMap.paths);
+      for (var j = 0; j < allCodes.length; j++) {
+        var c = allCodes[j];
+        var el = document.getElementById('region-' + c);
+        if (!el) continue;
+        var n = regionSummary[c] || 0;
+        if (n === 0) {
+          el.style.fill = 'var(--bg-tertiary)';
+          el.style.filter = '';
+        } else {
+          var intensity = Math.max(0.2, n / Math.max(maxCount, 1));
+          var r2 = Math.round(20 + intensity * 20);
+          var g = Math.round(70 + intensity * 60);
+          var b = Math.round(180 + intensity * 75);
+          el.style.fill = 'rgb(' + r2 + ',' + g + ',' + b + ')';
+          el.style.filter = 'drop-shadow(0 0 ' + Math.round(intensity * 6) + 'px rgba(59,130,246,' + (intensity * 0.5).toFixed(2) + '))';
+        }
+      }
+      document.getElementById('map-total-nodes').textContent = totalNodes;
+      document.getElementById('map-total-regions').textContent = totalRegions;
+      document.getElementById('map-legend-max').textContent = maxCount;
+    },
+
+    showTooltip: function(event, code) {
+      networkMap.hideTooltip();
+      var info = networkMap.data && networkMap.data.regions ? networkMap.data.regions[code] : null;
+      var tip = document.createElement('div');
+      tip.id = 'map-tooltip';
+      tip.className = 'map-tooltip';
+      var html = '<strong>' + code + '</strong>';
+      if (info) {
+        html += '<span class="mono" style="margin-left:8px">' + info.total + ' node' + (info.total !== 1 ? 's' : '') + '</span>';
+        if (info.models) {
+          var mids = Object.keys(info.models);
+          if (mids.length > 0) {
+            html += '<div class="mt-1" style="font-size:0.75rem">';
+            for (var i = 0; i < Math.min(mids.length, 5); i++) {
+              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mids[i].length > 20 ? mids[i].substring(0, 20) + '...' : mids[i]) + '</span><span class="mono">' + info.models[mids[i]] + '</span></div>';
+            }
+            if (mids.length > 5) html += '<div class="text-muted">+' + (mids.length - 5) + ' more</div>';
+            html += '</div>';
+          }
+        }
+      } else {
+        html += '<span class="text-muted" style="margin-left:8px">No nodes</span>';
+      }
+      tip.innerHTML = html;
+      document.getElementById('world-map-container').appendChild(tip);
+      var rect = event.target.getBoundingClientRect();
+      var containerRect = document.getElementById('world-map-container').getBoundingClientRect();
+      tip.style.left = Math.min(rect.left - containerRect.left + rect.width / 2, containerRect.width - 200) + 'px';
+      tip.style.top = (rect.top - containerRect.top - tip.offsetHeight - 8) + 'px';
+    },
+
+    hideTooltip: function() {
+      var tip = document.getElementById('map-tooltip');
+      if (tip) tip.remove();
+    }
+  };
+
+  // ========================================================================
   // Init
   // ========================================================================
   function init() {
@@ -1288,6 +1691,7 @@ var SwarmLLM = (function() {
     settings: settings,
     setup: setup,
     identity: identity,
+    networkMap: networkMap,
     requestModel: requestModel,
     shutdown: shutdown,
   };

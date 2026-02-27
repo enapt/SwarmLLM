@@ -60,6 +60,9 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "session_timeout_seconds": config.inference.session_timeout_seconds,
         "auto_manage_shards": config.auto_manage.enabled,
         "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
+        "shard_size_mb": config.model.shard_size_mb,
+        "max_batch_size": config.inference.max_batch_size,
+        "batch_timeout_ms": config.inference.batch_timeout_ms,
     }))
 }
 
@@ -96,6 +99,24 @@ pub async fn update_config(
     }
     if let Some(max_storage) = body.auto_manage_max_storage_mb {
         config.auto_manage.max_storage_mb = max_storage;
+    }
+    if let Some(shard_size) = body.shard_size_mb {
+        if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB).contains(&shard_size)
+        {
+            return Err(ApiError(crate::error::SwarmError::Config(format!(
+                "shard_size_mb must be between {} and {} (got {})",
+                crate::config::SHARD_SIZE_MIN_MB,
+                crate::config::SHARD_SIZE_MAX_MB,
+                shard_size
+            ))));
+        }
+        config.model.shard_size_mb = shard_size;
+    }
+    if let Some(batch_size) = body.max_batch_size {
+        config.inference.max_batch_size = batch_size.max(1);
+    }
+    if let Some(timeout) = body.batch_timeout_ms {
+        config.inference.batch_timeout_ms = timeout;
     }
 
     // Write updated config to disk
@@ -455,6 +476,9 @@ pub struct ConfigUpdate {
     pub max_disk_mb: Option<u64>,
     pub auto_manage_shards: Option<bool>,
     pub auto_manage_max_storage_mb: Option<u64>,
+    pub shard_size_mb: Option<u64>,
+    pub max_batch_size: Option<u32>,
+    pub batch_timeout_ms: Option<u64>,
     #[serde(default)]
     pub models: Vec<String>,
 }
@@ -686,11 +710,15 @@ pub async fn hf_download(
                 match exec.load_model(&path, gpu_layers) {
                     Ok(()) => {
                         let size = exec.model_size_bytes().unwrap_or(0);
+                        let gguf_meta = crate::inference::executor::extract_gguf_metadata(&path);
                         *download_shared.loaded_model_info.write().await =
                             Some(crate::daemon::LoadedModelInfo {
                                 name: model_name.clone(),
                                 size_bytes: size,
                                 eos_tokens: vec![2],
+                                chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
+                                bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
+                                eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
                             });
                         download_shared
                             .model_loaded
@@ -785,7 +813,7 @@ pub struct HfShardDownloadRequest {
 
 /// GET /api/admin/hf/probe — Probe a remote GGUF file to get shard info.
 pub async fn hf_probe(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HfProbeParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let repo_id = params.repo_id.unwrap_or_default();
@@ -798,7 +826,8 @@ pub async fn hf_probe(
         })));
     }
 
-    match crate::model::huggingface::probe_gguf_file(&repo_id, &filename).await {
+    let shard_size = state.config.model.shard_size_bytes();
+    match crate::model::huggingface::probe_gguf_file_with_shard_size(&repo_id, &filename, shard_size).await {
         Ok(info) => Ok(Json(serde_json::json!({
             "status": "ok",
             "total_size": info.total_size,
@@ -925,12 +954,14 @@ pub async fn hf_download_shards(
             }
         });
 
+        let configured_shard_size = shared.config.model.shard_size_bytes();
         match crate::model::huggingface::download_shards(
             &repo_id,
             &filename,
             &dest_dir,
             &shard_indices,
             Some(ptx),
+            Some(configured_shard_size),
         )
         .await
         {
@@ -1064,7 +1095,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         }
     };
 
-    const SHARD_SIZE: u64 = 512 * 1024 * 1024;
+    let configured_shard_size = params.shared.config.model.shard_size_bytes();
 
     // Build shard infos with layer ranges
     let layers_per_shard = num_layers / shard_count;
@@ -1077,8 +1108,8 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     for idx in 0..shard_count {
         let extra = if idx < remainder { 1 } else { 0 };
         let shard_layers = layers_per_shard + extra;
-        let shard_start = (idx as u64) * SHARD_SIZE;
-        let shard_end = ((idx as u64 + 1) * SHARD_SIZE).min(total_size);
+        let shard_start = (idx as u64) * configured_shard_size;
+        let shard_end = ((idx as u64 + 1) * configured_shard_size).min(total_size);
         let shard_size = shard_end - shard_start;
 
         // Compute BLAKE3 hash for shards we actually have
@@ -1226,4 +1257,68 @@ fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
         }
         _ => (None, None),
     }
+}
+
+/// GET /api/admin/network-map — Aggregated region data for the world heatmap.
+///
+/// Returns `{ regions: { "US": { total: N, models: { "model-id": count } }, ... } }`
+/// based on self-reported region in peer capabilities.
+pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+
+    let mut regions: HashMap<String, (u64, HashMap<String, u64>)> = HashMap::new();
+
+    // Include our own node if it has a region configured
+    if let Some(ref region) = state.shared_state.config.identity.region {
+        let code = region.to_uppercase();
+        let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
+        entry.0 += 1;
+        // Add our hosted models
+        for item in state.shared_state.shard_registry.iter() {
+            let model_id = &item.key().model_id.0;
+            let node_id = state.shared_state.identity.node_id();
+            if item.value().contains(node_id) {
+                *entry.1.entry(model_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Aggregate peer regions from capabilities
+    for peer in state.shared_state.peer_registry.iter() {
+        if let Some(ref cap) = peer.value().capability {
+            if let Some(ref region) = cap.region {
+                let code = region.to_uppercase();
+                let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
+                entry.0 += 1;
+                // Count distinct models this peer hosts
+                let mut peer_models = std::collections::HashSet::new();
+                for shard in &cap.hosted_shards {
+                    peer_models.insert(shard.model_id.0.clone());
+                }
+                for model_id in peer_models {
+                    *entry.1.entry(model_id).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Build JSON
+    let region_json: serde_json::Map<String, serde_json::Value> = regions
+        .into_iter()
+        .map(|(code, (total, models))| {
+            let models_json: serde_json::Map<String, serde_json::Value> = models
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::json!(v)))
+                .collect();
+            (
+                code,
+                serde_json::json!({
+                    "total": total,
+                    "models": models_json,
+                }),
+            )
+        })
+        .collect();
+
+    Json(serde_json::json!({ "regions": region_json }))
 }
