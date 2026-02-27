@@ -57,6 +57,7 @@ var SwarmLLM = (function() {
 
     openSettings: function() {
       document.getElementById('settings-modal').classList.remove('hidden');
+      settings.load();
     },
 
     closeSettings: function() {
@@ -672,12 +673,76 @@ var SwarmLLM = (function() {
   // Settings Module
   // ========================================================================
   var settings = {
+    init: function() {
+      // Toggle storage limit field visibility based on auto-manage setting
+      var autoSelect = document.getElementById('settings-auto-shards');
+      if (autoSelect) {
+        autoSelect.addEventListener('change', function() {
+          var isOn = this.value === 'on';
+          document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
+          document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
+          if (isOn) settings.loadStorageInfo();
+        });
+      }
+    },
+
+    load: async function() {
+      try {
+        var resp = await fetch('/api/admin/config');
+        var data = await resp.json();
+        document.getElementById('settings-contribution').value = data.contribution || 'moderate';
+        document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
+        document.getElementById('settings-bandwidth').value = data.max_bandwidth_mbps || 0;
+        document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
+        var autoManage = data.auto_manage_shards ? 'on' : 'off';
+        document.getElementById('settings-auto-shards').value = autoManage;
+        document.getElementById('settings-auto-manage-storage').value = data.auto_manage_max_storage_mb || 0;
+        // Show/hide storage group
+        var isOn = autoManage === 'on';
+        document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
+        document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
+        if (isOn) settings.loadStorageInfo();
+      } catch (e) {}
+    },
+
+    loadStorageInfo: async function() {
+      try {
+        var resp = await fetch('/api/admin/shard-storage');
+        var data = await resp.json();
+        document.getElementById('settings-storage-used').textContent = formatBytes(data.disk_usage_bytes || 0);
+        var maxMb = data.auto_manage_max_storage_mb || 0;
+        document.getElementById('settings-storage-max').textContent = maxMb > 0 ? formatMB(maxMb) : '50% of disk limit';
+        var modelsDiv = document.getElementById('settings-storage-models');
+        modelsDiv.innerHTML = '';
+        if (data.models && data.models.length > 0) {
+          data.models.forEach(function(m) {
+            if (m.local_shards > 0) {
+              var div = document.createElement('div');
+              div.className = 'flex-between';
+              div.style.cssText = 'padding:2px 0';
+              div.innerHTML = '<span>' + escapeHtml(m.name || m.id) + '</span>' +
+                '<span class="text-muted">' + m.local_shards + '/' + m.shard_count + ' shards &middot; ' + formatBytes(m.local_bytes) + '</span>';
+              modelsDiv.appendChild(div);
+            }
+          });
+          if (modelsDiv.children.length === 0) {
+            modelsDiv.innerHTML = '<span class="text-muted">No local shards yet</span>';
+          }
+        } else {
+          modelsDiv.innerHTML = '<span class="text-muted">No models registered</span>';
+        }
+      } catch (e) {}
+    },
+
     save: async function() {
+      var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
       var config = {
         contribution: document.getElementById('settings-contribution').value,
         max_concurrent_requests: parseInt(document.getElementById('settings-max-requests').value, 10),
         max_bandwidth_mbps: parseInt(document.getElementById('settings-bandwidth').value, 10),
         max_disk_mb: parseInt(document.getElementById('settings-disk').value, 10),
+        auto_manage_shards: autoManageOn,
+        auto_manage_max_storage_mb: autoManageOn ? parseInt(document.getElementById('settings-auto-manage-storage').value, 10) || 0 : 0,
       };
 
       try {
@@ -821,17 +886,23 @@ var SwarmLLM = (function() {
       document.getElementById('summary-gpu').textContent = setup.hwData && setup.hwData.gpu_name ? setup.hwData.gpu_name : 'CPU only';
       document.getElementById('summary-ram').textContent = formatMB(setup.hwData ? setup.hwData.total_ram_mb || 0 : 0);
       document.getElementById('summary-disk').textContent = formatMB(setup.hwData ? setup.hwData.available_disk_mb || 0 : 0);
+      var autoManage = document.getElementById('setup-auto-manage').checked;
+      document.getElementById('summary-auto-manage').textContent = autoManage ? 'Enabled' : 'Disabled';
       document.getElementById('summary-models').textContent = 'Default configuration';
     },
 
     submit: async function() {
       var levels = ['minimal', 'moderate', 'maximum'];
       var level = levels[parseInt(document.getElementById('contribution-slider').value, 10)];
+      var autoManage = document.getElementById('setup-auto-manage').checked;
       try {
         await fetch('/api/admin/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contribution: level }),
+          body: JSON.stringify({
+            contribution: level,
+            auto_manage_shards: autoManage,
+          }),
         });
       } catch (e) {}
       localStorage.setItem(SETUP_DONE_KEY, 'true');
@@ -1098,6 +1169,7 @@ var SwarmLLM = (function() {
     chat.renderMessages();
 
     setup.init();
+    settings.init();
     dashboard.loadInitial();
     loadModels();
     connectWebSocket();

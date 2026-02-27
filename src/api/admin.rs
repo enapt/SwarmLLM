@@ -58,6 +58,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "max_disk_mb": config.resources.max_disk_mb,
         "listen_port": config.node.listen_port,
         "session_timeout_seconds": config.inference.session_timeout_seconds,
+        "auto_manage_shards": config.auto_manage.enabled,
+        "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
     }))
 }
 
@@ -88,6 +90,12 @@ pub async fn update_config(
     }
     if let Some(disk) = body.max_disk_mb {
         config.resources.max_disk_mb = disk;
+    }
+    if let Some(auto_manage) = body.auto_manage_shards {
+        config.auto_manage.enabled = auto_manage;
+    }
+    if let Some(max_storage) = body.auto_manage_max_storage_mb {
+        config.auto_manage.max_storage_mb = max_storage;
     }
 
     // Write updated config to disk
@@ -406,8 +414,90 @@ pub struct ConfigUpdate {
     pub max_concurrent_requests: Option<u32>,
     pub max_bandwidth_mbps: Option<u64>,
     pub max_disk_mb: Option<u64>,
+    pub auto_manage_shards: Option<bool>,
+    pub auto_manage_max_storage_mb: Option<u64>,
     #[serde(default)]
     pub models: Vec<String>,
+}
+
+/// GET /api/admin/shard-storage — Show per-model shard storage usage.
+///
+/// Returns a list of all models with storage breakdown per shard,
+/// plus a total storage summary. Used by the auto-manage UI.
+pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let local_node_id = state.shared_state.identity.node_id().clone();
+    let models_dir = state.config.node.data_dir.join("models");
+
+    let mut model_storage: Vec<serde_json::Value> = Vec::new();
+    let mut total_local_bytes: u64 = 0;
+
+    for manifest in state.shared_state.model_registry.models() {
+        let mut local_shards = 0u32;
+        let mut local_bytes = 0u64;
+        let mut shard_details: Vec<serde_json::Value> = Vec::new();
+
+        for shard in &manifest.shards {
+            let shard_id = crate::types::ShardId {
+                model_id: manifest.id.clone(),
+                index: shard.index,
+            };
+            let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+            let is_local = holders.contains(&local_node_id);
+
+            if is_local {
+                local_shards += 1;
+                local_bytes += shard.size_bytes;
+            }
+
+            shard_details.push(serde_json::json!({
+                "index": shard.index,
+                "size_bytes": shard.size_bytes,
+                "local": is_local,
+                "holders": holders.len(),
+            }));
+        }
+
+        total_local_bytes += local_bytes;
+
+        model_storage.push(serde_json::json!({
+            "id": manifest.id.0,
+            "name": manifest.name,
+            "total_size_bytes": manifest.total_size_bytes,
+            "shard_count": manifest.shard_count,
+            "local_shards": local_shards,
+            "local_bytes": local_bytes,
+            "shards": shard_details,
+        }));
+    }
+
+    // Get actual disk usage of models dir
+    let disk_usage_bytes = dir_size(&models_dir).unwrap_or(0);
+
+    Json(serde_json::json!({
+        "models": model_storage,
+        "total_local_bytes": total_local_bytes,
+        "disk_usage_bytes": disk_usage_bytes,
+        "auto_manage_enabled": state.config.auto_manage.enabled,
+        "auto_manage_max_storage_mb": state.config.auto_manage.max_storage_mb,
+        "max_disk_mb": state.config.resources.max_disk_mb,
+    }))
+}
+
+/// Recursively compute total size of a directory.
+fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_file() {
+                total += entry.metadata()?.len();
+            } else if ft.is_dir() {
+                total += dir_size(&entry.path())?;
+            }
+        }
+    }
+    Ok(total)
 }
 
 // ---- HuggingFace Endpoints ----

@@ -54,6 +54,8 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/admin/peers", get(admin::list_peers))
         .route("/api/admin/credits", get(admin::credit_info))
+        // Shard storage info
+        .route("/api/admin/shard-storage", get(admin::shard_storage))
         // HuggingFace model browsing
         .route("/api/admin/hf/search", get(admin::hf_search))
         .route("/api/admin/hf/probe", get(admin::hf_probe))

@@ -51,6 +51,13 @@
           <input type="range" id="contribution-slider" min="0" max="2" step="1" value="1">
         </div>
         <div class="mt-2 text-muted" id="contribution-desc">Balanced: uses ~50% of available resources. Good for most users.</div>
+        <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="setup-auto-manage" style="width:18px;height:18px">
+            <span>Auto-manage shards</span>
+          </label>
+          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Let SwarmLLM automatically download and serve popular model shards to help the network. Uses your disk within the configured limits.</span>
+        </div>
       </div>
       <div class="wizard-body hidden" id="step-3">
         <h3>Model Selection</h3>
@@ -65,6 +72,7 @@
           <div class="flex-between mb-1"><span class="text-muted">GPU</span><span class="mono" id="summary-gpu">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">RAM Allocated</span><span class="mono" id="summary-ram">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Disk Allocated</span><span class="mono" id="summary-disk">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">Auto-Manage</span><span class="mono" id="summary-auto-manage">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Models</span><span class="mono" id="summary-models">---</span></div>
         </div>
       </div>
@@ -107,6 +115,29 @@
         <label>Max Concurrent Requests</label>
         <input type="number" id="settings-max-requests" value="10" min="1" max="100">
       </div>
+      <div class="form-group">
+        <label>Auto-Manage Shards</label>
+        <select id="settings-auto-shards">
+          <option value="off">Off</option>
+          <option value="on">On - Auto-download popular shards</option>
+        </select>
+        <span class="text-muted" style="font-size:0.75rem">Automatically downloads rarest shards for popular models to help the network</span>
+      </div>
+      <div id="settings-storage-info" class="hidden" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:12px;border:1px solid var(--border)">
+        <div class="flex-between mb-1" style="font-size:0.85rem">
+          <span class="text-muted">Shard storage used</span>
+          <span class="mono" id="settings-storage-used">--</span>
+        </div>
+        <div class="flex-between mb-1" style="font-size:0.85rem">
+          <span class="text-muted">Max auto-manage storage</span>
+          <span class="mono" id="settings-storage-max">--</span>
+        </div>
+        <div id="settings-storage-models" style="font-size:0.8rem;margin-top:8px"></div>
+      </div>
+      <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
+        <label>Max Auto-Manage Storage (MB, 0 = 50% of disk limit)</label>
+        <input type="number" id="settings-auto-manage-storage" value="0" min="0">
+      </div>
       <details class="settings-advanced">
         <summary>Advanced Settings</summary>
         <div class="mt-2">
@@ -117,13 +148,6 @@
           <div class="form-group">
             <label>Max Disk (MB)</label>
             <input type="number" id="settings-disk" value="50000" min="1000">
-          </div>
-          <div class="form-group">
-            <label>Auto-Manage Shards</label>
-            <select id="settings-auto-shards">
-              <option value="off">Off</option>
-              <option value="on">On - Download popular shards automatically</option>
-            </select>
           </div>
         </div>
       </details>

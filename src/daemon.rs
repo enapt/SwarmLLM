@@ -564,6 +564,16 @@ impl Daemon {
             }
         });
 
+        // Spawn AutoShardManager (10th subsystem task — optional, runs only if enabled)
+        let auto_manage = crate::model::auto_manage::AutoShardManager::new(
+            shared_state.clone(),
+            network_tx.clone(),
+            shutdown_rx.clone(),
+        );
+        let _auto_manage_handle = tokio::spawn(async move {
+            auto_manage.run().await;
+        });
+
         // Spawn API server (pass router_cmd_tx + acquisition_tx + network_tx so API can submit requests)
         let api_shared_state = shared_state.clone();
         let api_router_tx = router_cmd_tx.clone();

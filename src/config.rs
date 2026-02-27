@@ -24,6 +24,8 @@ pub struct Config {
     pub pool: PoolConfig,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
+    pub auto_manage: AutoManageConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -243,6 +245,43 @@ pub struct ApiConfig {
     /// Bearer token for API authentication. If empty, one is auto-generated on first run.
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+/// Configuration for automatic shard management.
+///
+/// When enabled, the node periodically evaluates network shard coverage
+/// and downloads rarest shards for popular models — filling gaps to
+/// improve overall network availability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutoManageConfig {
+    /// Master toggle for auto shard management.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum disk space (MB) the auto-manager may use for shard storage.
+    /// Defaults to the global `max_disk_mb` if 0.
+    #[serde(default)]
+    pub max_storage_mb: u64,
+    /// How often (in minutes) the auto-manager evaluates and downloads.
+    #[serde(default = "default_auto_manage_interval")]
+    pub interval_minutes: u32,
+    /// Maximum number of shards to hold at once (0 = unlimited within disk budget).
+    #[serde(default)]
+    pub max_shards: u32,
+}
+
+impl Default for AutoManageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_storage_mb: 0,
+            interval_minutes: default_auto_manage_interval(),
+            max_shards: 0,
+        }
+    }
+}
+
+fn default_auto_manage_interval() -> u32 {
+    60
 }
 
 fn default_theme() -> String {

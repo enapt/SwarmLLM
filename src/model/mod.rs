@@ -1,4 +1,5 @@
 pub mod acquisition;
+pub mod auto_manage;
 pub mod distribution;
 pub mod governance;
 pub mod huggingface;
