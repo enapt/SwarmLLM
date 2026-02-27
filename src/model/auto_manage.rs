@@ -71,6 +71,8 @@ pub struct AutoShardManager {
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Notify trigger — woken when new HF sources or manifests arrive from peers.
+    notify: Arc<tokio::sync::Notify>,
 }
 
 /// A candidate shard identified for auto-download.
@@ -91,14 +93,17 @@ impl AutoShardManager {
         network_tx: mpsc::Sender<NetworkCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
+        let notify = shared_state.auto_manage_notify.clone();
         Self {
             shared_state,
             network_tx,
             shutdown_rx,
+            notify,
         }
     }
 
-    /// Run the auto-manage loop. Checks periodically based on config interval.
+    /// Run the auto-manage loop. Checks periodically based on config interval,
+    /// and also wakes immediately when new HF sources or manifests arrive from peers.
     pub async fn run(mut self) {
         let config = &self.shared_state.config.auto_manage;
         if !config.enabled {
@@ -106,15 +111,18 @@ impl AutoShardManager {
             return;
         }
 
-        let interval_mins = config.interval_minutes.max(1); // minimum 1 min
-        let mut interval = tokio::time::interval(Duration::from_secs(interval_mins as u64 * 60));
+        // Use interval_seconds if set, else fall back to interval_minutes * 60
+        let interval_secs = config.interval_seconds
+            .unwrap_or_else(|| config.interval_minutes.max(1) as u64 * 60)
+            .max(10); // minimum 10 seconds
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Skip the first tick (fires immediately) — let the node discover peers first
         interval.tick().await;
 
         tracing::info!(
-            interval_minutes = interval_mins,
+            interval_secs = interval_secs,
             max_storage_mb = config.max_storage_mb,
             "AutoShardManager running"
         );
@@ -129,6 +137,15 @@ impl AutoShardManager {
                 }
                 _ = interval.tick() => {
                     // Re-check enabled — config may have changed at runtime
+                    if self.shared_state.config.auto_manage.enabled {
+                        self.evaluate_and_download().await;
+                    }
+                }
+                _ = self.notify.notified() => {
+                    // Woken by a new HfSourceGossip or ModelManifest — wait briefly
+                    // for additional gossip to settle, then evaluate.
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    tracing::info!("AutoShardManager: triggered by new HF source or manifest");
                     if self.shared_state.config.auto_manage.enabled {
                         self.evaluate_and_download().await;
                     }
@@ -323,7 +340,20 @@ impl AutoShardManager {
                 };
 
                 let configured_bonus = if in_configured_range { 100.0 } else { 1.0 };
-                let score = model_popularity * rarity_bonus * configured_bonus * vram_fitness;
+
+                // Node-specific jitter (0.0–0.1) so nodes with identical views
+                // of the network don't all pick the same shard to download.
+                // BLAKE3(node_id || model_id || shard_index) → deterministic per-node tiebreaker.
+                let jitter = {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(&local_node_id.0);
+                    hasher.update(manifest.id.0.as_bytes());
+                    hasher.update(&shard.index.to_le_bytes());
+                    let hash = hasher.finalize();
+                    hash.as_bytes()[0] as f64 / 2550.0 // 0.0–0.1 range
+                };
+
+                let score = model_popularity * rarity_bonus * configured_bonus * vram_fitness + jitter;
 
                 candidates.push(ShardCandidate {
                     model_id: manifest.id.clone(),
@@ -445,28 +475,7 @@ impl AutoShardManager {
             return;
         }
 
-        // Create a progress entry so the UI can track it
         let mid = candidate.model_id.clone();
-        let status = crate::model::acquisition::AcquisitionStatus {
-            model_id: mid.clone(),
-            state: crate::model::acquisition::AcquisitionState::Downloading,
-            total_shards: 1,
-            downloaded_shards: 0,
-            verified_shards: 0,
-            failed_shards: 0,
-            total_bytes: candidate.shard_size_bytes,
-            downloaded_bytes: 0,
-            shard_progress: std::collections::HashMap::new(),
-            speed_bytes_per_sec: 0,
-            started_at: Some(chrono::Utc::now()),
-            log: vec![format!(
-                "Auto-manage: downloading shard {} of {} (score: {:.1})",
-                candidate.shard_index, candidate.model_name, candidate.score
-            )],
-        };
-        self.shared_state
-            .acquisition_progress
-            .insert(mid.clone(), status);
 
         // Announce interest to network peers — they may push the shard to us
         let shard_id = ShardId {
@@ -484,6 +493,34 @@ impl AutoShardManager {
 
         // Download from HuggingFace if source is known
         if let Some(hf_source) = self.shared_state.hf_sources.get(&candidate.model_id) {
+            // Create progress entry with per-shard tracking for the specific shard
+            let mut shard_progress = std::collections::HashMap::new();
+            shard_progress.insert(candidate.shard_index, crate::model::acquisition::ShardProgress {
+                index: candidate.shard_index,
+                total_bytes: candidate.shard_size_bytes,
+                downloaded_bytes: 0,
+                state: crate::model::acquisition::ShardState::Downloading,
+            });
+            let status = crate::model::acquisition::AcquisitionStatus {
+                model_id: mid.clone(),
+                state: crate::model::acquisition::AcquisitionState::Downloading,
+                total_shards: 1,
+                downloaded_shards: 0,
+                verified_shards: 0,
+                failed_shards: 0,
+                total_bytes: candidate.shard_size_bytes,
+                downloaded_bytes: 0,
+                shard_progress,
+                speed_bytes_per_sec: 0,
+                started_at: Some(chrono::Utc::now()),
+                log: vec![format!(
+                    "Auto-manage: downloading shard {} of {} (score: {:.1})",
+                    candidate.shard_index, candidate.model_name, candidate.score
+                )],
+            };
+            self.shared_state
+                .acquisition_progress
+                .insert(mid.clone(), status);
             let repo_id = hf_source.repo_id.clone();
             let filename = hf_source.filename.clone();
             drop(hf_source); // release DashMap ref
@@ -500,22 +537,54 @@ impl AutoShardManager {
                 "AutoShardManager: downloading shard from HuggingFace"
             );
 
+            let net_tx = self.network_tx.clone();
+
             // Spawn the download so we don't block the evaluation loop
             tokio::spawn(async move {
                 let (ptx, mut prx) = tokio::sync::mpsc::channel::<
                     crate::model::huggingface::DownloadProgress,
                 >(32);
 
-                // Progress updater
+                // Progress updater — updates per-shard progress + broadcasts to network
                 let prog_mid = model_id.clone();
                 let prog_shared = shared.clone();
+                let prog_net_tx = net_tx.clone();
                 tokio::spawn(async move {
+                    let mut last_broadcast_pct: u32 = 0;
                     while let Some(prog) = prx.recv().await {
+                        let pct = if prog.total_bytes > 0 {
+                            (prog.downloaded_bytes as f64 / prog.total_bytes as f64 * 100.0) as u32
+                        } else { 0 };
+
                         if let Some(mut entry) =
                             prog_shared.acquisition_progress.get_mut(&prog_mid)
                         {
                             entry.downloaded_bytes = prog.downloaded_bytes;
                             entry.total_bytes = prog.total_bytes;
+                            // Update per-shard progress
+                            if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
+                                sp.downloaded_bytes = prog.downloaded_bytes;
+                                sp.total_bytes = prog.total_bytes;
+                            }
+                        }
+
+                        // Broadcast progress every 5% to avoid gossip flood
+                        if pct >= last_broadcast_pct + 5 || pct == 100 {
+                            last_broadcast_pct = pct;
+                            let progress_msg = crate::types::SwarmMessage::ShardDownloadProgress(
+                                crate::types::ShardDownloadProgress {
+                                    node_id: prog_shared.identity.node_id().clone(),
+                                    shard_id: crate::types::ShardId {
+                                        model_id: prog_mid.clone(),
+                                        index: shard_idx,
+                                    },
+                                    progress_pct: pct,
+                                    state: "downloading".to_string(),
+                                },
+                            );
+                            let _ = prog_net_tx.try_send(
+                                crate::types::NetworkCommand::Broadcast(progress_msg),
+                            );
                         }
                     }
                 });
@@ -549,9 +618,9 @@ impl AutoShardManager {
                             .record_shard_holder(sid.clone(), node_id.clone());
                         {
                             let mut holders =
-                                shared.shard_registry.entry(sid).or_default();
+                                shared.shard_registry.entry(sid.clone()).or_default();
                             if !holders.contains(&node_id) {
-                                holders.push(node_id);
+                                holders.push(node_id.clone());
                             }
                         }
 
@@ -563,8 +632,25 @@ impl AutoShardManager {
                                 crate::model::acquisition::AcquisitionState::Complete;
                             entry.downloaded_shards = 1;
                             entry.verified_shards = 1;
+                            if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
+                                sp.state = crate::model::acquisition::ShardState::Complete;
+                                sp.downloaded_bytes = sp.total_bytes;
+                            }
                             entry.log.push("Shard downloaded and registered".into());
                         }
+
+                        // Broadcast completion to network
+                        let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
+                            crate::types::ShardDownloadProgress {
+                                node_id,
+                                shard_id: sid,
+                                progress_pct: 100,
+                                state: "complete".to_string(),
+                            },
+                        );
+                        let _ = net_tx.try_send(
+                            crate::types::NetworkCommand::Broadcast(complete_msg),
+                        );
 
                         // Check if all shards are now available → auto-load
                         check_and_load_model(&shared, &model_id).await;
@@ -682,11 +768,12 @@ impl AutoShardManager {
     }
 }
 
-/// Check if all shards for a model are locally available, and if so, load the split model.
+/// Check if the model can be loaded (fully or partially) and load it for inference.
 ///
 /// This is called after each shard download completes (both auto-manage and manual).
-/// If all shards in the manifest are held locally, it loads the model into the
-/// `split_models` DashMap so it becomes available for inference.
+/// - If ALL shards are local: loads the full model (is_first=true, is_last=true)
+/// - If only a contiguous subset is local: loads those layers for distributed inference
+///   (the node handles its segment, other nodes handle theirs)
 async fn check_and_load_model(
     shared: &std::sync::Arc<crate::daemon::SharedState>,
     model_id: &ModelId,
@@ -704,9 +791,9 @@ async fn check_and_load_model(
         .join("models")
         .join(&model_id.0);
 
-    // Check if ALL shard files actually exist on disk (don't trust registry alone)
+    // Find which shards we actually have on disk
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
-    let local_count = manifest
+    let mut local_shard_indices: Vec<u32> = manifest
         .shards
         .iter()
         .filter(|s| {
@@ -714,20 +801,15 @@ async fn check_and_load_model(
                 model_id: model_id.clone(),
                 index: s.index,
             };
-            // Verify both registry AND file on disk
             let in_registry = shared.model_registry.shard_holders(&sid).contains(&local_node_id);
             let on_disk = shard_store.shard_path(model_id, s.index).exists();
             in_registry && on_disk
         })
-        .count();
+        .map(|s| s.index)
+        .collect();
+    local_shard_indices.sort();
 
-    if local_count < manifest.shard_count as usize {
-        tracing::debug!(
-            model = %model_id,
-            local = local_count,
-            total = manifest.shard_count,
-            "Model not yet complete"
-        );
+    if local_shard_indices.is_empty() {
         return;
     }
 
@@ -737,15 +819,40 @@ async fn check_and_load_model(
         return;
     }
 
+    let has_all = local_shard_indices.len() == manifest.shard_count as usize;
+
+    // Determine the layer range covered by our local shards
+    let (layer_start, layer_end, is_first, is_last) = if has_all {
+        (0, manifest.num_layers as usize, true, true)
+    } else {
+        // Find the contiguous layer range from our local shards
+        let first_idx = *local_shard_indices.first().unwrap();
+        let last_idx = *local_shard_indices.last().unwrap();
+
+        let first_shard = manifest.shards.iter().find(|s| s.index == first_idx);
+        let last_shard = manifest.shards.iter().find(|s| s.index == last_idx);
+
+        match (first_shard, last_shard) {
+            (Some(fs), Some(ls)) => {
+                let ls_start = fs.layer_range.0 as usize;
+                let ls_end = ls.layer_range.1 as usize;
+                let is_first = ls_start == 0;
+                let is_last = ls_end >= manifest.num_layers as usize;
+                (ls_start, ls_end, is_first, is_last)
+            }
+            _ => return, // shard info missing
+        }
+    };
+
     tracing::info!(
         model = %model_id,
-        shards = manifest.shard_count,
-        "All shards available — loading model for inference"
+        local_shards = local_shard_indices.len(),
+        total_shards = manifest.shard_count,
+        layers = format!("[{}..{})", layer_start, layer_end),
+        is_first,
+        is_last,
+        "Loading model segment for inference"
     );
-
-    // Determine layer range (all layers for a complete model)
-    let layer_start = 0;
-    let layer_end = manifest.num_layers as usize;
 
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let params = crate::daemon::ShardLoadParams {
@@ -754,8 +861,8 @@ async fn check_and_load_model(
         model_id,
         layer_start,
         layer_end,
-        is_first: true,
-        is_last: true,
+        is_first,
+        is_last,
     };
 
     match crate::daemon::try_load_from_shards(&params) {
@@ -783,7 +890,8 @@ async fn check_and_load_model(
             tracing::info!(
                 model = %model_id,
                 name = %manifest.name,
-                "Auto-manage: model loaded and ready for inference"
+                layers = format!("[{}..{})", layer_start, layer_end),
+                "Auto-manage: model segment loaded and ready for inference"
             );
         }
         Err(e) => {
@@ -830,6 +938,7 @@ mod tests {
             max_storage_mb: 10000,
             interval_minutes: 60,
             max_shards: 0,
+            interval_seconds: None,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

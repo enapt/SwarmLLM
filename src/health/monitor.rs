@@ -170,16 +170,28 @@ impl HealthMonitor {
         }
     }
 
-    /// Broadcast model manifests so peers can discover and acquire models.
+    /// Broadcast model manifests and HF sources so peers can discover and acquire models.
     async fn broadcast_manifests(&self) {
+        let our_id = self.shared_state.identity.node_id().clone();
         for manifest in self.shared_state.model_registry.models() {
             // Only broadcast manifests we published (or locally generated)
-            let our_id = self.shared_state.identity.node_id();
-            if manifest.publisher != *our_id {
+            if manifest.publisher != our_id {
                 continue;
             }
-            let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest));
+            let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest.clone()));
             let _ = self.network_tx.send(msg).await;
+
+            // Also broadcast HfSourceGossip so late-joining peers discover the HF source
+            if let Some(hf_source) = self.shared_state.hf_sources.get(&manifest.id) {
+                let gossip = crate::types::HfSourceGossip {
+                    model_id: manifest.id.clone(),
+                    repo_id: hf_source.repo_id.clone(),
+                    filename: hf_source.filename.clone(),
+                    publisher: our_id.clone(),
+                };
+                let msg = NetworkCommand::Broadcast(SwarmMessage::HfSourceGossip(gossip));
+                let _ = self.network_tx.send(msg).await;
+            }
         }
     }
 

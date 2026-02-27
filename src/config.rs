@@ -278,6 +278,9 @@ pub struct AutoManageConfig {
     /// Maximum number of shards to hold at once (0 = unlimited within disk budget).
     #[serde(default)]
     pub max_shards: u32,
+    /// Override interval in seconds (for testing). Takes precedence over `interval_minutes`.
+    #[serde(default)]
+    pub interval_seconds: Option<u64>,
 }
 
 impl Default for AutoManageConfig {
@@ -287,6 +290,7 @@ impl Default for AutoManageConfig {
             max_storage_mb: 0,
             interval_minutes: default_auto_manage_interval(),
             max_shards: 0,
+            interval_seconds: None,
         }
     }
 }

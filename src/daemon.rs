@@ -99,6 +99,11 @@ pub struct SharedState {
         DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     /// HuggingFace source info for models downloaded from HF, for re-download.
     pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
+    /// Notify trigger for the AutoShardManager — woken when new HF sources or manifests arrive.
+    pub auto_manage_notify: Arc<tokio::sync::Notify>,
+    /// Download progress reported by remote peers via gossip.
+    /// Key: ShardId, Value: Vec<(NodeId, progress_pct)>
+    pub peer_shard_downloads: DashMap<crate::types::ShardId, Vec<(NodeId, u32)>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -212,6 +217,8 @@ impl SharedState {
             anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
             streaming_token_txs: DashMap::new(),
             hf_sources,
+            auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
+            peer_shard_downloads: DashMap::new(),
             shutdown_tx,
         });
 
@@ -988,7 +995,15 @@ async fn dispatch_network_messages(
                                 // Verify the manifest hash before trusting it
                                 match manifest.verify_hash() {
                                     Ok(()) => {
+                                        let is_new = shared_state
+                                            .model_registry
+                                            .get_manifest(&manifest.id)
+                                            .is_none();
                                         shared_state.model_registry.register_manifest(manifest.clone());
+                                        // Wake auto-manage when a genuinely new model appears
+                                        if is_new {
+                                            shared_state.auto_manage_notify.notify_one();
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -1094,6 +1109,56 @@ async fn dispatch_network_messages(
                                             tracing::warn!(error = %e, "Failed to route pool message");
                                         }
                                     }
+                                }
+                            }
+                            // HuggingFace source gossip — store so auto-manage can download shards
+                            SwarmMessage::HfSourceGossip(gossip) => {
+                                let mid = gossip.model_id.clone();
+                                if !shared_state.hf_sources.contains_key(&mid) {
+                                    tracing::info!(
+                                        model = %mid,
+                                        repo = %gossip.repo_id,
+                                        filename = %gossip.filename,
+                                        publisher = %gossip.publisher,
+                                        "Received HfSourceGossip — storing HF source"
+                                    );
+                                    let source = crate::daemon::HfSource {
+                                        repo_id: gossip.repo_id.clone(),
+                                        filename: gossip.filename.clone(),
+                                    };
+                                    shared_state.hf_sources.insert(mid.clone(), source.clone());
+                                    // Persist to sled
+                                    let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
+                                    // Wake the AutoShardManager so it evaluates promptly
+                                    shared_state.auto_manage_notify.notify_one();
+                                }
+                            }
+                            SwarmMessage::ShardDownloadProgress(progress) => {
+                                // Update peer download state in shared state
+                                let local_nid = shared_state.identity.node_id();
+                                if progress.node_id != *local_nid {
+                                    if progress.state == "complete" || progress.progress_pct >= 100 {
+                                        // Download finished — remove from tracking
+                                        if let Some(mut entry) = shared_state.peer_shard_downloads.get_mut(&progress.shard_id) {
+                                            entry.retain(|(nid, _)| *nid != progress.node_id);
+                                        }
+                                    } else {
+                                        // Update or insert download progress
+                                        let mut entry = shared_state.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
+                                        if let Some(pos) = entry.iter().position(|(nid, _)| *nid == progress.node_id) {
+                                            entry[pos].1 = progress.progress_pct;
+                                        } else {
+                                            entry.push((progress.node_id.clone(), progress.progress_pct));
+                                        }
+                                    }
+                                    tracing::debug!(
+                                        node = %progress.node_id,
+                                        model = %progress.shard_id.model_id,
+                                        shard = progress.shard_id.index,
+                                        pct = progress.progress_pct,
+                                        state = %progress.state,
+                                        "Peer shard download progress"
+                                    );
                                 }
                             }
                             // Other messages handled by NetworkManager

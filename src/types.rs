@@ -269,6 +269,12 @@ pub enum SwarmMessage {
     // Streaming — incremental token from the final pipeline node back to the originator
     StreamingToken(StreamingToken),
 
+    // Shard download progress — broadcast so other nodes see downloads in progress
+    ShardDownloadProgress(ShardDownloadProgress),
+
+    // HuggingFace source gossip — tells peers where to download model shards from HF
+    HfSourceGossip(HfSourceGossip),
+
     // Encryption
     SealedInferenceRequest(crate::crypto::SealedPrompt),
     PeerKeyAdvertise {
@@ -327,6 +333,27 @@ pub struct StreamingToken {
     pub request_id: uuid::Uuid,
     pub token_id: u32,
     pub finish_reason: Option<NetworkFinishReason>,
+}
+
+/// Shard download progress broadcast — lets other nodes see downloads in real time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardDownloadProgress {
+    pub node_id: NodeId,
+    pub shard_id: ShardId,
+    /// 0-100 percentage
+    pub progress_pct: u32,
+    /// "downloading" or "complete"
+    pub state: String,
+}
+
+/// HuggingFace source gossip — tells peers where to download a model's shards from HF CDN.
+/// Without this, only the node that originally downloaded from HF knows the repo_id/filename.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HfSourceGossip {
+    pub model_id: ModelId,
+    pub repo_id: String,
+    pub filename: String,
+    pub publisher: NodeId,
 }
 
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).

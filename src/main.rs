@@ -50,6 +50,11 @@ struct Cli {
     /// instead of all shards, enabling distributed inference across nodes.
     #[arg(long, global = true)]
     shards: Option<String>,
+
+    /// Enable auto-manage: automatically download and distribute model shards
+    /// across the network based on rarity scoring.
+    #[arg(long, global = true)]
+    auto_manage: bool,
 }
 
 #[derive(Subcommand)]
@@ -105,6 +110,12 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
         cli.gpu_layers,
         cli.bootstrap,
     )?;
+
+    // Apply --auto-manage flag
+    if cli.auto_manage {
+        config.auto_manage.enabled = true;
+        tracing::info!("Auto-manage enabled via --auto-manage flag");
+    }
 
     // Parse --shards range (e.g. "0-4" → (0, 4))
     if let Some(ref shard_str) = cli.shards {

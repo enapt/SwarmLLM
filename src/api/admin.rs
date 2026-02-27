@@ -18,7 +18,14 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     let tier = crate::credit::priority::PriorityCalculator::tier_name(credit.balance);
 
-    let hosted_shards = state.shared_state.model_registry.shard_count();
+    // Count only shards held locally (not all tracked shards network-wide)
+    let hosted_shards = {
+        let local_nid = state.shared_state.identity.node_id();
+        state.shared_state.model_registry.all_shard_entries()
+            .iter()
+            .filter(|(_, holders)| holders.contains(local_nid))
+            .count()
+    };
 
     // Hardware detection
     let hardware = detect_hardware(&state.shared_state);
@@ -499,6 +506,12 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
         let mut local_bytes = 0u64;
         let mut shard_details: Vec<serde_json::Value> = Vec::new();
 
+        // Check if any shards are currently being downloaded
+        let mut any_downloading = false;
+
+        // Get per-shard download progress for this model (if any)
+        let acq_progress = state.shared_state.acquisition_progress.get(&manifest.id);
+
         for shard in &manifest.shards {
             let shard_id = crate::types::ShardId {
                 model_id: manifest.id.clone(),
@@ -512,17 +525,73 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 local_bytes += shard.size_bytes;
             }
 
-            shard_details.push(serde_json::json!({
+            // Only attach download state to the SPECIFIC shard being downloaded
+            let download_state = acq_progress.as_ref().and_then(|p| {
+                let p = p.value();
+                // Check per-shard progress first (populated by auto-manage)
+                if let Some(sp) = p.shard_progress.get(&shard.index) {
+                    if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                        any_downloading = true;
+                        return Some(serde_json::json!({
+                            "state": "Downloading",
+                            "progress_pct": if sp.total_bytes > 0 {
+                                (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
+                            } else { 0 },
+                            "downloaded_bytes": sp.downloaded_bytes,
+                            "total_bytes": sp.total_bytes,
+                        }));
+                    }
+                }
+                None
+            });
+
+            // Also check peer download states (from gossip)
+            let peer_downloading = state.shared_state.peer_shard_downloads.get(&shard_id)
+                .map(|entry| {
+                    let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
+                        serde_json::json!({ "node_id": format!("{}", nid), "progress_pct": pct })
+                    }).collect();
+                    peers
+                });
+
+            let mut shard_json = serde_json::json!({
                 "index": shard.index,
                 "size_bytes": shard.size_bytes,
                 "local": is_local,
                 "holders": holders.len(),
-            }));
+            });
+            if let Some(dl) = download_state {
+                shard_json.as_object_mut().unwrap().insert("download".to_string(), dl);
+            }
+            if let Some(peers_dl) = peer_downloading {
+                if !peers_dl.is_empty() {
+                    shard_json.as_object_mut().unwrap().insert("peer_downloads".to_string(),
+                        serde_json::json!(peers_dl));
+                    any_downloading = true;
+                }
+            }
+            shard_details.push(shard_json);
         }
 
         total_local_bytes += local_bytes;
 
         let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(manifest.total_size_bytes);
+
+        // Determine model readiness
+        let all_shards_available = shard_details.iter().all(|s| {
+            s.get("local").and_then(|v| v.as_bool()).unwrap_or(false)
+                || s.get("holders").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+        });
+        let all_local = local_shards == manifest.shard_count;
+        let ready_status = if all_local {
+            "ready"
+        } else if any_downloading {
+            "downloading"
+        } else if all_shards_available {
+            "available"
+        } else {
+            "incomplete"
+        };
 
         model_storage.push(serde_json::json!({
             "id": manifest.id.0,
@@ -533,6 +602,8 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             "local_bytes": local_bytes,
             "estimated_vram_mb": estimated_vram,
             "shards": shard_details,
+            "ready": ready_status,
+            "all_shards_available": all_shards_available,
         }));
     }
 
@@ -923,6 +994,9 @@ pub async fn hf_download_shards(
     let response_model_id = model_id_str.clone();
     let response_shards = shard_indices.clone();
 
+    // Capture network_tx for broadcasting HfSourceGossip + ModelManifest after download
+    let network_tx = state.network_tx.clone();
+
     tokio::spawn(async move {
         let (ptx, mut prx) =
             tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
@@ -1012,6 +1086,30 @@ pub async fn hf_download_shards(
                         );
                         // Persist to sled
                         let _ = download_shared.db.put_json("hf_sources", &model_id_str, &hf_source);
+
+                        // Broadcast HfSourceGossip + ModelManifest immediately so peers
+                        // can start auto-managing shards without waiting for the 30s health tick.
+                        if let Some(ref ntx) = network_tx {
+                            let gossip_msg = crate::types::SwarmMessage::HfSourceGossip(
+                                crate::types::HfSourceGossip {
+                                    model_id: crate::types::ModelId(model_id_str.clone()),
+                                    repo_id: repo_id.clone(),
+                                    filename: filename.clone(),
+                                    publisher: download_shared.identity.node_id().clone(),
+                                },
+                            );
+                            let _ = ntx.send(crate::types::NetworkCommand::Broadcast(gossip_msg)).await;
+
+                            // Also broadcast the manifest
+                            if let Some(manifest) = download_shared.model_registry.get_manifest(
+                                &crate::types::ModelId(model_id_str.clone()),
+                            ) {
+                                let _ = ntx.send(crate::types::NetworkCommand::Broadcast(
+                                    crate::types::SwarmMessage::ModelManifest(manifest),
+                                )).await;
+                            }
+                        }
+
                         tracing::info!(model = %model_id_str, "Shard download + registration complete");
                     }
                     Err(e) => {
