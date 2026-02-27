@@ -899,17 +899,46 @@ var SwarmLLM = (function() {
         var modeEl = document.getElementById('dl-mode-' + safeKey);
         var mode = modeEl ? modeEl.value : 'shards';
 
-        var resp = await fetch('/api/admin/hf/download', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_id: repoId, filename: filename, mode: mode }),
-        });
-        var data = await resp.json();
-        if (data.status === 'started' || data.status === 'acquiring') {
-          ui.showBanner('success', 'Download started for ' + repoId);
-          ui.closeModelBrowser();
+        if (mode === 'full') {
+          // Full model download (single GGUF file) — user explicitly chose this
+          var resp = await fetch('/api/admin/hf/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo_id: repoId, filename: filename }),
+          });
+          var data = await resp.json();
+          if (data.status === 'started' || data.status === 'acquiring') {
+            ui.showBanner('success', 'Full model download started');
+            ui.closeModelBrowser();
+          } else {
+            ui.showBanner('warning', data.message || 'Download could not be started');
+          }
         } else {
-          ui.showBanner('warning', data.message || 'Download could not be started');
+          // Default: shard-based download. Probe first to discover shard count,
+          // then download all shards. Other nodes auto-acquire via gossip.
+          ui.showBanner('info', 'Probing model...');
+          var probeResp = await fetch('/api/admin/hf/probe?repo_id=' + encodeURIComponent(repoId) + '&filename=' + encodeURIComponent(filename));
+          var probeData = await probeResp.json();
+          if (probeData.status !== 'ok' || !probeData.shard_count) {
+            ui.showBanner('error', probeData.message || 'Failed to probe model');
+            return;
+          }
+          // Build array of all shard indices [0, 1, 2, ...]
+          var shardIndices = [];
+          for (var i = 0; i < probeData.shard_count; i++) shardIndices.push(i);
+
+          var resp = await fetch('/api/admin/hf/download-shards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo_id: repoId, filename: filename, shards: shardIndices }),
+          });
+          var data = await resp.json();
+          if (data.status === 'started') {
+            ui.showBanner('success', 'Downloading ' + probeData.shard_count + ' shards from HuggingFace');
+            ui.closeModelBrowser();
+          } else {
+            ui.showBanner('warning', data.message || 'Download could not be started');
+          }
         }
       } catch (e) {
         ui.showBanner('error', 'Download failed: ' + e.message);

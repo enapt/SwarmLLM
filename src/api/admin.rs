@@ -1142,11 +1142,132 @@ pub async fn hf_download_shards(
     let network_tx = state.network_tx.clone();
 
     tokio::spawn(async move {
-        let (ptx, mut prx) =
-            tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
-
         let download_mid = mid.clone();
         let download_shared = shared.clone();
+        let configured_shard_size = shared.config.model.shard_size_bytes();
+
+        // ── Phase 1: Probe + header → broadcast manifest EARLY ──────────
+        // This lets peers learn about the model and begin auto-acquiring
+        // shards in parallel while this node is still downloading.
+
+        let info = match crate::model::huggingface::probe_gguf_file_with_shard_size(
+            &repo_id,
+            &filename,
+            configured_shard_size,
+        )
+        .await
+        {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::error!(error = %e, "HuggingFace probe failed");
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                    entry.state = crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                    entry.log.push(format!("Probe failed: {}", e));
+                }
+                return;
+            }
+        };
+
+        if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            entry.total_bytes = info.total_size;
+            entry.total_shards = info.shard_count;
+            entry.log.push(format!(
+                "Probed: {} shards, {:.1} MB total",
+                info.shard_count,
+                info.total_size as f64 / (1024.0 * 1024.0)
+            ));
+        }
+
+        // Download GGUF header (~6MB) — needed for manifest generation
+        if let Err(e) = crate::model::huggingface::download_gguf_header(
+            &repo_id,
+            &filename,
+            &dest_dir,
+            info.header_size,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "GGUF header download failed");
+            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                entry.state = crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                entry.log.push(format!("Header download failed: {}", e));
+            }
+            return;
+        }
+
+        // Generate manifest from header BEFORE downloading shard data.
+        // Pass empty shard_indices — no shards to register yet (they don't exist on disk).
+        let header_path = dest_dir.join("gguf_header.bin");
+        let manifest_result = generate_manifest_from_header(&ManifestGenParams {
+            header_path: &header_path,
+            model_id_str: &model_id_str,
+            filename: &filename,
+            total_size: info.total_size,
+            shard_count: info.shard_count,
+            shard_indices: &[],
+            shared: &download_shared,
+        });
+
+        if let Err(e) = &manifest_result {
+            tracing::error!(error = %e, "Manifest generation failed (early broadcast skipped)");
+            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                entry.log.push(format!("Manifest generation failed: {e}"));
+            }
+            // Continue with downloads anyway — manifest can be regenerated later
+        }
+
+        // Record HF source so auto-manager (and peers) know where to fetch shards
+        let hf_source = crate::daemon::HfSource {
+            repo_id: repo_id.clone(),
+            filename: filename.clone(),
+        };
+        download_shared.hf_sources.insert(
+            crate::types::ModelId(model_id_str.clone()),
+            hf_source.clone(),
+        );
+        let _ = download_shared.db.put_json("hf_sources", &model_id_str, &hf_source);
+        let hf_source_path = dest_dir.join("hf_source.json");
+        let _ = std::fs::write(
+            &hf_source_path,
+            serde_json::to_string_pretty(&hf_source).unwrap_or_default(),
+        );
+
+        // Broadcast HfSourceGossip + ModelManifest EARLY so peers can start
+        // auto-acquiring shards immediately (before our shard data downloads finish).
+        if let Some(ref ntx) = network_tx {
+            let gossip_msg = crate::types::SwarmMessage::HfSourceGossip(
+                crate::types::HfSourceGossip {
+                    model_id: crate::types::ModelId(model_id_str.clone()),
+                    repo_id: repo_id.clone(),
+                    filename: filename.clone(),
+                    publisher: download_shared.identity.node_id().clone(),
+                },
+            );
+            let _ = ntx
+                .send(crate::types::NetworkCommand::Broadcast(gossip_msg))
+                .await;
+
+            if let Some(manifest) = download_shared
+                .model_registry
+                .get_manifest(&crate::types::ModelId(model_id_str.clone()))
+            {
+                let _ = ntx
+                    .send(crate::types::NetworkCommand::Broadcast(
+                        crate::types::SwarmMessage::ModelManifest(manifest),
+                    ))
+                    .await;
+            }
+
+            tracing::info!(model = %model_id_str, "Broadcast manifest + HF source EARLY (before shard downloads)");
+        }
+
+        // Wake auto-manage on this node too (gossipsub doesn't self-deliver)
+        download_shared.auto_manage_notify.notify_one();
+
+        // ── Phase 2: Download shard data ────────────────────────────────
+
+        let (ptx, mut prx) =
+            tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
 
         // Spawn progress updater
         let progress_mid = mid.clone();
@@ -1171,124 +1292,133 @@ pub async fn hf_download_shards(
             }
         });
 
-        let configured_shard_size = shared.config.model.shard_size_bytes();
-        match crate::model::huggingface::download_shards(
-            &repo_id,
-            &filename,
-            &dest_dir,
-            &shard_indices,
-            Some(ptx),
-            Some(configured_shard_size),
-        )
-        .await
-        {
-            Ok((_path, info)) => {
-                tracing::info!(
-                    model = %model_id_str,
-                    shards = ?shard_indices,
-                    "HuggingFace shard download complete"
-                );
+        // Download individual shard byte ranges (header already downloaded above)
+        let total_shard_bytes: u64 = shard_indices
+            .iter()
+            .map(|&idx| {
+                let start = (idx as u64) * info.shard_size;
+                let end = ((idx as u64 + 1) * info.shard_size).min(info.total_size);
+                end - start
+            })
+            .sum();
 
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
-                {
-                    entry.downloaded_shards = shard_indices.len() as u32;
-                    entry.log.push("Shard download complete".to_string());
+        let mut cumulative_downloaded: u64 = 0;
+        let mut failed = false;
+
+        for &shard_idx in &shard_indices {
+            if shard_idx >= info.shard_count {
+                tracing::error!(shard_idx, max = info.shard_count - 1, "Shard index out of range");
+                failed = true;
+                break;
+            }
+
+            let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
+            let progress_tx_clone = ptx.clone();
+            let base_downloaded = cumulative_downloaded;
+            let total = total_shard_bytes;
+            let progress_task = tokio::spawn(async move {
+                while let Some(prog) = shard_rx.recv().await {
+                    let _ = progress_tx_clone.try_send(crate::model::huggingface::DownloadProgress {
+                        downloaded_bytes: base_downloaded + prog.downloaded_bytes,
+                        total_bytes: total,
+                    });
                 }
+            });
 
-                // Generate manifest from the downloaded GGUF header
-                let header_path = dest_dir.join("gguf_header.bin");
-                let manifest_result = generate_manifest_from_header(&ManifestGenParams {
-                    header_path: &header_path,
-                    model_id_str: &model_id_str,
-                    filename: &filename,
-                    total_size: info.total_size,
-                    shard_count: info.shard_count,
-                    shard_indices: &shard_indices,
-                    shared: &download_shared,
-                });
+            match crate::model::huggingface::download_shard(
+                &repo_id,
+                &filename,
+                &dest_dir,
+                shard_idx,
+                info.total_size,
+                info.shard_size,
+                Some(shard_tx),
+            )
+            .await
+            {
+                Ok(_shard_path) => {
+                    progress_task.abort();
+                    let start = (shard_idx as u64) * info.shard_size;
+                    let end = ((shard_idx as u64 + 1) * info.shard_size).min(info.total_size);
+                    cumulative_downloaded += end - start;
 
-                match manifest_result {
-                    Ok(()) => {
-                        if let Some(mut entry) =
-                            download_shared.acquisition_progress.get_mut(&download_mid)
-                        {
-                            entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                            entry.verified_shards = shard_indices.len() as u32;
-                            entry
-                                .log
-                                .push("Manifest generated, shards registered".to_string());
-                        }
-                        // Record HF source for auto-manager re-downloads
-                        let hf_source = crate::daemon::HfSource {
-                            repo_id: repo_id.clone(),
-                            filename: filename.clone(),
-                        };
-                        download_shared.hf_sources.insert(
-                            crate::types::ModelId(model_id_str.clone()),
-                            hf_source.clone(),
-                        );
-                        // Persist to sled
-                        let _ =
-                            download_shared
-                                .db
-                                .put_json("hf_sources", &model_id_str, &hf_source);
-                        // Write hf_source.json to disk so it survives DB wipes
-                        let hf_source_path = dest_dir.join("hf_source.json");
-                        let _ = std::fs::write(
-                            &hf_source_path,
-                            serde_json::to_string_pretty(&hf_source).unwrap_or_default(),
-                        );
-
-                        // Broadcast HfSourceGossip + ModelManifest immediately so peers
-                        // can start auto-managing shards without waiting for the 30s health tick.
-                        if let Some(ref ntx) = network_tx {
-                            let gossip_msg = crate::types::SwarmMessage::HfSourceGossip(
-                                crate::types::HfSourceGossip {
-                                    model_id: crate::types::ModelId(model_id_str.clone()),
-                                    repo_id: repo_id.clone(),
-                                    filename: filename.clone(),
-                                    publisher: download_shared.identity.node_id().clone(),
-                                },
-                            );
-                            let _ = ntx
-                                .send(crate::types::NetworkCommand::Broadcast(gossip_msg))
-                                .await;
-
-                            // Also broadcast the manifest
-                            if let Some(manifest) = download_shared
-                                .model_registry
-                                .get_manifest(&crate::types::ModelId(model_id_str.clone()))
-                            {
-                                let _ = ntx
-                                    .send(crate::types::NetworkCommand::Broadcast(
-                                        crate::types::SwarmMessage::ModelManifest(manifest),
-                                    ))
-                                    .await;
-                            }
-                        }
-
-                        tracing::info!(model = %model_id_str, "Shard download + registration complete");
+                    if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                        entry.downloaded_shards += 1;
+                        entry.log.push(format!("Shard {} downloaded", shard_idx));
                     }
-                    Err(e) => {
-                        if let Some(mut entry) =
-                            download_shared.acquisition_progress.get_mut(&download_mid)
-                        {
-                            entry.log.push(format!("Manifest generation failed: {e}"));
-                        }
-                        tracing::error!(error = %e, "Failed to generate manifest from downloaded shards");
+
+                    // Register this shard locally so the node knows it has it
+                    let shard_id = crate::types::ShardId {
+                        model_id: crate::types::ModelId(model_id_str.clone()),
+                        index: shard_idx,
+                    };
+                    let node_id = download_shared.identity.node_id().clone();
+                    download_shared
+                        .model_registry
+                        .record_shard_holder(shard_id.clone(), node_id.clone());
+                    let mut holders = download_shared.shard_registry.entry(shard_id.clone()).or_default();
+                    if !holders.contains(&node_id) {
+                        holders.push(node_id.clone());
+                    }
+                    drop(holders);
+
+                    // Announce this individual shard to the network immediately
+                    // so peers see partial progress and can start acquiring
+                    if let Some(ref ntx) = network_tx {
+                        let ann = crate::types::SwarmMessage::ShardAnnounce(
+                            crate::types::ShardAnnounce {
+                                node_id,
+                                shards: vec![shard_id],
+                                timestamp: chrono::Utc::now(),
+                            },
+                        );
+                        let _ = ntx.send(crate::types::NetworkCommand::Broadcast(ann)).await;
                     }
                 }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "HuggingFace shard download failed");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
-                {
-                    entry.state =
-                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
-                    entry.failed_shards = shard_indices.len() as u32;
-                    entry.log.push(format!("Shard download failed: {}", e));
+                Err(e) => {
+                    progress_task.abort();
+                    tracing::error!(error = %e, shard_idx, "Shard download failed");
+                    if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                        entry.failed_shards += 1;
+                        entry.log.push(format!("Shard {} failed: {}", shard_idx, e));
+                    }
+                    failed = true;
+                    break;
                 }
             }
+        }
+
+        // Drop the progress sender so the updater task exits
+        drop(ptx);
+
+        if failed {
+            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                    reason: "One or more shard downloads failed".to_string(),
+                };
+            }
+        } else {
+            tracing::info!(
+                model = %model_id_str,
+                shards = ?shard_indices,
+                "All shard downloads complete"
+            );
+
+            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                entry.verified_shards = shard_indices.len() as u32;
+                entry.log.push("All shards downloaded and registered".to_string());
+            }
+
+            // Try to load the model if all shards are now available
+            crate::model::auto_manage::check_and_load_model(
+                &download_shared,
+                &crate::types::ModelId(model_id_str.clone()),
+            )
+            .await;
+
+            // Wake auto-manage again to re-evaluate (maybe download more shards)
+            download_shared.auto_manage_notify.notify_one();
         }
     });
 

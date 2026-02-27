@@ -681,6 +681,11 @@ impl AutoShardManager {
 
                         // Check if all shards are now available → auto-load
                         check_and_load_model(&shared, &model_id).await;
+
+                        // Self-wake so we immediately re-evaluate and download
+                        // more shards (libp2p gossipsub doesn't deliver our own
+                        // broadcasts back to us, so we must notify ourselves).
+                        shared.auto_manage_notify.notify_one();
                     }
                     Err(e) => {
                         tracing::warn!(

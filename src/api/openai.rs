@@ -228,11 +228,13 @@ pub async fn chat_completions(
 
     let model_name = model_name.unwrap();
 
-    // In split/shard mode, the local executor only has a partial model.
-    // Route ALL requests (streaming and non-streaming) through the distributed
-    // inference router, which assembles a multi-node pipeline.
-    let is_split_mode = state.shared_state.config.inference.shard_range.is_some();
-    if is_split_mode {
+    // Prefer distributed inference whenever peers also have shards for this model.
+    // This spreads compute load across the network instead of bottlenecking on one
+    // node, even if the local node has all shards.  Only fall through to the local
+    // executor when no peers have any shards (single-node operation).
+    let peers_have_shards = all_shards_available(&state, &req.model)
+        || state.shared_state.config.inference.shard_range.is_some();
+    if peers_have_shards {
         if let Some(router_tx) = &state.router_tx {
             if req.stream {
                 return router_inference_stream(
