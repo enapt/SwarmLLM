@@ -168,3 +168,29 @@
 - [x] `AntiGaming` wired into CreditTransaction handler with periodic cleanup in HealthMonitor
 
 **Acceptance test**: API returns 401 without Bearer token. Different GGUF models use correct EOS tokens. Credit operations persist across restarts. Queue responds instantly to new requests.
+
+---
+
+## Phase 9: Auto-Manage & VRAM Awareness
+
+**Goal**: Nodes automatically acquire missing shards with VRAM-aware scoring, card-based model UI with shard visualization.
+
+- [x] `src/model/auto_manage.rs` — AutoShardManager subsystem (10th Tokio task)
+- [x] Config: `[auto_manage]` section — enabled, max_storage_mb, interval_minutes, max_shards
+- [x] Scoring: `popularity × rarity_bonus × configured_bonus × vram_fitness`
+- [x] Configured shard range priority: 100x bonus for shards in `--shards` range
+- [x] Configured range focus: `candidates.retain()` filters to only configured-range shards when any are missing
+- [x] VRAM awareness: `estimate_model_vram_mb()`, `global_pool_vram_mb()`, `local_vram_mb()` with nvidia-smi fallback
+- [x] VRAM fitness multiplier (0.1–1.0x) in candidate scoring
+- [x] Disk existence checks: shard registration verifies file exists (startup + generate_and_register)
+- [x] `GET /api/admin/shard-storage` returns `pool_vram_mb`, `local_vram_mb`, `estimated_vram_mb` per model
+- [x] Model UI: card-based layout with numbered shard grid (green=local, blue=peer, pulsing=downloading, dashed=missing)
+- [x] Model cards: status badges, meta info, shard legend, download progress bars, VRAM estimates
+- [x] HF model browser: shows VRAM fitness indicator (green/red) against pool capacity
+- [x] Bug fix: shard_registry dedup (prevent unbounded growth on repeated ShardAnnounce)
+- [x] Bug fix: pending_layer_results cleanup on failover error paths (memory leak)
+- [x] Bug fix: /api/admin/api-key excluded from auth exemption (sensitive endpoint)
+- [x] Bug fix: configured_range filter constrained by model_id (multi-model correctness)
+- [x] Bug fix: pool/manager.rs signature byte conversion uses safe error handling (no unwrap)
+
+**Acceptance test**: Node starts with incomplete shards. Auto-manager downloads only the missing configured-range shards. Shard grid shows local/peer/missing/downloading status. VRAM fitness influences model scoring.

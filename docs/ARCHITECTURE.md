@@ -24,6 +24,11 @@ Single Rust binary, three simultaneous functions:
 │  │  RwLock<NodeStats>              — node statistics    │  │
 │  │  SharedExecutor                 — llama.cpp model    │  │
 │  │  DashMap<Blake3Hash, VoteTally> — model votes       │  │
+│  │  DashMap<NodeId, NicknameRecord>— nickname registry │  │
+│  │  DashMap<PoolId, PoolState>     — pool registry     │  │
+│  │  DashMap<String, AcqProgress>   — download progress │  │
+│  │  AtomicBool                     — model_loaded flag  │  │
+│  │  Notify                         — queue drain signal │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -31,20 +36,20 @@ Single Rust binary, three simultaneous functions:
 ## Daemon Task Architecture
 
 ```
-                        ┌──────────────┐
-                        │   daemon.rs  │
-                        │  (bootstrap) │
-                        └──────┬───────┘
-                               │ spawns tokio tasks
-       ┌───────┬───────┬───────┼───────┬───────────┬──────────┬──────────┐
-       ▼       ▼       ▼       ▼       ▼           ▼          ▼          ▼
-┌──────────┐ ┌─────┐ ┌─────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌────────┐
-│ Network  │ │Infer│ │Credit│ │Health│ │ API  │ │Rebal-│ │Acquisi-│ │Message │
-│ Manager  │ │Router│ │Ledger│ │Mon.  │ │Server│ │ancer │ │tion Mgr│ │Dispatch│
-└────┬─────┘ └──┬──┘ └──┬──┘ └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘ └───┬────┘
-     │          │       │       │         │        │          │          │
-     └──────────┴───────┴───────┴─────────┴────────┴──────────┴──────────┘
-                         mpsc channels between tasks
+                           ┌──────────────┐
+                           │   daemon.rs  │
+                           │  (bootstrap) │
+                           └──────┬───────┘
+                                  │ spawns tokio tasks
+  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┐
+  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼
+┌──────┐┌─────┐┌─────┐┌──────┐┌──────┐┌──────┐┌────────┐┌────────┐┌──────┐┌────────┐
+│Netwrk││Infer││Crdit││Health││ API  ││Rebal-││Acquisi-││Message ││ Pool ││AutoShrd│
+│Mangr ││Routr││Ledgr││Mon.  ││Servr ││ancer ││tion Mgr││Dispatc ││Mangr ││Manager │
+└──┬───┘└──┬──┘└──┬──┘└──┬───┘└──┬───┘└──┬───┘└───┬────┘└───┬────┘└──┬───┘└───┬────┘
+   │       │      │      │       │       │         │         │        │        │
+   └───────┴──────┴──────┴───────┴───────┴─────────┴─────────┴────────┴────────┘
+                              mpsc channels between tasks
 ```
 
 ### Channel Layout
@@ -58,10 +63,13 @@ Single Rust binary, three simultaneous functions:
 | HealthMonitor | ShardRebalancer | `rebalance_tx` | RebalanceEvent |
 | ApiServer | InferenceRouter | `router_cmd_tx` | RouterCommand (from HTTP) |
 | ApiServer | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (model download) |
+| ApiServer | PoolManager | `pool_cmd_tx` | PoolCommand (pool CRUD) |
 | AcquisitionManager | NetworkManager | `network_tx` | ShardAnnounce (shard requests) |
 | CreditLedger | NetworkManager | `network_tx` | CreditGossip, CreditTransaction |
+| PoolManager | NetworkManager | `network_tx` | PoolInvitation, PoolState gossip |
+| AutoShardManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (auto downloads) |
 
-The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and ModelVote is processed by the model governance module.
+The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by the model governance module, and pool messages go to PoolManager.
 
 ## Startup Sequence
 
@@ -75,13 +83,14 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
 7.  Build Daemon { config, identity, db }
 8.  Initialize ModelExecutor (load GGUF model if --model provided)
 9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)
-10. Scan local shards → register in model_registry + shard_registry
-11. Create mpsc channels (network, router, rebalance, acquisition)
-12. Spawn all tasks (8 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
-    HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer)
+10. Scan local shards → register in model_registry + shard_registry (with disk existence verification)
+11. Create mpsc channels (network, router, rebalance, acquisition, pool)
+12. Spawn all tasks (10 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
+    HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
+    PoolManager, AutoShardManager)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
-15. Signal graceful shutdown via watch channel
+15. Signal graceful shutdown via watch channel, flush sled database
 ```
 
 ## Networking Stack
@@ -96,7 +105,9 @@ libp2p Swarm
 ├── GossipSub (pub/sub)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
 │   ├── swarm/governance              → ModelVote
-│   └── swarm/health                  → trust summaries
+│   ├── swarm/health                  → trust summaries
+│   ├── swarm/identity                → NicknameRecord (signed)
+│   └── swarm/pools                   → PoolState, PoolInvitation
 │
 ├── request_response
 │   └── Direct inference messages (LayerForward, LayerResult, ShardRequest)
@@ -275,6 +286,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | Tree | Key | Value |
 |---|---|---|
 | config | "config" | Config |
+| config | "api_key" | String (32-byte hex Bearer token) |
 | identity | "keypair" | Encrypted Ed25519 key |
 | credits | "balance" | CreditBalance |
 | credit_txns | {uuid} | CreditTransaction |
@@ -282,31 +294,147 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | shard_meta | {model_id}/{shard_index} | ShardInfo + path |
 | model_meta | {model_id} | ModelManifest |
 | sessions | {session_id} | KV-cache metadata |
+| nicknames | {node_id_hex} | NicknameRecord |
+| identity_prefs | "nickname" | Local nickname preference |
+| pool_state | "pool" | PoolState |
+| pool_forwards | {uuid} | PoolCreditForward |
+
+## Auto-Manage Shards
+
+The **AutoShardManager** (`src/model/auto_manage.rs`) is a background subsystem that
+automatically acquires missing shards based on a VRAM-aware scoring algorithm.
+
+### Scoring Formula
+
+```
+score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
+```
+
+| Factor | Value | Description |
+|--------|-------|-------------|
+| `model_popularity` | 1.0+ | Number of peers hosting any shard of the model |
+| `rarity_bonus` | 1.0–10.0 | Fewer existing holders → higher priority |
+| `configured_bonus` | 1.0 or 100.0 | 100x for shards within `--shards` range |
+| `vram_fitness` | 0.1–1.0 | Model VRAM needs vs. global pool VRAM capacity |
+
+### Key Behaviors
+
+- **Configured range focus**: When any shards in the `--shards` range are missing,
+  `candidates.retain()` filters to ONLY those shards (ignores others)
+- **Disk verification**: Registration checks that shard files actually exist on disk
+  (both at startup and in `generate_and_register_local_manifest`)
+- **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
+- **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
+- **Budget limits**: max_storage_mb, max_shards_per_cycle (2), skips in-progress acquisitions
+- **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`
+
+## E2E Encryption
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Three Encryption Tiers                     │
+│                                                             │
+│  Tier 1: Pairwise Sessions (unicast)                        │
+│    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
+│    Established during libp2p Identify handshake             │
+│                                                             │
+│  Tier 2: Pipeline Sealing (inference prompts)               │
+│    Per-request ephemeral key → sealed prompt/response       │
+│    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
+│                                                             │
+│  Tier 3: Sealed Gossip (broadcasts)                         │
+│    Epoch-based group key derived from network membership    │
+│    1hr rotation cycle                                       │
+│                                                             │
+│  Modules: src/crypto/{session, pipeline_seal, gossip_seal,  │
+│           key_rotation}.rs                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Identity & Nicknames
+
+- Ed25519-signed nickname records with timestamp-wins conflict resolution
+- GossipSub topic `swarm/identity` for network-wide propagation
+- Collision handling: `nickname#ab12` suffix from node ID prefix
+- Sled trees: `"nicknames"`, `"identity_prefs"`
+
+## Device Pools
+
+- Dual-signature invitation/acceptance protocol (owner signs invite, member signs acceptance)
+- Credit forwarding: member inference earnings → `PoolCreditForward` → owner's balance
+- Pool leaderboard aggregates member contributions
+- Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=3
+
+## API Authentication
+
+- Bearer token middleware in `src/api/middleware.rs`
+- Auto-generated 32-byte hex API key on first run, persisted in sled
+- **Protected paths**: `/v1/*` (OpenAI-compatible inference API)
+- **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
+  `/api/admin/*` (except `/api/admin/api-key`), `/api/identity/*`, `/api/pool/*`
+- Frontend dashboard APIs are exempt (already CORS-protected to localhost only)
+
+## Shard-Only Mode
+
+Nodes can operate with just shard files + manifest.json + gguf_header.bin (~6MB),
+without needing the full multi-GB GGUF file:
+
+```
+~/.swarmllm/models/qwen2.5-coder-7b/
+├── manifest.json        # Model metadata + shard layout
+├── gguf_header.bin      # First ~6MB of GGUF (metadata + tensor index)
+├── shard_000.bin        # 512MB shard
+├── shard_001.bin
+└── ...
+```
+
+`ShardReader` in `split.rs` constructs a virtual GGUF from header + shard files,
+allowing candle to parse the full tensor index while only loading assigned layers.
 
 ## HTTP API Routes
 
-### OpenAI-Compatible
+### OpenAI-Compatible (Bearer auth required)
 - `POST /v1/chat/completions` — Chat completions (streaming + non-streaming)
 - `POST /v1/completions` — Text completions
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
 
-### Admin API
+### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
 - `GET     /api/admin/stats` — Node statistics + hardware info
-- `GET     /api/admin/models` — Model list with shard status
+- `GET     /api/admin/models` — Model list with shard status, VRAM estimates, acquisition state
 - `POST    /api/admin/models/:id/add` — Trigger model acquisition
 - `GET     /api/admin/models/:id/status` — Model acquisition progress
 - `GET     /api/admin/peers` — Connected peers with latency/trust
 - `GET     /api/admin/credits` — Credit balance and tier info
+- `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
+- `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
 - `GET     /api/admin/ws` — WebSocket for live updates
 
 ### HuggingFace Integration
 - `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models
-- `POST /api/admin/hf/download` — Start downloading a GGUF model
+- `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
+- `POST /api/admin/hf/download` — Download full GGUF model
+- `POST /api/admin/hf/download-shards` — Download specific shard indices
+
+### Identity API
+- `GET/PUT/DELETE /api/identity/nickname` — Manage local nickname
+- `GET           /api/identity/leaderboard` — Network-wide credit leaderboard
+- `GET           /api/identity/peers` — Peer identity directory
+
+### Pool API
+- `GET  /api/pool/state` — Current pool membership state
+- `POST /api/pool/create` — Create a new device pool
+- `POST /api/pool/invite` — Invite a node to the pool
+- `POST /api/pool/accept` — Accept a pool invitation
+- `POST /api/pool/remove` — Remove a member from the pool
+- `POST /api/pool/leave` — Leave the current pool
+- `GET  /api/pool/invitations` — List pending invitations
+- `GET  /api/pool/leaderboard` — Pool member contribution rankings
 
 ### Utility
-- `POST /api/admin/shutdown` — Gracefully shut down the node
+- `POST /api/admin/shutdown` — Gracefully shut down the node (localhost only)
+
 ### Static
 - `/admin` — Dashboard SPA (single-page app — all routes serve index.html)
 - `/chat` — Chat interface
