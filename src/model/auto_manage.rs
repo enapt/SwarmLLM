@@ -339,16 +339,25 @@ impl AutoShardManager {
         // Sort by score descending (best candidates first)
         candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
-        // If any configured-range shards are missing, focus exclusively on those first.
-        // Don't download extra shards until our assigned range is complete.
-        if configured_range.is_some() {
-            let has_configured_missing = candidates.iter().any(|c| {
-                let (start, end) = configured_range.unwrap();
-                c.shard_index >= start && c.shard_index <= end
-            });
-            if has_configured_missing {
-                let (start, end) = configured_range.unwrap();
-                candidates.retain(|c| c.shard_index >= start && c.shard_index <= end);
+        // If any configured-range shards are missing for the primary model,
+        // focus exclusively on those first. Don't download extra shards until
+        // our assigned range is complete.
+        if let Some((start, end)) = configured_range {
+            // Find the model that matches our configured shard range
+            // (the one we were started with via --model + --shards)
+            let configured_model: Option<ModelId> = registry.models().iter()
+                .find(|m| m.shards.iter().any(|s| s.index >= start && s.index <= end))
+                .map(|m| m.id.clone());
+
+            if let Some(ref mid) = configured_model {
+                let has_configured_missing = candidates.iter().any(|c| {
+                    c.model_id == *mid && c.shard_index >= start && c.shard_index <= end
+                });
+                if has_configured_missing {
+                    candidates.retain(|c| {
+                        c.model_id == *mid && c.shard_index >= start && c.shard_index <= end
+                    });
+                }
             }
         }
 

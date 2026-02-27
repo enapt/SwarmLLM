@@ -590,26 +590,31 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                 };
 
-                let target_peer_bytes = self
+                let target_peer_bytes = match self
                     .shared_state
                     .peer_registry
                     .get(&backup.node_id)
                     .and_then(|p| p.peer_id_bytes.clone())
-                    .ok_or_else(|| {
-                        SwarmError::Network(format!(
+                {
+                    Some(b) => b,
+                    None => {
+                        self.shared_state.pending_layer_results.remove(&request_id);
+                        return Err(SwarmError::Network(format!(
                             "No peer_id_bytes for backup node {}",
                             backup.node_id
-                        ))
-                    })?;
-                self.network_tx
+                        )));
+                    }
+                };
+                if let Err(_) = self.network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
                         forward,
                     })
                     .await
-                    .map_err(|_| {
-                        SwarmError::Network("Failed to send to standby node".to_string())
-                    })?;
+                {
+                    self.shared_state.pending_layer_results.remove(&request_id);
+                    return Err(SwarmError::Network("Failed to send to standby node".to_string()));
+                }
 
                 // Wait for standby response via the oneshot channel
                 Self::wait_for_result(rx).await

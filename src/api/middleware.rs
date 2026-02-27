@@ -52,7 +52,12 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 /// are exempt — they're for the embedded UI and already protected by CORS
 /// (localhost only). The Bearer token protects external-facing endpoints
 /// like the OpenAI-compatible inference API (`/v1/...`).
+/// Note: `/api/admin/api-key` requires auth (returns the raw key).
 fn is_exempt_path(path: &str) -> bool {
+    // api-key endpoint must require auth — it returns the raw key
+    if path == "/api/admin/api-key" {
+        return false;
+    }
     matches!(path, "/" | "/health" | "/admin" | "/chat" | "/setup")
         || path.starts_with("/static/")
         || path.starts_with("/api/admin/")
@@ -124,7 +129,6 @@ mod tests {
         assert!(is_exempt_path("/static/css/style.css"));
         assert!(is_exempt_path("/static/js/app.js"));
         assert!(is_exempt_path("/api/admin/stats"));
-        assert!(is_exempt_path("/api/admin/api-key"));
         assert!(is_exempt_path("/api/admin/config"));
         assert!(is_exempt_path("/api/admin/shard-storage"));
         assert!(is_exempt_path("/api/identity/nickname"));
@@ -135,5 +139,6 @@ mod tests {
     fn non_exempt_paths() {
         assert!(!is_exempt_path("/v1/chat/completions"));
         assert!(!is_exempt_path("/v1/models"));
+        assert!(!is_exempt_path("/api/admin/api-key")); // sensitive — requires auth
     }
 }

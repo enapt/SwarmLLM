@@ -924,10 +924,14 @@ async fn dispatch_network_messages(
                                     peer.last_seen = chrono::Utc::now();
                                 }
                                 for shard_id in &announce.shards {
-                                    shared_state.shard_registry
-                                        .entry(shard_id.clone())
-                                        .or_default()
-                                        .push(announce.node_id.clone());
+                                    {
+                                        let mut holders = shared_state.shard_registry
+                                            .entry(shard_id.clone())
+                                            .or_default();
+                                        if !holders.contains(&announce.node_id) {
+                                            holders.push(announce.node_id.clone());
+                                        }
+                                    }
                                     // Also register in model_registry so auto-acquire
                                     // can see shard coverage across the network
                                     shared_state.model_registry

@@ -486,13 +486,14 @@ impl PoolManager {
             hasher.update(forward.timestamp.to_rfc3339().as_bytes());
             hasher.finalize().as_bytes().to_vec()
         };
-        if forward.member_signature.len() != 64 {
-            tracing::warn!("Credit forward has invalid signature length");
-            return;
-        }
-        let sig = ed25519_dalek::Signature::from_bytes(
-            forward.member_signature.as_slice().try_into().unwrap(),
-        );
+        let sig_bytes: &[u8; 64] = match forward.member_signature.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::warn!("Credit forward has invalid signature length");
+                return;
+            }
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
         if member_key.verify(&payload, &sig).is_err() {
             tracing::warn!(from = %forward.from_node_id, "Invalid member signature on credit forward");
             return;
@@ -554,13 +555,14 @@ impl PoolManager {
             h.update(state.created_at.to_rfc3339().as_bytes());
             h.finalize().as_bytes().to_vec()
         };
-        if state.owner_signature.len() != 64 {
-            tracing::warn!("Pool state gossip has invalid signature length");
-            return;
-        }
-        let sig = ed25519_dalek::Signature::from_bytes(
-            state.owner_signature.as_slice().try_into().unwrap(),
-        );
+        let sig_bytes: &[u8; 64] = match state.owner_signature.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::warn!("Pool state gossip has invalid signature length");
+                return;
+            }
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
         if owner_key.verify(&payload, &sig).is_err() {
             tracing::warn!(pool_id = %state.pool_id, "Invalid owner signature in pool state gossip");
             return;
