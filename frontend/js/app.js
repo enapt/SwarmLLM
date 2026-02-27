@@ -615,6 +615,16 @@ var SwarmLLM = (function() {
           return;
         }
 
+        // Fetch pool VRAM info for fitness display
+        var poolVram = 0;
+        try {
+          var storageResp = await fetch('/api/admin/shard-storage');
+          if (storageResp.ok) {
+            var storageData = await storageResp.json();
+            poolVram = storageData.pool_vram_mb || 0;
+          }
+        } catch (e2) {}
+
         results.innerHTML = '';
         data.forEach(function(model) {
           var card = document.createElement('div');
@@ -622,12 +632,28 @@ var SwarmLLM = (function() {
           var sizeStr = model.size_bytes ? formatBytes(model.size_bytes) : 'Unknown size';
           var downloads = model.downloads ? model.downloads.toLocaleString() + ' downloads' : '';
 
+          // Estimate VRAM requirement (model size * 1.15 overhead)
+          var vramTag = '';
+          if (model.size_bytes && model.size_bytes > 0) {
+            var estVramMb = Math.ceil(model.size_bytes * 1.15 / (1024 * 1024));
+            if (poolVram > 0) {
+              if (estVramMb <= poolVram) {
+                vramTag = '<span style="color:var(--green)" title="Fits in network VRAM pool (' + formatMB(poolVram) + ')">' + formatMB(estVramMb) + ' VRAM</span>';
+              } else {
+                vramTag = '<span style="color:var(--red)" title="Exceeds network VRAM pool (' + formatMB(poolVram) + '). Can still download but won\'t run yet.">' + formatMB(estVramMb) + ' VRAM (exceeds pool)</span>';
+              }
+            } else {
+              vramTag = '<span class="text-muted">' + formatMB(estVramMb) + ' VRAM est.</span>';
+            }
+          }
+
           card.innerHTML = '<div class="hf-model-info">' +
             '<div class="hf-model-name">' + escapeHtml(model.repo_id || model.id) + '</div>' +
             '<div class="hf-model-meta">' +
             (model.filename ? '<span class="mono">' + escapeHtml(model.filename) + '</span>' : '') +
             '<span>' + sizeStr + '</span>' +
             (downloads ? '<span>' + downloads + '</span>' : '') +
+            (vramTag ? '<span>' + vramTag + '</span>' : '') +
             '</div>' +
             '</div>' +
             '<div class="hf-model-actions">' +
@@ -712,16 +738,44 @@ var SwarmLLM = (function() {
         document.getElementById('settings-storage-used').textContent = formatBytes(data.disk_usage_bytes || 0);
         var maxMb = data.auto_manage_max_storage_mb || 0;
         document.getElementById('settings-storage-max').textContent = maxMb > 0 ? formatMB(maxMb) : '50% of disk limit';
+
+        // Show pool VRAM capacity
+        var poolVram = data.pool_vram_mb || 0;
+        var localVram = data.local_vram_mb || 0;
+        var peerCount = data.peer_count || 0;
+        var poolEl = document.getElementById('settings-pool-vram');
+        if (poolEl) {
+          if (poolVram > 0) {
+            poolEl.innerHTML = '<strong>' + formatMB(poolVram) + '</strong> total VRAM' +
+              ' (local: ' + formatMB(localVram) + ', ' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + ')';
+          } else {
+            poolEl.innerHTML = '<span class="text-muted">No GPU detected</span>';
+          }
+        }
+
         var modelsDiv = document.getElementById('settings-storage-models');
         modelsDiv.innerHTML = '';
         if (data.models && data.models.length > 0) {
           data.models.forEach(function(m) {
             if (m.local_shards > 0) {
+              var vramNeeded = m.estimated_vram_mb || 0;
+              var fits = poolVram > 0 && vramNeeded <= poolVram;
+              var tooLarge = poolVram > 0 && vramNeeded > poolVram;
+              var vramTag = '';
+              if (vramNeeded > 0) {
+                if (fits) {
+                  vramTag = ' <span style="color:var(--green)">' + formatMB(vramNeeded) + ' VRAM</span>';
+                } else if (tooLarge) {
+                  vramTag = ' <span style="color:var(--red)" title="Exceeds pool VRAM (' + formatMB(poolVram) + ')">' + formatMB(vramNeeded) + ' VRAM</span>';
+                } else {
+                  vramTag = ' <span class="text-muted">' + formatMB(vramNeeded) + ' VRAM</span>';
+                }
+              }
               var div = document.createElement('div');
               div.className = 'flex-between';
               div.style.cssText = 'padding:2px 0';
               div.innerHTML = '<span>' + escapeHtml(m.name || m.id) + '</span>' +
-                '<span class="text-muted">' + m.local_shards + '/' + m.shard_count + ' shards &middot; ' + formatBytes(m.local_bytes) + '</span>';
+                '<span class="text-muted">' + m.local_shards + '/' + m.shard_count + ' shards &middot; ' + formatBytes(m.local_bytes) + vramTag + '</span>';
               modelsDiv.appendChild(div);
             }
           });

@@ -86,7 +86,16 @@ pub struct SharedState {
     pub model_loaded: std::sync::atomic::AtomicBool,
     /// Anti-gaming system for credit transaction validation.
     pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
+    /// HuggingFace source info for models downloaded from HF, for re-download.
+    pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
     shutdown_tx: watch::Sender<bool>,
+}
+
+/// Tracks the HuggingFace origin of a model for re-downloading shards.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HfSource {
+    pub repo_id: String,
+    pub filename: String,
 }
 
 impl SharedState {
@@ -141,6 +150,22 @@ impl SharedState {
         };
         let gossip_sealer = Arc::new(crate::crypto::GossipSealer::new(&gossip_network_id));
 
+        // Load persisted HF sources from sled
+        let hf_sources = {
+            let map = DashMap::new();
+            if let Ok(tree) = db.tree("hf_sources") {
+                for (key, value) in tree.iter().flatten() {
+                    if let (Ok(model_id_str), Ok(source)) = (
+                        std::str::from_utf8(&key),
+                        serde_json::from_slice::<HfSource>(&value),
+                    ) {
+                        map.insert(crate::types::ModelId(model_id_str.to_string()), source);
+                    }
+                }
+            }
+            map
+        };
+
         let state = Arc::new(Self {
             config,
             identity,
@@ -174,6 +199,7 @@ impl SharedState {
             api_key,
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
+            hf_sources,
             shutdown_tx,
         });
 
@@ -306,6 +332,7 @@ impl Daemon {
                         );
                     }
                     // Register ourselves as holder of our shard range
+                    let shard_store_reg = ShardStore::new(&self.config.node.data_dir);
                     for shard_info in &manifest.shards {
                         let in_range = match shard_range {
                             Some((start, end)) => {
@@ -314,6 +341,18 @@ impl Daemon {
                             None => true,
                         };
                         if in_range {
+                            // Verify the shard file actually exists on disk before registering
+                            let shard_path = shard_store_reg
+                                .shard_path(&model_id, shard_info.index);
+                            if !shard_path.exists() {
+                                tracing::warn!(
+                                    model = %model_id,
+                                    shard = shard_info.index,
+                                    path = %shard_path.display(),
+                                    "Shard file missing on disk — skipping registration"
+                                );
+                                continue;
+                            }
                             let shard_id = crate::types::ShardId {
                                 model_id: model_id.clone(),
                                 index: shard_info.index,
@@ -1380,7 +1419,7 @@ pub struct ShardLoadParams<'a> {
 
 /// Try to load a SplitModel from shard files + gguf_header.bin.
 /// This is the shard-only loading path — no full GGUF needed.
-fn try_load_from_shards(params: &ShardLoadParams<'_>) -> Result<crate::inference::split::SplitModel, SwarmError> {
+pub fn try_load_from_shards(params: &ShardLoadParams<'_>) -> Result<crate::inference::split::SplitModel, SwarmError> {
     let model_dir = params.model_dir;
     let shard_store = params.shard_store;
     let model_id = params.model_id;

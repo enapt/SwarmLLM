@@ -459,6 +459,8 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
 
         total_local_bytes += local_bytes;
 
+        let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(manifest.total_size_bytes);
+
         model_storage.push(serde_json::json!({
             "id": manifest.id.0,
             "name": manifest.name,
@@ -466,12 +468,17 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             "shard_count": manifest.shard_count,
             "local_shards": local_shards,
             "local_bytes": local_bytes,
+            "estimated_vram_mb": estimated_vram,
             "shards": shard_details,
         }));
     }
 
     // Get actual disk usage of models dir
     let disk_usage_bytes = dir_size(&models_dir).unwrap_or(0);
+
+    // Compute global VRAM pool
+    let pool_vram_mb = crate::model::auto_manage::global_pool_vram_mb(&state.shared_state);
+    let local_vram_mb = state.shared_state.gpu_info.as_ref().map(|g| g.vram_total_mb).unwrap_or(0);
 
     Json(serde_json::json!({
         "models": model_storage,
@@ -480,6 +487,9 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
         "auto_manage_enabled": state.config.auto_manage.enabled,
         "auto_manage_max_storage_mb": state.config.auto_manage.max_storage_mb,
         "max_disk_mb": state.config.resources.max_disk_mb,
+        "pool_vram_mb": pool_vram_mb,
+        "local_vram_mb": local_vram_mb,
+        "peer_count": state.shared_state.peer_registry.len(),
     }))
 }
 
@@ -921,6 +931,17 @@ pub async fn hf_download_shards(
                             entry.verified_shards = shard_indices.len() as u32;
                             entry.log.push("Manifest generated, shards registered".to_string());
                         }
+                        // Record HF source for auto-manager re-downloads
+                        let hf_source = crate::daemon::HfSource {
+                            repo_id: repo_id.clone(),
+                            filename: filename.clone(),
+                        };
+                        download_shared.hf_sources.insert(
+                            crate::types::ModelId(model_id_str.clone()),
+                            hf_source.clone(),
+                        );
+                        // Persist to sled
+                        let _ = download_shared.db.put_json("hf_sources", &model_id_str, &hf_source);
                         tracing::info!(model = %model_id_str, "Shard download + registration complete");
                     }
                     Err(e) => {
