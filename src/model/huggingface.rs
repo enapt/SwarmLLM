@@ -474,8 +474,7 @@ pub async fn download_shards(
         }
 
         // Create a per-shard progress sender that maps to cumulative progress
-        let (shard_tx, mut shard_rx) =
-            tokio::sync::mpsc::channel::<DownloadProgress>(64);
+        let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(64);
 
         let progress_tx_clone = progress_tx.clone();
         let base_downloaded = cumulative_downloaded;

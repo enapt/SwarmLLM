@@ -127,9 +127,8 @@ impl InferenceRouter {
         );
         let max_concurrent = shared_state.config.inference.max_concurrent_requests as usize;
         let max_batch_size = (shared_state.config.inference.max_batch_size as usize).max(1);
-        let batch_timeout = std::time::Duration::from_millis(
-            shared_state.config.inference.batch_timeout_ms,
-        );
+        let batch_timeout =
+            std::time::Duration::from_millis(shared_state.config.inference.batch_timeout_ms);
         Self {
             shared_state: shared_state.clone(),
             command_rx,
@@ -366,10 +365,7 @@ impl InferenceRouter {
             }
 
             // Multi-request batch: dispatch as a group
-            tracing::info!(
-                batch_size,
-                "Dispatching inference batch"
-            );
+            tracing::info!(batch_size, "Dispatching inference batch");
 
             // Each request in the batch counts toward active_count
             self.active_count.fetch_add(batch_size, Ordering::Relaxed);
@@ -380,14 +376,7 @@ impl InferenceRouter {
             let scheduler = self.scheduler.clone();
 
             tokio::spawn(async move {
-                execute_batch(
-                    shared_state,
-                    network_tx,
-                    scheduler,
-                    batch,
-                    active_count,
-                )
-                .await;
+                execute_batch(shared_state, network_tx, scheduler, batch, active_count).await;
             });
         }
     }
@@ -478,8 +467,7 @@ async fn finalize_request(
         // - Here we debit the local API consumer for requesting inference
         if is_local_api_request {
             let total_tokens = result.prompt_tokens + result.completion_tokens;
-            let spent =
-                crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
+            let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
             if let Err(e) = crate::credit::ledger::apply_credit_direct(
                 &shared_state.credit_balance,
                 &shared_state.db,
@@ -545,10 +533,7 @@ async fn execute_local_batch(
     let mut executor = shared_state.executor.lock().await;
     let batch_size = batch.len();
 
-    tracing::info!(
-        batch_size,
-        "Executing local inference batch"
-    );
+    tracing::info!(batch_size, "Executing local inference batch");
 
     for queued in batch {
         let request = queued.request;

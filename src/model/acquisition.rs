@@ -671,8 +671,14 @@ impl AcquisitionManager {
                         size_bytes: size,
                         eos_tokens: vec![2],
                         chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
-                        bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
-                        eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
+                        bos_token: gguf_meta
+                            .as_ref()
+                            .map(|m| m.bos_token.clone())
+                            .unwrap_or_default(),
+                        eos_token: gguf_meta
+                            .as_ref()
+                            .map(|m| m.eos_token.clone())
+                            .unwrap_or_default(),
                     };
                     *shared_state.loaded_model_info.write().await = Some(info.clone());
 

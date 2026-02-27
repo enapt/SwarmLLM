@@ -754,10 +754,8 @@ impl IoRead for ShardReader {
                 None => true,
             };
             if need_open {
-                let file =
-                    std::fs::File::open(&self.shards[shard_idx].1).map_err(|e| {
-                        std::io::Error::other(e)
-                    })?;
+                let file = std::fs::File::open(&self.shards[shard_idx].1)
+                    .map_err(std::io::Error::other)?;
                 self.current_shard = Some((shard_idx, file));
             }
 
@@ -1225,11 +1223,13 @@ impl SplitModel {
             "Loading split model from shard files"
         );
 
-        let mut reader = ShardReader::new(&header_path, shard_files, shard_size, tensor_data_offset)?;
+        let mut reader =
+            ShardReader::new(&header_path, shard_files, shard_size, tensor_data_offset)?;
 
         // Use the same GGUF parsing path as load_from_gguf, but reading from ShardReader
-        let ct = gguf_file::Content::read(&mut reader)
-            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF via ShardReader: {e}")))?;
+        let ct = gguf_file::Content::read(&mut reader).map_err(|e| {
+            SwarmError::Internal(format!("Failed to read GGUF via ShardReader: {e}"))
+        })?;
 
         // From here, the exact same logic as load_from_gguf
         let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
@@ -1332,16 +1332,28 @@ impl SplitModel {
 
             let attention_wq = ct
                 .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}"))
+                })?;
             let attention_wk = ct
                 .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}"))
+                })?;
             let attention_wv = ct
                 .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}"))
+                })?;
             let attention_wo = ct
-                .tensor(&mut reader, &format!("{prefix}.attn_output.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_output: {e}")))?;
+                .tensor(
+                    &mut reader,
+                    &format!("{prefix}.attn_output.weight"),
+                    &device,
+                )
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.attn_output: {e}"))
+                })?;
 
             let attention_bq = ct
                 .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
@@ -1364,19 +1376,29 @@ impl SplitModel {
 
             let ffn_gate = ct
                 .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}"))
+                })?;
             let ffn_down = ct
                 .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_down: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.ffn_down: {e}"))
+                })?;
             let ffn_up = ct
                 .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
+                })?;
             let attn_norm = ct
                 .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_norm: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.attn_norm: {e}"))
+                })?;
             let ffn_norm = ct
                 .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_norm: {e}")))?;
+                .map_err(|e| {
+                    SwarmError::Internal(format!("Failed to load {prefix}.ffn_norm: {e}"))
+                })?;
 
             layers.push(LayerWeights {
                 attention_wq: QMatMul::from_qtensor(attention_wq)

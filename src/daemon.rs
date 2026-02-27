@@ -90,13 +90,15 @@ pub struct SharedState {
     /// Set after `executor.load_model()` succeeds; checked by InferenceRouter
     /// to avoid locking the executor mutex just to check readiness.
     pub model_loaded: std::sync::atomic::AtomicBool,
+    /// Runtime toggle for auto-manage (mirrors config.auto_manage.enabled).
+    /// Updated by the admin API so the AutoShardManager can pick up changes without restart.
+    pub auto_manage_enabled: std::sync::atomic::AtomicBool,
     /// Anti-gaming system for credit transaction validation.
     pub anti_gaming: tokio::sync::Mutex<crate::credit::anti_gaming::AntiGaming>,
     /// Streaming token channels for distributed inference SSE.
     /// Keyed by request_id. The pipeline executor registers a sender so that
     /// incoming StreamingToken messages can be forwarded to the SSE stream.
-    pub streaming_token_txs:
-        DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
+    pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     /// HuggingFace source info for models downloaded from HF, for re-download.
     pub hf_sources: DashMap<crate::types::ModelId, HfSource>,
     /// Notify trigger for the AutoShardManager — woken when new HF sources or manifests arrive.
@@ -182,6 +184,7 @@ impl SharedState {
             map
         };
 
+        let auto_manage_enabled = config.auto_manage.enabled;
         let state = Arc::new(Self {
             config,
             identity,
@@ -214,6 +217,7 @@ impl SharedState {
             pool_tx: RwLock::new(None),
             api_key,
             model_loaded: std::sync::atomic::AtomicBool::new(false),
+            auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
             anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
             streaming_token_txs: DashMap::new(),
             hf_sources,
@@ -275,8 +279,14 @@ impl Daemon {
                 size_bytes: executor.model_size_bytes().unwrap_or(0),
                 eos_tokens: vec![2], // Default; updated when split model loads with GGUF metadata
                 chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
-                bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
-                eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
+                bos_token: gguf_meta
+                    .as_ref()
+                    .map(|m| m.bos_token.clone())
+                    .unwrap_or_default(),
+                eos_token: gguf_meta
+                    .as_ref()
+                    .map(|m| m.eos_token.clone())
+                    .unwrap_or_default(),
             })
         } else {
             None
@@ -372,8 +382,8 @@ impl Daemon {
                         };
                         if in_range {
                             // Verify the shard file actually exists on disk before registering
-                            let shard_path = shard_store_reg
-                                .shard_path(&model_id, shard_info.index);
+                            let shard_path =
+                                shard_store_reg.shard_path(&model_id, shard_info.index);
                             if !shard_path.exists() {
                                 tracing::warn!(
                                     model = %model_id,
@@ -454,8 +464,7 @@ impl Daemon {
                         // Ensure GGUF header exists (extract from shard_000 if available)
                         // and load GGUF metadata for split inference.
                         if !shared_state.gguf_meta.contains_key(model_id) {
-                            if let Ok(()) =
-                                crate::inference::split::ensure_gguf_header(&model_dir)
+                            if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir)
                             {
                                 let header_path = model_dir.join("gguf_header.bin");
                                 if let Ok(meta) =
@@ -1399,7 +1408,8 @@ pub fn generate_and_register_local_manifest(
                     }
                     let alt_header = dir.join("gguf_header.bin");
                     if !alt_header.exists() {
-                        if let Err(e) = crate::inference::split::save_gguf_header(path, &alt_header) {
+                        if let Err(e) = crate::inference::split::save_gguf_header(path, &alt_header)
+                        {
                             tracing::warn!(error = %e, "Failed to save GGUF header to shard dir");
                         }
                     }
@@ -1538,7 +1548,9 @@ pub struct ShardLoadParams<'a> {
 
 /// Try to load a SplitModel from shard files + gguf_header.bin.
 /// This is the shard-only loading path — no full GGUF needed.
-pub fn try_load_from_shards(params: &ShardLoadParams<'_>) -> Result<crate::inference::split::SplitModel, SwarmError> {
+pub fn try_load_from_shards(
+    params: &ShardLoadParams<'_>,
+) -> Result<crate::inference::split::SplitModel, SwarmError> {
     let model_dir = params.model_dir;
     let shard_store = params.shard_store;
     let model_id = params.model_id;
@@ -1790,14 +1802,14 @@ async fn handle_layer_forward(
         } else {
             // No full GGUF anywhere — use shard-based loading
             try_load_from_shards(&ShardLoadParams {
-                            model_dir: &model_dir,
-                            shard_store: &shard_store,
-                            model_id: &model_id,
-                            layer_start,
-                            layer_end,
-                            is_first,
-                            is_last,
-                        })
+                model_dir: &model_dir,
+                shard_store: &shard_store,
+                model_id: &model_id,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+            })
         };
 
         match load_result {

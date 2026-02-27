@@ -45,8 +45,8 @@ pub struct NodeConfig {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContributionMode {
-    Minimal,
     #[default]
+    Minimal,
     Moderate,
     Maximum,
 }
@@ -693,7 +693,9 @@ shard_size_mb = 256
 
     #[test]
     fn shard_size_validation_rejects_too_large() {
-        let model_config = ModelConfig { shard_size_mb: 4096 };
+        let model_config = ModelConfig {
+            shard_size_mb: 4096,
+        };
         assert!(model_config.validate().is_err());
     }
 
@@ -703,7 +705,9 @@ shard_size_mb = 256
         assert!(model_config.validate().is_ok());
         let model_config = ModelConfig { shard_size_mb: 64 };
         assert!(model_config.validate().is_ok());
-        let model_config = ModelConfig { shard_size_mb: 2048 };
+        let model_config = ModelConfig {
+            shard_size_mb: 2048,
+        };
         assert!(model_config.validate().is_ok());
     }
 

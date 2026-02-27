@@ -104,15 +104,16 @@ impl AutoShardManager {
 
     /// Run the auto-manage loop. Checks periodically based on config interval,
     /// and also wakes immediately when new HF sources or manifests arrive from peers.
+    /// Always runs (even when disabled) so it can respond to runtime config changes.
     pub async fn run(mut self) {
         let config = &self.shared_state.config.auto_manage;
         if !config.enabled {
-            tracing::info!("AutoShardManager disabled, exiting");
-            return;
+            tracing::info!("AutoShardManager: disabled at startup (enable from dashboard)");
         }
 
         // Use interval_seconds if set, else fall back to interval_minutes * 60
-        let interval_secs = config.interval_seconds
+        let interval_secs = config
+            .interval_seconds
             .unwrap_or_else(|| config.interval_minutes.max(1) as u64 * 60)
             .max(10); // minimum 10 seconds
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -136,8 +137,8 @@ impl AutoShardManager {
                     }
                 }
                 _ = interval.tick() => {
-                    // Re-check enabled — config may have changed at runtime
-                    if self.shared_state.config.auto_manage.enabled {
+                    // Re-check enabled — admin API can toggle at runtime
+                    if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate_and_download().await;
                     }
                 }
@@ -145,8 +146,8 @@ impl AutoShardManager {
                     // Woken by a new HfSourceGossip or ModelManifest — wait briefly
                     // for additional gossip to settle, then evaluate.
                     tokio::time::sleep(Duration::from_secs(2)).await;
-                    tracing::info!("AutoShardManager: triggered by new HF source or manifest");
-                    if self.shared_state.config.auto_manage.enabled {
+                    if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
+                        tracing::info!("AutoShardManager: triggered by new HF source or manifest");
                         self.evaluate_and_download().await;
                     }
                 }
@@ -353,7 +354,8 @@ impl AutoShardManager {
                     hash.as_bytes()[0] as f64 / 2550.0 // 0.0–0.1 range
                 };
 
-                let score = model_popularity * rarity_bonus * configured_bonus * vram_fitness + jitter;
+                let score =
+                    model_popularity * rarity_bonus * configured_bonus * vram_fitness + jitter;
 
                 candidates.push(ShardCandidate {
                     model_id: manifest.id.clone(),
@@ -367,7 +369,11 @@ impl AutoShardManager {
         }
 
         // Sort by score descending (best candidates first)
-        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // If any configured-range shards are missing for the primary model,
         // focus exclusively on those first. Don't download extra shards until
@@ -375,14 +381,16 @@ impl AutoShardManager {
         if let Some((start, end)) = configured_range {
             // Find the model that matches our configured shard range
             // (the one we were started with via --model + --shards)
-            let configured_model: Option<ModelId> = registry.models().iter()
+            let configured_model: Option<ModelId> = registry
+                .models()
+                .iter()
                 .find(|m| m.shards.iter().any(|s| s.index >= start && s.index <= end))
                 .map(|m| m.id.clone());
 
             if let Some(ref mid) = configured_model {
-                let has_configured_missing = candidates.iter().any(|c| {
-                    c.model_id == *mid && c.shard_index >= start && c.shard_index <= end
-                });
+                let has_configured_missing = candidates
+                    .iter()
+                    .any(|c| c.model_id == *mid && c.shard_index >= start && c.shard_index <= end);
                 if has_configured_missing {
                     candidates.retain(|c| {
                         c.model_id == *mid && c.shard_index >= start && c.shard_index <= end
@@ -495,12 +503,15 @@ impl AutoShardManager {
         if let Some(hf_source) = self.shared_state.hf_sources.get(&candidate.model_id) {
             // Create progress entry with per-shard tracking for the specific shard
             let mut shard_progress = std::collections::HashMap::new();
-            shard_progress.insert(candidate.shard_index, crate::model::acquisition::ShardProgress {
-                index: candidate.shard_index,
-                total_bytes: candidate.shard_size_bytes,
-                downloaded_bytes: 0,
-                state: crate::model::acquisition::ShardState::Downloading,
-            });
+            shard_progress.insert(
+                candidate.shard_index,
+                crate::model::acquisition::ShardProgress {
+                    index: candidate.shard_index,
+                    total_bytes: candidate.shard_size_bytes,
+                    downloaded_bytes: 0,
+                    state: crate::model::acquisition::ShardState::Downloading,
+                },
+            );
             let status = crate::model::acquisition::AcquisitionStatus {
                 model_id: mid.clone(),
                 state: crate::model::acquisition::AcquisitionState::Downloading,
@@ -541,9 +552,8 @@ impl AutoShardManager {
 
             // Spawn the download so we don't block the evaluation loop
             tokio::spawn(async move {
-                let (ptx, mut prx) = tokio::sync::mpsc::channel::<
-                    crate::model::huggingface::DownloadProgress,
-                >(32);
+                let (ptx, mut prx) =
+                    tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(32);
 
                 // Progress updater — updates per-shard progress + broadcasts to network
                 let prog_mid = model_id.clone();
@@ -554,10 +564,11 @@ impl AutoShardManager {
                     while let Some(prog) = prx.recv().await {
                         let pct = if prog.total_bytes > 0 {
                             (prog.downloaded_bytes as f64 / prog.total_bytes as f64 * 100.0) as u32
-                        } else { 0 };
+                        } else {
+                            0
+                        };
 
-                        if let Some(mut entry) =
-                            prog_shared.acquisition_progress.get_mut(&prog_mid)
+                        if let Some(mut entry) = prog_shared.acquisition_progress.get_mut(&prog_mid)
                         {
                             entry.downloaded_bytes = prog.downloaded_bytes;
                             entry.total_bytes = prog.total_bytes;
@@ -582,9 +593,8 @@ impl AutoShardManager {
                                     state: "downloading".to_string(),
                                 },
                             );
-                            let _ = prog_net_tx.try_send(
-                                crate::types::NetworkCommand::Broadcast(progress_msg),
-                            );
+                            let _ = prog_net_tx
+                                .try_send(crate::types::NetworkCommand::Broadcast(progress_msg));
                         }
                     }
                 });
@@ -617,19 +627,15 @@ impl AutoShardManager {
                             .model_registry
                             .record_shard_holder(sid.clone(), node_id.clone());
                         {
-                            let mut holders =
-                                shared.shard_registry.entry(sid.clone()).or_default();
+                            let mut holders = shared.shard_registry.entry(sid.clone()).or_default();
                             if !holders.contains(&node_id) {
                                 holders.push(node_id.clone());
                             }
                         }
 
                         // Update progress
-                        if let Some(mut entry) =
-                            shared.acquisition_progress.get_mut(&model_id)
-                        {
-                            entry.state =
-                                crate::model::acquisition::AcquisitionState::Complete;
+                        if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
+                            entry.state = crate::model::acquisition::AcquisitionState::Complete;
                             entry.downloaded_shards = 1;
                             entry.verified_shards = 1;
                             if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
@@ -648,9 +654,8 @@ impl AutoShardManager {
                                 state: "complete".to_string(),
                             },
                         );
-                        let _ = net_tx.try_send(
-                            crate::types::NetworkCommand::Broadcast(complete_msg),
-                        );
+                        let _ =
+                            net_tx.try_send(crate::types::NetworkCommand::Broadcast(complete_msg));
 
                         // Check if all shards are now available → auto-load
                         check_and_load_model(&shared, &model_id).await;
@@ -662,13 +667,9 @@ impl AutoShardManager {
                             error = %e,
                             "AutoShardManager: HF shard download failed"
                         );
-                        if let Some(mut entry) =
-                            shared.acquisition_progress.get_mut(&model_id)
-                        {
+                        if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
                             entry.state =
-                                crate::model::acquisition::AcquisitionState::Failed {
-                                    reason: e,
-                                };
+                                crate::model::acquisition::AcquisitionState::Failed { reason: e };
                             entry.log.push("HF download failed".into());
                         }
                     }
@@ -718,12 +719,7 @@ impl AutoShardManager {
     /// This allows seeding HF source info by placing a small JSON file:
     /// `{ "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf" }`
     fn discover_hf_sources(&self) {
-        let models_dir = self
-            .shared_state
-            .config
-            .node
-            .data_dir
-            .join("models");
+        let models_dir = self.shared_state.config.node.data_dir.join("models");
 
         if !models_dir.is_dir() {
             return;
@@ -745,21 +741,20 @@ impl AutoShardManager {
                 let hf_path = entry.path().join("hf_source.json");
                 if hf_path.exists() {
                     if let Ok(data) = std::fs::read_to_string(&hf_path) {
-                        if let Ok(source) =
-                            serde_json::from_str::<crate::daemon::HfSource>(&data)
-                        {
+                        if let Ok(source) = serde_json::from_str::<crate::daemon::HfSource>(&data) {
                             tracing::info!(
                                 model = %model_id_str,
                                 repo = %source.repo_id,
                                 "Discovered HF source from hf_source.json"
                             );
-                            self.shared_state.hf_sources.insert(mid.clone(), source.clone());
+                            self.shared_state
+                                .hf_sources
+                                .insert(mid.clone(), source.clone());
                             // Persist to sled
-                            let _ = self.shared_state.db.put_json(
-                                "hf_sources",
-                                &model_id_str,
-                                &source,
-                            );
+                            let _ =
+                                self.shared_state
+                                    .db
+                                    .put_json("hf_sources", &model_id_str, &source);
                         }
                     }
                 }
@@ -784,12 +779,7 @@ async fn check_and_load_model(
     };
 
     let local_node_id = shared.identity.node_id().clone();
-    let model_dir = shared
-        .config
-        .node
-        .data_dir
-        .join("models")
-        .join(&model_id.0);
+    let model_dir = shared.config.node.data_dir.join("models").join(&model_id.0);
 
     // Find which shards we actually have on disk
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
@@ -801,7 +791,10 @@ async fn check_and_load_model(
                 model_id: model_id.clone(),
                 index: s.index,
             };
-            let in_registry = shared.model_registry.shard_holders(&sid).contains(&local_node_id);
+            let in_registry = shared
+                .model_registry
+                .shard_holders(&sid)
+                .contains(&local_node_id);
             let on_disk = shard_store.shard_path(model_id, s.index).exists();
             in_registry && on_disk
         })
@@ -877,15 +870,14 @@ async fn check_and_load_model(
             );
 
             // Update loaded_model_info so the API knows the model is available
-            *shared.loaded_model_info.write().await =
-                Some(crate::daemon::LoadedModelInfo {
-                    name: manifest.name.clone(),
-                    size_bytes: manifest.total_size_bytes,
-                    eos_tokens,
-                    chat_template,
-                    bos_token,
-                    eos_token,
-                });
+            *shared.loaded_model_info.write().await = Some(crate::daemon::LoadedModelInfo {
+                name: manifest.name.clone(),
+                size_bytes: manifest.total_size_bytes,
+                eos_tokens,
+                chat_template,
+                bos_token,
+                eos_token,
+            });
 
             tracing::info!(
                 model = %model_id,

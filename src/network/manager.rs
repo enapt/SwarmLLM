@@ -193,8 +193,13 @@ impl NetworkManager {
                 // Try to unseal gossip (encrypted), then try plaintext JSON decode.
                 // This handles key mismatches between bootstrap and joining nodes
                 // as well as pre-encryption upgrade nodes.
-                let decoded = self.shared_state.gossip_sealer.open(&message.data)
-                    .and_then(|plaintext| protocol::decode_message(&plaintext).map_err(|e| e.into()))
+                let decoded = self
+                    .shared_state
+                    .gossip_sealer
+                    .open(&message.data)
+                    .and_then(|plaintext| {
+                        protocol::decode_message(&plaintext).map_err(|e| e.into())
+                    })
                     .or_else(|_| protocol::decode_message(&message.data));
 
                 match decoded {

@@ -663,7 +663,8 @@ impl PipelineExecutor {
                         )));
                     }
                 };
-                if self.network_tx
+                if self
+                    .network_tx
                     .send(NetworkCommand::SendTensor {
                         target_peer_bytes,
                         forward,
@@ -672,7 +673,9 @@ impl PipelineExecutor {
                     .is_err()
                 {
                     self.shared_state.pending_layer_results.remove(&request_id);
-                    return Err(SwarmError::Network("Failed to send to standby node".to_string()));
+                    return Err(SwarmError::Network(
+                        "Failed to send to standby node".to_string(),
+                    ));
                 }
 
                 // Wait for standby response via the oneshot channel

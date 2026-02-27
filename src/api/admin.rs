@@ -21,7 +21,10 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Count only shards held locally (not all tracked shards network-wide)
     let hosted_shards = {
         let local_nid = state.shared_state.identity.node_id();
-        state.shared_state.model_registry.all_shard_entries()
+        state
+            .shared_state
+            .model_registry
+            .all_shard_entries()
             .iter()
             .filter(|(_, holders)| holders.contains(local_nid))
             .count()
@@ -65,7 +68,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "max_disk_mb": config.resources.max_disk_mb,
         "listen_port": config.node.listen_port,
         "session_timeout_seconds": config.inference.session_timeout_seconds,
-        "auto_manage_shards": config.auto_manage.enabled,
+        "auto_manage_shards": state.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
         "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
         "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
@@ -103,12 +106,22 @@ pub async fn update_config(
     }
     if let Some(auto_manage) = body.auto_manage_shards {
         config.auto_manage.enabled = auto_manage;
+        // Update the runtime atomic so AutoShardManager picks it up immediately
+        state
+            .shared_state
+            .auto_manage_enabled
+            .store(auto_manage, std::sync::atomic::Ordering::Release);
+        if auto_manage {
+            // Wake the AutoShardManager so it evaluates promptly
+            state.shared_state.auto_manage_notify.notify_one();
+        }
     }
     if let Some(max_storage) = body.auto_manage_max_storage_mb {
         config.auto_manage.max_storage_mb = max_storage;
     }
     if let Some(shard_size) = body.shard_size_mb {
-        if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB).contains(&shard_size)
+        if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
+            .contains(&shard_size)
         {
             return Err(ApiError(crate::error::SwarmError::Config(format!(
                 "shard_size_mb must be between {} and {} (got {})",
@@ -289,13 +302,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     _ => "unknown",
                 }
             });
-        let acq_progress = state.shared_state.acquisition_progress.get(&m.id).map(|entry| {
-            serde_json::json!({
-                "downloaded_bytes": entry.downloaded_bytes,
-                "total_bytes": entry.total_bytes,
-                "downloaded_shards": entry.downloaded_shards,
-            })
-        });
+        let acq_progress = state
+            .shared_state
+            .acquisition_progress
+            .get(&m.id)
+            .map(|entry| {
+                serde_json::json!({
+                    "downloaded_bytes": entry.downloaded_bytes,
+                    "total_bytes": entry.total_bytes,
+                    "downloaded_shards": entry.downloaded_shards,
+                })
+            });
 
         // Compute global shard availability (any holder, not just local)
         let global_available = (0..m.shard_count)
@@ -304,7 +321,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     model_id: m.id.clone(),
                     index: idx,
                 };
-                !state.shared_state.model_registry.shard_holders(&shard_id).is_empty()
+                !state
+                    .shared_state
+                    .model_registry
+                    .shard_holders(&shard_id)
+                    .is_empty()
             })
             .count();
 
@@ -546,13 +567,17 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             });
 
             // Also check peer download states (from gossip)
-            let peer_downloading = state.shared_state.peer_shard_downloads.get(&shard_id)
-                .map(|entry| {
-                    let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
+            let peer_downloading =
+                state
+                    .shared_state
+                    .peer_shard_downloads
+                    .get(&shard_id)
+                    .map(|entry| {
+                        let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
                         serde_json::json!({ "node_id": format!("{}", nid), "progress_pct": pct })
                     }).collect();
-                    peers
-                });
+                        peers
+                    });
 
             let mut shard_json = serde_json::json!({
                 "index": shard.index,
@@ -561,12 +586,17 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 "holders": holders.len(),
             });
             if let Some(dl) = download_state {
-                shard_json.as_object_mut().unwrap().insert("download".to_string(), dl);
+                shard_json
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("download".to_string(), dl);
             }
             if let Some(peers_dl) = peer_downloading {
                 if !peers_dl.is_empty() {
-                    shard_json.as_object_mut().unwrap().insert("peer_downloads".to_string(),
-                        serde_json::json!(peers_dl));
+                    shard_json
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("peer_downloads".to_string(), serde_json::json!(peers_dl));
                     any_downloading = true;
                 }
             }
@@ -575,7 +605,8 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
 
         total_local_bytes += local_bytes;
 
-        let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(manifest.total_size_bytes);
+        let estimated_vram =
+            crate::model::auto_manage::estimate_model_vram_mb(manifest.total_size_bytes);
 
         // Determine model readiness
         let all_shards_available = shard_details.iter().all(|s| {
@@ -787,9 +818,17 @@ pub async fn hf_download(
                                 name: model_name.clone(),
                                 size_bytes: size,
                                 eos_tokens: vec![2],
-                                chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
-                                bos_token: gguf_meta.as_ref().map(|m| m.bos_token.clone()).unwrap_or_default(),
-                                eos_token: gguf_meta.as_ref().map(|m| m.eos_token.clone()).unwrap_or_default(),
+                                chat_template: gguf_meta
+                                    .as_ref()
+                                    .and_then(|m| m.chat_template.clone()),
+                                bos_token: gguf_meta
+                                    .as_ref()
+                                    .map(|m| m.bos_token.clone())
+                                    .unwrap_or_default(),
+                                eos_token: gguf_meta
+                                    .as_ref()
+                                    .map(|m| m.eos_token.clone())
+                                    .unwrap_or_default(),
                             });
                         download_shared
                             .model_loaded
@@ -898,7 +937,11 @@ pub async fn hf_probe(
     }
 
     let shard_size = state.config.model.shard_size_bytes();
-    match crate::model::huggingface::probe_gguf_file_with_shard_size(&repo_id, &filename, shard_size).await {
+    match crate::model::huggingface::probe_gguf_file_with_shard_size(
+        &repo_id, &filename, shard_size,
+    )
+    .await
+    {
         Ok(info) => Ok(Json(serde_json::json!({
             "status": "ok",
             "total_size": info.total_size,
@@ -1011,8 +1054,7 @@ pub async fn hf_download_shards(
             let mut last_bytes = 0u64;
             let mut last_time = std::time::Instant::now();
             while let Some(prog) = prx.recv().await {
-                if let Some(mut entry) =
-                    progress_shared.acquisition_progress.get_mut(&progress_mid)
+                if let Some(mut entry) = progress_shared.acquisition_progress.get_mut(&progress_mid)
                 {
                     entry.downloaded_bytes = prog.downloaded_bytes;
                     entry.total_bytes = prog.total_bytes;
@@ -1046,8 +1088,7 @@ pub async fn hf_download_shards(
                     "HuggingFace shard download complete"
                 );
 
-                if let Some(mut entry) =
-                    download_shared.acquisition_progress.get_mut(&download_mid)
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
                 {
                     entry.downloaded_shards = shard_indices.len() as u32;
                     entry.log.push("Shard download complete".to_string());
@@ -1070,10 +1111,11 @@ pub async fn hf_download_shards(
                         if let Some(mut entry) =
                             download_shared.acquisition_progress.get_mut(&download_mid)
                         {
-                            entry.state =
-                                crate::model::acquisition::AcquisitionState::Complete;
+                            entry.state = crate::model::acquisition::AcquisitionState::Complete;
                             entry.verified_shards = shard_indices.len() as u32;
-                            entry.log.push("Manifest generated, shards registered".to_string());
+                            entry
+                                .log
+                                .push("Manifest generated, shards registered".to_string());
                         }
                         // Record HF source for auto-manager re-downloads
                         let hf_source = crate::daemon::HfSource {
@@ -1085,7 +1127,10 @@ pub async fn hf_download_shards(
                             hf_source.clone(),
                         );
                         // Persist to sled
-                        let _ = download_shared.db.put_json("hf_sources", &model_id_str, &hf_source);
+                        let _ =
+                            download_shared
+                                .db
+                                .put_json("hf_sources", &model_id_str, &hf_source);
 
                         // Broadcast HfSourceGossip + ModelManifest immediately so peers
                         // can start auto-managing shards without waiting for the 30s health tick.
@@ -1098,15 +1143,20 @@ pub async fn hf_download_shards(
                                     publisher: download_shared.identity.node_id().clone(),
                                 },
                             );
-                            let _ = ntx.send(crate::types::NetworkCommand::Broadcast(gossip_msg)).await;
+                            let _ = ntx
+                                .send(crate::types::NetworkCommand::Broadcast(gossip_msg))
+                                .await;
 
                             // Also broadcast the manifest
-                            if let Some(manifest) = download_shared.model_registry.get_manifest(
-                                &crate::types::ModelId(model_id_str.clone()),
-                            ) {
-                                let _ = ntx.send(crate::types::NetworkCommand::Broadcast(
-                                    crate::types::SwarmMessage::ModelManifest(manifest),
-                                )).await;
+                            if let Some(manifest) = download_shared
+                                .model_registry
+                                .get_manifest(&crate::types::ModelId(model_id_str.clone()))
+                            {
+                                let _ = ntx
+                                    .send(crate::types::NetworkCommand::Broadcast(
+                                        crate::types::SwarmMessage::ModelManifest(manifest),
+                                    ))
+                                    .await;
                             }
                         }
 
@@ -1124,8 +1174,7 @@ pub async fn hf_download_shards(
             }
             Err(e) => {
                 tracing::error!(error = %e, "HuggingFace shard download failed");
-                if let Some(mut entry) =
-                    download_shared.acquisition_progress.get_mut(&download_mid)
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
                 {
                     entry.state =
                         crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
@@ -1254,7 +1303,10 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;
 
     // Register manifest in the model registry
-    params.shared.model_registry.register_manifest(manifest.clone());
+    params
+        .shared
+        .model_registry
+        .register_manifest(manifest.clone());
 
     // Store GGUF metadata
     params.shared.gguf_meta.insert(model_id.clone(), meta);

@@ -60,7 +60,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/hf/search", get(admin::hf_search))
         .route("/api/admin/hf/probe", get(admin::hf_probe))
         .route("/api/admin/hf/download", post(admin::hf_download))
-        .route("/api/admin/hf/download-shards", post(admin::hf_download_shards))
+        .route(
+            "/api/admin/hf/download-shards",
+            post(admin::hf_download_shards),
+        )
         // Network map (heatmap data)
         .route("/api/admin/network-map", get(admin::network_map))
         // Shutdown

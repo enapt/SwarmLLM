@@ -45,16 +45,10 @@ struct Cli {
     #[arg(long, global = true)]
     bootstrap: Vec<String>,
 
-    /// Only claim specific shards for split inference (e.g. "0-4" or "5-8").
-    /// When set, the node registers itself as holder of only these shards
-    /// instead of all shards, enabling distributed inference across nodes.
-    #[arg(long, global = true)]
+    /// [Advanced/Dev] Only claim specific shards for split inference (e.g. "0-4" or "5-8").
+    /// Not needed for normal use — the node auto-detects all local shards.
+    #[arg(long, global = true, hide = true)]
     shards: Option<String>,
-
-    /// Enable auto-manage: automatically download and distribute model shards
-    /// across the network based on rarity scoring.
-    #[arg(long, global = true)]
-    auto_manage: bool,
 }
 
 #[derive(Subcommand)]
@@ -111,13 +105,7 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
         cli.bootstrap,
     )?;
 
-    // Apply --auto-manage flag
-    if cli.auto_manage {
-        config.auto_manage.enabled = true;
-        tracing::info!("Auto-manage enabled via --auto-manage flag");
-    }
-
-    // Parse --shards range (e.g. "0-4" → (0, 4))
+    // Parse --shards range (e.g. "0-4" → (0, 4)) — hidden dev flag
     if let Some(ref shard_str) = cli.shards {
         if let Some((start, end)) = shard_str.split_once('-') {
             if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {

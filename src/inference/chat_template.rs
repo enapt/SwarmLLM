@@ -62,7 +62,10 @@ enum Token {
 impl Token {
     fn tag_content(&self) -> Option<&str> {
         match self {
-            Token::Tag(s) | Token::TagTrimLeft(s) | Token::TagTrimRight(s) | Token::TagTrimBoth(s) => Some(s.trim()),
+            Token::Tag(s)
+            | Token::TagTrimLeft(s)
+            | Token::TagTrimRight(s)
+            | Token::TagTrimBoth(s) => Some(s.trim()),
             _ => None,
         }
     }
@@ -215,7 +218,11 @@ fn eval_block(
                     i = end + 1;
                 } else if content.starts_with("if ") {
                     i = eval_if_chain(ctx, i, output, state)?;
-                } else if content == "endfor" || content == "endif" || content.starts_with("elif ") || content == "else" {
+                } else if content == "endfor"
+                    || content == "endif"
+                    || content.starts_with("elif ")
+                    || content == "else"
+                {
                     return Some(i);
                 } else {
                     i += 1;
@@ -340,12 +347,7 @@ fn find_endfor(tokens: &[Token], start: usize) -> Option<usize> {
 // ── Expression evaluator ──
 
 /// Evaluate a `{{ ... }}` expression and return the string value.
-fn eval_expr(
-    expr: &str,
-    state: &EvalState,
-    bos_token: &str,
-    eos_token: &str,
-) -> Option<String> {
+fn eval_expr(expr: &str, state: &EvalState, bos_token: &str, eos_token: &str) -> Option<String> {
     let expr = expr.trim();
 
     // Handle string concatenation with +
@@ -371,13 +373,20 @@ fn eval_expr(
     }
 
     // Message field access: message['role'], message['content'], message.role, message.content
-    if let EvalState::InLoop { messages, current_index } = state {
+    if let EvalState::InLoop {
+        messages,
+        current_index,
+    } = state
+    {
         let msg = messages.get(*current_index)?;
 
         if expr == "message['role']" || expr == "message[\"role\"]" || expr == "message.role" {
             return Some(role_str(&msg.role).to_string());
         }
-        if expr == "message['content']" || expr == "message[\"content\"]" || expr == "message.content" {
+        if expr == "message['content']"
+            || expr == "message[\"content\"]"
+            || expr == "message.content"
+        {
             return Some(msg.content.clone());
         }
     }
@@ -399,7 +408,11 @@ fn eval_condition(condition: &str, state: &EvalState, add_generation_prompt: boo
     }
 
     // loop.last / not loop.last / loop.first
-    if let EvalState::InLoop { messages, current_index } = state {
+    if let EvalState::InLoop {
+        messages,
+        current_index,
+    } = state
+    {
         if condition == "not loop.last" {
             return *current_index < messages.len().saturating_sub(1);
         }
@@ -531,7 +544,10 @@ pub fn chatml_fallback(messages: &[ChatMessage]) -> String {
     let mut prompt = String::new();
     for msg in messages {
         let role = role_str(&msg.role);
-        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, msg.content));
+        prompt.push_str(&format!(
+            "<|im_start|>{}\n{}<|im_end|>\n",
+            role, msg.content
+        ));
     }
     prompt.push_str("<|im_start|>assistant\n");
     prompt
@@ -599,9 +615,10 @@ mod tests {
         // Simplified Llama 3 / Llama 3.1 style template
         let template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}";
         let msgs = test_messages();
-        let result = apply_chat_template(template, &msgs, "<|begin_of_text|>", "<|eot_id|>", true)
-            .unwrap();
-        assert!(result.contains("<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|>"));
+        let result =
+            apply_chat_template(template, &msgs, "<|begin_of_text|>", "<|eot_id|>", true).unwrap();
+        assert!(result
+            .contains("<|start_header_id|>system<|end_header_id|>\n\nYou are helpful.<|eot_id|>"));
         assert!(result.contains("<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>"));
         assert!(result.ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"));
     }
@@ -610,12 +627,10 @@ mod tests {
     fn mistral_style_template() {
         // Simplified Mistral Instruct template
         let template = "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token }}{% endif %}{% endfor %}";
-        let msgs = vec![
-            ChatMessage {
-                role: Role::User,
-                content: "Hello".into(),
-            },
-        ];
+        let msgs = vec![ChatMessage {
+            role: Role::User,
+            content: "Hello".into(),
+        }];
         let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
         assert_eq!(result, "<s>[INST] Hello [/INST]");
     }

@@ -232,7 +232,11 @@ pub async fn chat_completions(
     let (tmpl, bos, eos) = {
         let info = state.shared_state.loaded_model_info.read().await;
         match info.as_ref() {
-            Some(i) => (i.chat_template.clone(), i.bos_token.clone(), i.eos_token.clone()),
+            Some(i) => (
+                i.chat_template.clone(),
+                i.bos_token.clone(),
+                i.eos_token.clone(),
+            ),
             None => (None, String::new(), String::new()),
         }
     };
