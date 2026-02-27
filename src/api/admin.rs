@@ -634,6 +634,378 @@ pub struct HfDownloadRequest {
     pub mode: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HfShardDownloadRequest {
+    pub repo_id: String,
+    pub filename: String,
+    /// Which shard indices to download (e.g. [0,1,2] for the first 3 shards).
+    /// If empty, the server will probe the file and return shard info without downloading.
+    #[serde(default)]
+    pub shards: Vec<u32>,
+}
+
+/// GET /api/admin/hf/probe — Probe a remote GGUF file to get shard info.
+pub async fn hf_probe(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HfProbeParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repo_id = params.repo_id.unwrap_or_default();
+    let filename = params.filename.unwrap_or_default();
+
+    if repo_id.is_empty() || filename.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": "repo_id and filename query params are required",
+        })));
+    }
+
+    match crate::model::huggingface::probe_gguf_file(&repo_id, &filename).await {
+        Ok(info) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "total_size": info.total_size,
+            "header_size": info.header_size,
+            "shard_count": info.shard_count,
+            "shard_size": info.shard_size,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": e,
+        }))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HfProbeParams {
+    pub repo_id: Option<String>,
+    pub filename: Option<String>,
+}
+
+/// POST /api/admin/hf/download-shards — Download specific shards of a GGUF from HuggingFace.
+///
+/// Instead of downloading the full multi-GB GGUF file, this downloads only the
+/// GGUF header (~6MB) plus the requested shard byte ranges (~512MB each).
+/// After download, it generates a manifest and registers the shards.
+pub async fn hf_download_shards(
+    State(state): State<AppState>,
+    Json(body): Json<HfShardDownloadRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let repo_id = body.repo_id;
+    let filename = body.filename;
+    let shard_indices = body.shards;
+
+    if repo_id.is_empty() || filename.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": "repo_id and filename are required",
+        })));
+    }
+
+    if shard_indices.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "status": "error",
+            "message": "shards array is required (e.g. [0, 1, 2])",
+        })));
+    }
+
+    // Build a filesystem-safe model directory name
+    let safe_name = filename
+        .trim_end_matches(".gguf")
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let dest_dir = state.config.node.data_dir.join("models").join(&safe_name);
+
+    tracing::info!(
+        repo = %repo_id,
+        file = %filename,
+        shards = ?shard_indices,
+        dest = %dest_dir.display(),
+        "Starting HuggingFace shard download"
+    );
+
+    let model_id_str = safe_name.clone();
+    let mid = crate::types::ModelId(model_id_str.clone());
+
+    // Create initial acquisition progress entry
+    let status = crate::model::acquisition::AcquisitionStatus {
+        model_id: mid.clone(),
+        state: crate::model::acquisition::AcquisitionState::Downloading,
+        total_shards: shard_indices.len() as u32,
+        downloaded_shards: 0,
+        verified_shards: 0,
+        failed_shards: 0,
+        total_bytes: 0,
+        downloaded_bytes: 0,
+        shard_progress: std::collections::HashMap::new(),
+        speed_bytes_per_sec: 0,
+        started_at: Some(chrono::Utc::now()),
+        log: vec![format!(
+            "Downloading shards {:?} of {} from HuggingFace...",
+            shard_indices, filename
+        )],
+    };
+    let shared = state.shared_state.clone();
+    shared.acquisition_progress.insert(mid.clone(), status);
+
+    // Clone values needed both in the spawn and the response
+    let response_model_id = model_id_str.clone();
+    let response_shards = shard_indices.clone();
+
+    tokio::spawn(async move {
+        let (ptx, mut prx) =
+            tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
+
+        let download_mid = mid.clone();
+        let download_shared = shared.clone();
+
+        // Spawn progress updater
+        let progress_mid = mid.clone();
+        let progress_shared = shared.clone();
+        tokio::spawn(async move {
+            let mut last_bytes = 0u64;
+            let mut last_time = std::time::Instant::now();
+            while let Some(prog) = prx.recv().await {
+                if let Some(mut entry) =
+                    progress_shared.acquisition_progress.get_mut(&progress_mid)
+                {
+                    entry.downloaded_bytes = prog.downloaded_bytes;
+                    entry.total_bytes = prog.total_bytes;
+                    let now = std::time::Instant::now();
+                    let dt = now.duration_since(last_time).as_secs_f64();
+                    if dt > 0.5 {
+                        let speed = ((prog.downloaded_bytes - last_bytes) as f64 / dt) as u64;
+                        entry.speed_bytes_per_sec = speed;
+                        last_bytes = prog.downloaded_bytes;
+                        last_time = now;
+                    }
+                }
+            }
+        });
+
+        match crate::model::huggingface::download_shards(
+            &repo_id,
+            &filename,
+            &dest_dir,
+            &shard_indices,
+            Some(ptx),
+        )
+        .await
+        {
+            Ok((_path, info)) => {
+                tracing::info!(
+                    model = %model_id_str,
+                    shards = ?shard_indices,
+                    "HuggingFace shard download complete"
+                );
+
+                if let Some(mut entry) =
+                    download_shared.acquisition_progress.get_mut(&download_mid)
+                {
+                    entry.downloaded_shards = shard_indices.len() as u32;
+                    entry.log.push("Shard download complete".to_string());
+                }
+
+                // Generate manifest from the downloaded GGUF header
+                let header_path = dest_dir.join("gguf_header.bin");
+                let manifest_result = generate_manifest_from_header(&ManifestGenParams {
+                    header_path: &header_path,
+                    model_id_str: &model_id_str,
+                    filename: &filename,
+                    total_size: info.total_size,
+                    shard_count: info.shard_count,
+                    shard_indices: &shard_indices,
+                    shared: &download_shared,
+                });
+
+                match manifest_result {
+                    Ok(()) => {
+                        if let Some(mut entry) =
+                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        {
+                            entry.state =
+                                crate::model::acquisition::AcquisitionState::Complete;
+                            entry.verified_shards = shard_indices.len() as u32;
+                            entry.log.push("Manifest generated, shards registered".to_string());
+                        }
+                        tracing::info!(model = %model_id_str, "Shard download + registration complete");
+                    }
+                    Err(e) => {
+                        if let Some(mut entry) =
+                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        {
+                            entry.log.push(format!("Manifest generation failed: {e}"));
+                        }
+                        tracing::error!(error = %e, "Failed to generate manifest from downloaded shards");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "HuggingFace shard download failed");
+                if let Some(mut entry) =
+                    download_shared.acquisition_progress.get_mut(&download_mid)
+                {
+                    entry.state =
+                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                    entry.failed_shards = shard_indices.len() as u32;
+                    entry.log.push(format!("Shard download failed: {}", e));
+                }
+            }
+        }
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "started",
+        "model_id": response_model_id,
+        "shards": response_shards,
+    })))
+}
+
+struct ManifestGenParams<'a> {
+    header_path: &'a std::path::Path,
+    model_id_str: &'a str,
+    filename: &'a str,
+    total_size: u64,
+    shard_count: u32,
+    shard_indices: &'a [u32],
+    shared: &'a std::sync::Arc<crate::daemon::SharedState>,
+}
+
+/// Generate a manifest from a downloaded GGUF header and register shards.
+fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), String> {
+    use crate::inference::split::GgufTensorMeta;
+
+    let header_path = params.header_path;
+    let total_size = params.total_size;
+    let shard_count = params.shard_count;
+
+    // Parse model metadata from the GGUF header
+    let meta = GgufTensorMeta::from_gguf_file(header_path)
+        .map_err(|e| format!("Failed to parse GGUF header: {e}"))?;
+
+    let model_id = crate::types::ModelId(params.model_id_str.to_string());
+    let num_layers = meta.block_count as u32;
+
+    // Build a friendly model name from the GGUF metadata or filename
+    let model_name = meta
+        .model_name
+        .clone()
+        .unwrap_or_else(|| params.filename.trim_end_matches(".gguf").to_string());
+
+    // Detect architecture from the GGUF header
+    let architecture = {
+        let header_bytes = std::fs::read(header_path).map_err(|e| e.to_string())?;
+        let mut cursor = std::io::Cursor::new(&header_bytes);
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)
+            .map_err(|e| format!("Failed to re-parse GGUF header: {e}"))?;
+        let arch_str = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "llama".to_string());
+        match arch_str.as_str() {
+            "qwen2" => crate::types::ModelArchitecture::Qwen2,
+            "mistral" => crate::types::ModelArchitecture::Mistral,
+            "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
+            _ => crate::types::ModelArchitecture::Llama,
+        }
+    };
+
+    const SHARD_SIZE: u64 = 512 * 1024 * 1024;
+
+    // Build shard infos with layer ranges
+    let layers_per_shard = num_layers / shard_count;
+    let remainder = num_layers % shard_count;
+    let mut shards = Vec::with_capacity(shard_count as usize);
+    let mut layer_cursor = 0u32;
+
+    let model_dir = header_path.parent().unwrap();
+
+    for idx in 0..shard_count {
+        let extra = if idx < remainder { 1 } else { 0 };
+        let shard_layers = layers_per_shard + extra;
+        let shard_start = (idx as u64) * SHARD_SIZE;
+        let shard_end = ((idx as u64 + 1) * SHARD_SIZE).min(total_size);
+        let shard_size = shard_end - shard_start;
+
+        // Compute BLAKE3 hash for shards we actually have
+        let hash = {
+            let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
+            if shard_path.exists() {
+                let data = std::fs::read(&shard_path).map_err(|e| e.to_string())?;
+                *blake3::hash(&data).as_bytes()
+            } else {
+                [0u8; 32] // Unknown hash for shards we don't have
+            }
+        };
+
+        shards.push(crate::types::ShardInfo {
+            index: idx,
+            layer_range: (layer_cursor, layer_cursor + shard_layers),
+            size_bytes: shard_size,
+            hash,
+        });
+        layer_cursor += shard_layers;
+    }
+
+    let node_id = params.shared.identity.node_id().clone();
+
+    let mut manifest = crate::types::ModelManifest {
+        id: model_id.clone(),
+        name: model_name,
+        architecture,
+        num_layers,
+        num_params_billions: 0.0,
+        quantization: crate::types::Quantization::Q4KM,
+        total_size_bytes: total_size,
+        shard_count,
+        shards,
+        tokenizer_hash: [0u8; 32],
+        manifest_hash: [0u8; 32],
+        publisher: node_id.clone(),
+        publish_date: chrono::Utc::now(),
+        license: "Unknown".to_string(),
+    };
+    manifest.manifest_hash = manifest.compute_hash();
+
+    // Save manifest to disk
+    manifest.save_to_dir(model_dir).map_err(|e| e.to_string())?;
+
+    // Register manifest in the model registry
+    params.shared.model_registry.register_manifest(manifest.clone());
+
+    // Store GGUF metadata
+    params.shared.gguf_meta.insert(model_id.clone(), meta);
+
+    // Register this node as holder of the downloaded shards
+    for &shard_idx in params.shard_indices {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_idx,
+        };
+        params
+            .shared
+            .model_registry
+            .record_shard_holder(shard_id.clone(), node_id.clone());
+        let mut holders = params.shared.shard_registry.entry(shard_id).or_default();
+        if !holders.contains(&node_id) {
+            holders.push(node_id.clone());
+        }
+    }
+
+    tracing::info!(
+        model = %model_id,
+        shards_registered = params.shard_indices.len(),
+        num_layers,
+        "Generated manifest and registered shards from HF download"
+    );
+
+    Ok(())
+}
+
 // ---- Hardware detection ----
 
 fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Value {

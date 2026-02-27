@@ -381,6 +381,28 @@ impl Daemon {
                                 );
                             }
                         }
+
+                        // Ensure GGUF header exists (extract from shard_000 if available)
+                        // and load GGUF metadata for split inference.
+                        if !shared_state.gguf_meta.contains_key(model_id) {
+                            if let Ok(()) =
+                                crate::inference::split::ensure_gguf_header(&model_dir)
+                            {
+                                let header_path = model_dir.join("gguf_header.bin");
+                                if let Ok(meta) =
+                                    crate::inference::split::GgufTensorMeta::from_gguf_file(
+                                        &header_path,
+                                    )
+                                {
+                                    tracing::info!(
+                                        model = %model_id,
+                                        layers = meta.block_count,
+                                        "Loaded GGUF metadata from shard header"
+                                    );
+                                    shared_state.gguf_meta.insert(model_id.clone(), meta);
+                                }
+                            }
+                        }
                     }
 
                     let shard_id = ShardId {
@@ -1043,7 +1065,17 @@ pub fn generate_and_register_local_manifest(
     info: &LoadedModelInfo,
     model_path: &std::path::Path,
 ) {
-    let model_id = crate::types::ModelId(info.name.clone());
+    // Use a filesystem-safe slug for the model ID.
+    // Lowercase, replace spaces/special chars with hyphens, collapse runs.
+    let slug = info
+        .name
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let model_id = crate::types::ModelId(slug);
 
     // Check if we already have a manifest for this model (e.g. persisted from a previous run).
     // Even if the manifest exists, we must still register ourselves as shard holders.
@@ -1172,10 +1204,52 @@ pub fn generate_and_register_local_manifest(
         }
     }
 
+    // Save GGUF header for shard-only operation.
+    // This allows nodes without the full model file to use ShardReader.
+    let header_path = model_dir.join("gguf_header.bin");
+    if !header_path.exists() {
+        if let Err(e) = crate::inference::split::save_gguf_header(path, &header_path) {
+            tracing::warn!(error = %e, "Failed to save GGUF header (shard-only mode won't work)");
+        }
+    }
+
     // Save manifest to disk
     if let Err(e) = manifest.save_to_dir(&model_dir) {
         tracing::warn!(error = %e, "Failed to save generated manifest");
         return;
+    }
+
+    // If shards live in a differently-named directory (e.g. from HF download),
+    // also save manifest + header there so shard scanning finds them.
+    let shard0_in_model_dir = model_dir.join("shard_000.bin");
+    if !shard0_in_model_dir.exists() {
+        // Shards might be in a different directory — scan for them
+        let models_dir = shard_store.models_dir();
+        if let Ok(entries) = std::fs::read_dir(&models_dir) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if dir.is_dir() && dir != model_dir && dir.join("shard_000.bin").exists() {
+                    // Found shards in a different directory — save manifest + header there too
+                    if !dir.join("manifest.json").exists() {
+                        if let Err(e) = manifest.save_to_dir(&dir) {
+                            tracing::warn!(error = %e, path = %dir.display(), "Failed to save manifest to shard dir");
+                        } else {
+                            tracing::info!(
+                                model = %model_id,
+                                shard_dir = %dir.display(),
+                                "Also saved manifest to shard directory"
+                            );
+                        }
+                    }
+                    let alt_header = dir.join("gguf_header.bin");
+                    if !alt_header.exists() {
+                        if let Err(e) = crate::inference::split::save_gguf_header(path, &alt_header) {
+                            tracing::warn!(error = %e, "Failed to save GGUF header to shard dir");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Register in model_registry
@@ -1283,6 +1357,87 @@ fn compute_shard_hashes(
 /// Handle an incoming LayerForward from a remote peer: run the local split model
 /// segment and send back a LayerResult with either logits (last segment) or
 /// hidden-state activations (intermediate segment).
+/// Parameters for shard-based model loading.
+pub struct ShardLoadParams<'a> {
+    pub model_dir: &'a std::path::Path,
+    pub shard_store: &'a ShardStore,
+    pub model_id: &'a crate::types::ModelId,
+    pub layer_start: usize,
+    pub layer_end: usize,
+    pub is_first: bool,
+    pub is_last: bool,
+}
+
+/// Try to load a SplitModel from shard files + gguf_header.bin.
+/// This is the shard-only loading path — no full GGUF needed.
+fn try_load_from_shards(params: &ShardLoadParams<'_>) -> Result<crate::inference::split::SplitModel, SwarmError> {
+    let model_dir = params.model_dir;
+    let shard_store = params.shard_store;
+    let model_id = params.model_id;
+    let layer_start = params.layer_start;
+    let layer_end = params.layer_end;
+    let is_first = params.is_first;
+    let is_last = params.is_last;
+    // Ensure GGUF header exists (extract from shard_000 if needed)
+    if let Err(e) = crate::inference::split::ensure_gguf_header(model_dir) {
+        return Err(SwarmError::Internal(format!(
+            "Cannot load from shards: {e}"
+        )));
+    }
+
+    // Collect available shard files for this model
+    let mut shard_files: Vec<(u32, std::path::PathBuf)> = Vec::new();
+    for i in 0u32..256 {
+        let path = shard_store.shard_path(model_id, i);
+        if path.exists() {
+            shard_files.push((i, path));
+        } else if i > 0 && shard_files.is_empty() {
+            // Keep looking — shards might not start at 0
+            continue;
+        } else if !shard_files.is_empty() {
+            // Found a gap after some shards — stop
+            break;
+        }
+    }
+
+    if shard_files.is_empty() {
+        return Err(SwarmError::Internal(format!(
+            "No shard files found for model {} in {}",
+            model_id,
+            model_dir.display()
+        )));
+    }
+
+    // Determine shard size from the first non-last shard (last shard may be smaller)
+    let shard_size = if shard_files.len() > 1 {
+        std::fs::metadata(&shard_files[0].1)
+            .map(|m| m.len())
+            .unwrap_or(512 * 1024 * 1024)
+    } else {
+        std::fs::metadata(&shard_files[0].1)
+            .map(|m| m.len())
+            .unwrap_or(512 * 1024 * 1024)
+    };
+
+    tracing::info!(
+        model = %model_id,
+        shards = shard_files.len(),
+        shard_size_mb = shard_size / (1024 * 1024),
+        layers = format!("[{layer_start}..{layer_end})"),
+        "Loading split model from shard files (no full GGUF)"
+    );
+
+    crate::inference::split::SplitModel::load_from_shards(
+        model_dir,
+        shard_files,
+        shard_size,
+        layer_start,
+        layer_end,
+        is_first,
+        is_last,
+    )
+}
+
 async fn handle_layer_forward(
     shared_state: Arc<SharedState>,
     network_tx: mpsc::Sender<NetworkCommand>,
@@ -1421,46 +1576,63 @@ async fn handle_layer_forward(
     if !shared_state.split_models.contains_key(&model_id) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
         let model_dir = shard_store.models_dir().join(&model_id.0);
+
+        // Try loading the split model from available sources, in priority order:
+        // 1. Reconstructed model.gguf (all shards concatenated)
+        // 2. Original GGUF via source_path
+        // 3. Shard files + gguf_header.bin (no full GGUF needed)
         let gguf_path = model_dir.join("model.gguf");
-        let gguf_path = if gguf_path.exists() {
-            gguf_path
-        } else {
-            let source_path_file = model_dir.join("source_path");
-            if source_path_file.exists() {
-                match std::fs::read_to_string(&source_path_file) {
-                    Ok(p) => std::path::PathBuf::from(p.trim()),
-                    Err(e) => {
-                        send_error_result(
-                            &network_tx,
-                            &sender_peer_bytes,
-                            request_id,
-                            &format!("IO: {e}"),
-                        )
-                        .await;
-                        return;
+        let source_path_file = model_dir.join("source_path");
+
+        let load_result = if gguf_path.exists() {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{layer_start}..{layer_end})"),
+                path = %gguf_path.display(),
+                "Loading split model from reconstructed GGUF"
+            );
+            SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
+        } else if source_path_file.exists() {
+            match std::fs::read_to_string(&source_path_file) {
+                Ok(p) => {
+                    let p = std::path::PathBuf::from(p.trim());
+                    if p.exists() {
+                        tracing::info!(
+                            model = %model_id,
+                            layers = format!("[{layer_start}..{layer_end})"),
+                            path = %p.display(),
+                            "Loading split model from source GGUF"
+                        );
+                        SplitModel::load_from_gguf(&p, layer_start, layer_end, is_first, is_last)
+                    } else {
+                        // source_path exists but file is gone — try shard-based loading
+                        try_load_from_shards(&ShardLoadParams {
+                            model_dir: &model_dir,
+                            shard_store: &shard_store,
+                            model_id: &model_id,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
+                        })
                     }
                 }
-            } else {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    "No GGUF file found",
-                )
-                .await;
-                return;
+                Err(e) => Err(SwarmError::Io(e)),
             }
+        } else {
+            // No full GGUF anywhere — use shard-based loading
+            try_load_from_shards(&ShardLoadParams {
+                            model_dir: &model_dir,
+                            shard_store: &shard_store,
+                            model_id: &model_id,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
+                        })
         };
 
-        tracing::info!(
-            model = %model_id,
-            layers = format!("[{layer_start}..{layer_end})"),
-            total = total_layers,
-            path = %gguf_path.display(),
-            "Loading split model for LayerForward handling"
-        );
-
-        match SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last) {
+        match load_result {
             Ok(model) => {
                 shared_state.split_models.insert(
                     model_id.clone(),

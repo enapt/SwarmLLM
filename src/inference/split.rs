@@ -6,7 +6,8 @@
 //! GGUF weights.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::{Read as IoRead, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
@@ -565,6 +566,231 @@ impl GgufTensorMeta {
     }
 }
 
+// ── GGUF Header Extraction ──
+
+/// Save the raw GGUF header (metadata + tensor info table) to a file.
+/// The header is everything from byte 0 up to (but not including) `tensor_data_offset`.
+/// This allows nodes without shard_000 to reconstruct the GGUF parsing context.
+///
+/// The source can be a full GGUF file, OR shard_000.bin (which is the first
+/// 512MB of the GGUF and always contains the complete header, since headers
+/// are typically only a few MB).
+pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Result<(), SwarmError> {
+    let mut file = std::fs::File::open(gguf_or_shard0_path).map_err(SwarmError::Io)?;
+    let ct = gguf_file::Content::read(&mut file)
+        .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+
+    let header_size = ct.tensor_data_offset as usize;
+    let mut header_buf = vec![0u8; header_size];
+    file.seek(SeekFrom::Start(0)).map_err(SwarmError::Io)?;
+    file.read_exact(&mut header_buf).map_err(SwarmError::Io)?;
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(SwarmError::Io)?;
+    }
+    std::fs::write(output_path, &header_buf).map_err(SwarmError::Io)?;
+
+    tracing::info!(
+        header_bytes = header_size,
+        path = %output_path.display(),
+        "Saved GGUF header for shard-only operation"
+    );
+    Ok(())
+}
+
+/// Try to extract the GGUF header from shard_000.bin if it exists in the model directory.
+/// This enables shard-only operation without needing the full GGUF or a `source_path`.
+pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
+    let header_path = model_dir.join("gguf_header.bin");
+    if header_path.exists() {
+        return Ok(());
+    }
+
+    // shard_000.bin contains the GGUF header (first ~6MB of the file)
+    let shard0_path = model_dir.join("shard_000.bin");
+    if shard0_path.exists() {
+        tracing::info!(
+            model_dir = %model_dir.display(),
+            "Extracting GGUF header from shard_000.bin"
+        );
+        return save_gguf_header(&shard0_path, &header_path);
+    }
+
+    // Try source_path as a fallback
+    let source_path_file = model_dir.join("source_path");
+    if source_path_file.exists() {
+        if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
+            let gguf_path = Path::new(path_str.trim());
+            if gguf_path.exists() {
+                tracing::info!(
+                    gguf = %gguf_path.display(),
+                    "Extracting GGUF header from source path"
+                );
+                return save_gguf_header(gguf_path, &header_path);
+            }
+        }
+    }
+
+    Err(SwarmError::Internal(format!(
+        "Cannot create gguf_header.bin: no shard_000.bin or source GGUF found in {}",
+        model_dir.display()
+    )))
+}
+
+// ── ShardReader: virtual GGUF file from header + shard files ──
+
+/// A reader that presents a GGUF header + shard files as a single contiguous
+/// seekable file. This allows candle's `Content::read()` and `ct.tensor()`
+/// to work transparently over shard files without reconstructing the full GGUF.
+pub struct ShardReader {
+    /// Raw GGUF header bytes (metadata + tensor info table).
+    header: Vec<u8>,
+    /// Shard files ordered by index. Each entry: (start_byte_in_gguf, file_path).
+    shards: Vec<(u64, PathBuf)>,
+    /// Total size of the virtual file (header + all tensor data).
+    total_size: u64,
+    /// Current seek position in the virtual file.
+    position: u64,
+    /// Currently open shard file handle (cached to avoid repeated opens).
+    current_shard: Option<(usize, std::fs::File)>,
+}
+
+impl ShardReader {
+    /// Create a ShardReader from a GGUF header file and ordered shard files.
+    ///
+    /// `shard_files` must be in order by shard index. Each shard represents a
+    /// contiguous byte range of the original GGUF, starting right after the header
+    /// (i.e., at `tensor_data_offset`). Gaps are allowed — shards that this node
+    /// doesn't hold can be omitted; reads into missing ranges will fail.
+    pub fn new(
+        header_path: &Path,
+        shard_files: Vec<(u32, PathBuf)>,
+        shard_size: u64,
+        tensor_data_offset: u64,
+    ) -> Result<Self, SwarmError> {
+        let header = std::fs::read(header_path).map_err(SwarmError::Io)?;
+        if (header.len() as u64) < tensor_data_offset {
+            // Pad header to tensor_data_offset (alignment padding)
+            let mut padded = header;
+            padded.resize(tensor_data_offset as usize, 0);
+            return Self::new_from_header(padded, shard_files, shard_size, tensor_data_offset);
+        }
+        Self::new_from_header(header, shard_files, shard_size, tensor_data_offset)
+    }
+
+    fn new_from_header(
+        header: Vec<u8>,
+        shard_files: Vec<(u32, PathBuf)>,
+        shard_size: u64,
+        tensor_data_offset: u64,
+    ) -> Result<Self, SwarmError> {
+        let mut shards = Vec::new();
+        for (idx, path) in &shard_files {
+            let start_byte = tensor_data_offset + (*idx as u64) * shard_size;
+            shards.push((start_byte, path.clone()));
+        }
+
+        // Compute total size from last shard
+        let total_size = if let Some((_, last_path)) = shard_files.last() {
+            let last_idx = shard_files.last().unwrap().0;
+            let last_size = std::fs::metadata(last_path).map_err(SwarmError::Io)?.len();
+            tensor_data_offset + (last_idx as u64) * shard_size + last_size
+        } else {
+            header.len() as u64
+        };
+
+        Ok(Self {
+            header,
+            shards,
+            total_size,
+            position: 0,
+            current_shard: None,
+        })
+    }
+
+    /// Find which shard (if any) contains the given virtual file position.
+    fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
+        for (i, (start, path)) in self.shards.iter().enumerate() {
+            if pos >= *start {
+                let shard_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                if pos < *start + shard_len {
+                    return Some((i, pos - *start));
+                }
+            }
+        }
+        None
+    }
+}
+
+impl IoRead for ShardReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.position >= self.total_size {
+            return Ok(0);
+        }
+
+        let header_len = self.header.len() as u64;
+
+        // Reading from header region
+        if self.position < header_len {
+            let start = self.position as usize;
+            let available = (header_len - self.position) as usize;
+            let to_read = buf.len().min(available);
+            buf[..to_read].copy_from_slice(&self.header[start..start + to_read]);
+            self.position += to_read as u64;
+            return Ok(to_read);
+        }
+
+        // Reading from shard region
+        if let Some((shard_idx, offset_in_shard)) = self.find_shard(self.position) {
+            // Open the shard file if not already open
+            let need_open = match &self.current_shard {
+                Some((idx, _)) => *idx != shard_idx,
+                None => true,
+            };
+            if need_open {
+                let file =
+                    std::fs::File::open(&self.shards[shard_idx].1).map_err(|e| {
+                        std::io::Error::other(e)
+                    })?;
+                self.current_shard = Some((shard_idx, file));
+            }
+
+            let (_, ref mut file) = self.current_shard.as_mut().unwrap();
+            file.seek(SeekFrom::Start(offset_in_shard))?;
+            let n = file.read(buf)?;
+            self.position += n as u64;
+            Ok(n)
+        } else {
+            // Position is in a gap (missing shard)
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "ShardReader: position {} is in a missing shard region",
+                    self.position
+                ),
+            ))
+        }
+    }
+}
+
+impl Seek for ShardReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::End(p) => self.total_size as i64 + p,
+            SeekFrom::Current(p) => self.position as i64 + p,
+        };
+        if new_pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Seek before start",
+            ));
+        }
+        self.position = new_pos as u64;
+        Ok(self.position)
+    }
+}
+
 fn precompute_freqs_cis(
     head_dim: usize,
     freq_base: f32,
@@ -894,6 +1120,335 @@ impl SplitModel {
             rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
             context_length,
             "Loaded split model segment"
+        );
+
+        Ok(Self {
+            tok_embeddings,
+            layers,
+            norm,
+            output,
+            masks: HashMap::new(),
+            layer_start,
+            layer_end,
+            total_layers: block_count,
+            hidden_dim: embedding_length,
+            device,
+            vocabulary,
+            tokenizer,
+            eos_tokens,
+        })
+    }
+
+    /// Load a partial model from local shard files + GGUF header.
+    ///
+    /// This is the shard-only alternative to `load_from_gguf`. Instead of needing
+    /// the full GGUF file, it reads from:
+    /// - `gguf_header.bin`: the raw GGUF header (metadata + tensor info table)
+    /// - `shard_NNN.bin` files: byte-range slices of the original GGUF's tensor data
+    ///
+    /// The `ShardReader` presents these as a virtual contiguous file so candle's
+    /// GGUF parser works unchanged.
+    pub fn load_from_shards(
+        model_dir: &Path,
+        shard_files: Vec<(u32, PathBuf)>,
+        shard_size: u64,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+    ) -> Result<Self, SwarmError> {
+        let header_path = model_dir.join("gguf_header.bin");
+        if !header_path.exists() {
+            return Err(SwarmError::Internal(format!(
+                "GGUF header not found at {}. The originating node must generate this file.",
+                header_path.display()
+            )));
+        }
+
+        // Read header to get tensor_data_offset
+        let header_bytes = std::fs::read(&header_path).map_err(SwarmError::Io)?;
+        // Parse tensor_data_offset from a temporary read of the header
+        let tensor_data_offset = {
+            let mut cursor = std::io::Cursor::new(&header_bytes);
+            let ct = gguf_file::Content::read(&mut cursor)
+                .map_err(|e| SwarmError::Internal(format!("Failed to parse GGUF header: {e}")))?;
+            ct.tensor_data_offset
+        };
+
+        tracing::info!(
+            model_dir = %model_dir.display(),
+            header_bytes = header_bytes.len(),
+            tensor_data_offset,
+            shards = shard_files.len(),
+            layers = format!("[{layer_start}..{layer_end})"),
+            "Loading split model from shard files"
+        );
+
+        let mut reader = ShardReader::new(&header_path, shard_files, shard_size, tensor_data_offset)?;
+
+        // Use the same GGUF parsing path as load_from_gguf, but reading from ShardReader
+        let ct = gguf_file::Content::read(&mut reader)
+            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF via ShardReader: {e}")))?;
+
+        // From here, the exact same logic as load_from_gguf
+        let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+        if device.is_cuda() {
+            tracing::info!("Split model using CUDA GPU");
+        } else {
+            tracing::info!("Split model using CPU (no CUDA available)");
+        }
+
+        let arch = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "llama".to_string());
+
+        let md_get = |suffix: &str| {
+            let key = format!("{arch}.{suffix}");
+            ct.metadata
+                .get(&key)
+                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
+        };
+
+        let head_count = md_get("attention.head_count")?
+            .to_u32()
+            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
+        let head_count_kv = md_get("attention.head_count_kv")?
+            .to_u32()
+            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
+        let block_count = md_get("block_count")?
+            .to_u32()
+            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
+        let embedding_length = md_get("embedding_length")?
+            .to_u32()
+            .map_err(|e| SwarmError::Internal(e.to_string()))?
+            as usize;
+        let rope_dim = md_get("rope.dimension_count")
+            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .unwrap_or((embedding_length / head_count) as u32) as usize;
+        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
+            .to_f32()
+            .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
+        let rope_freq_base = ct
+            .metadata
+            .get(&format!("{arch}.rope.freq_base"))
+            .and_then(|v| v.to_f32().ok())
+            .unwrap_or(10000f32);
+        let context_length = md_get("context_length")
+            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
+            .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
+
+        let use_rope_contiguous = matches!(arch.as_str(), "qwen2" | "qwen3");
+
+        let head_dim = embedding_length / head_count;
+        let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
+            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
+            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+        let tok_embeddings = if is_first {
+            let tok_embd = ct
+                .tensor(&mut reader, "token_embd.weight", &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?;
+            let tok_embd = tok_embd
+                .dequantize(&device)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+            Some(Embedding::new(tok_embd, embedding_length))
+        } else {
+            None
+        };
+
+        let norm = if is_last {
+            let norm_tensor = ct
+                .tensor(&mut reader, "output_norm.weight", &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load output_norm: {e}")))?;
+            Some(
+                RmsNorm::from_qtensor(norm_tensor, rms_norm_eps)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        let output = if is_last {
+            let output_tensor = ct
+                .tensor(&mut reader, "output.weight", &device)
+                .or_else(|_| ct.tensor(&mut reader, "token_embd.weight", &device))
+                .map_err(|e| SwarmError::Internal(format!("Failed to load output head: {e}")))?;
+            Some(
+                QMatMul::from_qtensor(output_tensor)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        let layer_end = layer_end.min(block_count);
+        let mut layers = Vec::with_capacity(layer_end - layer_start);
+        for layer_idx in layer_start..layer_end {
+            let prefix = format!("blk.{layer_idx}");
+
+            let attention_wq = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}")))?;
+            let attention_wk = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}")))?;
+            let attention_wv = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}")))?;
+            let attention_wo = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_output.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_output: {e}")))?;
+
+            let attention_bq = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_q.bias dequant: {e}")))?;
+            let attention_bk = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_k.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_k.bias dequant: {e}")))?;
+            let attention_bv = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_v.bias"), &device)
+                .ok()
+                .map(|t| t.dequantize(&device))
+                .transpose()
+                .map_err(|e| SwarmError::Internal(format!("attn_v.bias dequant: {e}")))?;
+
+            let ffn_gate = ct
+                .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}")))?;
+            let ffn_down = ct
+                .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_down: {e}")))?;
+            let ffn_up = ct
+                .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
+            let attn_norm = ct
+                .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_norm: {e}")))?;
+            let ffn_norm = ct
+                .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
+                .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_norm: {e}")))?;
+
+            layers.push(LayerWeights {
+                attention_wq: QMatMul::from_qtensor(attention_wq)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_wk: QMatMul::from_qtensor(attention_wk)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_wv: QMatMul::from_qtensor(attention_wv)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_wo: QMatMul::from_qtensor(attention_wo)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_bq,
+                attention_bk,
+                attention_bv,
+                attention_norm: RmsNorm::from_qtensor(attn_norm, rms_norm_eps)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                mlp: Mlp {
+                    ffn_gate: QMatMul::from_qtensor(ffn_gate)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    ffn_down: QMatMul::from_qtensor(ffn_down)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    ffn_up: QMatMul::from_qtensor(ffn_up)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                },
+                ffn_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                n_head: head_count,
+                n_kv_head: head_count_kv,
+                head_dim,
+                cos: cos.clone(),
+                sin: sin.clone(),
+                neg_inf: neg_inf.clone(),
+                kv_cache: None,
+                use_rope_contiguous,
+            });
+        }
+
+        let vocabulary = ct
+            .metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect::<Vec<String>>()
+            });
+
+        let tokenizer = if let Some(ref vocab) = vocabulary {
+            let merges_raw = ct
+                .metadata
+                .get("tokenizer.ggml.merges")
+                .and_then(|v| v.to_vec().ok())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.to_string().ok().cloned())
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default();
+            let pre_type = ct
+                .metadata
+                .get("tokenizer.ggml.pre")
+                .and_then(|v| v.to_string().ok().cloned())
+                .unwrap_or_else(|| "gpt2".to_string());
+            if !merges_raw.is_empty() {
+                tracing::info!(
+                    merges = merges_raw.len(),
+                    pre_type = %pre_type,
+                    "Loaded BPE tokenizer from GGUF header"
+                );
+                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut eos_tokens = Vec::new();
+        if let Some(eos_id) = ct
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok())
+        {
+            eos_tokens.push(eos_id);
+        }
+        match arch.as_str() {
+            "qwen2" => {
+                for &id in &[151643u32, 151645] {
+                    if !eos_tokens.contains(&id) {
+                        eos_tokens.push(id);
+                    }
+                }
+            }
+            _ => {
+                if !eos_tokens.contains(&2) {
+                    eos_tokens.push(2);
+                }
+            }
+        }
+        if eos_tokens.is_empty() {
+            eos_tokens.push(2);
+        }
+
+        let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
+        tracing::info!(
+            arch = %arch,
+            layers = format!("[{layer_start}..{layer_end})"),
+            total = block_count,
+            is_first,
+            is_last,
+            has_qkv_biases = has_biases,
+            rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
+            context_length,
+            "Loaded split model from shard files"
         );
 
         Ok(Self {

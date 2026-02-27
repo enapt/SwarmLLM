@@ -56,7 +56,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/credits", get(admin::credit_info))
         // HuggingFace model browsing
         .route("/api/admin/hf/search", get(admin::hf_search))
+        .route("/api/admin/hf/probe", get(admin::hf_probe))
         .route("/api/admin/hf/download", post(admin::hf_download))
+        .route("/api/admin/hf/download-shards", post(admin::hf_download_shards))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
         // API key (requires auth)
