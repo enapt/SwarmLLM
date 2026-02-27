@@ -65,9 +65,10 @@ pub struct SharedState {
     pub pending_layer_results:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,
     /// Loaded split models for distributed inference (layer-range segments).
-    /// Keyed by model_id. Each node loads only its assigned layers.
+    /// Keyed by (model_id, layer_start, layer_end) so a node can cache multiple
+    /// non-contiguous segments (e.g., layers [0,2) and [10,14)) for the same model.
     pub split_models: DashMap<
-        crate::types::ModelId,
+        (crate::types::ModelId, usize, usize),
         Arc<tokio::sync::Mutex<crate::inference::split::SplitModel>>,
     >,
     /// GGUF tensor metadata for known models (extracted from GGUF header, stored in manifest).
@@ -430,8 +431,55 @@ impl Daemon {
             }
         }
 
-        // Scan local shards and register them + their manifests
+        // Pre-pass: regenerate any missing manifests from GGUF headers + shard files.
+        // load_all_local() requires a manifest to exist (security check), so we must
+        // create one first if gguf_header.bin + shard files are present.
         let shard_store = ShardStore::new(&self.config.node.data_dir);
+        {
+            let models_dir = shard_store.models_dir();
+            if models_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(&models_dir) {
+                    for entry in entries.flatten() {
+                        let model_dir = entry.path();
+                        if !model_dir.is_dir() {
+                            continue;
+                        }
+                        let manifest_path = model_dir.join("manifest.json");
+                        let header_path = model_dir.join("gguf_header.bin");
+                        if !manifest_path.exists() && header_path.exists() {
+                            let model_id_str = model_dir
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let model_id = crate::types::ModelId(model_id_str);
+                            if let Ok(meta) =
+                                crate::inference::split::GgufTensorMeta::from_gguf_file(
+                                    &header_path,
+                                )
+                            {
+                                tracing::info!(
+                                    model = %model_id,
+                                    "Regenerating missing manifest from GGUF header"
+                                );
+                                if regenerate_manifest_from_header(
+                                    &model_id,
+                                    &model_dir,
+                                    &meta,
+                                    &self.config,
+                                )
+                                .is_some()
+                                {
+                                    shared_state.gguf_meta.insert(model_id, meta);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scan local shards and register them + their manifests
         match shard_store.load_all_local() {
             Ok(shards) => {
                 // Track which model manifests we've already registered
@@ -441,7 +489,31 @@ impl Daemon {
                     // Register the manifest if we haven't yet
                     if registered_manifests.insert(model_id.clone()) {
                         let model_dir = shard_store.models_dir().join(&model_id.0);
-                        if let Ok(manifest) = crate::types::ModelManifest::load_from_dir(&model_dir)
+
+                        // Ensure GGUF header exists (extract from shard_000 if available)
+                        // and load GGUF metadata for split inference.
+                        // Do this BEFORE loading manifest so we can regenerate if needed.
+                        if !shared_state.gguf_meta.contains_key(model_id) {
+                            if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir)
+                            {
+                                let header_path = model_dir.join("gguf_header.bin");
+                                if let Ok(meta) =
+                                    crate::inference::split::GgufTensorMeta::from_gguf_file(
+                                        &header_path,
+                                    )
+                                {
+                                    tracing::info!(
+                                        model = %model_id,
+                                        layers = meta.block_count,
+                                        "Loaded GGUF metadata from shard header"
+                                    );
+                                    shared_state.gguf_meta.insert(model_id.clone(), meta);
+                                }
+                            }
+                        }
+
+                        let manifest_loaded = if let Ok(manifest) =
+                            crate::types::ModelManifest::load_from_dir(&model_dir)
                         {
                             if manifest.verify_hash().is_ok() {
                                 shared_state
@@ -458,26 +530,33 @@ impl Daemon {
                                     shards = manifest.shard_count,
                                     "Registered manifest from local shard directory"
                                 );
+                                true
+                            } else {
+                                false
                             }
-                        }
+                        } else {
+                            false
+                        };
 
-                        // Ensure GGUF header exists (extract from shard_000 if available)
-                        // and load GGUF metadata for split inference.
-                        if !shared_state.gguf_meta.contains_key(model_id) {
-                            if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir)
-                            {
-                                let header_path = model_dir.join("gguf_header.bin");
-                                if let Ok(meta) =
-                                    crate::inference::split::GgufTensorMeta::from_gguf_file(
-                                        &header_path,
-                                    )
-                                {
-                                    tracing::info!(
-                                        model = %model_id,
-                                        layers = meta.block_count,
-                                        "Loaded GGUF metadata from shard header"
-                                    );
-                                    shared_state.gguf_meta.insert(model_id.clone(), meta);
+                        // Regenerate manifest if missing/invalid and GGUF header available
+                        if !manifest_loaded {
+                            if let Some(meta) = shared_state.gguf_meta.get(model_id) {
+                                tracing::info!(
+                                    model = %model_id,
+                                    "Regenerating manifest from GGUF header + shard files"
+                                );
+                                if let Some(manifest) = regenerate_manifest_from_header(
+                                    model_id,
+                                    &model_dir,
+                                    &meta,
+                                    &shared_state.config,
+                                ) {
+                                    shared_state
+                                        .model_registry
+                                        .register_manifest(manifest.clone());
+                                    let _ = shared_state
+                                        .model_registry
+                                        .persist_manifest(&shared_state.db, &manifest);
                                 }
                             }
                         }
@@ -499,6 +578,42 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to scan local shards");
+            }
+        }
+
+        // Discover HF sources from hf_source.json files alongside manifests.
+        // Models always originate from HuggingFace, so this ensures the source
+        // is known even after a DB wipe or fresh node with pre-seeded shards.
+        {
+            let models_dir = self.config.node.data_dir.join("models");
+            if models_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&models_dir) {
+                    for entry in entries.flatten() {
+                        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            continue;
+                        }
+                        let model_id_str = entry.file_name().to_string_lossy().to_string();
+                        let mid = crate::types::ModelId(model_id_str.clone());
+                        if shared_state.hf_sources.contains_key(&mid) {
+                            continue;
+                        }
+                        let hf_path = entry.path().join("hf_source.json");
+                        if hf_path.exists() {
+                            if let Ok(data) = std::fs::read_to_string(&hf_path) {
+                                if let Ok(source) = serde_json::from_str::<HfSource>(&data) {
+                                    tracing::info!(
+                                        model = %model_id_str,
+                                        repo = %source.repo_id,
+                                        file = %source.filename,
+                                        "Loaded HF source from disk"
+                                    );
+                                    shared_state.hf_sources.insert(mid.clone(), source.clone());
+                                    let _ = self.db.put_json("hf_sources", &model_id_str, &source);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -750,6 +865,22 @@ impl Daemon {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if let Err(e) = open_browser(&target) {
                     tracing::debug!(error = %e, "Could not open browser automatically");
+                }
+            });
+        }
+
+        // Auto-load models that have local shards available
+        {
+            let sm = shared_state.clone();
+            tokio::spawn(async move {
+                // Brief delay to let shard announcements propagate
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let manifests = sm.model_registry.list_models();
+                for m in &manifests {
+                    if sm.split_models.iter().any(|e| e.key().0 == m.id) {
+                        continue;
+                    }
+                    crate::model::auto_manage::check_and_load_model(&sm, &m.id).await;
                 }
             });
         }
@@ -1147,10 +1278,23 @@ async fn dispatch_network_messages(
                                 let local_nid = shared_state.identity.node_id();
                                 if progress.node_id != *local_nid {
                                     if progress.state == "complete" || progress.progress_pct >= 100 {
-                                        // Download finished — remove from tracking
+                                        // Download finished — remove from download tracking
                                         if let Some(mut entry) = shared_state.peer_shard_downloads.get_mut(&progress.shard_id) {
                                             entry.retain(|(nid, _)| *nid != progress.node_id);
                                         }
+                                        // Register the peer as a shard holder now
+                                        // (the ShardAnnounce gossip will also arrive,
+                                        //  but this gives immediate consistency)
+                                        {
+                                            let mut holders = shared_state.shard_registry
+                                                .entry(progress.shard_id.clone())
+                                                .or_default();
+                                            if !holders.contains(&progress.node_id) {
+                                                holders.push(progress.node_id.clone());
+                                            }
+                                        }
+                                        shared_state.model_registry
+                                            .record_shard_holder(progress.shard_id.clone(), progress.node_id.clone());
                                     } else {
                                         // Update or insert download progress
                                         let mut entry = shared_state.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
@@ -1314,18 +1458,16 @@ pub fn generate_and_register_local_manifest(
                     embedding_length = meta.embedding_length,
                     "Extracted GGUF metadata for manifest"
                 );
-                // Assign layer ranges proportionally across shards.
-                // Simple linear distribution: divide num_layers evenly.
-                // This avoids gaps caused by tensor byte offsets crossing shard boundaries.
-                let n = shards.len() as u32;
-                let layers_per_shard = num_layers / n;
-                let remainder = num_layers % n;
-                let mut layer_cursor = 0u32;
+                // Assign layer ranges per shard using actual GGUF tensor positions.
+                // The naive approach (num_layers / shard_count) is inaccurate because
+                // layer tensors don't align to shard byte boundaries.
                 for shard in &mut shards {
-                    let extra = if shard.index < remainder { 1 } else { 0 };
-                    let shard_layers = layers_per_shard + extra;
-                    shard.layer_range = (layer_cursor, layer_cursor + shard_layers);
-                    layer_cursor += shard_layers;
+                    let (ls, le) = crate::inference::split::compute_local_layer_range(
+                        &meta,
+                        shard_size,
+                        &[shard.index],
+                    );
+                    shard.layer_range = (ls as u32, le as u32);
                 }
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
@@ -1481,6 +1623,101 @@ pub fn generate_and_register_local_manifest(
         shards = shard_count,
         "Generated and registered multi-shard manifest for local model"
     );
+}
+
+/// Regenerate a manifest from GGUF header metadata and on-disk shard files.
+/// Used when manifest.json is missing but gguf_header.bin + shards exist.
+fn regenerate_manifest_from_header(
+    model_id: &crate::types::ModelId,
+    model_dir: &std::path::Path,
+    meta: &crate::inference::split::GgufTensorMeta,
+    config: &crate::config::Config,
+) -> Option<crate::types::ModelManifest> {
+    let shard_size = config.model.shard_size_bytes();
+
+    // Compute total GGUF file size from tensor metadata (header + all tensor data).
+    // This is the REAL total, even when we only have a subset of shards locally.
+    let total_size = {
+        let max_end = meta
+            .tensors
+            .values()
+            .map(|loc| meta.tensor_data_offset + loc.offset + loc.size)
+            .max()
+            .unwrap_or(meta.tensor_data_offset);
+        // Round up to alignment (GGUF tensors are 32-byte aligned)
+        (max_end + 31) & !31
+    };
+
+    let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
+
+    let mut shards = Vec::new();
+    for idx in 0..shard_count {
+        let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
+        // For shards we don't have locally, compute expected size
+        let expected_size = if idx == shard_count - 1 {
+            total_size - (idx as u64) * shard_size
+        } else {
+            shard_size
+        };
+        let file_size = std::fs::metadata(&shard_path)
+            .map(|m| m.len())
+            .unwrap_or(expected_size);
+
+        let (ls, le) = crate::inference::split::compute_local_layer_range(meta, shard_size, &[idx]);
+
+        let hash = if shard_path.exists() {
+            match std::fs::read(&shard_path) {
+                Ok(data) => *blake3::hash(&data).as_bytes(),
+                Err(_) => [0u8; 32],
+            }
+        } else {
+            [0u8; 32]
+        };
+
+        shards.push(crate::types::ShardInfo {
+            index: idx,
+            layer_range: (ls as u32, le as u32),
+            size_bytes: file_size,
+            hash,
+        });
+    }
+
+    let model_name = meta
+        .model_name
+        .clone()
+        .unwrap_or_else(|| model_id.0.clone());
+
+    let mut manifest = crate::types::ModelManifest {
+        id: model_id.clone(),
+        name: model_name,
+        architecture: crate::types::ModelArchitecture::Llama,
+        num_layers: meta.block_count as u32,
+        num_params_billions: 0.0,
+        quantization: crate::types::Quantization::Q4KM,
+        total_size_bytes: total_size,
+        shard_count,
+        shards,
+        tokenizer_hash: [0u8; 32],
+        manifest_hash: [0u8; 32],
+        publisher: crate::types::NodeId([0u8; 32]),
+        publish_date: chrono::Utc::now(),
+        license: "Unknown".to_string(),
+    };
+    manifest.manifest_hash = manifest.compute_hash();
+
+    // Save to disk
+    if let Err(e) = manifest.save_to_dir(model_dir) {
+        tracing::warn!(model = %model_id, error = %e, "Failed to save regenerated manifest");
+    } else {
+        tracing::info!(
+            model = %model_id,
+            shard_count,
+            num_layers = meta.block_count,
+            "Regenerated and saved manifest with accurate layer ranges"
+        );
+    }
+
+    Some(manifest)
 }
 
 /// Split a file into byte-range shards and compute BLAKE3 hash for each.
@@ -1646,7 +1883,7 @@ async fn handle_layer_forward(
     let model_id = {
         // Check if we already have a cached split model
         if let Some(entry) = shared_state.split_models.iter().next() {
-            entry.key().clone()
+            entry.key().0.clone()
         } else {
             // Find a model we have local shards for
             match shared_state.shard_registry.iter().next() {
@@ -1706,10 +1943,22 @@ async fn handle_layer_forward(
         return;
     }
 
-    // Determine layer range from manifest shard layer_ranges (most reliable),
-    // falling back to byte-offset GgufTensorMeta computation if manifest lacks layer info.
-    let (layer_start, layer_end, total_layers) = if manifest.num_layers > 0 {
-        // Use shard layer_range from manifest — these are authoritative
+    // Determine layer range.  If the sender specified a layer_range in the forward
+    // message (new protocol), use that directly — it tells us exactly which segment
+    // to process.  Otherwise fall back to computing from GGUF metadata / manifest.
+    let shard_size = shared_state.config.model.shard_size_bytes();
+    let (layer_start, layer_end, total_layers) = if let Some((ls, le)) = forward.layer_range {
+        let total = shared_state
+            .gguf_meta
+            .get(&model_id)
+            .map(|m| m.block_count)
+            .unwrap_or(manifest.num_layers as usize);
+        (ls as usize, le as usize, total)
+    } else if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
+        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
+        (ls, le, meta.block_count)
+    } else if manifest.num_layers > 0 {
+        // Fallback: use manifest layer_range (approximate)
         let mut ls = manifest.num_layers as usize;
         let mut le = 0usize;
         for shard_info in &manifest.shards {
@@ -1719,14 +1968,6 @@ async fn handle_layer_forward(
             }
         }
         (ls, le, manifest.num_layers as usize)
-    } else if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
-        let shard_size = if manifest.shard_count > 0 {
-            manifest.total_size_bytes / manifest.shard_count as u64
-        } else {
-            manifest.total_size_bytes
-        };
-        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
-        (ls, le, meta.block_count)
     } else {
         send_error_result(
             &network_tx,
@@ -1753,7 +1994,8 @@ async fn handle_layer_forward(
     let is_last = layer_end >= total_layers;
 
     // Ensure the split model is loaded
-    if !shared_state.split_models.contains_key(&model_id) {
+    let split_key = (model_id.clone(), layer_start, layer_end);
+    if !shared_state.split_models.contains_key(&split_key) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
         let model_dir = shard_store.models_dir().join(&model_id.0);
 
@@ -1815,7 +2057,7 @@ async fn handle_layer_forward(
         match load_result {
             Ok(model) => {
                 shared_state.split_models.insert(
-                    model_id.clone(),
+                    split_key.clone(),
                     std::sync::Arc::new(tokio::sync::Mutex::new(model)),
                 );
             }
@@ -1832,7 +2074,7 @@ async fn handle_layer_forward(
         }
     }
 
-    let split_model_ref = match shared_state.split_models.get(&model_id) {
+    let split_model_ref = match shared_state.split_models.get(&split_key) {
         Some(r) => r.clone(),
         None => {
             send_error_result(

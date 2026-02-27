@@ -688,11 +688,16 @@ impl ShardReader {
         header: Vec<u8>,
         shard_files: Vec<(u32, PathBuf)>,
         shard_size: u64,
-        tensor_data_offset: u64,
+        _tensor_data_offset: u64,
     ) -> Result<Self, SwarmError> {
+        // Shards are byte ranges of the FULL original GGUF file (including header
+        // portion in shard 0).  Shard N covers bytes [N*shard_size, (N+1)*shard_size).
+        // The ShardReader serves positions [0, header_len) from the in-memory header,
+        // so positions >= header_len fall through to find_shard which maps them to
+        // the correct file offset within the appropriate shard.
         let mut shards = Vec::new();
         for (idx, path) in &shard_files {
-            let start_byte = tensor_data_offset + (*idx as u64) * shard_size;
+            let start_byte = (*idx as u64) * shard_size;
             shards.push((start_byte, path.clone()));
         }
 
@@ -700,7 +705,7 @@ impl ShardReader {
         let total_size = if let Some((_, last_path)) = shard_files.last() {
             let last_idx = shard_files.last().unwrap().0;
             let last_size = std::fs::metadata(last_path).map_err(SwarmError::Io)?.len();
-            tensor_data_offset + (last_idx as u64) * shard_size + last_size
+            (last_idx as u64) * shard_size + last_size
         } else {
             header.len() as u64
         };
@@ -748,6 +753,16 @@ impl IoRead for ShardReader {
 
         // Reading from shard region
         if let Some((shard_idx, offset_in_shard)) = self.find_shard(self.position) {
+            // Temporary debug: log every shard boundary crossing
+            if tracing::enabled!(tracing::Level::TRACE) {
+                tracing::trace!(
+                    pos = self.position,
+                    shard_idx,
+                    offset_in_shard,
+                    buf_len = buf.len(),
+                    "ShardReader::read"
+                );
+            }
             // Open the shard file if not already open
             let need_open = match &self.current_shard {
                 Some((idx, _)) => *idx != shard_idx,
@@ -761,16 +776,48 @@ impl IoRead for ShardReader {
 
             let (_, ref mut file) = self.current_shard.as_mut().unwrap();
             file.seek(SeekFrom::Start(offset_in_shard))?;
-            let n = file.read(buf)?;
+            let shard_file_len = file.seek(SeekFrom::End(0))?;
+            file.seek(SeekFrom::Start(offset_in_shard))?;
+            let available_in_shard = shard_file_len.saturating_sub(offset_in_shard) as usize;
+            let to_read = buf.len().min(available_in_shard);
+            if to_read == 0 {
+                // This shouldn't happen if find_shard is correct
+                tracing::error!(
+                    pos = self.position,
+                    shard_idx,
+                    offset_in_shard,
+                    shard_file_len,
+                    buf_len = buf.len(),
+                    "ShardReader: 0 bytes available at offset in shard"
+                );
+                return Ok(0);
+            }
+            let n = file.read(&mut buf[..to_read])?;
             self.position += n as u64;
             Ok(n)
         } else {
             // Position is in a gap (missing shard)
+            let shard_info: Vec<String> = self
+                .shards
+                .iter()
+                .map(|(start, path)| {
+                    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    format!("[{start}..{})", start + len)
+                })
+                .collect();
+            tracing::error!(
+                pos = self.position,
+                total_size = self.total_size,
+                header_len = self.header.len(),
+                buf_len = buf.len(),
+                shards = ?shard_info,
+                "ShardReader: position is in a missing shard region"
+            );
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!(
-                    "ShardReader: position {} is in a missing shard region",
-                    self.position
+                    "ShardReader: position {} is in a missing shard region (total_size={}, shards={:?})",
+                    self.position, self.total_size, shard_info
                 ),
             ))
         }
@@ -1838,14 +1885,16 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
     Ok(*subset.last().unwrap_or(&0) as u32)
 }
 
-/// Determine which layer range a node should process based on which shard files
-/// it has locally. Maps byte-range shards to the GGUF tensor layout to figure out
-/// which transformer blocks' weights are fully contained in the local shards.
-pub fn compute_local_layer_range(
+/// Build a bitmap of which layers have ALL their tensors available locally.
+///
+/// Shared logic extracted from `compute_local_layer_range`. Maps byte-range
+/// shards to the GGUF tensor layout and checks every tensor of every layer
+/// against the merged byte ranges of the local shards.
+fn build_available_layer_bitmap(
     meta: &GgufTensorMeta,
     shard_size: u64,
     local_shard_indices: &[u32],
-) -> (usize, usize) {
+) -> Vec<bool> {
     // Calculate which byte ranges are locally available
     let mut available_ranges: Vec<(u64, u64)> = local_shard_indices
         .iter()
@@ -1857,13 +1906,41 @@ pub fn compute_local_layer_range(
         .collect();
     available_ranges.sort_by_key(|r| r.0);
 
-    // Check which layers have ALL their tensors in available byte ranges
-    let mut layer_start = meta.block_count;
-    let mut layer_end = 0;
+    // Merge contiguous/overlapping ranges so that tensors spanning two adjacent
+    // shards are correctly detected as available.
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for range in &available_ranges {
+        if let Some(last) = merged.last_mut() {
+            if range.0 <= last.1 {
+                last.1 = last.1.max(range.1);
+                continue;
+            }
+        }
+        merged.push(*range);
+    }
 
-    for layer_idx in 0..meta.block_count {
+    let tensor_available = |name: &str| -> bool {
+        if let Some(loc) = meta.tensors.get(name) {
+            let tensor_start = meta.tensor_data_offset + loc.offset;
+            let tensor_end = tensor_start + loc.size;
+            merged
+                .iter()
+                .any(|&(rs, re)| tensor_start >= rs && tensor_end <= re)
+        } else {
+            false
+        }
+    };
+
+    // Build a bitmap of which layers have ALL their tensors available.
+    // IMPORTANT: GGUF tensor data is stored in alphabetical name order, so blk.10
+    // physically precedes blk.2 in the file.  We must find the largest CONTIGUOUS
+    // range of layer indices, not just min/max of available layers.
+    let mut available_layers = vec![false; meta.block_count];
+
+    for (layer_idx, layer_avail) in available_layers.iter_mut().enumerate() {
         let prefix = format!("blk.{layer_idx}");
-        let tensor_names = [
+        // Required tensors for every layer
+        let required = [
             format!("{prefix}.attn_q.weight"),
             format!("{prefix}.attn_k.weight"),
             format!("{prefix}.attn_v.weight"),
@@ -1875,35 +1952,76 @@ pub fn compute_local_layer_range(
             format!("{prefix}.ffn_up.weight"),
         ];
 
-        let all_available = tensor_names.iter().all(|name| {
-            if let Some(loc) = meta.tensors.get(name) {
-                let tensor_start = meta.tensor_data_offset + loc.offset;
-                let tensor_end = tensor_start + loc.size;
-                // Check if this tensor is fully within any available range
-                available_ranges
-                    .iter()
-                    .any(|&(rs, re)| tensor_start >= rs && tensor_end <= re)
-            } else {
-                false
-            }
-        });
+        let all_available = required.iter().all(|name| tensor_available(name));
 
-        if all_available {
-            if layer_idx < layer_start {
-                layer_start = layer_idx;
+        // Also check optional bias tensors — if they exist in the GGUF, they must
+        // be available too (Qwen2 has attn biases).
+        let biases_ok = ["attn_q.bias", "attn_k.bias", "attn_v.bias"]
+            .iter()
+            .all(|suffix| {
+                let name = format!("{prefix}.{suffix}");
+                meta.tensors
+                    .get(&name)
+                    .map_or(true, |_| tensor_available(&name))
+            });
+
+        *layer_avail = all_available && biases_ok;
+    }
+
+    available_layers
+}
+
+/// Return ALL contiguous layer ranges available from the given shards.
+///
+/// Unlike `compute_local_layer_range` which returns only the longest run,
+/// this returns every contiguous run as a `(start, end)` half-open range.
+/// A node with layers {0,1,10,11,12,13} gets two ranges: `(0,2)` and `(10,14)`.
+pub fn compute_available_layer_ranges(
+    meta: &GgufTensorMeta,
+    shard_size: u64,
+    local_shard_indices: &[u32],
+) -> Vec<(usize, usize)> {
+    let bitmap = build_available_layer_bitmap(meta, shard_size, local_shard_indices);
+    let mut ranges = Vec::new();
+    let mut run_start = 0;
+    let mut in_run = false;
+
+    for (i, &avail) in bitmap.iter().enumerate() {
+        if avail {
+            if !in_run {
+                run_start = i;
+                in_run = true;
             }
-            if layer_idx + 1 > layer_end {
-                layer_end = layer_idx + 1;
-            }
+        } else if in_run {
+            ranges.push((run_start, i));
+            in_run = false;
         }
     }
-
-    if layer_start >= layer_end {
-        // No complete layers available
-        (0, 0)
-    } else {
-        (layer_start, layer_end)
+    // Close final run if it extends to the end
+    if in_run {
+        ranges.push((run_start, bitmap.len()));
     }
+
+    ranges
+}
+
+/// Determine which layer range a node should process based on which shard files
+/// it has locally. Maps byte-range shards to the GGUF tensor layout to figure out
+/// which transformer blocks' weights are fully contained in the local shards.
+///
+/// Returns the **longest** contiguous run. For all runs, use
+/// `compute_available_layer_ranges`.
+pub fn compute_local_layer_range(
+    meta: &GgufTensorMeta,
+    shard_size: u64,
+    local_shard_indices: &[u32],
+) -> (usize, usize) {
+    let ranges = compute_available_layer_ranges(meta, shard_size, local_shard_indices);
+    // Return the longest range, or (0,0) if none.
+    ranges
+        .into_iter()
+        .max_by_key(|&(start, end)| end - start)
+        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]
@@ -1978,5 +2096,189 @@ mod tests {
 
         let range = compute_local_layer_range(&meta, 1800, &[0, 1]);
         assert_eq!(range, (0, 4)); // all layers
+    }
+
+    #[test]
+    fn layer_range_cross_shard_tensor() {
+        // Test that a tensor spanning two contiguous shards is detected as available.
+        let mut tensors = HashMap::new();
+        let names = [
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "attn_norm.weight",
+            "ffn_norm.weight",
+            "ffn_gate.weight",
+            "ffn_down.weight",
+            "ffn_up.weight",
+        ];
+
+        // Layer 0: all tensors in shard 0 (offsets 0..900)
+        for (i, name) in names.iter().enumerate() {
+            tensors.insert(
+                format!("blk.0.{name}"),
+                TensorLocation {
+                    offset: (i * 100) as u64,
+                    size: 100,
+                },
+            );
+        }
+
+        // Layer 1: last tensor straddles shards 0 and 1 (offset 950, size 100 → ends at 1050)
+        // Shard boundary is at 1000.
+        for (i, name) in names.iter().enumerate() {
+            let offset = if i == 8 { 950 } else { 900 + i * 10 } as u64;
+            let size = if i == 8 { 100 } else { 10 };
+            tensors.insert(
+                format!("blk.1.{name}"),
+                TensorLocation {
+                    offset,
+                    size: size as u64,
+                },
+            );
+        }
+
+        let meta = GgufTensorMeta {
+            tensors,
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 8,
+            head_count_kv: 8,
+            block_count: 2,
+            embedding_length: 512,
+            rope_dim: 64,
+            rope_freq_base: 10000.0,
+            rms_norm_eps: 1e-6,
+        };
+
+        // With only shard 0 (bytes 0..1000), layer 1 is NOT available (tensor ends at 1050)
+        let range = compute_local_layer_range(&meta, 1000, &[0]);
+        assert_eq!(range, (0, 1)); // only layer 0
+
+        // With shards 0+1 (merged range 0..2000), layer 1 IS available
+        let range = compute_local_layer_range(&meta, 1000, &[0, 1]);
+        assert_eq!(range, (0, 2)); // both layers
+    }
+
+    #[test]
+    fn layer_range_alphabetical_gguf_order() {
+        // GGUF stores tensors in alphabetical name order, so blk.10 comes before blk.2.
+        // Physical file order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
+        // This means layers 0,1,10,11 are at the start of the file, and layers 2,3 later.
+        // With only the first shard, we get layers 0,1,10,11 available — non-contiguous!
+        // The function should return the longest contiguous run.
+        let mut tensors = HashMap::new();
+        let names = [
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "attn_norm.weight",
+            "ffn_norm.weight",
+            "ffn_gate.weight",
+            "ffn_down.weight",
+            "ffn_up.weight",
+        ];
+
+        // Alphabetical order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
+        let gguf_order = [0, 1, 10, 11, 2, 3];
+        for (pos, &layer_idx) in gguf_order.iter().enumerate() {
+            for (i, name) in names.iter().enumerate() {
+                let offset = (pos * 900 + i * 100) as u64;
+                tensors.insert(
+                    format!("blk.{layer_idx}.{name}"),
+                    TensorLocation { offset, size: 100 },
+                );
+            }
+        }
+
+        let meta = GgufTensorMeta {
+            tensors,
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 8,
+            head_count_kv: 8,
+            block_count: 12, // pretend 12 layers total
+            embedding_length: 512,
+            rope_dim: 64,
+            rope_freq_base: 10000.0,
+            rms_norm_eps: 1e-6,
+        };
+
+        // Shard 0: bytes [0, 1800) — contains layers 0,1 (pos 0-1) but also 10,11 (pos 2-3)
+        // Available layers: 0, 1, 10, 11 — non-contiguous!
+        // Longest contiguous run: either (0,1) length=2 or (10,11) length=2
+        // Should return (0, 2) since it's the first run of length 2
+        let range = compute_local_layer_range(&meta, 1800, &[0]);
+        assert_eq!(range, (0, 2)); // layers 0,1 — NOT (0,12) which would include gaps
+
+        // Shards 0+1+2: bytes [0, 5400) — all 6 physical positions covered
+        // Layers 0,1,2,3,10,11 all available. Contiguous: 0,1,2,3 (length=4)
+        let range = compute_local_layer_range(&meta, 1800, &[0, 1, 2]);
+        assert_eq!(range, (0, 4)); // layers 0-3 contiguous (10,11 non-contiguous)
+    }
+
+    #[test]
+    fn available_layer_ranges_non_contiguous() {
+        // Same setup as layer_range_alphabetical_gguf_order but tests the new
+        // compute_available_layer_ranges() that returns ALL contiguous runs.
+        let mut tensors = HashMap::new();
+        let names = [
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "attn_norm.weight",
+            "ffn_norm.weight",
+            "ffn_gate.weight",
+            "ffn_down.weight",
+            "ffn_up.weight",
+        ];
+
+        // Alphabetical order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
+        let gguf_order = [0, 1, 10, 11, 2, 3];
+        for (pos, &layer_idx) in gguf_order.iter().enumerate() {
+            for (i, name) in names.iter().enumerate() {
+                let offset = (pos * 900 + i * 100) as u64;
+                tensors.insert(
+                    format!("blk.{layer_idx}.{name}"),
+                    TensorLocation { offset, size: 100 },
+                );
+            }
+        }
+
+        let meta = GgufTensorMeta {
+            tensors,
+            tensor_data_offset: 0,
+            model_name: None,
+            head_count: 8,
+            head_count_kv: 8,
+            block_count: 12,
+            embedding_length: 512,
+            rope_dim: 64,
+            rope_freq_base: 10000.0,
+            rms_norm_eps: 1e-6,
+        };
+
+        // Shard 0: bytes [0, 1800) — layers 0,1 only (layers 10,11 start at byte 1800)
+        let ranges = compute_available_layer_ranges(&meta, 1800, &[0]);
+        assert_eq!(ranges, vec![(0, 2)]);
+
+        // Shard 1: bytes [1800, 3600) — layers 10,11 (GGUF positions 2-3)
+        let ranges = compute_available_layer_ranges(&meta, 1800, &[1]);
+        assert_eq!(ranges, vec![(10, 12)]);
+
+        // Shards 0+1: bytes [0, 3600) — layers 0,1,10,11 → two non-contiguous ranges
+        let ranges = compute_available_layer_ranges(&meta, 1800, &[0, 1]);
+        assert_eq!(ranges, vec![(0, 2), (10, 12)]);
+
+        // Shards 0+1+2: bytes [0, 5400) — layers 0,1,2,3,10,11 → two ranges
+        let ranges = compute_available_layer_ranges(&meta, 1800, &[0, 1, 2]);
+        assert_eq!(ranges, vec![(0, 4), (10, 12)]);
+
+        // compute_local_layer_range still returns the longest
+        let range = compute_local_layer_range(&meta, 1800, &[0, 1, 2]);
+        assert_eq!(range, (0, 4));
     }
 }

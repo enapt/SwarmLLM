@@ -449,8 +449,8 @@ var SwarmLLM = (function() {
         var hostedShards = m.hosted_shards || 0;
         var globalAvail = m.global_available || hostedShards;
         var isDownloading = m.acquisition === 'downloading';
-        var isReady = m.status === 'loaded' || (hostedShards === shardCount && shardCount > 0);
-        var isPartial = hostedShards > 0 && hostedShards < shardCount;
+        var isReady = m.status === 'loaded' || m.status === 'ready' || (globalAvail === shardCount && shardCount > 0);
+        var isPartial = !isReady && hostedShards > 0 && hostedShards < shardCount;
         var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
 
         var card = document.createElement('div');
@@ -460,13 +460,13 @@ var SwarmLLM = (function() {
         // Status badge
         var statusHtml = '';
         if (m.status === 'loaded') {
-          statusHtml = '<span style="color:var(--green);font-weight:600;font-size:0.8rem">Ready</span>';
+          statusHtml = '<span style="color:var(--green);font-weight:600;font-size:0.8rem">Active</span>';
         } else if (isReady) {
-          statusHtml = '<span style="color:var(--green);font-size:0.8rem">All shards local</span>';
+          statusHtml = '<span style="color:var(--green);font-size:0.8rem">Ready (' + hostedShards + ' local, ' + globalAvail + '/' + shardCount + ' network)</span>';
         } else if (isDownloading) {
           statusHtml = '<span style="color:var(--accent);font-size:0.8rem"><span class="spinner" style="width:12px;height:12px;border-width:1.5px;margin-right:4px;vertical-align:middle"></span>Downloading</span>';
         } else if (isPartial) {
-          statusHtml = '<span style="color:var(--orange);font-size:0.8rem">' + hostedShards + '/' + shardCount + ' local</span>';
+          statusHtml = '<span style="color:var(--orange);font-size:0.8rem">' + hostedShards + '/' + shardCount + ' local, ' + globalAvail + ' on network</span>';
         } else {
           statusHtml = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
         }
@@ -542,11 +542,13 @@ var SwarmLLM = (function() {
         // Action button
         var actionHtml = '';
         if (m.status === 'loaded') {
-          // already ready
+          // already active — no button needed
+        } else if (isReady) {
+          actionHtml = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.selectModel(\'' + escapeHtml(m.id) + '\')">Use</button>';
         } else if (isDownloading) {
-          // downloading
-        } else if (!isReady && (m.source === 'network' || m.status === 'available' || m.status === 'partial')) {
-          actionHtml = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download</button>';
+          // downloading — no button
+        } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
+          actionHtml = '<button class="btn btn-sm" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download Missing</button>';
         }
 
         var name = m.name || m.id;
@@ -753,40 +755,54 @@ var SwarmLLM = (function() {
     },
 
     renderAcquisitionPanel: function(modelId, status) {
+      // Progress is now shown inline in model cards only — no separate banner panels.
+      // This method updates the model card's progress bar and status badge in-place.
+      if (!status) return;
       var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
-      var panelId = 'acq-panel-' + safeId;
-      var panel = document.getElementById(panelId);
+      var card = document.querySelector('[data-model-id="' + modelId + '"]');
+      if (!card) return; // card not rendered yet — will show on next loadInitial
 
-      if (!panel) {
-        var banner = document.getElementById('status-banner');
-        panel = document.createElement('div');
-        panel.id = panelId;
-        panel.style.cssText = 'background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:8px';
-        banner.appendChild(panel);
-      }
+      var stateName = typeof status.state === 'string' ? status.state : (status.state && status.state.failed ? 'failed' : 'unknown');
 
-      if (!status) {
-        panel.innerHTML = '<div style="display:flex;align-items:center;gap:8px"><div class="spinner"></div><strong>' + escapeHtml(modelId) + '</strong><span class="text-muted" style="font-size:0.8rem">Starting...</span></div>';
+      // If complete, refresh model list to pick up new shard state
+      if (stateName === 'complete') {
+        if (!card.classList.contains('ready')) {
+          setTimeout(function() { dashboard.loadInitial(); }, 1500);
+        }
         return;
       }
 
-      var state = status.state;
-      var stateName = typeof state === 'string' ? state : (state && state.failed ? 'failed' : 'unknown');
+      // Ensure card has downloading class
+      if (!card.classList.contains('downloading')) {
+        card.classList.remove('partial');
+        card.classList.add('downloading');
+      }
+
+      // Update or insert progress bar in card
       var totalBytes = status.total_bytes || 0;
       var dlBytes = status.downloaded_bytes || 0;
       var pct = totalBytes > 0 ? Math.round((dlBytes / totalBytes) * 100) : 0;
       var speed = status.speed_bytes_per_sec || 0;
 
-      var stateColor = 'var(--accent)';
-      if (stateName === 'complete') stateColor = 'var(--green)';
-      else if (stateName === 'failed') stateColor = 'var(--red)';
+      var progressEl = card.querySelector('.dl-progress');
+      if (!progressEl) {
+        progressEl = document.createElement('div');
+        progressEl.className = 'dl-progress';
+        progressEl.setAttribute('data-model-progress', safeId);
+        card.appendChild(progressEl);
+      }
 
-      panel.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-        '<strong>' + escapeHtml(modelId.length > 30 ? modelId.substring(0, 30) + '...' : modelId) + '</strong>' +
-        '<span class="mono" style="font-size:0.85rem">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' +
-        (speed > 0 ? ' - ' + formatSpeed(speed) : '') + '</span></div>' +
-        '<div style="width:100%;height:6px;background:var(--bg-tertiary);border-radius:3px;overflow:hidden">' +
-        '<div style="width:' + pct + '%;height:100%;background:' + stateColor + ';transition:width 0.3s"></div></div>';
+      var speedStr = speed > 0 ? ' - ' + formatSpeed(speed) : '';
+      progressEl.innerHTML =
+        '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
+        '<span class="text-muted">Downloading shard</span>' +
+        '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
+        '</div>' +
+        '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>';
+
+      // Remove any stale banner panels (legacy cleanup)
+      var oldPanel = document.getElementById('acq-panel-' + safeId);
+      if (oldPanel) oldPanel.remove();
     }
   };
 
@@ -1232,6 +1248,28 @@ var SwarmLLM = (function() {
     } catch (e) {
       ui.showBanner('error', 'Failed to request model: ' + e.message);
     }
+  }
+
+  function selectModel(modelId) {
+    currentModel = modelId;
+    var sel = document.getElementById('model-select');
+    if (sel) {
+      // Ensure model is in the dropdown
+      var found = false;
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === modelId) { found = true; break; }
+      }
+      if (!found) {
+        var opt = document.createElement('option');
+        opt.value = modelId;
+        opt.textContent = modelId.length > 30 ? modelId.substring(0, 30) + '...' : modelId;
+        sel.appendChild(opt);
+      }
+      sel.value = modelId;
+    }
+    ui.showBanner('success', 'Model selected: ' + modelId);
+    // Refresh model list from server
+    loadModels();
   }
 
   // ========================================================================
@@ -1722,6 +1760,7 @@ var SwarmLLM = (function() {
     identity: identity,
     networkMap: networkMap,
     requestModel: requestModel,
+    selectModel: selectModel,
     shutdown: shutdown,
   };
 })();

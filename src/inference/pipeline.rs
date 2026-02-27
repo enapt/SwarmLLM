@@ -262,7 +262,12 @@ impl PipelineExecutor {
     /// Compute prompt token count using BPE tokenizer if available, else byte-level count.
     async fn compute_prompt_token_count(&self, prompt: &str) -> usize {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+        let model_ref_opt = self
+            .shared_state
+            .split_models
+            .iter()
+            .find(|e| e.key().0 == *model_id);
+        if let Some(model_ref) = model_ref_opt {
             let model = model_ref.lock().await;
             if let Some(tokenizer) = model.tokenizer() {
                 return tokenizer.encode(prompt).len();
@@ -274,7 +279,12 @@ impl PipelineExecutor {
     /// Decode token IDs to text using the GGUF vocabulary from the split model.
     async fn decode_tokens(&self, token_ids: &[u32]) -> String {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+        let model_ref_opt = self
+            .shared_state
+            .split_models
+            .iter()
+            .find(|e| e.key().0 == *model_id);
+        if let Some(model_ref) = model_ref_opt {
             let model = model_ref.lock().await;
             if let Some(vocab) = model.vocab() {
                 // If we have a BPE tokenizer, use its byte decoder for proper decoding
@@ -309,7 +319,12 @@ impl PipelineExecutor {
     /// Get EOS token IDs from the loaded split model, falling back to [2].
     async fn get_eos_tokens(&self) -> Vec<u32> {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        if let Some(model_ref) = self.shared_state.split_models.get(model_id) {
+        let model_ref_opt = self
+            .shared_state
+            .split_models
+            .iter()
+            .find(|e| e.key().0 == *model_id);
+        if let Some(model_ref) = model_ref_opt {
             let model = model_ref.lock().await;
             return model.eos_tokens().to_vec();
         }
@@ -337,6 +352,7 @@ impl PipelineExecutor {
                 index_pos: index_pos as u32,
                 activations: activations.clone(),
                 format: TensorFormat::FP32,
+                layer_range: Some(segment.layer_range),
                 sender_peer_bytes: None,
             };
 
@@ -434,7 +450,8 @@ impl PipelineExecutor {
         );
 
         // Ensure the split model is loaded for this model's layer range
-        if !self.shared_state.split_models.contains_key(model_id) {
+        let split_key = (model_id.clone(), layer_start, layer_end);
+        if !self.shared_state.split_models.contains_key(&split_key) {
             // Find the GGUF file (reconstructed or original)
             let shard_store =
                 crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
@@ -478,7 +495,7 @@ impl PipelineExecutor {
                 SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)?;
 
             self.shared_state.split_models.insert(
-                model_id.clone(),
+                split_key.clone(),
                 std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
             );
         }
@@ -486,7 +503,7 @@ impl PipelineExecutor {
         let split_model_ref = self
             .shared_state
             .split_models
-            .get(model_id)
+            .get(&split_key)
             .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
 
         let mut split_model = split_model_ref.lock().await;
@@ -645,6 +662,7 @@ impl PipelineExecutor {
                     index_pos: 0, // Failover doesn't track position precisely
                     activations: activations.to_vec(),
                     format: TensorFormat::FP16,
+                    layer_range: Some(backup.layer_range),
                     sender_peer_bytes: None,
                 };
 

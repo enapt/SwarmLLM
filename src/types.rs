@@ -302,6 +302,12 @@ pub struct LayerForward {
     pub index_pos: u32,
     pub activations: Vec<u8>,
     pub format: TensorFormat,
+    /// The layer range this forward should be processed over.
+    /// When present, the receiving node uses this to look up the correct cached
+    /// SplitModel segment (keyed by model_id + layer_start + layer_end).
+    /// `None` for backward compatibility with older peers.
+    #[serde(default)]
+    pub layer_range: Option<(u32, u32)>,
     /// Populated locally after receiving from the network — not serialized over the wire.
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]

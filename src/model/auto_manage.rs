@@ -322,7 +322,15 @@ impl AutoShardManager {
                     continue;
                 }
 
-                let holder_count = holders.len();
+                // Count peers actively downloading this shard — treat them as
+                // near-holders so we don't duplicate their work.
+                let peer_dl_count = self
+                    .shared_state
+                    .peer_shard_downloads
+                    .get(&shard_id)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                let holder_count = holders.len() + peer_dl_count;
 
                 // Check if this shard is in our configured --shards range but missing
                 let in_configured_range = match configured_range {
@@ -485,19 +493,12 @@ impl AutoShardManager {
 
         let mid = candidate.model_id.clone();
 
-        // Announce interest to network peers — they may push the shard to us
-        let shard_id = ShardId {
-            model_id: candidate.model_id.clone(),
-            index: candidate.shard_index,
-        };
-        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-            node_id: self.shared_state.identity.node_id().clone(),
-            shards: vec![shard_id],
-            timestamp: chrono::Utc::now(),
-        });
-        let _ = self
-            .network_tx
-            .try_send(NetworkCommand::Broadcast(announce));
+        // NOTE: We do NOT send a ShardAnnounce before the download starts.
+        // Premature announces cause peers to register us as a holder before
+        // the shard is actually on disk, making the UI show "peer-held" instead
+        // of "peer-downloading".  The ShardDownloadProgress gossip broadcasts
+        // our progress, and the completion message triggers holder registration
+        // on remote nodes.
 
         // Download from HuggingFace if source is known
         if let Some(hf_source) = self.shared_state.hf_sources.get(&candidate.model_id) {
@@ -648,14 +649,25 @@ impl AutoShardManager {
                         // Broadcast completion to network
                         let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
                             crate::types::ShardDownloadProgress {
-                                node_id,
-                                shard_id: sid,
+                                node_id: node_id.clone(),
+                                shard_id: sid.clone(),
                                 progress_pct: 100,
                                 state: "complete".to_string(),
                             },
                         );
                         let _ =
                             net_tx.try_send(crate::types::NetworkCommand::Broadcast(complete_msg));
+
+                        // Now that the shard is on disk, announce it to the network
+                        // so peers register us as a holder.
+                        let announce = crate::types::SwarmMessage::ShardAnnounce(
+                            crate::types::ShardAnnounce {
+                                node_id,
+                                shards: vec![sid],
+                                timestamp: chrono::Utc::now(),
+                            },
+                        );
+                        let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
 
                         // Check if all shards are now available → auto-load
                         check_and_load_model(&shared, &model_id).await;
@@ -769,7 +781,7 @@ impl AutoShardManager {
 /// - If ALL shards are local: loads the full model (is_first=true, is_last=true)
 /// - If only a contiguous subset is local: loads those layers for distributed inference
 ///   (the node handles its segment, other nodes handle theirs)
-async fn check_and_load_model(
+pub async fn check_and_load_model(
     shared: &std::sync::Arc<crate::daemon::SharedState>,
     model_id: &ModelId,
 ) {
@@ -807,34 +819,68 @@ async fn check_and_load_model(
     }
 
     // Already loaded?
-    if shared.split_models.contains_key(model_id) {
+    if shared.split_models.iter().any(|e| e.key().0 == *model_id) {
         tracing::debug!(model = %model_id, "Model already loaded in split_models");
         return;
     }
 
     let has_all = local_shard_indices.len() == manifest.shard_count as usize;
 
-    // Determine the layer range covered by our local shards
+    // Determine the layer range covered by our local shards using actual GGUF tensor
+    // metadata.  The manifest's layer_range per shard is approximate (computed from
+    // byte-offset division) and may claim a layer is available when some of its tensors
+    // actually reside in the next shard.  compute_local_layer_range() checks every
+    // tensor of every layer against the real byte ranges of our local shards.
     let (layer_start, layer_end, is_first, is_last) = if has_all {
         (0, manifest.num_layers as usize, true, true)
     } else {
-        // Find the contiguous layer range from our local shards
-        let first_idx = *local_shard_indices.first().unwrap();
-        let last_idx = *local_shard_indices.last().unwrap();
+        let shard_size = shared.config.model.shard_size_bytes();
 
-        let first_shard = manifest.shards.iter().find(|s| s.index == first_idx);
-        let last_shard = manifest.shards.iter().find(|s| s.index == last_idx);
-
-        match (first_shard, last_shard) {
-            (Some(fs), Some(ls)) => {
-                let ls_start = fs.layer_range.0 as usize;
-                let ls_end = ls.layer_range.1 as usize;
-                let is_first = ls_start == 0;
-                let is_last = ls_end >= manifest.num_layers as usize;
-                (ls_start, ls_end, is_first, is_last)
+        // Try GGUF tensor metadata first (accurate), fall back to header file, then manifest
+        let range = if let Some(meta) = shared.gguf_meta.get(model_id) {
+            crate::inference::split::compute_local_layer_range(
+                &meta,
+                shard_size,
+                &local_shard_indices,
+            )
+        } else {
+            // Try to load from gguf_header.bin
+            let header_path = model_dir.join("gguf_header.bin");
+            if header_path.exists() {
+                match crate::inference::split::GgufTensorMeta::from_gguf_file(&header_path) {
+                    Ok(meta) => {
+                        let range = crate::inference::split::compute_local_layer_range(
+                            &meta,
+                            shard_size,
+                            &local_shard_indices,
+                        );
+                        // Cache for future use
+                        shared.gguf_meta.insert(model_id.clone(), meta);
+                        range
+                    }
+                    Err(e) => {
+                        tracing::warn!(model = %model_id, error = %e, "Failed to parse GGUF header for layer range");
+                        (0, 0)
+                    }
+                }
+            } else {
+                tracing::warn!(model = %model_id, "No GGUF metadata available for accurate layer range");
+                (0, 0)
             }
-            _ => return, // shard info missing
+        };
+
+        if range.0 >= range.1 {
+            tracing::warn!(
+                model = %model_id,
+                local_shards = ?local_shard_indices,
+                "No complete layers available in local shards"
+            );
+            return;
         }
+
+        let is_first = range.0 == 0;
+        let is_last = range.1 >= manifest.num_layers as usize;
+        (range.0, range.1, is_first, is_last)
     };
 
     tracing::info!(
@@ -865,7 +911,7 @@ async fn check_and_load_model(
             let bos_token = split_model.bos_token().to_string();
             let eos_token = split_model.eos_token_str().to_string();
             shared.split_models.insert(
-                model_id.clone(),
+                (model_id.clone(), layer_start, layer_end),
                 std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
             );
 

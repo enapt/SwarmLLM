@@ -596,7 +596,9 @@ impl NetworkManager {
         let topic = match &msg {
             SwarmMessage::ShardAnnounce(_)
             | SwarmMessage::NodeCapabilityUpdate(_)
-            | SwarmMessage::ModelManifest(_) => TOPIC_MODELS,
+            | SwarmMessage::ModelManifest(_)
+            | SwarmMessage::ShardDownloadProgress(_)
+            | SwarmMessage::HfSourceGossip(_) => TOPIC_MODELS,
             SwarmMessage::CreditGossip(_) => crate::network::protocol::TOPIC_CREDITS,
             SwarmMessage::ModelVote(_) => crate::network::protocol::TOPIC_GOVERNANCE,
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {

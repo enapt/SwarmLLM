@@ -878,14 +878,15 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
     }
 
     // Include models from the model registry (restored from DB or received via gossip)
+    // Use the model ID (slug) as the primary identifier so inference routing works.
     for manifest in state.shared_state.model_registry.models() {
-        let name = manifest.name.clone();
-        if seen.insert(name.clone()) {
+        let id = manifest.id.0.clone();
+        if seen.insert(id.clone()) {
             data.push(ModelInfo {
-                id: name,
+                id,
                 object: "model",
                 created: manifest.publish_date.timestamp(),
-                owned_by: "registry".into(),
+                owned_by: "network".into(),
             });
         }
     }

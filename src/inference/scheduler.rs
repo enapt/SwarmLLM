@@ -11,12 +11,16 @@ pub struct PipelineScheduler {
     shared_state: Arc<SharedState>,
 }
 
-/// A candidate node for a layer range, with scoring metadata.
+/// A candidate node for layer ranges, with scoring metadata.
+/// A single node may advertise multiple non-contiguous layer ranges (e.g.,
+/// layers [0,2) and [10,14)) when the GGUF's alphabetical tensor ordering
+/// scatters layers across byte-range shards.
 #[derive(Debug, Clone)]
 struct NodeCandidate {
     node_id: NodeId,
     shard_id: ShardId,
-    layer_range: (u32, u32),
+    /// All contiguous layer ranges this node can serve for the model.
+    available_ranges: Vec<(u32, u32)>,
     latency_ms: u32,
     load: f32,
     trust_score: f32,
@@ -92,34 +96,82 @@ impl PipelineScheduler {
     }
 
     /// Gather all candidate nodes for the given model's shards.
+    ///
+    /// Groups shards by node and computes combined layer ranges using actual GGUF
+    /// tensor metadata when available, falling back to manifest layer_range otherwise.
     fn gather_candidates(
         &self,
         manifest: &ModelManifest,
         local_node_id: &NodeId,
     ) -> Vec<NodeCandidate> {
-        let mut candidates = Vec::new();
+        // First, collect which shard indices each node holds
+        let mut node_shards: std::collections::HashMap<NodeId, Vec<u32>> =
+            std::collections::HashMap::new();
 
         for shard in &manifest.shards {
             let shard_id = ShardId {
                 model_id: manifest.id.clone(),
                 index: shard.index,
             };
-
-            // Check model_registry shard_holders
             let holders = self.shared_state.model_registry.shard_holders(&shard_id);
-
             for node_id in holders {
-                let (latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
-
-                candidates.push(NodeCandidate {
-                    node_id,
-                    shard_id: shard_id.clone(),
-                    layer_range: shard.layer_range,
-                    latency_ms,
-                    load: 0.0, // TODO: track active requests per node
-                    trust_score,
-                });
+                node_shards.entry(node_id).or_default().push(shard.index);
             }
+        }
+
+        let shard_size = self.shared_state.config.model.shard_size_bytes();
+        let gguf_meta = self.shared_state.gguf_meta.get(&manifest.id);
+
+        let mut candidates = Vec::new();
+
+        for (node_id, mut shard_indices) in node_shards {
+            shard_indices.sort();
+
+            // Compute ALL contiguous layer ranges for this node's shards
+            let ranges = if let Some(ref meta) = gguf_meta {
+                crate::inference::split::compute_available_layer_ranges(
+                    meta,
+                    shard_size,
+                    &shard_indices,
+                )
+                .into_iter()
+                .map(|(s, e)| (s as u32, e as u32))
+                .collect::<Vec<_>>()
+            } else {
+                // Fallback: use manifest layer ranges (approximate, single range)
+                let mut ls = manifest.num_layers as usize;
+                let mut le = 0usize;
+                for &idx in &shard_indices {
+                    if let Some(shard) = manifest.shards.iter().find(|s| s.index == idx) {
+                        ls = ls.min(shard.layer_range.0 as usize);
+                        le = le.max(shard.layer_range.1 as usize);
+                    }
+                }
+                if ls < le {
+                    vec![(ls as u32, le as u32)]
+                } else {
+                    vec![]
+                }
+            };
+
+            if ranges.is_empty() {
+                continue; // No complete layers on this node
+            }
+
+            let first_shard_id = ShardId {
+                model_id: manifest.id.clone(),
+                index: shard_indices[0],
+            };
+            let (latency_ms, trust_score) = self.get_peer_metrics(&node_id, local_node_id);
+
+            candidates.push(NodeCandidate {
+                node_id,
+                shard_id: first_shard_id,
+                available_ranges: ranges,
+                latency_ms,
+                load: 0.0, // TODO: track active requests per node
+                trust_score,
+            });
         }
 
         // Sort: latency ASC, load ASC, trust DESC
@@ -158,6 +210,8 @@ impl PipelineScheduler {
     ///
     /// Starting from layer 0, find the best candidate that covers at least
     /// the current layer, preferring those that cover the widest contiguous range.
+    /// A single node may appear multiple times in the pipeline if it has
+    /// non-contiguous layer ranges (e.g., layers [0,2) and [10,14)).
     fn greedy_assign(
         &self,
         num_layers: u32,
@@ -167,23 +221,29 @@ impl PipelineScheduler {
         let mut current_layer = 0u32;
 
         while current_layer < num_layers {
-            // Find the best candidate that covers current_layer
+            // Find the best (candidate, range) pair that covers current_layer.
+            // We search across all available_ranges of every candidate.
             let best = candidates
                 .iter()
-                .filter(|c| c.layer_range.0 <= current_layer && c.layer_range.1 > current_layer)
-                .max_by_key(|c| {
-                    // Prefer wider coverage, then better metrics (already sorted)
-                    c.layer_range.1 - current_layer
+                .flat_map(|c| {
+                    c.available_ranges
+                        .iter()
+                        .filter(|r| r.0 <= current_layer && r.1 > current_layer)
+                        .map(move |r| (c, *r))
+                })
+                .max_by_key(|(_c, r)| {
+                    // Prefer wider coverage from current_layer
+                    r.1 - current_layer
                 });
 
             match best {
-                Some(candidate) => {
+                Some((candidate, range)) => {
                     segments.push(PipelineSegment {
                         node_id: candidate.node_id.clone(),
                         shard_id: candidate.shard_id.clone(),
-                        layer_range: (current_layer, candidate.layer_range.1),
+                        layer_range: (current_layer, range.1),
                     });
-                    current_layer = candidate.layer_range.1;
+                    current_layer = range.1;
                 }
                 None => {
                     return Err(SwarmError::PipelineError(format!(
@@ -222,11 +282,13 @@ impl PipelineScheduler {
 
         for segment in segments {
             // Find the next-best candidate for the same layer range
-            // that isn't the primary node
+            // that isn't the primary node.  Check if ANY of the candidate's
+            // available_ranges fully covers the segment.
             if let Some(backup) = candidates.iter().find(|c| {
                 c.node_id != segment.node_id
-                    && c.layer_range.0 <= segment.layer_range.0
-                    && c.layer_range.1 >= segment.layer_range.1
+                    && c.available_ranges
+                        .iter()
+                        .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
             }) {
                 standbys.push(PipelineSegment {
                     node_id: backup.node_id.clone(),
@@ -419,5 +481,79 @@ mod tests {
         let scheduler = PipelineScheduler::new(state);
         let result = scheduler.assemble_pipeline(&ModelId("orphan-model".into()), &local_id);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_contiguous_segments_same_node() {
+        let node = NodeId([1u8; 32]);
+        let shard = ShardId {
+            model_id: ModelId("m".into()),
+            index: 0,
+        };
+        let segments = vec![
+            PipelineSegment {
+                node_id: node.clone(),
+                shard_id: shard.clone(),
+                layer_range: (0, 2),
+            },
+            PipelineSegment {
+                node_id: node.clone(),
+                shard_id: shard.clone(),
+                layer_range: (2, 4),
+            },
+        ];
+        let merged = PipelineScheduler::merge_contiguous(segments);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].layer_range, (0, 4));
+    }
+
+    #[test]
+    fn greedy_assign_multi_range_candidate() {
+        // Test that a candidate with multiple non-contiguous ranges can
+        // serve multiple pipeline segments for the same model.
+        let state = make_shared_state();
+        let scheduler = PipelineScheduler::new(state);
+
+        // Candidate A: layers [0,2) and [10,14)
+        // Candidate B: layers [2,10)
+        let candidates = vec![
+            NodeCandidate {
+                node_id: NodeId([1u8; 32]),
+                shard_id: ShardId {
+                    model_id: ModelId("test".into()),
+                    index: 0,
+                },
+                available_ranges: vec![(0, 2), (10, 14)],
+                latency_ms: 0,
+                load: 0.0,
+                trust_score: 1.0,
+            },
+            NodeCandidate {
+                node_id: NodeId([2u8; 32]),
+                shard_id: ShardId {
+                    model_id: ModelId("test".into()),
+                    index: 1,
+                },
+                available_ranges: vec![(2, 10)],
+                latency_ms: 10,
+                load: 0.0,
+                trust_score: 0.8,
+            },
+        ];
+
+        let segments = scheduler.greedy_assign(14, &candidates).unwrap();
+        // Should produce 3 segments: [0,2) on A, [2,10) on B, [10,14) on A
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].layer_range, (0, 2));
+        assert_eq!(segments[0].node_id, NodeId([1u8; 32]));
+        assert_eq!(segments[1].layer_range, (2, 10));
+        assert_eq!(segments[1].node_id, NodeId([2u8; 32]));
+        assert_eq!(segments[2].layer_range, (10, 14));
+        assert_eq!(segments[2].node_id, NodeId([1u8; 32]));
+
+        // After merging, same-node contiguous segments collapse
+        let merged = PipelineScheduler::merge_contiguous(segments);
+        // A's [0,2) and [10,14) are NOT contiguous → no merge → still 3 segments
+        assert_eq!(merged.len(), 3);
     }
 }

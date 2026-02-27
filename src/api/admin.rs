@@ -280,40 +280,6 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             ("network", "sharded")
         };
 
-        let status = if hosted_count == m.shard_count as usize {
-            "complete"
-        } else if hosted_count > 0 {
-            "partial"
-        } else {
-            "available"
-        };
-
-        // Check acquisition progress for this model
-        let acq_state = state
-            .shared_state
-            .acquisition_progress
-            .get(&m.id)
-            .map(|entry| {
-                let s = &entry.state;
-                match s {
-                    crate::model::acquisition::AcquisitionState::Downloading => "downloading",
-                    crate::model::acquisition::AcquisitionState::Complete => "complete",
-                    crate::model::acquisition::AcquisitionState::Failed { .. } => "failed",
-                    _ => "unknown",
-                }
-            });
-        let acq_progress = state
-            .shared_state
-            .acquisition_progress
-            .get(&m.id)
-            .map(|entry| {
-                serde_json::json!({
-                    "downloaded_bytes": entry.downloaded_bytes,
-                    "total_bytes": entry.total_bytes,
-                    "downloaded_shards": entry.downloaded_shards,
-                })
-            });
-
         // Compute global shard availability (any holder, not just local)
         let global_available = (0..m.shard_count)
             .filter(|&idx| {
@@ -329,6 +295,56 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             })
             .count();
 
+        // Check if the model is loaded and ready for inference
+        let is_loaded = state
+            .shared_state
+            .split_models
+            .iter()
+            .any(|e| e.key().0 == m.id);
+
+        let status = if is_loaded {
+            "loaded"
+        } else if global_available == m.shard_count as usize {
+            // All shards covered by the network — ready for distributed inference
+            "ready"
+        } else if hosted_count == m.shard_count as usize {
+            "complete"
+        } else if hosted_count > 0 {
+            "partial"
+        } else {
+            "available"
+        };
+
+        // Check acquisition progress — clean up completed entries
+        let acq_state = state
+            .shared_state
+            .acquisition_progress
+            .get(&m.id)
+            .and_then(|entry| {
+                let s = &entry.state;
+                match s {
+                    crate::model::acquisition::AcquisitionState::Downloading => Some("downloading"),
+                    crate::model::acquisition::AcquisitionState::Failed { .. } => Some("failed"),
+                    // Don't report "complete" — let the status field handle readiness
+                    _ => None,
+                }
+            });
+        let acq_progress = if acq_state == Some("downloading") {
+            state
+                .shared_state
+                .acquisition_progress
+                .get(&m.id)
+                .map(|entry| {
+                    serde_json::json!({
+                        "downloaded_bytes": entry.downloaded_bytes,
+                        "total_bytes": entry.total_bytes,
+                        "downloaded_shards": entry.downloaded_shards,
+                    })
+                })
+        } else {
+            None
+        };
+
         let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes);
 
         models.push(serde_json::json!({
@@ -338,7 +354,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "shard_count": m.shard_count,
             "hosted_shards": hosted_count,
             "global_available": global_available,
-            "healthy": hosted_count == m.shard_count as usize,
+            "healthy": global_available == m.shard_count as usize,
             "status": status,
             "mode": mode,
             "source": source,
@@ -919,6 +935,10 @@ pub struct HfShardDownloadRequest {
     /// If empty, the server will probe the file and return shard info without downloading.
     #[serde(default)]
     pub shards: Vec<u32>,
+    /// Optional: target an existing model_id so downloaded shards merge into its directory.
+    /// If omitted, a new model_id is derived from the filename.
+    #[serde(default)]
+    pub model_id: Option<String>,
 }
 
 /// GET /api/admin/hf/probe — Probe a remote GGUF file to get shard info.
@@ -989,15 +1009,32 @@ pub async fn hf_download_shards(
         })));
     }
 
-    // Build a filesystem-safe model directory name
-    let safe_name = filename
-        .trim_end_matches(".gguf")
-        .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    // Use provided model_id if it matches an existing model, otherwise derive from filename
+    let safe_name = if let Some(ref mid) = body.model_id {
+        let candidate_dir = state.config.node.data_dir.join("models").join(mid);
+        if candidate_dir.exists() {
+            mid.clone()
+        } else {
+            // Fall back to filename-derived name
+            filename
+                .trim_end_matches(".gguf")
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-")
+        }
+    } else {
+        filename
+            .trim_end_matches(".gguf")
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+            .split('-')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+    };
 
     let dest_dir = state.config.node.data_dir.join("models").join(&safe_name);
 
@@ -1131,6 +1168,12 @@ pub async fn hf_download_shards(
                             download_shared
                                 .db
                                 .put_json("hf_sources", &model_id_str, &hf_source);
+                        // Write hf_source.json to disk so it survives DB wipes
+                        let hf_source_path = dest_dir.join("hf_source.json");
+                        let _ = std::fs::write(
+                            &hf_source_path,
+                            serde_json::to_string_pretty(&hf_source).unwrap_or_default(),
+                        );
 
                         // Broadcast HfSourceGossip + ModelManifest immediately so peers
                         // can start auto-managing shards without waiting for the 30s health tick.
@@ -1244,20 +1287,25 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
 
     let configured_shard_size = params.shared.config.model.shard_size_bytes();
 
-    // Build shard infos with layer ranges
-    let layers_per_shard = num_layers / shard_count;
-    let remainder = num_layers % shard_count;
+    // Build shard infos with accurate layer ranges computed from actual GGUF tensor
+    // positions.  The naive approach (num_layers / shard_count) doesn't work because
+    // layer tensors don't align to shard byte boundaries — a layer's data may start in
+    // one shard and end in the next.
     let mut shards = Vec::with_capacity(shard_count as usize);
-    let mut layer_cursor = 0u32;
 
     let model_dir = header_path.parent().unwrap();
 
     for idx in 0..shard_count {
-        let extra = if idx < remainder { 1 } else { 0 };
-        let shard_layers = layers_per_shard + extra;
         let shard_start = (idx as u64) * configured_shard_size;
         let shard_end = ((idx as u64 + 1) * configured_shard_size).min(total_size);
         let shard_size = shard_end - shard_start;
+
+        // Compute accurate layer range: which layers have ALL tensors in this shard
+        let (ls, le) = crate::inference::split::compute_local_layer_range(
+            &meta,
+            configured_shard_size,
+            &[idx],
+        );
 
         // Compute BLAKE3 hash for shards we actually have
         let hash = {
@@ -1272,11 +1320,10 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
 
         shards.push(crate::types::ShardInfo {
             index: idx,
-            layer_range: (layer_cursor, layer_cursor + shard_layers),
+            layer_range: (ls as u32, le as u32),
             size_bytes: shard_size,
             hash,
         });
-        layer_cursor += shard_layers;
     }
 
     let node_id = params.shared.identity.node_id().clone();

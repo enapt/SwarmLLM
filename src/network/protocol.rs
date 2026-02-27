@@ -289,7 +289,9 @@ pub const TENSOR_TAG_ENCRYPTED: u8 = 0x10;
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
     let data_len = forward.activations.len();
     // Header: tag(1) + uuid(16) + seq(4) + index_pos(4) + fmt(1) + data_len(4) = 30
-    let total = 1 + 29 + data_len;
+    // Optional trailer: marker(1) + layer_start(4) + layer_end(4) = 9
+    let trailer_len = if forward.layer_range.is_some() { 9 } else { 0 };
+    let total = 1 + 29 + data_len + trailer_len;
     let mut buf = Vec::with_capacity(total);
 
     // Message type tag
@@ -311,6 +313,13 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     buf.extend_from_slice(&(data_len as u32).to_le_bytes());
     // activation data
     buf.extend_from_slice(&forward.activations);
+
+    // Optional layer_range trailer (backward compatible — old decoders stop at data end)
+    if let Some((layer_start, layer_end)) = forward.layer_range {
+        buf.push(0x01); // marker byte
+        buf.extend_from_slice(&layer_start.to_le_bytes());
+        buf.extend_from_slice(&layer_end.to_le_bytes());
+    }
 
     Ok(buf)
 }
@@ -371,12 +380,31 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
 
     let activations = data[29..29 + data_len].to_vec();
 
+    // Read optional layer_range trailer (backward compatible — absent on old peers)
+    let trailer_start = 29 + data_len;
+    let layer_range = if data.len() >= trailer_start + 9 && data[trailer_start] == 0x01 {
+        let ls = u32::from_le_bytes(
+            data[trailer_start + 1..trailer_start + 5]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid layer_start".into()))?,
+        );
+        let le = u32::from_le_bytes(
+            data[trailer_start + 5..trailer_start + 9]
+                .try_into()
+                .map_err(|_| SwarmError::Network("Invalid layer_end".into()))?,
+        );
+        Some((ls, le))
+    } else {
+        None
+    };
+
     Ok(LayerForward {
         request_id,
         sequence_num,
         index_pos,
         activations,
         format,
+        layer_range,
         sender_peer_bytes: None,
     })
 }
@@ -639,6 +667,7 @@ pub fn decode_layer_forward_encrypted(
         index_pos,
         activations: vec![], // Will be filled after decryption
         format,
+        layer_range: None, // Encrypted messages don't carry layer_range in AAD header
         sender_peer_bytes: None,
     };
 
@@ -762,6 +791,7 @@ mod tests {
             index_pos: 0,
             activations: vec![1, 2, 3, 4, 5, 6, 7, 8],
             format: TensorFormat::FP16,
+            layer_range: None,
             sender_peer_bytes: None,
         };
 
@@ -772,6 +802,7 @@ mod tests {
         assert_eq!(decoded.sequence_num, 42);
         assert_eq!(decoded.activations, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(matches!(decoded.format, TensorFormat::FP16));
+        assert!(decoded.layer_range.is_none());
     }
 
     #[test]
@@ -787,6 +818,7 @@ mod tests {
                 index_pos: 0,
                 activations: vec![],
                 format: fmt,
+                layer_range: None,
                 sender_peer_bytes: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
@@ -810,6 +842,7 @@ mod tests {
             index_pos: 0,
             activations: data.clone(),
             format: TensorFormat::FP32,
+            layer_range: None,
             sender_peer_bytes: None,
         };
 
@@ -817,6 +850,47 @@ mod tests {
         let decoded = decode_layer_forward(&encoded).unwrap();
         assert_eq!(decoded.activations.len(), 1024 * 1024);
         assert_eq!(decoded.activations, data);
+    }
+
+    #[test]
+    fn layer_forward_with_layer_range_roundtrip() {
+        let forward = LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 7,
+            index_pos: 128,
+            activations: vec![0xAA; 64],
+            format: TensorFormat::FP32,
+            layer_range: Some((10, 14)),
+            sender_peer_bytes: None,
+        };
+
+        let encoded = encode_layer_forward(&forward).unwrap();
+        let decoded = decode_layer_forward(&encoded).unwrap();
+
+        assert_eq!(decoded.request_id, forward.request_id);
+        assert_eq!(decoded.sequence_num, 7);
+        assert_eq!(decoded.index_pos, 128);
+        assert_eq!(decoded.layer_range, Some((10, 14)));
+    }
+
+    #[test]
+    fn layer_forward_without_layer_range_backward_compat() {
+        // Simulate an old encoder that doesn't write the trailer
+        let forward = LayerForward {
+            request_id: uuid::Uuid::nil(),
+            sequence_num: 0,
+            index_pos: 0,
+            activations: vec![1, 2, 3],
+            format: TensorFormat::FP16,
+            layer_range: None,
+            sender_peer_bytes: None,
+        };
+        let encoded = encode_layer_forward(&forward).unwrap();
+        // Trim to remove any trailer — simulates an old encoder
+        let trimmed = &encoded[..1 + 29 + 3]; // tag + header + 3 bytes data
+        let decoded = decode_layer_forward(trimmed).unwrap();
+        assert!(decoded.layer_range.is_none());
+        assert_eq!(decoded.activations, vec![1, 2, 3]);
     }
 
     #[test]
