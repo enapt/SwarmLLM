@@ -271,11 +271,11 @@ impl AutoShardManager {
                 }
             }
 
-            let model_popularity = all_holders.len() as f64;
-            if model_popularity < 1.0 {
-                // No one has any shards — probably just published, skip
-                continue;
-            }
+            // Popularity = number of unique nodes holding any shard of this model.
+            // A value of 0 means no one has shards yet (manifest just arrived via gossip).
+            // We still want to acquire shards for it if we have an HF source — this is
+            // the "complete the set" flow where one node downloads and others follow.
+            let model_popularity = (all_holders.len() as f64).max(1.0);
 
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
@@ -424,19 +424,27 @@ impl AutoShardManager {
             usize::MAX
         };
 
-        // Also check existing downloads in progress
-        let in_progress: std::collections::HashSet<String> = self
-            .shared_state
-            .acquisition_progress
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.value().state,
+        // Track which specific shards are currently downloading so we don't
+        // start a duplicate. We check per-shard progress, NOT per-model — otherwise
+        // downloading shard 0 would block acquisition of shard 1.
+        let downloading_shards: std::collections::HashSet<(String, u32)> = {
+            let mut set = std::collections::HashSet::new();
+            for entry in self.shared_state.acquisition_progress.iter() {
+                if !matches!(
+                    entry.value().state,
                     crate::model::acquisition::AcquisitionState::Downloading
-                )
-            })
-            .map(|e| e.key().0.clone())
-            .collect();
+                ) {
+                    continue;
+                }
+                let mid = entry.key().0.clone();
+                for (&idx, sp) in &entry.value().shard_progress {
+                    if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                        set.insert((mid.clone(), idx));
+                    }
+                }
+            }
+            set
+        };
 
         for candidate in candidates {
             if selected.len() >= max {
@@ -445,8 +453,10 @@ impl AutoShardManager {
             if candidate.shard_size_bytes > budget_bytes {
                 continue;
             }
-            // Don't download if model is already being acquired
-            if in_progress.contains(&candidate.model_id.0) {
+            // Skip this specific shard if it's already being downloaded
+            if downloading_shards
+                .contains(&(candidate.model_id.0.clone(), candidate.shard_index))
+            {
                 continue;
             }
 
@@ -901,7 +911,7 @@ pub async fn check_and_load_model(
         // is_last requires the final shard (output.weight spans to the end of the file)
         let has_shard_0 = local_shard_indices.contains(&0);
         let last_shard_idx = manifest.shard_count.saturating_sub(1);
-        let has_last_shard = local_shard_indices.contains(&(last_shard_idx as u32));
+        let has_last_shard = local_shard_indices.contains(&last_shard_idx);
         let is_first = layer_start == 0 && has_shard_0;
         let is_last = layer_end >= manifest.num_layers as usize && has_last_shard;
 

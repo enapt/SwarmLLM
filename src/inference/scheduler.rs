@@ -583,6 +583,8 @@ mod tests {
                 latency_ms: 0,
                 load: 0.0,
                 trust_score: 1.0,
+                can_be_first: true,
+                can_be_last: true,
             },
             NodeCandidate {
                 node_id: NodeId([2u8; 32]),
@@ -594,6 +596,8 @@ mod tests {
                 latency_ms: 10,
                 load: 0.0,
                 trust_score: 0.8,
+                can_be_first: false,
+                can_be_last: false,
             },
         ];
 

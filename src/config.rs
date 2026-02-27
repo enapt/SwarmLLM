@@ -266,7 +266,7 @@ pub struct ApiConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutoManageConfig {
     /// Master toggle for auto shard management.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Maximum disk space (MB) the auto-manager may use for shard storage.
     /// Defaults to the global `max_disk_mb` if 0.
@@ -286,7 +286,7 @@ pub struct AutoManageConfig {
 impl Default for AutoManageConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_storage_mb: 0,
             interval_minutes: default_auto_manage_interval(),
             max_shards: 0,
@@ -296,7 +296,7 @@ impl Default for AutoManageConfig {
 }
 
 fn default_auto_manage_interval() -> u32 {
-    60
+    5
 }
 
 /// Configuration for model storage and sharding.

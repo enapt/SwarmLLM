@@ -44,6 +44,12 @@ keep_versions = 3
 [model]
 shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)
 
+[auto_manage]
+# enabled = true               # Auto-acquire shards from peers and HuggingFace (default: on)
+# max_storage_mb = 0           # 0 = use 50% of max_disk_mb
+# interval_minutes = 5         # How often to check for new shards to download
+# max_shards = 0               # 0 = unlimited within disk budget
+
 [pool]
 max_pool_size = 10             # Maximum devices in a single pool
 invitation_ttl_hours = 24      # How long an invitation stays valid

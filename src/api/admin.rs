@@ -1357,7 +1357,9 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     // one shard and end in the next.
     let mut shards = Vec::with_capacity(shard_count as usize);
 
-    let model_dir = header_path.parent().unwrap();
+    let model_dir = header_path
+        .parent()
+        .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
 
     for idx in 0..shard_count {
         let shard_start = (idx as u64) * configured_shard_size;

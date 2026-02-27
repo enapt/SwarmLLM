@@ -104,7 +104,7 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             middleware::auth_middleware,
         ))
-        .layer(middleware::cors_layer())
+        .layer(middleware::cors_layer(state.config.node.listen_port))
         .with_state(state)
 }
 

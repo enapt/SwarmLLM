@@ -7,20 +7,20 @@ use tower_http::cors::CorsLayer;
 
 use crate::api::server::AppState;
 
-/// Create a CORS layer restricted to localhost origins and specific methods/headers.
-pub fn cors_layer() -> CorsLayer {
-    let origins = [
-        "http://localhost:8800".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:8800".parse::<HeaderValue>().unwrap(),
-        "http://localhost:8801".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:8801".parse::<HeaderValue>().unwrap(),
-        "http://localhost:8802".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:8802".parse::<HeaderValue>().unwrap(),
-        "http://localhost:8803".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:8803".parse::<HeaderValue>().unwrap(),
-    ];
+/// Create a CORS layer restricted to localhost origins on the configured port.
+///
+/// Dynamically builds the origin whitelist from the actual listen port so users
+/// running on non-default ports (e.g. `-p 9000`) don't get blocked by CORS.
+pub fn cors_layer(port: u16) -> CorsLayer {
+    let mut origins: Vec<HeaderValue> = Vec::with_capacity(2);
+    if let Ok(v) = format!("http://localhost:{port}").parse::<HeaderValue>() {
+        origins.push(v);
+    }
+    if let Ok(v) = format!("http://127.0.0.1:{port}").parse::<HeaderValue>() {
+        origins.push(v);
+    }
     CorsLayer::new()
-        .allow_origin(origins.to_vec())
+        .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,

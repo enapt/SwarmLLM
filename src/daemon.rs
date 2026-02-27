@@ -1122,6 +1122,9 @@ async fn dispatch_network_messages(
                                     shared_state.model_registry
                                         .record_shard_holder(shard_id.clone(), announce.node_id.clone());
                                 }
+                                // Wake auto-manage so it re-evaluates rarity scores —
+                                // new shard holders change which shards are most needed.
+                                shared_state.auto_manage_notify.notify_one();
                             }
                             // Process model manifests from peers — register in model_registry
                             SwarmMessage::ModelManifest(manifest) => {
@@ -1295,6 +1298,8 @@ async fn dispatch_network_messages(
                                         }
                                         shared_state.model_registry
                                             .record_shard_holder(progress.shard_id.clone(), progress.node_id.clone());
+                                        // Wake auto-manage — peer completed a download, rarity changed
+                                        shared_state.auto_manage_notify.notify_one();
                                     } else {
                                         // Update or insert download progress
                                         let mut entry = shared_state.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
