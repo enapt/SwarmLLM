@@ -2065,37 +2065,83 @@ fn regenerate_manifest_from_header(
 
     let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
 
-    let mut shards = Vec::new();
-    for idx in 0..shard_count {
-        let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
-        // For shards we don't have locally, compute expected size
-        let expected_size = if idx == shard_count - 1 {
-            total_size - (idx as u64) * shard_size
-        } else {
-            shard_size
-        };
-        let file_size = std::fs::metadata(&shard_path)
-            .map(|m| m.len())
-            .unwrap_or(expected_size);
-
-        let (ls, le) = crate::inference::split::compute_local_layer_range(meta, shard_size, &[idx]);
-
-        let hash = if shard_path.exists() {
-            match std::fs::read(&shard_path) {
-                Ok(data) => *blake3::hash(&data).as_bytes(),
-                Err(_) => [0u8; 32],
+    // Try v2 layer-aligned layout: check if repacked shard files match layout sizes
+    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, shard_count);
+    let v2_matches = !layouts.is_empty()
+        && layouts.iter().all(|layout| {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            if let Ok(file_meta) = std::fs::metadata(&shard_path) {
+                let diff = (file_meta.len() as i64 - layout.size_bytes as i64).unsigned_abs();
+                diff <= layout.size_bytes / 100 + 1
+            } else {
+                false
             }
-        } else {
-            [0u8; 32]
-        };
-
-        shards.push(crate::types::ShardInfo {
-            index: idx,
-            layer_range: (ls as u32, le as u32),
-            size_bytes: file_size,
-            hash,
         });
-    }
+
+    let shards = if v2_matches {
+        // V2 layer-aligned shards
+        tracing::info!(model = %model_id, shard_count, "Detected v2 layer-aligned shards");
+        let mut shards = Vec::new();
+        for layout in &layouts {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            let hash = if shard_path.exists() {
+                match std::fs::read(&shard_path) {
+                    Ok(data) => *blake3::hash(&data).as_bytes(),
+                    Err(_) => [0u8; 32],
+                }
+            } else {
+                [0u8; 32]
+            };
+            let file_size = std::fs::metadata(&shard_path)
+                .map(|m| m.len())
+                .unwrap_or(layout.size_bytes);
+            shards.push(crate::types::ShardInfo {
+                index: layout.index,
+                layer_range: (layout.layer_start, layout.layer_end),
+                size_bytes: file_size,
+                hash,
+                byte_start: Some(0),
+                byte_end: Some(file_size),
+            });
+        }
+        shards
+    } else {
+        // V1 byte-range shards
+        let mut shards = Vec::new();
+        for idx in 0..shard_count {
+            let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
+            let expected_size = if idx == shard_count - 1 {
+                total_size - (idx as u64) * shard_size
+            } else {
+                shard_size
+            };
+            let file_size = std::fs::metadata(&shard_path)
+                .map(|m| m.len())
+                .unwrap_or(expected_size);
+
+            let (ls, le) =
+                crate::inference::split::compute_local_layer_range(meta, shard_size, &[idx]);
+
+            let hash = if shard_path.exists() {
+                match std::fs::read(&shard_path) {
+                    Ok(data) => *blake3::hash(&data).as_bytes(),
+                    Err(_) => [0u8; 32],
+                }
+            } else {
+                [0u8; 32]
+            };
+
+            shards.push(crate::types::ShardInfo {
+                index: idx,
+                layer_range: (ls as u32, le as u32),
+                size_bytes: file_size,
+                hash,
+                byte_start: None,
+                byte_end: None,
+            });
+        }
+        shards
+    };
 
     let model_name = meta
         .model_name
@@ -2173,6 +2219,8 @@ fn compute_shard_hashes(
             layer_range: (0, 0), // Byte-range shards, not layer-based
             size_bytes: this_shard_size,
             hash: *hasher.finalize().as_bytes(),
+            byte_start: None,
+            byte_end: None,
         });
     }
 

@@ -1707,46 +1707,85 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
 
     let configured_shard_size = params.shared.config.model.shard_size_bytes();
 
-    // Build shard infos with accurate layer ranges computed from actual GGUF tensor
-    // positions.  The naive approach (num_layers / shard_count) doesn't work because
-    // layer tensors don't align to shard byte boundaries — a layer's data may start in
-    // one shard and end in the next.
-    let mut shards = Vec::with_capacity(shard_count as usize);
-
     let model_dir = header_path
         .parent()
         .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
 
-    for idx in 0..shard_count {
-        let shard_start = (idx as u64) * configured_shard_size;
-        let shard_end = ((idx as u64 + 1) * configured_shard_size).min(total_size);
-        let shard_size = shard_end - shard_start;
+    // Try v2 layer-aligned layout first: check if repacked shard files exist
+    let layouts = crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
+    let v2_matches = !layouts.is_empty()
+        && layouts.iter().all(|layout| {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            if let Ok(meta) = std::fs::metadata(&shard_path) {
+                // v2 shard size matches the layout's computed size (tolerance: file may
+                // differ slightly due to alignment, so check within 1%)
+                let diff = (meta.len() as i64 - layout.size_bytes as i64).unsigned_abs();
+                diff <= layout.size_bytes / 100 + 1
+            } else {
+                false
+            }
+        });
 
-        // Compute accurate layer range: which layers have ALL tensors in this shard
-        let (ls, le) = crate::inference::split::compute_local_layer_range(
-            &meta,
-            configured_shard_size,
-            &[idx],
-        );
-
-        // Compute BLAKE3 hash for shards we actually have
-        let hash = {
-            let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
-            if shard_path.exists() {
+    let shards = if v2_matches {
+        // V2 layer-aligned shards: use layout data directly
+        tracing::info!(shard_count, "Generating v2 layer-aligned manifest");
+        let mut shards = Vec::with_capacity(layouts.len());
+        for layout in &layouts {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            let hash = if shard_path.exists() {
                 let data = std::fs::read(&shard_path).map_err(|e| e.to_string())?;
                 *blake3::hash(&data).as_bytes()
             } else {
-                [0u8; 32] // Unknown hash for shards we don't have
-            }
-        };
+                [0u8; 32]
+            };
+            let file_size = std::fs::metadata(&shard_path)
+                .map(|m| m.len())
+                .unwrap_or(layout.size_bytes);
+            shards.push(crate::types::ShardInfo {
+                index: layout.index,
+                layer_range: (layout.layer_start, layout.layer_end),
+                size_bytes: file_size,
+                hash,
+                byte_start: Some(0),
+                byte_end: Some(file_size),
+            });
+        }
+        shards
+    } else {
+        // V1 byte-range shards: fallback to original logic
+        let mut shards = Vec::with_capacity(shard_count as usize);
+        for idx in 0..shard_count {
+            let shard_start = (idx as u64) * configured_shard_size;
+            let shard_end = ((idx as u64 + 1) * configured_shard_size).min(total_size);
+            let shard_size = shard_end - shard_start;
 
-        shards.push(crate::types::ShardInfo {
-            index: idx,
-            layer_range: (ls as u32, le as u32),
-            size_bytes: shard_size,
-            hash,
-        });
-    }
+            let (ls, le) = crate::inference::split::compute_local_layer_range(
+                &meta,
+                configured_shard_size,
+                &[idx],
+            );
+
+            let hash = {
+                let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
+                if shard_path.exists() {
+                    let data = std::fs::read(&shard_path).map_err(|e| e.to_string())?;
+                    *blake3::hash(&data).as_bytes()
+                } else {
+                    [0u8; 32]
+                }
+            };
+
+            shards.push(crate::types::ShardInfo {
+                index: idx,
+                layer_range: (ls as u32, le as u32),
+                size_bytes: shard_size,
+                hash,
+                byte_start: None,
+                byte_end: None,
+            });
+        }
+        shards
+    };
 
     let node_id = params.shared.identity.node_id().clone();
 

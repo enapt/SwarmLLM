@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Current manifest schema version. Increment when making breaking changes.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 // ---- Identity ----
 /// Wrapper around Ed25519 public key. This IS the node's identity.
@@ -104,6 +104,14 @@ pub struct ShardInfo {
     pub layer_range: (u32, u32),
     pub size_bytes: u64,
     pub hash: Blake3Hash,
+    /// Byte start offset within the shard file (v2 layer-aligned shards).
+    /// `None` for v1 byte-range shards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_start: Option<u64>,
+    /// Byte end offset within the shard file (v2 layer-aligned shards).
+    /// `None` for v1 byte-range shards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_end: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

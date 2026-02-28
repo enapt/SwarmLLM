@@ -1109,6 +1109,98 @@ impl ShardReader {
         })
     }
 
+    /// Create a v2 ShardReader from layer-aligned shard files.
+    ///
+    /// In v2 shards, each shard file contains only the tensor data for its
+    /// assigned layers, written sequentially. The remap table maps GGUF
+    /// virtual positions to (shard_index, local_offset) pairs.
+    pub fn new_v2(
+        header: Vec<u8>,
+        _meta: &GgufTensorMeta,
+        layouts: &[LayerShardLayout],
+        model_dir: &Path,
+    ) -> Result<Self, SwarmError> {
+        // Build a remap: for each tensor in the GGUF, figure out which shard
+        // file contains it and at what offset within that shard file.
+        //
+        // The ShardReader's `shards` vec stores (virtual_start, path, len).
+        // For v2, we create virtual shard entries that map GGUF tensor positions
+        // to the correct shard file offset.
+        //
+        // Strategy: For each tensor in each layout, we know:
+        //   - its GGUF absolute offset = tensor_data_offset + tensor.offset
+        //   - its position in the shard file (cumulative offset within the shard)
+        // We build shard entries where start_byte = gguf_abs_offset - local_offset
+        // so that find_shard(gguf_abs_offset) = (shard_idx, local_offset).
+        //
+        // Since tensors are reordered within shards, each tensor needs its own
+        // virtual "shard" entry in the worst case. We can optimize by only creating
+        // entries when the delta changes.
+
+        let mut shards_vec: Vec<(u64, PathBuf, u64)> = Vec::new();
+
+        for layout in layouts {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            let file_len = std::fs::metadata(&shard_path)
+                .map_err(SwarmError::Io)?
+                .len();
+
+            let mut local_offset: u64 = 0;
+            for (_name, abs_offset, size) in &layout.tensors {
+                // Virtual start is chosen so that: abs_offset - virtual_start = local_offset
+                // → virtual_start = abs_offset - local_offset
+                let virtual_start = abs_offset - local_offset;
+
+                // Check if we can merge with the previous entry (same shard, contiguous)
+                let can_merge =
+                    shards_vec
+                        .last()
+                        .is_some_and(|(prev_start, prev_path, prev_len)| {
+                            prev_path == &shard_path
+                                && *prev_start + *prev_len == virtual_start + local_offset
+                        });
+
+                if can_merge {
+                    // Extend previous entry
+                    if let Some(last) = shards_vec.last_mut() {
+                        last.2 += size;
+                    }
+                } else {
+                    shards_vec.push((
+                        virtual_start,
+                        shard_path.clone(),
+                        local_offset + size, // len covers from 0 to end of this tensor
+                    ));
+                }
+
+                local_offset += size;
+            }
+
+            // Overwrite the last entry for this shard to use the full file length
+            if let Some(last) = shards_vec.last_mut() {
+                if last.1 == shard_path {
+                    last.2 = file_len;
+                }
+            }
+        }
+
+        // Compute total virtual size: header + largest (virtual_start + shard_len)
+        let max_virtual = shards_vec
+            .iter()
+            .map(|(start, _, len)| start + len)
+            .max()
+            .unwrap_or(0);
+        let total_size = max_virtual.max(header.len() as u64);
+
+        Ok(Self {
+            header,
+            shards: shards_vec,
+            total_size,
+            position: 0,
+            current_shard: None,
+        })
+    }
+
     /// Find which shard (if any) contains the given virtual file position.
     fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
         for (i, (start, _path, shard_len)) in self.shards.iter().enumerate() {
@@ -2536,6 +2628,295 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
     }
 
     Ok(*subset.last().unwrap_or(&0) as u32)
+}
+
+// ── V2 Layer-Aligned Sharding ──
+
+/// Describes one layer-aligned shard: which layers it contains and their tensors.
+#[derive(Clone, Debug)]
+pub struct LayerShardLayout {
+    pub index: u32,
+    pub layer_start: u32,
+    /// Exclusive upper bound of layer range.
+    pub layer_end: u32,
+    /// Tensor entries: (name, absolute_gguf_offset, size), sorted by offset.
+    pub tensors: Vec<(String, u64, u64)>,
+    /// Total size of this shard in bytes (sum of tensor sizes).
+    pub size_bytes: u64,
+}
+
+/// Group layers into `shard_count` shards of roughly equal byte size.
+///
+/// Non-layer tensors: `token_embd*` → shard 0, `output*`/`output_norm*` → last shard.
+/// Each shard contains ONLY complete transformer layers — no layer spans two shards.
+pub fn compute_layer_shard_layouts(
+    meta: &GgufTensorMeta,
+    shard_count: u32,
+) -> Vec<LayerShardLayout> {
+    if shard_count == 0 {
+        return vec![];
+    }
+
+    // Classify tensors: per-layer vs prefix (token_embd) vs suffix (output)
+    let mut layer_sizes: Vec<(u32, u64)> = Vec::new(); // (layer_idx, total_bytes)
+    let mut layer_tensors: HashMap<u32, Vec<(String, u64, u64)>> = HashMap::new();
+    let mut prefix_tensors: Vec<(String, u64, u64)> = Vec::new();
+    let mut prefix_size: u64 = 0;
+    let mut suffix_tensors: Vec<(String, u64, u64)> = Vec::new();
+    let mut suffix_size: u64 = 0;
+
+    // Per-layer byte totals
+    let mut per_layer_bytes: HashMap<u32, u64> = HashMap::new();
+
+    for (name, loc) in &meta.tensors {
+        let abs_offset = meta.tensor_data_offset + loc.offset;
+        if name.starts_with("blk.") {
+            // Parse layer index: "blk.{N}.suffix"
+            if let Some(idx_str) = name.strip_prefix("blk.").and_then(|s| s.split('.').next()) {
+                if let Ok(layer_idx) = idx_str.parse::<u32>() {
+                    *per_layer_bytes.entry(layer_idx).or_insert(0) += loc.size;
+                    layer_tensors.entry(layer_idx).or_default().push((
+                        name.clone(),
+                        abs_offset,
+                        loc.size,
+                    ));
+                }
+            }
+        } else if name.starts_with("token_embd") {
+            prefix_tensors.push((name.clone(), abs_offset, loc.size));
+            prefix_size += loc.size;
+        } else if name.starts_with("output") {
+            suffix_tensors.push((name.clone(), abs_offset, loc.size));
+            suffix_size += loc.size;
+        } else {
+            // Other tensors (rope_freqs, etc.) go to prefix
+            prefix_tensors.push((name.clone(), abs_offset, loc.size));
+            prefix_size += loc.size;
+        }
+    }
+
+    // Sorted layer indices
+    let mut layer_indices: Vec<u32> = per_layer_bytes.keys().copied().collect();
+    layer_indices.sort();
+
+    // Build (layer_idx, bytes) sorted by layer index
+    for &idx in &layer_indices {
+        layer_sizes.push((idx, *per_layer_bytes.get(&idx).unwrap_or(&0)));
+    }
+
+    let total_layer_bytes: u64 = layer_sizes.iter().map(|(_, s)| s).sum();
+    let total_bytes = total_layer_bytes + prefix_size + suffix_size;
+
+    // Single shard: everything in one
+    if shard_count == 1 {
+        let mut all_tensors = prefix_tensors;
+        for &idx in &layer_indices {
+            if let Some(t) = layer_tensors.get(&idx) {
+                all_tensors.extend(t.iter().cloned());
+            }
+        }
+        all_tensors.extend(suffix_tensors);
+        all_tensors.sort_by_key(|(_, off, _)| *off);
+
+        let layer_start = layer_indices.first().copied().unwrap_or(0);
+        let layer_end = layer_indices.last().map(|&l| l + 1).unwrap_or(0);
+
+        return vec![LayerShardLayout {
+            index: 0,
+            layer_start,
+            layer_end,
+            tensors: all_tensors,
+            size_bytes: total_bytes,
+        }];
+    }
+
+    // Target bytes per shard (including prefix/suffix distributed to first/last)
+    let target_per_shard = total_bytes / shard_count as u64;
+
+    // Greedily assign layers to shards
+    let mut layouts: Vec<LayerShardLayout> = Vec::new();
+    let mut current_tensors: Vec<(String, u64, u64)> = Vec::new();
+    let mut current_size: u64 = 0;
+    let mut current_layer_start: Option<u32> = None;
+    let mut current_layer_end: u32 = 0;
+
+    // Add prefix tensors to current (will be shard 0)
+    current_tensors.extend(prefix_tensors.iter().cloned());
+    current_size += prefix_size;
+
+    for (i, &(layer_idx, layer_bytes)) in layer_sizes.iter().enumerate() {
+        if current_layer_start.is_none() {
+            current_layer_start = Some(layer_idx);
+        }
+        current_layer_end = layer_idx + 1;
+
+        if let Some(t) = layer_tensors.get(&layer_idx) {
+            current_tensors.extend(t.iter().cloned());
+        }
+        current_size += layer_bytes;
+
+        // Check if this is the last layer going to the last shard
+        let is_last_layer = i == layer_sizes.len() - 1;
+        let remaining_shards = shard_count as usize - layouts.len() - 1;
+
+        // Emit shard when we've reached target or must to avoid running out of shards
+        let should_emit = if is_last_layer {
+            true // Last layer always emits
+        } else if remaining_shards == 0 {
+            false // Can't emit more, keep accumulating
+        } else {
+            current_size >= target_per_shard && remaining_shards > 0
+        };
+
+        if should_emit && !is_last_layer && remaining_shards > 0 {
+            current_tensors.sort_by_key(|(_, off, _)| *off);
+            layouts.push(LayerShardLayout {
+                index: layouts.len() as u32,
+                layer_start: current_layer_start.unwrap_or(0),
+                layer_end: current_layer_end,
+                tensors: std::mem::take(&mut current_tensors),
+                size_bytes: current_size,
+            });
+            current_size = 0;
+            current_layer_start = None;
+        }
+    }
+
+    // Final shard: add suffix tensors
+    current_tensors.extend(suffix_tensors.iter().cloned());
+    current_size += suffix_size;
+    current_tensors.sort_by_key(|(_, off, _)| *off);
+
+    layouts.push(LayerShardLayout {
+        index: layouts.len() as u32,
+        layer_start: current_layer_start.unwrap_or(0),
+        layer_end: current_layer_end,
+        tensors: current_tensors,
+        size_bytes: current_size,
+    });
+
+    layouts
+}
+
+/// Repack a full GGUF into layer-aligned shard files.
+///
+/// Reads tensor data from the GGUF, writes one shard file per layout.
+/// Returns ShardInfo entries with computed BLAKE3 hashes.
+///
+/// Each shard file contains only the tensors for its assigned layers,
+/// written sequentially. The shard files are NOT valid GGUF — they are
+/// raw tensor data files read via the v2 ShardReader's remap table.
+pub fn repack_to_layer_shards(
+    gguf_path: &Path,
+    meta: &GgufTensorMeta,
+    shard_count: u32,
+    dest_dir: &Path,
+) -> Result<Vec<crate::types::ShardInfo>, SwarmError> {
+    use std::io::Write;
+
+    let layouts = compute_layer_shard_layouts(meta, shard_count);
+    let mut shard_infos = Vec::new();
+
+    let mut gguf_file = std::fs::File::open(gguf_path).map_err(SwarmError::Io)?;
+
+    std::fs::create_dir_all(dest_dir).map_err(SwarmError::Io)?;
+
+    for layout in &layouts {
+        let tmp_path = dest_dir.join(format!("shard_{:03}.bin.tmp", layout.index));
+        let final_path = dest_dir.join(format!("shard_{:03}.bin", layout.index));
+        let mut out =
+            std::io::BufWriter::new(std::fs::File::create(&tmp_path).map_err(SwarmError::Io)?);
+        let mut hasher = blake3::Hasher::new();
+        let mut written: u64 = 0;
+
+        // Buffer for copying tensor data
+        let mut buf = vec![0u8; 64 * 1024]; // 64KB copy buffer
+
+        for (_name, abs_offset, size) in &layout.tensors {
+            gguf_file
+                .seek(SeekFrom::Start(*abs_offset))
+                .map_err(SwarmError::Io)?;
+            let mut remaining = *size;
+            while remaining > 0 {
+                let to_read = (remaining as usize).min(buf.len());
+                gguf_file
+                    .read_exact(&mut buf[..to_read])
+                    .map_err(SwarmError::Io)?;
+                hasher.update(&buf[..to_read]);
+                out.write_all(&buf[..to_read]).map_err(SwarmError::Io)?;
+                remaining -= to_read as u64;
+            }
+            written += size;
+        }
+
+        out.flush().map_err(SwarmError::Io)?;
+        drop(out);
+
+        // Atomic rename
+        std::fs::rename(&tmp_path, &final_path).map_err(SwarmError::Io)?;
+
+        let hash = *hasher.finalize().as_bytes();
+
+        shard_infos.push(crate::types::ShardInfo {
+            index: layout.index,
+            layer_range: (layout.layer_start, layout.layer_end),
+            size_bytes: written,
+            hash,
+            byte_start: Some(0),
+            byte_end: Some(written),
+        });
+
+        tracing::info!(
+            shard = layout.index,
+            layers = format!("{}-{}", layout.layer_start, layout.layer_end),
+            size_mb = written / (1024 * 1024),
+            "Wrote layer-aligned shard"
+        );
+    }
+
+    Ok(shard_infos)
+}
+
+/// Return all contiguous layer ranges from a v2 manifest's ShardInfo entries.
+///
+/// For v2 manifests (byte_start is Some), this reads layer_range directly from
+/// each shard — no tensor byte-range analysis needed. Falls back to the v1
+/// bitmap-based approach when byte_start is None.
+pub fn available_layer_ranges_from_manifest(
+    manifest: &crate::types::ModelManifest,
+    local_shard_indices: &[u32],
+) -> Vec<(usize, usize)> {
+    // Collect layer ranges from shards we hold
+    let mut layer_bits = vec![false; manifest.num_layers as usize];
+    for shard in &manifest.shards {
+        if local_shard_indices.contains(&shard.index) {
+            let start = shard.layer_range.0 as usize;
+            let end = (shard.layer_range.1 as usize).min(layer_bits.len());
+            for bit in layer_bits.iter_mut().take(end).skip(start) {
+                *bit = true;
+            }
+        }
+    }
+
+    // Extract contiguous ranges from the bitmap
+    let mut ranges = Vec::new();
+    let mut run_start = 0;
+    let mut in_run = false;
+    for (i, &avail) in layer_bits.iter().enumerate() {
+        if avail {
+            if !in_run {
+                run_start = i;
+                in_run = true;
+            }
+        } else if in_run {
+            ranges.push((run_start, i));
+            in_run = false;
+        }
+    }
+    if in_run {
+        ranges.push((run_start, layer_bits.len()));
+    }
+    ranges
 }
 
 /// Build a bitmap of which layers have ALL their tensors available locally.

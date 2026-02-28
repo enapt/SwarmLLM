@@ -65,6 +65,8 @@ impl ModelManifest {
             hasher.update(&shard.layer_range.1.to_le_bytes());
             hasher.update(&shard.size_bytes.to_le_bytes());
             hasher.update(&shard.hash);
+            hasher.update(&shard.byte_start.unwrap_or(0).to_le_bytes());
+            hasher.update(&shard.byte_end.unwrap_or(0).to_le_bytes());
         }
         hasher.update(&self.tokenizer_hash);
         *hasher.finalize().as_bytes()
@@ -108,6 +110,8 @@ mod tests {
                 layer_range: (0, 2),
                 size_bytes: 1024,
                 hash: [0u8; 32],
+                byte_start: None,
+                byte_end: None,
             }],
             tokenizer_hash: [0u8; 32],
             manifest_hash: [0u8; 32],

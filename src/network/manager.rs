@@ -660,53 +660,57 @@ impl NetworkManager {
                 }
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                cause,
+                num_established,
+                ..
+            } => {
                 tracing::info!(%peer_id, ?cause, remaining = num_established, "Connection closed");
 
                 // Skip cleanup if other connections to this peer remain
                 if num_established > 0 {
                     tracing::debug!(%peer_id, remaining = num_established, "Other connections remain, skipping cleanup");
                 } else {
+                    self.update_peer_count().await;
 
-                self.update_peer_count().await;
-
-                // NET-I1: Drain pending shard requests and download progress for this peer
-                let drained_ids: Vec<OutboundRequestId> = self
-                    .pending_shard_requests
-                    .iter()
-                    .filter(|(_, (pid, _))| *pid == peer_id)
-                    .map(|(rid, _)| *rid)
-                    .collect();
-                for rid in &drained_ids {
-                    if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
-                        self.shard_download_progress.remove(&shard_id);
-                        tracing::debug!(
-                            %peer_id,
-                            model = %shard_id.model_id,
-                            index = shard_id.index,
-                            "Cleaned up pending shard request for disconnected peer"
-                        );
+                    // NET-I1: Drain pending shard requests and download progress for this peer
+                    let drained_ids: Vec<OutboundRequestId> = self
+                        .pending_shard_requests
+                        .iter()
+                        .filter(|(_, (pid, _))| *pid == peer_id)
+                        .map(|(rid, _)| *rid)
+                        .collect();
+                    for rid in &drained_ids {
+                        if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
+                            self.shard_download_progress.remove(&shard_id);
+                            tracing::debug!(
+                                %peer_id,
+                                model = %shard_id.model_id,
+                                index = shard_id.index,
+                                "Cleaned up pending shard request for disconnected peer"
+                            );
+                        }
                     }
-                }
 
-                // NET-I2: Remove peer from registry, but skip if in active pipelines
-                if let Some(node_id) = self.peer_to_node.get(&peer_id) {
-                    let in_active_pipeline =
-                        self.shared_state.active_pipelines.iter().any(|entry| {
-                            entry
-                                .value()
-                                .segments
-                                .iter()
-                                .any(|seg| seg.node_id == *node_id)
-                        });
-                    if !in_active_pipeline {
-                        self.shared_state.peer_registry.remove(&*node_id);
-                        self.peer_to_node.remove(&peer_id);
-                        tracing::debug!(%peer_id, "Removed disconnected peer from registry");
-                    } else {
-                        tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                    // NET-I2: Remove peer from registry, but skip if in active pipelines
+                    if let Some(node_id) = self.peer_to_node.get(&peer_id) {
+                        let in_active_pipeline =
+                            self.shared_state.active_pipelines.iter().any(|entry| {
+                                entry
+                                    .value()
+                                    .segments
+                                    .iter()
+                                    .any(|seg| seg.node_id == *node_id)
+                            });
+                        if !in_active_pipeline {
+                            self.shared_state.peer_registry.remove(&*node_id);
+                            self.peer_to_node.remove(&peer_id);
+                            tracing::debug!(%peer_id, "Removed disconnected peer from registry");
+                        } else {
+                            tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                        }
                     }
-                }
                 } // end else (num_established == 0)
             }
 
@@ -1134,8 +1138,9 @@ impl NetworkManager {
             );
         }
 
-        // Second try: read byte range from the source GGUF file
-        // The source_path file tells us where the original GGUF lives
+        // Second try: read byte range from the source GGUF file (v1 only)
+        // For v2 layer-aligned shards, the source GGUF byte offsets don't match
+        // shard file contents — skip this fallback.
         let model_dir = self.shard_store.models_dir().join(&model_id.0);
         let source_path_file = model_dir.join("source_path");
         if source_path_file.exists() {
@@ -1145,7 +1150,14 @@ impl NetworkManager {
                     // Look up the shard's size from the manifest to compute byte offset
                     let manifest = self.shared_state.model_registry.get_manifest(model_id);
                     if let Some(manifest) = manifest {
-                        if let Some(shard_info) =
+                        // Skip source GGUF fallback for v2 manifests — byte offsets don't match
+                        if manifest.shards.iter().any(|s| s.byte_start.is_some()) {
+                            tracing::debug!(
+                                model = %model_id,
+                                shard = shard_index,
+                                "Skipping source GGUF fallback for v2 layer-aligned manifest"
+                            );
+                        } else if let Some(shard_info) =
                             manifest.shards.iter().find(|s| s.index == shard_index)
                         {
                             // Compute the byte offset in the source file for this shard

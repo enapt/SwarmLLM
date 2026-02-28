@@ -139,8 +139,19 @@ impl PipelineScheduler {
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
 
-            // Compute ALL contiguous layer ranges for this node's shards
-            let ranges = if let Some(ref meta) = gguf_meta {
+            // Compute ALL contiguous layer ranges for this node's shards.
+            // V2 manifests (byte_start is set) have accurate layer_range per shard,
+            // so we can read directly from the manifest without tensor analysis.
+            let is_v2 = manifest.shards.iter().any(|s| s.byte_start.is_some());
+            let ranges = if is_v2 {
+                crate::inference::split::available_layer_ranges_from_manifest(
+                    manifest,
+                    &shard_indices,
+                )
+                .into_iter()
+                .map(|(s, e)| (s as u32, e as u32))
+                .collect::<Vec<_>>()
+            } else if let Some(ref meta) = gguf_meta {
                 crate::inference::split::compute_available_layer_ranges(
                     meta,
                     shard_size,
@@ -477,6 +488,8 @@ mod tests {
             layer_range: (0, 32),
             size_bytes: 4_000_000_000,
             hash: [0u8; 32],
+            byte_start: None,
+            byte_end: None,
         }];
         let manifest = make_manifest("test-model", 32, shards);
         state.model_registry.register_manifest(manifest);
@@ -513,12 +526,16 @@ mod tests {
                 layer_range: (0, 16),
                 size_bytes: 2_000_000_000,
                 hash: [0u8; 32],
+                byte_start: None,
+                byte_end: None,
             },
             ShardInfo {
                 index: 1,
                 layer_range: (16, 32),
                 size_bytes: 2_000_000_000,
                 hash: [0u8; 32],
+                byte_start: None,
+                byte_end: None,
             },
         ];
         let manifest = make_manifest("test-model", 32, shards);
@@ -607,6 +624,8 @@ mod tests {
                 layer_range: (0, 32),
                 size_bytes: 4_000_000_000,
                 hash: [0u8; 32],
+                byte_start: None,
+                byte_end: None,
             }],
         );
         state.model_registry.register_manifest(manifest);
@@ -708,6 +727,8 @@ mod tests {
             layer_range: (0, 16),
             size_bytes: 2_000_000_000,
             hash: [0u8; 32],
+            byte_start: None,
+            byte_end: None,
         }];
         let manifest = make_manifest("load-test", 16, shards);
         state.model_registry.register_manifest(manifest);
