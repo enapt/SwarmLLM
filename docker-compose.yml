@@ -1,6 +1,13 @@
 # ============================================================================
-# SwarmLLM — 3-Node Local Test Cluster
+# SwarmLLM — 3-Node Local Test Cluster (DEVELOPMENT/TESTING ONLY)
 # ============================================================================
+# This compose file spins up a 3-node cluster on localhost for development
+# and testing. It is NOT intended for production use — in production, each
+# node runs on a separate machine.
+#
+# For single-node production use, just run:
+#   docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
+#
 # Start:   docker-compose up
 # Stop:    docker-compose down
 # Rebuild: docker-compose up --build
