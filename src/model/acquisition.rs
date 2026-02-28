@@ -678,7 +678,7 @@ impl AcquisitionManager {
             .insert(model_id.clone(), status.clone());
     }
 
-    /// Register a fully acquired model, reconstruct the GGUF, and auto-load for inference.
+    /// Register a fully acquired model and load available shards for inference.
     fn register_model(&self, model_id: &ModelId, manifest: &ModelManifest) {
         // Persist manifest to DB
         if let Err(e) = self
@@ -689,127 +689,18 @@ impl AcquisitionManager {
             tracing::error!(model = %model_id, error = %e, "Failed to persist manifest to DB");
         }
 
-        // Update acquisition log
-        if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
-            entry.log.push("Reconstructing GGUF from shards...".into());
-        }
-
-        // Reconstruct the full GGUF file from shard files
-        let gguf_path = match self.shard_store.reconstruct_gguf(model_id, manifest) {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::error!(model = %model_id, error = %e, "Failed to reconstruct GGUF");
-                if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
-                    entry.log.push(format!("GGUF reconstruction failed: {}", e));
-                }
-                return;
-            }
-        };
-
-        tracing::info!(model = %model_id, path = %gguf_path.display(), "GGUF reconstructed");
-
-        // Auto-load the model into the executor for inference
-        let executor = self.shared_state.executor.clone();
-        let shared_state = self.shared_state.clone();
-        let model_name = manifest.name.clone();
-        let model_id_clone = model_id.clone();
-        let gpu_layers = self.shared_state.config.inference.gpu_layers;
-
         if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
             entry
                 .log
-                .push("Loading model into GPU for inference...".into());
+                .push("Loading model from shards for inference...".into());
         }
 
+        // Load from shards — no full GGUF reconstruction needed.
+        // check_and_load_model handles both partial and complete shard sets.
+        let shared = self.shared_state.clone();
+        let mid = model_id.clone();
         tokio::spawn(async move {
-            tracing::info!(model = %model_name, "Loading reconstructed model...");
-
-            let mut exec = executor.lock().await;
-            match exec.load_model(&gguf_path, gpu_layers) {
-                Ok(()) => {
-                    let size = exec.model_size_bytes().unwrap_or(0);
-                    let gguf_meta = crate::inference::executor::extract_gguf_metadata(&gguf_path);
-                    // Extract EOS tokens from GGUF metadata with architecture-specific fallbacks
-                    let eos_tokens = {
-                        let mut tokens = Vec::new();
-                        if let Ok(mut f) = std::fs::File::open(&gguf_path) {
-                            if let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut f)
-                            {
-                                if let Some(eos_id) = ct
-                                    .metadata
-                                    .get("tokenizer.ggml.eos_token_id")
-                                    .and_then(|v| v.to_u32().ok())
-                                {
-                                    tokens.push(eos_id);
-                                }
-                                let arch = ct
-                                    .metadata
-                                    .get("general.architecture")
-                                    .and_then(|v| v.to_string().ok().cloned())
-                                    .unwrap_or_default();
-                                match arch.as_str() {
-                                    "qwen2" => {
-                                        for &id in &[151643u32, 151645] {
-                                            if !tokens.contains(&id) {
-                                                tokens.push(id);
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        if !tokens.contains(&2) {
-                                            tokens.push(2);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if tokens.is_empty() {
-                            tokens.push(2);
-                        }
-                        tokens
-                    };
-                    let info = crate::daemon::LoadedModelInfo {
-                        name: model_name.clone(),
-                        size_bytes: size,
-                        eos_tokens,
-                        chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
-                        bos_token: gguf_meta
-                            .as_ref()
-                            .map(|m| m.bos_token.clone())
-                            .unwrap_or_default(),
-                        eos_token: gguf_meta
-                            .as_ref()
-                            .map(|m| m.eos_token.clone())
-                            .unwrap_or_default(),
-                    };
-                    *shared_state.loaded_model_info.write().await = Some(info.clone());
-
-                    // Generate manifest for the reconstructed model so we can serve shards
-                    crate::daemon::generate_and_register_local_manifest(
-                        &shared_state,
-                        &info,
-                        &gguf_path,
-                    );
-
-                    if let Some(mut entry) =
-                        shared_state.acquisition_progress.get_mut(&model_id_clone)
-                    {
-                        entry
-                            .log
-                            .push(format!("Model loaded! {} ready for inference", model_name));
-                    }
-
-                    tracing::info!(model = %model_name, "Model loaded and ready for inference");
-                }
-                Err(e) => {
-                    if let Some(mut entry) =
-                        shared_state.acquisition_progress.get_mut(&model_id_clone)
-                    {
-                        entry.log.push(format!("Model load failed: {}", e));
-                    }
-                    tracing::error!(model = %model_name, error = %e, "Failed to load reconstructed model");
-                }
-            }
+            crate::model::auto_manage::check_and_load_model(&shared, &mid).await;
         });
     }
 
