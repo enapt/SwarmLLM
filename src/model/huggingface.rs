@@ -196,28 +196,27 @@ pub struct DownloadProgress {
 // ── Shard-level download via HTTP Range requests ──
 
 /// Information about a remote GGUF file needed to plan shard downloads.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GgufFileInfo {
     pub total_size: u64,
     pub header_size: u64,
-    pub shard_count: u32,
-    pub shard_size: u64,
+    pub tensor_meta: crate::inference::split::GgufTensorMeta,
+    pub layouts: Vec<crate::inference::split::LayerShardLayout>,
 }
 
-/// Default shard size in bytes (512MB) — used when no config is available.
-const DEFAULT_SHARD_SIZE: u64 = 512 * 1024 * 1024;
+impl GgufFileInfo {
+    /// Number of shards (derived from layouts).
+    pub fn shard_count(&self) -> u32 {
+        self.layouts.len() as u32
+    }
+}
 
-/// Probe a remote GGUF file on HuggingFace to determine its size and shard layout.
+/// Probe a remote GGUF file on HuggingFace to determine its size, tensor layout,
+/// and layer-aligned shard plan.
 ///
 /// Uses a HEAD request for total size, then a Range GET for the first 16MB to parse
-/// the GGUF header and extract `tensor_data_offset`.
-/// Uses the default 512MB shard size. For custom shard sizes, use `probe_gguf_file_with_shard_size`.
-pub async fn probe_gguf_file(repo_id: &str, filename: &str) -> Result<GgufFileInfo, String> {
-    probe_gguf_file_with_shard_size(repo_id, filename, DEFAULT_SHARD_SIZE).await
-}
-
-/// Probe a remote GGUF file with a specific shard size.
-pub async fn probe_gguf_file_with_shard_size(
+/// the GGUF header and extract tensor metadata. Computes layer-aligned shard layouts.
+pub async fn probe_gguf_file(
     repo_id: &str,
     filename: &str,
     shard_size: u64,
@@ -280,14 +279,20 @@ pub async fn probe_gguf_file_with_shard_size(
         .map_err(|e| format!("Failed to parse GGUF header from probe: {e}"))?;
 
     let header_size = ct.tensor_data_offset;
+
+    // Build GgufTensorMeta from the parsed GGUF content
+    let tensor_meta = build_tensor_meta_from_content(&ct)
+        .map_err(|e| format!("Failed to extract tensor metadata from probe: {e}"))?;
+
     let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
+    let layouts = crate::inference::split::compute_layer_shard_layouts(&tensor_meta, shard_count);
 
     tracing::info!(
         repo = %repo_id,
         file = %filename,
         total_size,
         header_size,
-        shard_count,
+        shard_count = layouts.len(),
         shard_size_mb = shard_size / (1024 * 1024),
         "Probed remote GGUF file"
     );
@@ -295,8 +300,80 @@ pub async fn probe_gguf_file_with_shard_size(
     Ok(GgufFileInfo {
         total_size,
         header_size,
-        shard_count,
-        shard_size,
+        tensor_meta,
+        layouts,
+    })
+}
+
+/// Build `GgufTensorMeta` from a candle `Content` that was parsed from a GGUF header.
+fn build_tensor_meta_from_content(
+    ct: &candle_core::quantized::gguf_file::Content,
+) -> Result<crate::inference::split::GgufTensorMeta, String> {
+    use std::collections::HashMap;
+
+    let arch = ct
+        .metadata
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok().cloned())
+        .unwrap_or_else(|| "llama".to_string());
+
+    let md_get = |suffix: &str| -> Result<&candle_core::quantized::gguf_file::Value, String> {
+        let key = format!("{arch}.{suffix}");
+        ct.metadata
+            .get(&key)
+            .ok_or_else(|| format!("Missing GGUF metadata: {key}"))
+    };
+
+    let head_count = md_get("attention.head_count")?
+        .to_u32()
+        .map_err(|e| e.to_string())? as usize;
+    let head_count_kv = md_get("attention.head_count_kv")?
+        .to_u32()
+        .map_err(|e| e.to_string())? as usize;
+    let block_count = md_get("block_count")?.to_u32().map_err(|e| e.to_string())? as usize;
+    let embedding_length = md_get("embedding_length")?
+        .to_u32()
+        .map_err(|e| e.to_string())? as usize;
+    let rope_dim = md_get("rope.dimension_count")
+        .and_then(|v| v.to_u32().map_err(|e| e.to_string()))
+        .unwrap_or((embedding_length / head_count) as u32) as usize;
+    let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
+        .to_f32()
+        .map_err(|e| e.to_string())? as f64;
+    let rope_freq_base = ct
+        .metadata
+        .get(&format!("{arch}.rope.freq_base"))
+        .and_then(|v| v.to_f32().ok())
+        .unwrap_or(10000f32);
+    let model_name = ct
+        .metadata
+        .get("general.name")
+        .and_then(|v| v.to_string().ok().cloned());
+
+    let mut tensors = HashMap::new();
+    for (name, info) in &ct.tensor_infos {
+        let size =
+            info.ggml_dtype.type_size() * info.shape.elem_count() / info.ggml_dtype.block_size();
+        tensors.insert(
+            name.clone(),
+            crate::inference::split::TensorLocation {
+                offset: info.offset,
+                size: size as u64,
+            },
+        );
+    }
+
+    Ok(crate::inference::split::GgufTensorMeta {
+        tensors,
+        tensor_data_offset: ct.tensor_data_offset,
+        model_name,
+        head_count,
+        head_count_kv,
+        block_count,
+        embedding_length,
+        rope_dim,
+        rope_freq_base,
+        rms_norm_eps,
     })
 }
 
@@ -415,24 +492,41 @@ fn parse_http_date(s: &str) -> Option<SystemTime> {
     Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64))
 }
 
-/// Download a specific shard (byte range) of a remote GGUF file from HuggingFace.
+/// Coalesce nearby byte ranges (within `max_gap` bytes) into fewer requests.
 ///
-/// Each shard is a slice of the GGUF file. The byte range is computed from the
-/// shard index and the shard size stored in `GgufFileInfo`.
+/// Input: sorted list of (offset, size) pairs.
+/// Output: merged (start, end_exclusive) ranges.
+pub fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u64)> {
+    if ranges.is_empty() {
+        return vec![];
+    }
+    let mut sorted: Vec<(u64, u64)> = ranges.iter().map(|&(off, sz)| (off, off + sz)).collect();
+    sorted.sort_by_key(|r| r.0);
+
+    let mut merged = vec![sorted[0]];
+    for &(start, end) in &sorted[1..] {
+        let last = merged.last_mut().unwrap();
+        if start <= last.1 + max_gap {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+/// Download a v2 layer-aligned shard from HuggingFace.
 ///
-/// Supports resuming from partial `.tmp` files. If a `.tmp` file exists from a
-/// previous interrupted download, it will attempt to resume from the last byte
-/// using HTTP `Range` headers, falling back to a full re-download if the server
-/// doesn't support Range requests.
+/// Takes a `LayerShardLayout` describing which tensors belong to this shard.
+/// Coalesces nearby byte ranges into fewer HTTP Range requests, then packs
+/// the tensor data sequentially into `shard_{idx:03}.bin`.
 ///
-/// Connection errors during streaming are retried up to 3 times with backoff.
-pub async fn download_shard(
+/// Connection errors are retried up to 3 times with backoff.
+pub async fn download_shard_v2(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
-    shard_index: u32,
-    total_file_size: u64,
-    shard_size: u64,
+    layout: &crate::inference::split::LayerShardLayout,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
@@ -441,61 +535,40 @@ pub async fn download_shard(
         .map_err(|e| e.to_string())?;
 
     let url = download_url(repo_id, filename);
-
-    // Shards are byte ranges of the FULL GGUF file (not just tensor data),
-    // because that's how the shard hashes and the ShardReader work.
-    let range_start = (shard_index as u64) * shard_size;
-    let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
-    let expected_size = range_end - range_start + 1;
+    let shard_index = layout.index;
 
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
     let dest_path = dest_dir.join(format!("shard_{shard_index:03}.bin"));
     let tmp_path = dest_dir.join(format!("shard_{shard_index:03}.bin.tmp"));
 
-    // Check for partial download to resume from
-    let existing_bytes = if tmp_path.exists() {
-        let meta = std::fs::metadata(&tmp_path)
-            .map_err(|e| format!("Failed to read tmp file metadata: {e}"))?;
-        let len = meta.len();
-        if len >= expected_size {
-            // tmp file is already complete (or larger) — start fresh to be safe
-            tracing::info!(
-                shard = shard_index,
-                "Tmp file already >= expected size, re-downloading"
-            );
-            0
-        } else {
-            tracing::info!(
-                shard = shard_index,
-                existing_bytes = len,
-                expected_size,
-                "Found partial download, will attempt resume"
-            );
-            len
-        }
-    } else {
-        0
-    };
+    // Build byte ranges from tensor locations (gguf_offset, size)
+    let tensor_ranges: Vec<(u64, u64)> = layout
+        .tensors
+        .iter()
+        .map(|(_, offset, size)| (*offset, *size))
+        .collect();
 
-    // Connection-level retry: wraps the entire request+stream cycle
-    let stream_retry_delays = [2u64, 5, 10];
-    let mut total_downloaded: u64 = existing_bytes;
+    // Coalesce nearby ranges (4MB gap tolerance) to reduce HTTP requests
+    let coalesced = coalesce_byte_ranges(&tensor_ranges, 4 * 1024 * 1024);
+    let total_download_bytes: u64 = coalesced.iter().map(|(s, e)| e - s).sum();
 
-    for stream_attempt in 0..=3u32 {
-        // Calculate the actual range start accounting for already-downloaded bytes
-        let actual_range_start = range_start + total_downloaded;
-        if total_downloaded >= expected_size {
-            break; // Already have all bytes
-        }
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| format!("Failed to create tmp file: {e}"))?;
 
-        // HTTP-level retry for 429/503
-        let mut resp = None;
+    let mut downloaded: u64 = 0;
+
+    // Download each coalesced range and write to file
+    for (range_start, range_end) in &coalesced {
         let http_retry_delays = [5u64, 30, 120];
+        let mut resp = None;
+
         for attempt in 0..=3u32 {
             let result = client
                 .get(&url)
                 .header("User-Agent", "SwarmLLM/0.1")
-                .header("Range", format!("bytes={actual_range_start}-{range_end}"))
+                .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
                 .send()
                 .await;
 
@@ -509,9 +582,8 @@ pub async fn download_shard(
                                 .get("retry-after")
                                 .and_then(|v| v.to_str().ok())
                                 .and_then(parse_retry_after)
-                                .unwrap_or(http_retry_delays[attempt as usize]);
-                            // Cap retry delay to 10 minutes to avoid indefinite waits
-                            let retry_secs = retry_secs.min(600);
+                                .unwrap_or(http_retry_delays[attempt as usize])
+                                .min(600);
                             tracing::warn!(
                                 status,
                                 retry_after_secs = retry_secs,
@@ -523,25 +595,12 @@ pub async fn download_shard(
                         }
                         return Err(format!("Shard download returned {} after retries", status));
                     }
-
-                    // If server returned 200 instead of 206, it doesn't support Range resume.
-                    // We need to re-download from scratch.
-                    if status == 200 && total_downloaded > 0 {
-                        tracing::warn!(
-                            shard = shard_index,
-                            "Server returned 200 instead of 206 — Range not supported, restarting download"
-                        );
-                        total_downloaded = 0;
-                        // Delete the tmp file since we're starting over
-                        let _ = std::fs::remove_file(&tmp_path);
-                    }
-
                     resp = Some(r);
                     break;
                 }
                 Err(e) => {
                     if attempt < 3 {
-                        tracing::warn!(error = %e, attempt = attempt + 1, "Shard download request failed, retrying");
+                        tracing::warn!(error = %e, attempt = attempt + 1, "Shard range request failed, retrying");
                         tokio::time::sleep(std::time::Duration::from_secs(
                             http_retry_delays[attempt as usize],
                         ))
@@ -558,182 +617,100 @@ pub async fn download_shard(
             return Err(format!("Shard download returned {}", resp.status()));
         }
 
-        // Open file in append mode if resuming, create mode if starting fresh
-        use tokio::io::AsyncWriteExt;
-        let mut file = if total_downloaded > 0 {
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&tmp_path)
-                .await
-                .map_err(|e| format!("Failed to open tmp file for append: {e}"))?
-        } else {
-            tokio::fs::File::create(&tmp_path)
-                .await
-                .map_err(|e| format!("Failed to create tmp file: {e}"))?
-        };
-
         use futures::StreamExt;
         let mut stream = resp.bytes_stream();
-        let mut stream_error = false;
-
         while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(data) => {
-                    file.write_all(&data)
-                        .await
-                        .map_err(|e| format!("Shard write error: {e}"))?;
-                    total_downloaded += data.len() as u64;
+            let data = chunk.map_err(|e| format!("Stream error: {e}"))?;
+            file.write_all(&data)
+                .await
+                .map_err(|e| format!("Write error: {e}"))?;
+            downloaded += data.len() as u64;
 
-                    if let Some(ref tx) = progress_tx {
-                        let _ = tx.try_send(DownloadProgress {
-                            downloaded_bytes: total_downloaded,
-                            total_bytes: expected_size,
-                        });
-                    }
-                }
-                Err(e) => {
-                    // Connection error during streaming — retry
-                    tracing::warn!(
-                        error = %e,
-                        shard = shard_index,
-                        downloaded = total_downloaded,
-                        stream_attempt = stream_attempt + 1,
-                        "Stream error during shard download"
-                    );
-                    stream_error = true;
-                    break;
-                }
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.try_send(DownloadProgress {
+                    downloaded_bytes: downloaded,
+                    total_bytes: total_download_bytes,
+                });
             }
-        }
-
-        file.flush()
-            .await
-            .map_err(|e| format!("Shard flush error: {e}"))?;
-
-        if !stream_error {
-            // Stream completed successfully
-            break;
-        }
-
-        // Stream was interrupted — retry with resume
-        if stream_attempt < 3 {
-            let delay = stream_retry_delays[stream_attempt as usize];
-            tracing::info!(
-                shard = shard_index,
-                delay_secs = delay,
-                downloaded = total_downloaded,
-                "Retrying shard download from byte {}",
-                total_downloaded
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-        } else {
-            return Err(format!(
-                "Shard {} download failed after {} stream retries (got {}/{} bytes)",
-                shard_index, stream_attempt, total_downloaded, expected_size
-            ));
         }
     }
 
-    // Rename .tmp → .bin atomically
+    file.flush()
+        .await
+        .map_err(|e| format!("Flush error: {e}"))?;
+
+    // Atomic rename .tmp → .bin
     std::fs::rename(&tmp_path, &dest_path)
         .map_err(|e| format!("Failed to rename tmp to final shard file: {e}"))?;
 
     tracing::info!(
         shard = shard_index,
-        size = total_downloaded,
+        size = downloaded,
         path = %dest_path.display(),
-        "Downloaded shard from HuggingFace"
+        "Downloaded v2 layer-aligned shard from HuggingFace"
     );
 
     Ok(dest_path)
 }
 
-/// Download only the specified shards of a GGUF model from HuggingFace.
+/// Download header + specified v2 shards from HuggingFace.
 ///
-/// This is the main entry point for shard-level downloads. It:
-/// 1. Probes the remote file to get size and GGUF header offset
-/// 2. Downloads the GGUF header (~6MB)
-/// 3. Downloads each requested shard via Range requests
-/// 4. Returns the model directory containing header + shard files
-///
-/// The `shard_size_bytes` parameter controls the shard granularity. Pass `None`
-/// to use the default 512MB size.
-pub async fn download_shards(
+/// Main entry point for shard-level downloads:
+/// 1. Probes the remote file to get tensor metadata and layer-aligned shard layouts
+/// 2. Downloads the GGUF header
+/// 3. Downloads each requested shard via coalesced Range requests
+/// 4. Returns the model directory and file info
+pub async fn download_shards_v2(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
     shard_indices: &[u32],
+    info: &GgufFileInfo,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
-    shard_size_bytes: Option<u64>,
-) -> Result<(std::path::PathBuf, GgufFileInfo), String> {
-    let shard_sz = shard_size_bytes.unwrap_or(DEFAULT_SHARD_SIZE);
-
-    // Step 1: Probe the remote GGUF with the configured shard size
-    let info = probe_gguf_file_with_shard_size(repo_id, filename, shard_sz).await?;
-
-    // Step 2: Download the GGUF header
+) -> Result<std::path::PathBuf, String> {
+    // Download the GGUF header
     download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
 
-    // Download each requested shard via byte-range requests (no full GGUF needed)
     let total_shard_bytes: u64 = shard_indices
         .iter()
-        .map(|&idx| {
-            let start = (idx as u64) * info.shard_size;
-            let end = ((idx as u64 + 1) * info.shard_size).min(info.total_size);
-            end - start
-        })
+        .filter_map(|&idx| info.layouts.get(idx as usize))
+        .map(|layout| layout.size_bytes)
         .sum();
 
     let mut cumulative_downloaded: u64 = 0;
 
     for &shard_idx in shard_indices {
-        if shard_idx >= info.shard_count {
-            return Err(format!(
+        let layout = info.layouts.get(shard_idx as usize).ok_or_else(|| {
+            format!(
                 "Shard index {} out of range (max {})",
                 shard_idx,
-                info.shard_count - 1
-            ));
-        }
+                info.layouts.len().saturating_sub(1)
+            )
+        })?;
 
-        // Create a per-shard progress sender that maps to cumulative progress
+        // Per-shard progress mapping to cumulative
         let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(64);
-
         let progress_tx_clone = progress_tx.clone();
-        let base_downloaded = cumulative_downloaded;
+        let base = cumulative_downloaded;
         let total = total_shard_bytes;
         let progress_task = tokio::spawn(async move {
             while let Some(prog) = shard_rx.recv().await {
                 if let Some(ref tx) = progress_tx_clone {
                     let _ = tx.try_send(DownloadProgress {
-                        downloaded_bytes: base_downloaded + prog.downloaded_bytes,
+                        downloaded_bytes: base + prog.downloaded_bytes,
                         total_bytes: total,
                     });
                 }
             }
         });
 
-        download_shard(
-            repo_id,
-            filename,
-            dest_dir,
-            shard_idx,
-            info.total_size,
-            info.shard_size,
-            Some(shard_tx),
-        )
-        .await?;
-
-        // shard_tx was moved into download_shard and is now dropped,
-        // so shard_rx.recv() will return None and the progress task exits gracefully.
+        download_shard_v2(repo_id, filename, dest_dir, layout, Some(shard_tx)).await?;
         let _ = progress_task.await;
 
-        // Update cumulative for next shard
-        let start = (shard_idx as u64) * info.shard_size;
-        let end = ((shard_idx as u64 + 1) * info.shard_size).min(info.total_size);
-        cumulative_downloaded += end - start;
+        cumulative_downloaded += layout.size_bytes;
     }
 
-    Ok((dest_dir.to_path_buf(), info))
+    Ok(dest_dir.to_path_buf())
 }
 
 // ---- HF API response types ----
@@ -795,43 +772,52 @@ mod tests {
     }
 
     #[test]
-    fn default_shard_size_constant() {
-        assert_eq!(DEFAULT_SHARD_SIZE, 512 * 1024 * 1024);
-    }
-
-    #[test]
-    fn gguf_file_info_shard_count() {
+    fn shard_count_from_size() {
         let total_size: u64 = 4_683_074_048; // Qwen2.5-Coder-7B Q4
-        let shard_count = total_size.div_ceil(DEFAULT_SHARD_SIZE).max(1) as u32;
+        let shard_size: u64 = 512 * 1024 * 1024;
+        let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
         assert_eq!(shard_count, 9);
     }
 
     #[test]
-    fn gguf_file_info_custom_shard_size() {
-        let total_size: u64 = 4_683_074_048;
-        // 256MB shards should produce more shards
-        let small_shard: u64 = 256 * 1024 * 1024;
-        let shard_count = total_size.div_ceil(small_shard).max(1) as u32;
-        assert_eq!(shard_count, 18);
-        // 1024MB shards should produce fewer shards
-        let big_shard: u64 = 1024 * 1024 * 1024;
-        let shard_count = total_size.div_ceil(big_shard).max(1) as u32;
-        assert_eq!(shard_count, 5);
+    fn coalesce_empty() {
+        assert!(coalesce_byte_ranges(&[], 0).is_empty());
     }
 
     #[test]
-    fn gguf_file_info_serde() {
-        let info = GgufFileInfo {
-            total_size: 4_000_000_000,
-            header_size: 5_954_048,
-            shard_count: 8,
-            shard_size: DEFAULT_SHARD_SIZE,
-        };
-        let json = serde_json::to_string(&info).unwrap();
-        let parsed: GgufFileInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.total_size, 4_000_000_000);
-        assert_eq!(parsed.header_size, 5_954_048);
-        assert_eq!(parsed.shard_count, 8);
+    fn coalesce_no_merge() {
+        // Two ranges far apart
+        let ranges = vec![(0, 100), (1000, 100)];
+        let merged = coalesce_byte_ranges(&ranges, 50);
+        assert_eq!(merged, vec![(0, 100), (1000, 1100)]);
+    }
+
+    #[test]
+    fn coalesce_adjacent() {
+        // Two adjacent ranges
+        let ranges = vec![(0, 100), (100, 100)];
+        let merged = coalesce_byte_ranges(&ranges, 0);
+        assert_eq!(merged, vec![(0, 200)]);
+    }
+
+    #[test]
+    fn coalesce_with_gap() {
+        // Two ranges with a small gap within max_gap
+        let ranges = vec![(0, 100), (110, 100)];
+        let merged = coalesce_byte_ranges(&ranges, 20);
+        assert_eq!(merged, vec![(0, 210)]);
+
+        // Same gap but max_gap is too small
+        let merged = coalesce_byte_ranges(&ranges, 5);
+        assert_eq!(merged, vec![(0, 100), (110, 210)]);
+    }
+
+    #[test]
+    fn coalesce_unsorted() {
+        // Input not sorted — should still work
+        let ranges = vec![(200, 50), (0, 100), (100, 100)];
+        let merged = coalesce_byte_ranges(&ranges, 0);
+        assert_eq!(merged, vec![(0, 250)]);
     }
 
     #[test]
@@ -881,79 +867,19 @@ mod tests {
     }
 
     #[test]
-    fn resume_byte_offset_calculation() {
-        // Simulate: shard 3 of a 4GB file with 512MB shards
-        let shard_index: u32 = 3;
-        let shard_size: u64 = 512 * 1024 * 1024;
-        let total_file_size: u64 = 4_000_000_000;
-
-        let range_start = (shard_index as u64) * shard_size;
-        let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
-        let expected_size = range_end - range_start + 1;
-
-        assert_eq!(range_start, 1_610_612_736); // 3 * 512MB
-        assert_eq!(expected_size, shard_size); // Full 512MB shard
-
-        // If we've downloaded 100MB already, the resume range starts at range_start + 100MB
-        let existing_bytes: u64 = 100 * 1024 * 1024;
-        let resume_start = range_start + existing_bytes;
-        assert_eq!(resume_start, range_start + existing_bytes);
-
-        // The Range header should be: bytes={resume_start}-{range_end}
-        let range_header = format!("bytes={resume_start}-{range_end}");
-        assert!(range_header.starts_with("bytes="));
-        assert!(range_header.contains('-'));
-    }
-
-    #[test]
-    fn resume_byte_offset_last_shard() {
-        // Last shard may be smaller than shard_size
-        let total_file_size: u64 = 4_683_074_048; // Qwen2.5 size
-        let shard_size: u64 = 512 * 1024 * 1024;
-        let shard_count = total_file_size.div_ceil(shard_size) as u32;
-        let last_shard = shard_count - 1; // shard 8
-
-        let range_start = (last_shard as u64) * shard_size;
-        let range_end = ((last_shard as u64 + 1) * shard_size - 1).min(total_file_size - 1);
-        let expected_size = range_end - range_start + 1;
-
-        // Last shard should be smaller than shard_size
-        assert!(expected_size < shard_size);
-        assert_eq!(expected_size, total_file_size - range_start);
-
-        // Resume from halfway
-        let existing = expected_size / 2;
-        let resume_start = range_start + existing;
-        assert!(resume_start < total_file_size);
-        assert_eq!(total_file_size - resume_start, expected_size - existing);
-    }
-
-    #[test]
-    fn range_header_construction_from_partial() {
-        // Verify that range header is correctly constructed when resuming
-        let shard_index: u32 = 0;
-        let shard_size: u64 = 512 * 1024 * 1024;
-        let total_file_size: u64 = 1_000_000_000;
-
-        let range_start = (shard_index as u64) * shard_size;
-        let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
-        let expected_size = range_end - range_start + 1;
-
-        // No existing bytes — full range
-        let header_full = format!("bytes={}-{}", range_start, range_end);
-        assert_eq!(header_full, "bytes=0-536870911");
-
-        // With 200MB already downloaded — resume range
-        let existing: u64 = 200 * 1024 * 1024;
-        let actual_start = range_start + existing;
-        let header_resume = format!("bytes={}-{}", actual_start, range_end);
-        assert_eq!(
-            header_resume,
-            format!("bytes={}-{}", existing, shard_size - 1)
-        );
-
-        // Remaining bytes should be expected_size - existing
-        assert_eq!(range_end - actual_start + 1, expected_size - existing);
+    fn coalesce_real_world() {
+        // Simulate tensor ranges with small gaps (like GGUF alignment padding)
+        let ranges = vec![
+            (1000, 5000),      // tensor 1: [1000, 6000)
+            (6032, 5000),      // tensor 2: [6032, 11032) — 32-byte gap
+            (11064, 5000),     // tensor 3: [11064, 16064) — 32-byte gap
+            (5_000_000, 5000), // tensor 4: [5000000, 5005000) — ~5MB gap
+        ];
+        let merged = coalesce_byte_ranges(&ranges, 4 * 1024 * 1024);
+        // First 3 should merge (within 4MB gap), tensor 4 is separate (>4MB gap)
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], (1000, 16064));
+        assert_eq!(merged[1], (5_000_000, 5_005_000));
     }
 
     #[test]

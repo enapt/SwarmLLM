@@ -1870,16 +1870,26 @@ pub fn generate_and_register_local_manifest(
                     embedding_length = meta.embedding_length,
                     "Extracted GGUF metadata for manifest"
                 );
-                // Assign layer ranges per shard using actual GGUF tensor positions.
-                // The naive approach (num_layers / shard_count) is inaccurate because
-                // layer tensors don't align to shard byte boundaries.
-                for shard in &mut shards {
-                    let (ls, le) = crate::inference::split::compute_local_layer_range(
-                        &meta,
-                        shard_size,
-                        &[shard.index],
-                    );
-                    shard.layer_range = (ls as u32, le as u32);
+                // Assign layer ranges and tensor entries per shard using v2 layouts
+                let layouts =
+                    crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
+                for (shard, layout) in shards.iter_mut().zip(layouts.iter()) {
+                    shard.layer_range = (layout.layer_start, layout.layer_end);
+                    let mut shard_offset = 0u64;
+                    shard.tensors = layout
+                        .tensors
+                        .iter()
+                        .map(|(name, gguf_off, size)| {
+                            let entry = crate::types::ShardTensorEntry {
+                                name: name.clone(),
+                                gguf_offset: *gguf_off,
+                                shard_offset,
+                                size: *size,
+                            };
+                            shard_offset += size;
+                            entry
+                        })
+                        .collect();
                 }
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
@@ -1894,7 +1904,7 @@ pub fn generate_and_register_local_manifest(
         };
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
+        schema_version: 2,
         id: model_id.clone(),
         name: info.name.clone(),
         architecture,
@@ -2065,9 +2075,8 @@ fn regenerate_manifest_from_header(
 
     let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
 
-    let shards = crate::model::manifest::build_shard_infos(
-        model_dir, meta, shard_count, shard_size, total_size,
-    );
+    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, shard_count);
+    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
 
     let model_name = meta
         .model_name
@@ -2075,7 +2084,7 @@ fn regenerate_manifest_from_header(
         .unwrap_or_else(|| model_id.0.clone());
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
+        schema_version: 2,
         id: model_id.clone(),
         name: model_name,
         architecture: crate::types::ModelArchitecture::Llama,
@@ -2145,8 +2154,7 @@ fn compute_shard_hashes(
             layer_range: (0, 0), // Byte-range shards, not layer-based
             size_bytes: this_shard_size,
             hash: *hasher.finalize().as_bytes(),
-            byte_start: None,
-            byte_end: None,
+            tensors: vec![],
         });
     }
 
@@ -2171,9 +2179,8 @@ pub struct ShardLoadParams<'a> {
     pub layer_end: usize,
     pub is_first: bool,
     pub is_last: bool,
-    /// Configured shard size in bytes (from [model].shard_size_mb config).
-    /// Used for byte-range calculations instead of actual file sizes.
-    pub shard_size_bytes: u64,
+    /// Manifest for this model — provides tensor entries and total size.
+    pub manifest: &'a crate::types::ModelManifest,
 }
 
 /// Try to load a SplitModel from shard files + gguf_header.bin.
@@ -2218,16 +2225,24 @@ pub fn try_load_from_shards(
         )));
     }
 
-    // Use configured shard size rather than file size on disk.
-    // File sizes may differ from configured shard_size when downloaded from HF
-    // (CDN edge caching, partial downloads, etc.). The configured value is what
-    // the manifest and layer-range computations are based on.
-    let shard_size: u64 = params.shard_size_bytes;
+    // Build tensor entries for each shard file from manifest data.
+    // The order must match shard_files (which is sorted by shard index).
+    let tensor_entries: Vec<Vec<crate::types::ShardTensorEntry>> = shard_files
+        .iter()
+        .map(|(idx, _)| {
+            params
+                .manifest
+                .shards
+                .iter()
+                .find(|s| s.index == *idx)
+                .map(|s| s.tensors.clone())
+                .unwrap_or_default()
+        })
+        .collect();
 
     tracing::info!(
         model = %model_id,
         shards = shard_files.len(),
-        shard_size_mb = shard_size / (1024 * 1024),
         layers = format!("[{layer_start}..{layer_end})"),
         "Loading split model from shard files (no full GGUF)"
     );
@@ -2235,7 +2250,8 @@ pub fn try_load_from_shards(
     crate::inference::split::SplitModel::load_from_shards(
         model_dir,
         shard_files,
-        shard_size,
+        &tensor_entries,
+        params.manifest.total_size_bytes,
         layer_start,
         layer_end,
         is_first,
@@ -2333,28 +2349,19 @@ async fn handle_layer_forward(
 
     // Determine layer range.  If the sender specified a layer_range in the forward
     // message (new protocol), use that directly — it tells us exactly which segment
-    // to process.  Otherwise fall back to computing from GGUF metadata / manifest.
-    let shard_size = shared_state.config.model.shard_size_bytes();
+    // to process.  Otherwise use manifest layer_range data (v2 manifests have
+    // accurate layer ranges from tensor metadata).
     let (layer_start, layer_end, total_layers) = if let Some((ls, le)) = forward.layer_range {
-        let total = shared_state
-            .gguf_meta
-            .get(&model_id)
-            .map(|m| m.block_count)
-            .unwrap_or(manifest.num_layers as usize);
+        let total = manifest.num_layers as usize;
         (ls as usize, le as usize, total)
-    } else if let Some(meta) = shared_state.gguf_meta.get(&model_id) {
-        let (ls, le) = split::compute_local_layer_range(&meta, shard_size, &local_shard_indices);
-        (ls, le, meta.block_count)
     } else if manifest.num_layers > 0 {
-        // Fallback: use manifest layer_range (approximate)
-        let mut ls = manifest.num_layers as usize;
-        let mut le = 0usize;
-        for shard_info in &manifest.shards {
-            if local_shard_indices.contains(&shard_info.index) {
-                ls = ls.min(shard_info.layer_range.0 as usize);
-                le = le.max(shard_info.layer_range.1 as usize);
-            }
-        }
+        // Use manifest shard layer_range data (always accurate in v2)
+        let ranges = split::available_layer_ranges_from_manifest(&manifest, &local_shard_indices);
+        // Pick the longest contiguous range
+        let (ls, le) = ranges
+            .into_iter()
+            .max_by_key(|&(s, e)| e - s)
+            .unwrap_or((0, 0));
         (ls, le, manifest.num_layers as usize)
     } else {
         send_error_result(
@@ -2429,7 +2436,7 @@ async fn handle_layer_forward(
                             layer_end,
                             is_first,
                             is_last,
-                            shard_size_bytes: shared_state.config.model.shard_size_bytes(),
+                            manifest: &manifest,
                         })
                     }
                 }
@@ -2445,7 +2452,7 @@ async fn handle_layer_forward(
                 layer_end,
                 is_first,
                 is_last,
-                shard_size_bytes: shared_state.config.model.shard_size_bytes(),
+                manifest: &manifest,
             })
         };
 

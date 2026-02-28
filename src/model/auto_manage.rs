@@ -733,18 +733,64 @@ impl AutoShardManager {
                     }
                 });
 
+                // Probe to get v2 layouts, then download the specific shard
                 let configured_shard_size = shared.config.model.shard_size_bytes();
-                match crate::model::huggingface::download_shards(
+                let probe_result = crate::model::huggingface::probe_gguf_file(
+                    &repo_id,
+                    &filename,
+                    configured_shard_size,
+                )
+                .await;
+                let info = match probe_result {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_idx,
+                            error = %e,
+                            "AutoShardManager: GGUF probe failed"
+                        );
+                        if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
+                            entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                                reason: format!("GGUF probe failed: {}", e),
+                            };
+                        }
+                        return;
+                    }
+                };
+                let layout = match info.layouts.get(shard_idx as usize) {
+                    Some(l) => l,
+                    None => {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_idx,
+                            total_shards = info.shard_count(),
+                            "AutoShardManager: shard index out of range"
+                        );
+                        return;
+                    }
+                };
+
+                // Download header + shard
+                crate::model::huggingface::download_gguf_header(
                     &repo_id,
                     &filename,
                     &dest,
-                    &[shard_idx],
+                    info.header_size,
+                )
+                .await
+                .ok();
+
+                match crate::model::huggingface::download_shard_v2(
+                    &repo_id,
+                    &filename,
+                    &dest,
+                    layout,
                     Some(ptx),
-                    Some(configured_shard_size),
                 )
                 .await
                 {
-                    Ok((_path, _info)) => {
+                    Ok(_shard_path) => {
                         tracing::info!(
                             model = %model_id,
                             shard = shard_idx,
@@ -1029,47 +1075,16 @@ pub async fn check_and_load_model(
 
     let has_all = local_shard_indices.len() == manifest.shard_count as usize;
 
-    // Determine ALL layer ranges covered by our local shards.  GGUF files store
-    // tensors in alphabetical order (blk.10 before blk.2), so byte-range shards
-    // may contain non-contiguous layers.  We load every contiguous run as a
-    // separate split model segment.
+    // Determine ALL layer ranges covered by our local shards using manifest
+    // tensor metadata.  V2 manifests carry per-shard tensor entries with
+    // accurate layer_range data, so we always use that.
     let ranges: Vec<(usize, usize)> = if has_all {
         vec![(0, manifest.num_layers as usize)]
     } else {
-        let shard_size = shared.config.model.shard_size_bytes();
-
-        // Try GGUF tensor metadata first (accurate), fall back to header file
-        if let Some(meta) = shared.gguf_meta.get(model_id) {
-            crate::inference::split::compute_available_layer_ranges(
-                &meta,
-                shard_size,
-                &local_shard_indices,
-            )
-        } else {
-            // Try to load from gguf_header.bin
-            let header_path = model_dir.join("gguf_header.bin");
-            if header_path.exists() {
-                match crate::inference::split::GgufTensorMeta::from_gguf_file(&header_path) {
-                    Ok(meta) => {
-                        let ranges = crate::inference::split::compute_available_layer_ranges(
-                            &meta,
-                            shard_size,
-                            &local_shard_indices,
-                        );
-                        // Cache for future use
-                        shared.gguf_meta.insert(model_id.clone(), meta);
-                        ranges
-                    }
-                    Err(e) => {
-                        tracing::warn!(model = %model_id, error = %e, "Failed to parse GGUF header for layer range");
-                        vec![]
-                    }
-                }
-            } else {
-                tracing::warn!(model = %model_id, "No GGUF metadata available for accurate layer range");
-                vec![]
-            }
-        }
+        crate::inference::split::available_layer_ranges_from_manifest(
+            &manifest,
+            &local_shard_indices,
+        )
     };
 
     if ranges.is_empty() {
@@ -1154,7 +1169,7 @@ pub async fn check_and_load_model(
                             layer_end,
                             is_first,
                             is_last,
-                            shard_size_bytes: shared.config.model.shard_size_bytes(),
+                            manifest: &manifest,
                         })
                     }
                 }
@@ -1169,7 +1184,7 @@ pub async fn check_and_load_model(
                 layer_end,
                 is_first,
                 is_last,
-                shard_size_bytes: shared.config.model.shard_size_bytes(),
+                manifest: &manifest,
             })
         };
 

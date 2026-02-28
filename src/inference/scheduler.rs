@@ -131,48 +131,40 @@ impl PipelineScheduler {
             }
         }
 
-        let shard_size = self.shared_state.config.model.shard_size_bytes();
-        let gguf_meta = self.shared_state.gguf_meta.get(&manifest.id);
+        let _shard_size = self.shared_state.config.model.shard_size_bytes();
 
         let mut candidates = Vec::new();
 
         for (node_id, mut shard_indices) in node_shards {
             shard_indices.sort();
 
-            // Compute ALL contiguous layer ranges for this node's shards.
-            // V2 manifests have accurate layer_range per shard, so we can
-            // read directly from the manifest without tensor analysis.
-            let ranges = if manifest.is_v2() {
-                crate::inference::split::available_layer_ranges_from_manifest(
+            // Compute ALL contiguous layer ranges for this node's shards
+            // from manifest layer_range data.
+            let ranges = {
+                let manifest_ranges = crate::inference::split::available_layer_ranges_from_manifest(
                     manifest,
                     &shard_indices,
-                )
-                .into_iter()
-                .map(|(s, e)| (s as u32, e as u32))
-                .collect::<Vec<_>>()
-            } else if let Some(ref meta) = gguf_meta {
-                crate::inference::split::compute_available_layer_ranges(
-                    meta,
-                    shard_size,
-                    &shard_indices,
-                )
-                .into_iter()
-                .map(|(s, e)| (s as u32, e as u32))
-                .collect::<Vec<_>>()
-            } else {
-                // Fallback: use manifest layer ranges (approximate, single range)
-                let mut ls = manifest.num_layers as usize;
-                let mut le = 0usize;
-                for &idx in &shard_indices {
-                    if let Some(shard) = manifest.shards.iter().find(|s| s.index == idx) {
-                        ls = ls.min(shard.layer_range.0 as usize);
-                        le = le.max(shard.layer_range.1 as usize);
-                    }
-                }
-                if ls < le {
-                    vec![(ls as u32, le as u32)]
+                );
+                if !manifest_ranges.is_empty() {
+                    manifest_ranges
+                        .into_iter()
+                        .map(|(s, e)| (s as u32, e as u32))
+                        .collect::<Vec<_>>()
                 } else {
-                    vec![]
+                    // Fallback: use manifest layer ranges (approximate, single range)
+                    let mut ls = manifest.num_layers as usize;
+                    let mut le = 0usize;
+                    for &idx in &shard_indices {
+                        if let Some(shard) = manifest.shards.iter().find(|s| s.index == idx) {
+                            ls = ls.min(shard.layer_range.0 as usize);
+                            le = le.max(shard.layer_range.1 as usize);
+                        }
+                    }
+                    if ls < le {
+                        vec![(ls as u32, le as u32)]
+                    } else {
+                        vec![]
+                    }
                 }
             };
 
@@ -487,8 +479,7 @@ mod tests {
             layer_range: (0, 32),
             size_bytes: 4_000_000_000,
             hash: [0u8; 32],
-            byte_start: None,
-            byte_end: None,
+            tensors: vec![],
         }];
         let manifest = make_manifest("test-model", 32, shards);
         state.model_registry.register_manifest(manifest);
@@ -525,16 +516,14 @@ mod tests {
                 layer_range: (0, 16),
                 size_bytes: 2_000_000_000,
                 hash: [0u8; 32],
-                byte_start: None,
-                byte_end: None,
+                tensors: vec![],
             },
             ShardInfo {
                 index: 1,
                 layer_range: (16, 32),
                 size_bytes: 2_000_000_000,
                 hash: [0u8; 32],
-                byte_start: None,
-                byte_end: None,
+                tensors: vec![],
             },
         ];
         let manifest = make_manifest("test-model", 32, shards);
@@ -623,8 +612,7 @@ mod tests {
                 layer_range: (0, 32),
                 size_bytes: 4_000_000_000,
                 hash: [0u8; 32],
-                byte_start: None,
-                byte_end: None,
+                tensors: vec![],
             }],
         );
         state.model_registry.register_manifest(manifest);
@@ -726,8 +714,7 @@ mod tests {
             layer_range: (0, 16),
             size_bytes: 2_000_000_000,
             hash: [0u8; 32],
-            byte_start: None,
-            byte_end: None,
+            tensors: vec![],
         }];
         let manifest = make_manifest("load-test", 16, shards);
         state.model_registry.register_manifest(manifest);

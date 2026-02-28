@@ -65,8 +65,12 @@ impl ModelManifest {
             hasher.update(&shard.layer_range.1.to_le_bytes());
             hasher.update(&shard.size_bytes.to_le_bytes());
             hasher.update(&shard.hash);
-            hasher.update(&shard.byte_start.unwrap_or(0).to_le_bytes());
-            hasher.update(&shard.byte_end.unwrap_or(0).to_le_bytes());
+            for entry in &shard.tensors {
+                hasher.update(entry.name.as_bytes());
+                hasher.update(&entry.gguf_offset.to_le_bytes());
+                hasher.update(&entry.shard_offset.to_le_bytes());
+                hasher.update(&entry.size.to_le_bytes());
+            }
         }
         hasher.update(&self.tokenizer_hash);
         *hasher.finalize().as_bytes()
@@ -90,93 +94,56 @@ impl ModelManifest {
     }
 }
 
-/// Build `ShardInfo` entries from on-disk shard files and GGUF tensor metadata.
+/// Build ShardInfo entries from `LayerShardLayout` computed by `compute_layer_shard_layouts`.
 ///
-/// Detects v2 layer-aligned shards (repacked files matching layout sizes) and
-/// falls back to v1 byte-range shards otherwise. Used by both daemon startup
-/// manifest regeneration and the admin API manifest generation.
-pub fn build_shard_infos(
+/// For each layout, hashes the on-disk shard file (if present) and builds the
+/// `ShardTensorEntry` list from the layout's tensor data.
+pub fn build_shard_infos_from_layouts(
     model_dir: &Path,
-    meta: &crate::inference::split::GgufTensorMeta,
-    shard_count: u32,
-    shard_size: u64,
-    total_size: u64,
+    layouts: &[crate::inference::split::LayerShardLayout],
 ) -> Vec<crate::types::ShardInfo> {
-    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, shard_count);
-    let v2_matches = !layouts.is_empty()
-        && layouts.iter().all(|layout| {
+    layouts
+        .iter()
+        .map(|layout| {
             let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
-            if let Ok(file_meta) = std::fs::metadata(&shard_path) {
-                let diff = (file_meta.len() as i64 - layout.size_bytes as i64).unsigned_abs();
-                diff <= layout.size_bytes / 100 + 1
+            let hash = if shard_path.exists() {
+                match std::fs::read(&shard_path) {
+                    Ok(data) => *blake3::hash(&data).as_bytes(),
+                    Err(_) => [0u8; 32],
+                }
             } else {
-                false
-            }
-        });
+                [0u8; 32]
+            };
+            let file_size = std::fs::metadata(&shard_path)
+                .map(|m| m.len())
+                .unwrap_or(layout.size_bytes);
 
-    if v2_matches {
-        // V2 layer-aligned shards
-        tracing::info!(shard_count, "Building v2 layer-aligned shard infos");
-        layouts
-            .iter()
-            .map(|layout| {
-                let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
-                let hash = if shard_path.exists() {
-                    match std::fs::read(&shard_path) {
-                        Ok(data) => *blake3::hash(&data).as_bytes(),
-                        Err(_) => [0u8; 32],
-                    }
-                } else {
-                    [0u8; 32]
-                };
-                let file_size = std::fs::metadata(&shard_path)
-                    .map(|m| m.len())
-                    .unwrap_or(layout.size_bytes);
-                crate::types::ShardInfo {
-                    index: layout.index,
-                    layer_range: (layout.layer_start, layout.layer_end),
-                    size_bytes: file_size,
-                    hash,
-                    byte_start: Some(0),
-                    byte_end: Some(file_size),
-                }
-            })
-            .collect()
-    } else {
-        // V1 byte-range shards (legacy, needed for partial downloads)
-        (0..shard_count)
-            .map(|idx| {
-                let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
-                let expected_size = if idx == shard_count - 1 {
-                    total_size - (idx as u64) * shard_size
-                } else {
-                    shard_size
-                };
-                let file_size = std::fs::metadata(&shard_path)
-                    .map(|m| m.len())
-                    .unwrap_or(expected_size);
-                let (ls, le) = crate::inference::split::compute_local_layer_range(
-                    meta, shard_size, &[idx],
-                );
-                let hash = if shard_path.exists() {
-                    match std::fs::read(&shard_path) {
-                        Ok(data) => *blake3::hash(&data).as_bytes(),
-                        Err(_) => [0u8; 32],
-                    }
-                } else {
-                    [0u8; 32]
-                };
-                crate::types::ShardInfo {
-                    index: idx,
-                    layer_range: (ls as u32, le as u32),
-                    size_bytes: file_size,
-                    hash,
-                    byte_start: None,
-                    byte_end: None,
-                }
-            })
-            .collect()
-    }
+            // Build tensor entries with sequential shard-local offsets
+            let mut shard_offset = 0u64;
+            let tensors: Vec<crate::types::ShardTensorEntry> = layout
+                .tensors
+                .iter()
+                .map(|(name, gguf_offset, size)| {
+                    let entry = crate::types::ShardTensorEntry {
+                        name: name.clone(),
+                        gguf_offset: *gguf_offset,
+                        shard_offset,
+                        size: *size,
+                    };
+                    shard_offset += size;
+                    entry
+                })
+                .collect();
+
+            crate::types::ShardInfo {
+                index: layout.index,
+                layer_range: (layout.layer_start, layout.layer_end),
+                size_bytes: file_size,
+                hash,
+                tensors,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -185,7 +152,7 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
-            schema_version: 1,
+            schema_version: 2,
             id: ModelId("test-model".into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,
@@ -199,8 +166,7 @@ mod tests {
                 layer_range: (0, 2),
                 size_bytes: 1024,
                 hash: [0u8; 32],
-                byte_start: None,
-                byte_end: None,
+                tensors: vec![],
             }],
             tokenizer_hash: [0u8; 32],
             manifest_hash: [0u8; 32],

@@ -1178,17 +1178,12 @@ pub async fn hf_probe(
     }
 
     let shard_size = state.config.model.shard_size_bytes();
-    match crate::model::huggingface::probe_gguf_file_with_shard_size(
-        &repo_id, &filename, shard_size,
-    )
-    .await
-    {
+    match crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size).await {
         Ok(info) => Ok(Json(serde_json::json!({
             "status": "ok",
             "total_size": info.total_size,
             "header_size": info.header_size,
-            "shard_count": info.shard_count,
-            "shard_size": info.shard_size,
+            "shard_count": info.shard_count(),
         }))),
         Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
     }
@@ -1321,7 +1316,7 @@ pub async fn hf_download_shards(
         // This lets peers learn about the model and begin auto-acquiring
         // shards in parallel while this node is still downloading.
 
-        let info = match crate::model::huggingface::probe_gguf_file_with_shard_size(
+        let info = match crate::model::huggingface::probe_gguf_file(
             &repo_id,
             &filename,
             configured_shard_size,
@@ -1343,10 +1338,10 @@ pub async fn hf_download_shards(
 
         if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
             entry.total_bytes = info.total_size;
-            entry.total_shards = info.shard_count;
+            entry.total_shards = info.shard_count();
             entry.log.push(format!(
                 "Probed: {} shards, {:.1} MB total",
-                info.shard_count,
+                info.shard_count(),
                 info.total_size as f64 / (1024.0 * 1024.0)
             ));
         }
@@ -1377,7 +1372,7 @@ pub async fn hf_download_shards(
             model_id_str: &model_id_str,
             filename: &filename,
             total_size: info.total_size,
-            shard_count: info.shard_count,
+            shard_count: info.shard_count(),
             shard_indices: &[],
             shared: &download_shared,
         });
@@ -1467,14 +1462,11 @@ pub async fn hf_download_shards(
             }
         });
 
-        // Download individual shard byte ranges (header already downloaded above)
+        // Download individual v2 layer-aligned shards
         let total_shard_bytes: u64 = shard_indices
             .iter()
-            .map(|&idx| {
-                let start = (idx as u64) * info.shard_size;
-                let end = ((idx as u64 + 1) * info.shard_size).min(info.total_size);
-                end - start
-            })
+            .filter_map(|&idx| info.layouts.get(idx as usize))
+            .map(|layout| layout.size_bytes)
             .sum();
 
         let mut cumulative_downloaded: u64 = 0;
@@ -1496,15 +1488,18 @@ pub async fn hf_download_shards(
                 return;
             }
 
-            if shard_idx >= info.shard_count {
-                tracing::error!(
-                    shard_idx,
-                    max = info.shard_count - 1,
-                    "Shard index out of range"
-                );
-                failed = true;
-                break;
-            }
+            let layout = match info.layouts.get(shard_idx as usize) {
+                Some(l) => l,
+                None => {
+                    tracing::error!(
+                        shard_idx,
+                        max = info.layouts.len().saturating_sub(1),
+                        "Shard index out of range"
+                    );
+                    failed = true;
+                    break;
+                }
+            };
 
             let (shard_tx, mut shard_rx) =
                 tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
@@ -1521,22 +1516,18 @@ pub async fn hf_download_shards(
                 }
             });
 
-            match crate::model::huggingface::download_shard(
+            match crate::model::huggingface::download_shard_v2(
                 &repo_id,
                 &filename,
                 &dest_dir,
-                shard_idx,
-                info.total_size,
-                info.shard_size,
+                layout,
                 Some(shard_tx),
             )
             .await
             {
                 Ok(_shard_path) => {
                     progress_task.abort();
-                    let start = (shard_idx as u64) * info.shard_size;
-                    let end = ((shard_idx as u64 + 1) * info.shard_size).min(info.total_size);
-                    cumulative_downloaded += end - start;
+                    cumulative_downloaded += layout.size_bytes;
 
                     if let Some(mut entry) =
                         download_shared.acquisition_progress.get_mut(&download_mid)
@@ -1623,7 +1614,7 @@ pub async fn hf_download_shards(
                 model_id_str: &model_id_str,
                 filename: &filename,
                 total_size: info.total_size,
-                shard_count: info.shard_count,
+                shard_count: info.shard_count(),
                 shard_indices: &shard_indices,
                 shared: &download_shared,
             });
@@ -1705,20 +1696,17 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         }
     };
 
-    let configured_shard_size = params.shared.config.model.shard_size_bytes();
-
     let model_dir = header_path
         .parent()
         .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
 
-    let shards = crate::model::manifest::build_shard_infos(
-        model_dir, &meta, shard_count, configured_shard_size, total_size,
-    );
+    let layouts = crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
+    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
 
     let node_id = params.shared.identity.node_id().clone();
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
+        schema_version: 2,
         id: model_id.clone(),
         name: model_name,
         architecture,

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Current manifest schema version. Increment when making breaking changes.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+/// Current manifest schema version.
+const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 // ---- Identity ----
 /// Wrapper around Ed25519 public key. This IS the node's identity.
@@ -68,13 +68,6 @@ impl ModelManifest {
     pub fn stamp_version(&mut self) {
         self.schema_version = MANIFEST_SCHEMA_VERSION;
     }
-
-    /// Whether this manifest uses v2 layer-aligned shards.
-    /// V2 shards have `byte_start`/`byte_end` set, meaning each shard file
-    /// contains complete layers (not arbitrary byte ranges of the GGUF).
-    pub fn is_v2(&self) -> bool {
-        self.shards.iter().any(|s| s.byte_start.is_some())
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,14 +104,21 @@ pub struct ShardInfo {
     pub layer_range: (u32, u32),
     pub size_bytes: u64,
     pub hash: Blake3Hash,
-    /// Byte start offset within the shard file (v2 layer-aligned shards).
-    /// `None` for v1 byte-range shards.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub byte_start: Option<u64>,
-    /// Byte end offset within the shard file (v2 layer-aligned shards).
-    /// `None` for v1 byte-range shards.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub byte_end: Option<u64>,
+    /// Tensors contained in this shard, sorted by GGUF offset.
+    #[serde(default)]
+    pub tensors: Vec<ShardTensorEntry>,
+}
+
+/// One tensor's location within a shard file and in the original GGUF.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShardTensorEntry {
+    pub name: String,
+    /// Absolute byte offset of this tensor in the virtual GGUF file.
+    pub gguf_offset: u64,
+    /// Byte offset within this shard file where the tensor data starts.
+    pub shard_offset: u64,
+    /// Size in bytes.
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

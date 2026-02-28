@@ -1121,8 +1121,6 @@ impl NetworkManager {
     ///
     /// The shard's `chunk_offset` is relative to the shard itself (not the source file).
     fn serve_shard_data(&self, req: &crate::types::ShardRequest) -> SwarmResponse {
-        use std::io::{Read, Seek, SeekFrom};
-
         let model_id = &req.shard_id.model_id;
         let shard_index = req.shard_id.index;
 
@@ -1138,94 +1136,7 @@ impl NetworkManager {
             );
         }
 
-        // Second try: read byte range from the source GGUF file (v1 only)
-        // For v2 layer-aligned shards, the source GGUF byte offsets don't match
-        // shard file contents — skip this fallback.
-        let model_dir = self.shard_store.models_dir().join(&model_id.0);
-        let source_path_file = model_dir.join("source_path");
-        if source_path_file.exists() {
-            if let Ok(source_path_str) = std::fs::read_to_string(&source_path_file) {
-                let source_path = std::path::Path::new(source_path_str.trim());
-                if source_path.exists() {
-                    // Look up the shard's size from the manifest to compute byte offset
-                    let manifest = self.shared_state.model_registry.get_manifest(model_id);
-                    if let Some(manifest) = manifest {
-                        // Skip source GGUF fallback for v2 manifests — byte offsets don't match
-                        if manifest.is_v2() {
-                            tracing::debug!(
-                                model = %model_id,
-                                shard = shard_index,
-                                "Skipping source GGUF fallback for v2 layer-aligned manifest"
-                            );
-                        } else if let Some(shard_info) =
-                            manifest.shards.iter().find(|s| s.index == shard_index)
-                        {
-                            // Compute the byte offset in the source file for this shard
-                            let shard_file_offset: u64 = manifest
-                                .shards
-                                .iter()
-                                .filter(|s| s.index < shard_index)
-                                .map(|s| s.size_bytes)
-                                .sum();
-                            let total_shard_size = shard_info.size_bytes;
-
-                            // chunk_offset is relative to this shard
-                            let file_offset = shard_file_offset + req.chunk_offset;
-                            let chunk_size = req.chunk_size.min(32 * 1024 * 1024);
-                            let remaining_in_shard =
-                                total_shard_size.saturating_sub(req.chunk_offset);
-                            let read_len = chunk_size.min(remaining_in_shard) as usize;
-
-                            if read_len == 0 {
-                                return SwarmResponse::ShardData(crate::types::ShardResponse {
-                                    data: vec![],
-                                    total_size: total_shard_size,
-                                });
-                            }
-
-                            match std::fs::File::open(source_path) {
-                                Ok(mut file) => {
-                                    // NET-C2: Propagate seek errors
-                                    if let Err(e) = file.seek(SeekFrom::Start(file_offset)) {
-                                        tracing::warn!(error = %e, "Failed to seek in source GGUF");
-                                        return SwarmResponse::ShardData(
-                                            crate::types::ShardResponse {
-                                                data: vec![],
-                                                total_size: 0,
-                                            },
-                                        );
-                                    }
-                                    let mut buf = vec![0u8; read_len];
-                                    match file.read_exact(&mut buf) {
-                                        Ok(()) => {
-                                            tracing::info!(
-                                                model = %model_id,
-                                                shard = shard_index,
-                                                bytes = buf.len(),
-                                                shard_size = total_shard_size,
-                                                "Serving shard from source GGUF"
-                                            );
-                                            return SwarmResponse::ShardData(
-                                                crate::types::ShardResponse {
-                                                    data: buf,
-                                                    total_size: total_shard_size,
-                                                },
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "Failed to read from source GGUF");
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Failed to open source GGUF");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Shard files are self-contained — no source GGUF fallback needed.
 
         tracing::debug!(
             model = %model_id,

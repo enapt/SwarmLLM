@@ -1034,15 +1034,40 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
 
 // ── ShardReader: virtual GGUF file from header + shard files ──
 
-/// A reader that presents a GGUF header + shard files as a single contiguous
-/// seekable file. This allows candle's `Content::read()` and `ct.tensor()`
-/// to work transparently over shard files without reconstructing the full GGUF.
+/// One tensor's mapping from virtual GGUF position to a shard file.
+struct TensorMapEntry {
+    /// Absolute byte offset in the virtual GGUF file.
+    gguf_offset: u64,
+    /// Index into the `shards` vec.
+    shard_idx: usize,
+    /// Byte offset within the shard file where this tensor's data starts.
+    shard_local_offset: u64,
+    /// Size of this tensor's data in bytes.
+    size: u64,
+}
+
+/// Metadata for one shard file.
+struct ShardFile {
+    _index: u32,
+    path: PathBuf,
+    file_len: u64,
+}
+
+/// A reader that presents a GGUF header + v2 layer-aligned shard files as a
+/// single contiguous seekable file.  This allows candle's `Content::read()`
+/// and `ct.tensor()` to work transparently over shard files.
+///
+/// V2 shards contain packed tensor data (not byte-range slices of the GGUF).
+/// The `tensor_map` translates virtual GGUF offsets → (shard_idx, shard_local_offset)
+/// via binary search.
 pub struct ShardReader {
-    /// Raw GGUF header bytes (metadata + tensor info table).
+    /// Raw GGUF header bytes (metadata + tensor info table), padded to tensor_data_offset.
     header: Vec<u8>,
-    /// Shard files ordered by index. Each entry: (start_byte_in_gguf, file_path, cached_length).
-    shards: Vec<(u64, PathBuf, u64)>,
-    /// Total size of the virtual file (header + all tensor data).
+    /// Shard files in order by index.
+    shards: Vec<ShardFile>,
+    /// Sorted by `gguf_offset` for binary search.
+    tensor_map: Vec<TensorMapEntry>,
+    /// Total size of the virtual GGUF file (header + all tensor data).
     total_size: u64,
     /// Current seek position in the virtual file.
     position: u64,
@@ -1051,72 +1076,83 @@ pub struct ShardReader {
 }
 
 impl ShardReader {
-    /// Create a ShardReader from a GGUF header file and ordered shard files.
+    /// Create a ShardReader from a GGUF header and v2 shard files with tensor maps.
     ///
-    /// `shard_files` must be in order by shard index. Each shard represents a
-    /// contiguous byte range of the original GGUF, starting right after the header
-    /// (i.e., at `tensor_data_offset`). Gaps are allowed — shards that this node
-    /// doesn't hold can be omitted; reads into missing ranges will fail.
+    /// `shard_files` must be ordered by shard index.  Each shard's tensor entries
+    /// describe which virtual-GGUF-offset ranges map to which shard-local offsets.
     pub fn new(
         header_path: &Path,
         shard_files: Vec<(u32, PathBuf)>,
-        shard_size: u64,
+        tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
+        total_gguf_size: u64,
         tensor_data_offset: u64,
     ) -> Result<Self, SwarmError> {
         let header = std::fs::read(header_path).map_err(SwarmError::Io)?;
-        if (header.len() as u64) < tensor_data_offset {
-            // Pad header to tensor_data_offset (alignment padding)
+        let header = if (header.len() as u64) < tensor_data_offset {
             let mut padded = header;
             padded.resize(tensor_data_offset as usize, 0);
-            return Self::new_from_header(padded, shard_files, shard_size, tensor_data_offset);
-        }
-        Self::new_from_header(header, shard_files, shard_size, tensor_data_offset)
-    }
-
-    fn new_from_header(
-        header: Vec<u8>,
-        shard_files: Vec<(u32, PathBuf)>,
-        shard_size: u64,
-        _tensor_data_offset: u64,
-    ) -> Result<Self, SwarmError> {
-        // Shards are byte ranges of the FULL original GGUF file (including header
-        // portion in shard 0).  Shard N covers bytes [N*shard_size, (N+1)*shard_size).
-        // The ShardReader serves positions [0, header_len) from the in-memory header,
-        // so positions >= header_len fall through to find_shard which maps them to
-        // the correct file offset within the appropriate shard.
-        // Cache shard file lengths upfront to avoid repeated seeks during read().
-        let mut shards = Vec::new();
-        for (idx, path) in &shard_files {
-            let start_byte = (*idx as u64) * shard_size;
-            let file_len = std::fs::metadata(path).map_err(SwarmError::Io)?.len();
-            shards.push((start_byte, path.clone(), file_len));
-        }
-
-        // Compute total size from last shard
-        let total_size = if let Some((_, _, last_len)) = shards.last() {
-            let last_idx = shard_files.last().unwrap().0;
-            (last_idx as u64) * shard_size + last_len
+            padded
         } else {
-            header.len() as u64
+            header
         };
+
+        let mut shards = Vec::with_capacity(shard_files.len());
+        let mut tensor_map = Vec::new();
+
+        for (i, (idx, path)) in shard_files.iter().enumerate() {
+            let file_len = std::fs::metadata(path).map_err(SwarmError::Io)?.len();
+            shards.push(ShardFile {
+                _index: *idx,
+                path: path.clone(),
+                file_len,
+            });
+
+            // Build tensor map entries from the corresponding tensor_entries
+            if let Some(entries) = tensor_entries.get(i) {
+                for te in entries {
+                    tensor_map.push(TensorMapEntry {
+                        gguf_offset: te.gguf_offset,
+                        shard_idx: i,
+                        shard_local_offset: te.shard_offset,
+                        size: te.size,
+                    });
+                }
+            }
+        }
+
+        // Sort by gguf_offset for binary search
+        tensor_map.sort_by_key(|e| e.gguf_offset);
 
         Ok(Self {
             header,
             shards,
-            total_size,
+            tensor_map,
+            total_size: total_gguf_size,
             position: 0,
             current_shard: None,
         })
     }
 
-    /// Find which shard (if any) contains the given virtual file position.
+    /// Find which shard (if any) contains the given virtual file position,
+    /// returning (shard_vec_index, offset_within_shard_file).
     fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
-        for (i, (start, _path, shard_len)) in self.shards.iter().enumerate() {
-            if pos >= *start && pos < *start + shard_len {
-                return Some((i, pos - *start));
-            }
+        // Binary search: find the last entry where gguf_offset <= pos
+        let idx = match self
+            .tensor_map
+            .binary_search_by_key(&pos, |e| e.gguf_offset)
+        {
+            Ok(i) => i,
+            Err(0) => return None,
+            Err(i) => i - 1,
+        };
+
+        let entry = &self.tensor_map[idx];
+        if pos < entry.gguf_offset + entry.size {
+            let delta = pos - entry.gguf_offset;
+            Some((entry.shard_idx, entry.shard_local_offset + delta))
+        } else {
+            None
         }
-        None
     }
 }
 
@@ -1138,9 +1174,8 @@ impl IoRead for ShardReader {
             return Ok(to_read);
         }
 
-        // Reading from shard region
+        // Reading from shard region via tensor map
         if let Some((shard_idx, offset_in_shard)) = self.find_shard(self.position) {
-            // Temporary debug: log every shard boundary crossing
             if tracing::enabled!(tracing::Level::TRACE) {
                 tracing::trace!(
                     pos = self.position,
@@ -1156,18 +1191,17 @@ impl IoRead for ShardReader {
                 None => true,
             };
             if need_open {
-                let file = std::fs::File::open(&self.shards[shard_idx].1)
+                let file = std::fs::File::open(&self.shards[shard_idx].path)
                     .map_err(std::io::Error::other)?;
                 self.current_shard = Some((shard_idx, file));
             }
 
-            let shard_file_len = self.shards[shard_idx].2;
+            let shard_file_len = self.shards[shard_idx].file_len;
             let (_, ref mut file) = self.current_shard.as_mut().unwrap();
             file.seek(SeekFrom::Start(offset_in_shard))?;
             let available_in_shard = shard_file_len.saturating_sub(offset_in_shard) as usize;
             let to_read = buf.len().min(available_in_shard);
             if to_read == 0 {
-                // This shouldn't happen if find_shard is correct
                 tracing::error!(
                     pos = self.position,
                     shard_idx,
@@ -1182,25 +1216,33 @@ impl IoRead for ShardReader {
             self.position += n as u64;
             Ok(n)
         } else {
-            // Position is in a gap (missing shard)
-            let shard_info: Vec<String> = self
-                .shards
+            // Position is in a gap (missing tensor / missing shard)
+            let map_info: Vec<String> = self
+                .tensor_map
                 .iter()
-                .map(|(start, _path, len)| format!("[{start}..{})", start + len))
+                .take(5)
+                .map(|e| {
+                    format!(
+                        "shard[{}]@gguf[{}..{})",
+                        e.shard_idx,
+                        e.gguf_offset,
+                        e.gguf_offset + e.size
+                    )
+                })
                 .collect();
             tracing::error!(
                 pos = self.position,
                 total_size = self.total_size,
                 header_len = self.header.len(),
                 buf_len = buf.len(),
-                shards = ?shard_info,
+                tensor_map_sample = ?map_info,
                 "ShardReader: position is in a missing shard region"
             );
             Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!(
-                    "ShardReader: position {} is in a missing shard region (total_size={}, shards={:?})",
-                    self.position, self.total_size, shard_info
+                    "ShardReader: position {} is in a missing region (total_size={})",
+                    self.position, self.total_size
                 ),
             ))
         }
@@ -1623,14 +1665,16 @@ impl SplitModel {
     /// This is the shard-only alternative to `load_from_gguf`. Instead of needing
     /// the full GGUF file, it reads from:
     /// - `gguf_header.bin`: the raw GGUF header (metadata + tensor info table)
-    /// - `shard_NNN.bin` files: byte-range slices of the original GGUF's tensor data
+    /// - `shard_NNN.bin` files: layer-aligned shard files with packed tensor data
     ///
-    /// The `ShardReader` presents these as a virtual contiguous file so candle's
-    /// GGUF parser works unchanged.
+    /// The `ShardReader` uses the tensor entries to map virtual GGUF positions
+    /// to shard-local offsets, so candle's GGUF parser works unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn load_from_shards(
         model_dir: &Path,
         shard_files: Vec<(u32, PathBuf)>,
-        shard_size: u64,
+        tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
+        total_gguf_size: u64,
         layer_start: usize,
         layer_end: usize,
         is_first: bool,
@@ -1646,7 +1690,6 @@ impl SplitModel {
 
         // Read header to get tensor_data_offset
         let header_bytes = std::fs::read(&header_path).map_err(SwarmError::Io)?;
-        // Parse tensor_data_offset from a temporary read of the header
         let tensor_data_offset = {
             let mut cursor = std::io::Cursor::new(&header_bytes);
             let ct = gguf_file::Content::read(&mut cursor)
@@ -1663,8 +1706,13 @@ impl SplitModel {
             "Loading split model from shard files"
         );
 
-        let mut reader =
-            ShardReader::new(&header_path, shard_files, shard_size, tensor_data_offset)?;
+        let mut reader = ShardReader::new(
+            &header_path,
+            shard_files,
+            tensor_entries,
+            total_gguf_size,
+            tensor_data_offset,
+        )?;
 
         // Use the same GGUF parsing path as load_from_gguf, but reading from ShardReader
         let ct = gguf_file::Content::read(&mut reader).map_err(|e| {
@@ -2708,9 +2756,8 @@ pub fn compute_layer_shard_layouts(
 
 /// Return all contiguous layer ranges from manifest ShardInfo entries.
 ///
-/// Reads layer_range directly from each shard — accurate for v2 manifests
-/// (use `manifest.is_v2()` to check). For v1 manifests, layer ranges are
-/// approximate; prefer `compute_available_layer_ranges` with tensor metadata.
+/// Reads layer_range directly from each shard — v2 manifests have accurate
+/// layer ranges computed from GGUF tensor metadata.
 pub fn available_layer_ranges_from_manifest(
     manifest: &crate::types::ModelManifest,
     local_shard_indices: &[u32],
@@ -2748,144 +2795,10 @@ pub fn available_layer_ranges_from_manifest(
     ranges
 }
 
-/// Build a bitmap of which layers have ALL their tensors available locally.
-///
-/// Shared logic extracted from `compute_local_layer_range`. Maps byte-range
-/// shards to the GGUF tensor layout and checks every tensor of every layer
-/// against the merged byte ranges of the local shards.
-fn build_available_layer_bitmap(
-    meta: &GgufTensorMeta,
-    shard_size: u64,
-    local_shard_indices: &[u32],
-) -> Vec<bool> {
-    // Calculate which byte ranges are locally available
-    let mut available_ranges: Vec<(u64, u64)> = local_shard_indices
-        .iter()
-        .map(|&idx| {
-            let start = idx as u64 * shard_size;
-            let end = start + shard_size;
-            (start, end)
-        })
-        .collect();
-    available_ranges.sort_by_key(|r| r.0);
-
-    // Merge contiguous/overlapping ranges so that tensors spanning two adjacent
-    // shards are correctly detected as available.
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for range in &available_ranges {
-        if let Some(last) = merged.last_mut() {
-            if range.0 <= last.1 {
-                last.1 = last.1.max(range.1);
-                continue;
-            }
-        }
-        merged.push(*range);
-    }
-
-    let tensor_available = |name: &str| -> bool {
-        if let Some(loc) = meta.tensors.get(name) {
-            let tensor_start = meta.tensor_data_offset + loc.offset;
-            let tensor_end = tensor_start + loc.size;
-            merged
-                .iter()
-                .any(|&(rs, re)| tensor_start >= rs && tensor_end <= re)
-        } else {
-            false
-        }
-    };
-
-    // Build a bitmap of which layers have ALL their tensors available.
-    // IMPORTANT: GGUF tensor data is stored in alphabetical name order, so blk.10
-    // physically precedes blk.2 in the file.  We must find the largest CONTIGUOUS
-    // range of layer indices, not just min/max of available layers.
-    let mut available_layers = vec![false; meta.block_count];
-
-    for (layer_idx, layer_avail) in available_layers.iter_mut().enumerate() {
-        let prefix = format!("blk.{layer_idx}");
-        // Required tensors for every layer
-        let required = [
-            format!("{prefix}.attn_q.weight"),
-            format!("{prefix}.attn_k.weight"),
-            format!("{prefix}.attn_v.weight"),
-            format!("{prefix}.attn_output.weight"),
-            format!("{prefix}.attn_norm.weight"),
-            format!("{prefix}.ffn_norm.weight"),
-            format!("{prefix}.ffn_gate.weight"),
-            format!("{prefix}.ffn_down.weight"),
-            format!("{prefix}.ffn_up.weight"),
-        ];
-
-        let all_available = required.iter().all(|name| tensor_available(name));
-
-        // Also check optional bias tensors — if they exist in the GGUF, they must
-        // be available too (Qwen2 has attn biases).
-        let biases_ok = ["attn_q.bias", "attn_k.bias", "attn_v.bias"]
-            .iter()
-            .all(|suffix| {
-                let name = format!("{prefix}.{suffix}");
-                meta.tensors
-                    .get(&name)
-                    .map_or(true, |_| tensor_available(&name))
-            });
-
-        *layer_avail = all_available && biases_ok;
-    }
-
-    available_layers
-}
-
-/// Return ALL contiguous layer ranges available from the given shards.
-///
-/// Unlike `compute_local_layer_range` which returns only the longest run,
-/// this returns every contiguous run as a `(start, end)` half-open range.
-/// A node with layers {0,1,10,11,12,13} gets two ranges: `(0,2)` and `(10,14)`.
-pub fn compute_available_layer_ranges(
-    meta: &GgufTensorMeta,
-    shard_size: u64,
-    local_shard_indices: &[u32],
-) -> Vec<(usize, usize)> {
-    let bitmap = build_available_layer_bitmap(meta, shard_size, local_shard_indices);
-    let mut ranges = Vec::new();
-    let mut run_start = 0;
-    let mut in_run = false;
-
-    for (i, &avail) in bitmap.iter().enumerate() {
-        if avail {
-            if !in_run {
-                run_start = i;
-                in_run = true;
-            }
-        } else if in_run {
-            ranges.push((run_start, i));
-            in_run = false;
-        }
-    }
-    // Close final run if it extends to the end
-    if in_run {
-        ranges.push((run_start, bitmap.len()));
-    }
-
-    ranges
-}
-
-/// Determine which layer range a node should process based on which shard files
-/// it has locally. Maps byte-range shards to the GGUF tensor layout to figure out
-/// which transformer blocks' weights are fully contained in the local shards.
-///
-/// Returns the **longest** contiguous run. For all runs, use
-/// `compute_available_layer_ranges`.
-pub fn compute_local_layer_range(
-    meta: &GgufTensorMeta,
-    shard_size: u64,
-    local_shard_indices: &[u32],
-) -> (usize, usize) {
-    let ranges = compute_available_layer_ranges(meta, shard_size, local_shard_indices);
-    // Return the longest range, or (0,0) if none.
-    ranges
-        .into_iter()
-        .max_by_key(|&(start, end)| end - start)
-        .unwrap_or((0, 0))
-}
+// V1 byte-range layer functions (build_available_layer_bitmap,
+// compute_available_layer_ranges, compute_local_layer_range) have been removed.
+// All callers now use available_layer_ranges_from_manifest() which reads
+// accurate layer_range data from v2 manifest ShardInfo entries.
 
 #[cfg(test)]
 mod tests {
@@ -2909,240 +2822,65 @@ mod tests {
         assert_eq!(token, 2); // index of 5.0
     }
 
-    #[test]
-    fn layer_range_computation() {
-        // Create a simple metadata with known tensor offsets
-        let mut tensors = HashMap::new();
-        let tensor_names_per_layer = [
-            "attn_q.weight",
-            "attn_k.weight",
-            "attn_v.weight",
-            "attn_output.weight",
-            "attn_norm.weight",
-            "ffn_norm.weight",
-            "ffn_gate.weight",
-            "ffn_down.weight",
-            "ffn_up.weight",
-        ];
-
-        // Each layer's tensors take ~100 bytes, starting at offset 0
-        for layer_idx in 0..4 {
-            for (i, name) in tensor_names_per_layer.iter().enumerate() {
-                let offset = (layer_idx * 900 + i * 100) as u64;
-                tensors.insert(
-                    format!("blk.{layer_idx}.{name}"),
-                    TensorLocation { offset, size: 100 },
-                );
-            }
-        }
-
-        let meta = GgufTensorMeta {
-            tensors,
-            tensor_data_offset: 0,
-            model_name: None,
-            head_count: 8,
-            head_count_kv: 8,
-            block_count: 4,
-            embedding_length: 512,
-            rope_dim: 64,
-            rope_freq_base: 10000.0,
-            rms_norm_eps: 1e-6,
-        };
-
-        // Shards of size 1800 bytes: shard 0 covers bytes 0-1800 (layers 0-1)
-        // shard 1 covers bytes 1800-3600 (layers 2-3)
-        let range = compute_local_layer_range(&meta, 1800, &[0]);
-        assert_eq!(range, (0, 2)); // layers 0 and 1
-
-        let range = compute_local_layer_range(&meta, 1800, &[1]);
-        assert_eq!(range, (2, 4)); // layers 2 and 3
-
-        let range = compute_local_layer_range(&meta, 1800, &[0, 1]);
-        assert_eq!(range, (0, 4)); // all layers
-    }
+    // V1 byte-range layer tests (layer_range_computation, layer_range_cross_shard_tensor,
+    // layer_range_alphabetical_gguf_order, available_layer_ranges_non_contiguous) removed.
+    // Layer ranges are now computed from manifest ShardInfo.layer_range data.
 
     #[test]
-    fn layer_range_cross_shard_tensor() {
-        // Test that a tensor spanning two contiguous shards is detected as available.
-        let mut tensors = HashMap::new();
-        let names = [
-            "attn_q.weight",
-            "attn_k.weight",
-            "attn_v.weight",
-            "attn_output.weight",
-            "attn_norm.weight",
-            "ffn_norm.weight",
-            "ffn_gate.weight",
-            "ffn_down.weight",
-            "ffn_up.weight",
-        ];
+    fn available_layer_ranges_from_manifest_basic() {
+        use crate::types::{ModelId, ModelManifest, ShardInfo};
 
-        // Layer 0: all tensors in shard 0 (offsets 0..900)
-        for (i, name) in names.iter().enumerate() {
-            tensors.insert(
-                format!("blk.0.{name}"),
-                TensorLocation {
-                    offset: (i * 100) as u64,
-                    size: 100,
+        let manifest = ModelManifest {
+            schema_version: 2,
+            id: ModelId("test".into()),
+            name: "test".into(),
+            architecture: crate::types::ModelArchitecture::Llama,
+            num_layers: 12,
+            num_params_billions: 0.0,
+            quantization: crate::types::Quantization::Q4KM,
+            total_size_bytes: 1000,
+            shard_count: 3,
+            shards: vec![
+                ShardInfo {
+                    index: 0,
+                    layer_range: (0, 4),
+                    size_bytes: 300,
+                    hash: [0u8; 32],
+                    tensors: vec![],
                 },
-            );
-        }
-
-        // Layer 1: last tensor straddles shards 0 and 1 (offset 950, size 100 → ends at 1050)
-        // Shard boundary is at 1000.
-        for (i, name) in names.iter().enumerate() {
-            let offset = if i == 8 { 950 } else { 900 + i * 10 } as u64;
-            let size = if i == 8 { 100 } else { 10 };
-            tensors.insert(
-                format!("blk.1.{name}"),
-                TensorLocation {
-                    offset,
-                    size: size as u64,
+                ShardInfo {
+                    index: 1,
+                    layer_range: (4, 8),
+                    size_bytes: 300,
+                    hash: [0u8; 32],
+                    tensors: vec![],
                 },
-            );
-        }
-
-        let meta = GgufTensorMeta {
-            tensors,
-            tensor_data_offset: 0,
-            model_name: None,
-            head_count: 8,
-            head_count_kv: 8,
-            block_count: 2,
-            embedding_length: 512,
-            rope_dim: 64,
-            rope_freq_base: 10000.0,
-            rms_norm_eps: 1e-6,
+                ShardInfo {
+                    index: 2,
+                    layer_range: (8, 12),
+                    size_bytes: 400,
+                    hash: [0u8; 32],
+                    tensors: vec![],
+                },
+            ],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: crate::types::NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
         };
 
-        // With only shard 0 (bytes 0..1000), layer 1 is NOT available (tensor ends at 1050)
-        let range = compute_local_layer_range(&meta, 1000, &[0]);
-        assert_eq!(range, (0, 1)); // only layer 0
+        // Single shard
+        let ranges = available_layer_ranges_from_manifest(&manifest, &[0]);
+        assert_eq!(ranges, vec![(0, 4)]);
 
-        // With shards 0+1 (merged range 0..2000), layer 1 IS available
-        let range = compute_local_layer_range(&meta, 1000, &[0, 1]);
-        assert_eq!(range, (0, 2)); // both layers
-    }
+        // Non-contiguous shards
+        let ranges = available_layer_ranges_from_manifest(&manifest, &[0, 2]);
+        assert_eq!(ranges, vec![(0, 4), (8, 12)]);
 
-    #[test]
-    fn layer_range_alphabetical_gguf_order() {
-        // GGUF stores tensors in alphabetical name order, so blk.10 comes before blk.2.
-        // Physical file order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
-        // This means layers 0,1,10,11 are at the start of the file, and layers 2,3 later.
-        // With only the first shard, we get layers 0,1,10,11 available — non-contiguous!
-        // The function should return the longest contiguous run.
-        let mut tensors = HashMap::new();
-        let names = [
-            "attn_q.weight",
-            "attn_k.weight",
-            "attn_v.weight",
-            "attn_output.weight",
-            "attn_norm.weight",
-            "ffn_norm.weight",
-            "ffn_gate.weight",
-            "ffn_down.weight",
-            "ffn_up.weight",
-        ];
-
-        // Alphabetical order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
-        let gguf_order = [0, 1, 10, 11, 2, 3];
-        for (pos, &layer_idx) in gguf_order.iter().enumerate() {
-            for (i, name) in names.iter().enumerate() {
-                let offset = (pos * 900 + i * 100) as u64;
-                tensors.insert(
-                    format!("blk.{layer_idx}.{name}"),
-                    TensorLocation { offset, size: 100 },
-                );
-            }
-        }
-
-        let meta = GgufTensorMeta {
-            tensors,
-            tensor_data_offset: 0,
-            model_name: None,
-            head_count: 8,
-            head_count_kv: 8,
-            block_count: 12, // pretend 12 layers total
-            embedding_length: 512,
-            rope_dim: 64,
-            rope_freq_base: 10000.0,
-            rms_norm_eps: 1e-6,
-        };
-
-        // Shard 0: bytes [0, 1800) — contains layers 0,1 (pos 0-1) but also 10,11 (pos 2-3)
-        // Available layers: 0, 1, 10, 11 — non-contiguous!
-        // Longest contiguous run: either (0,1) length=2 or (10,11) length=2
-        // Should return (0, 2) since it's the first run of length 2
-        let range = compute_local_layer_range(&meta, 1800, &[0]);
-        assert_eq!(range, (0, 2)); // layers 0,1 — NOT (0,12) which would include gaps
-
-        // Shards 0+1+2: bytes [0, 5400) — all 6 physical positions covered
-        // Layers 0,1,2,3,10,11 all available. Contiguous: 0,1,2,3 (length=4)
-        let range = compute_local_layer_range(&meta, 1800, &[0, 1, 2]);
-        assert_eq!(range, (0, 4)); // layers 0-3 contiguous (10,11 non-contiguous)
-    }
-
-    #[test]
-    fn available_layer_ranges_non_contiguous() {
-        // Same setup as layer_range_alphabetical_gguf_order but tests the new
-        // compute_available_layer_ranges() that returns ALL contiguous runs.
-        let mut tensors = HashMap::new();
-        let names = [
-            "attn_q.weight",
-            "attn_k.weight",
-            "attn_v.weight",
-            "attn_output.weight",
-            "attn_norm.weight",
-            "ffn_norm.weight",
-            "ffn_gate.weight",
-            "ffn_down.weight",
-            "ffn_up.weight",
-        ];
-
-        // Alphabetical order: blk.0, blk.1, blk.10, blk.11, blk.2, blk.3
-        let gguf_order = [0, 1, 10, 11, 2, 3];
-        for (pos, &layer_idx) in gguf_order.iter().enumerate() {
-            for (i, name) in names.iter().enumerate() {
-                let offset = (pos * 900 + i * 100) as u64;
-                tensors.insert(
-                    format!("blk.{layer_idx}.{name}"),
-                    TensorLocation { offset, size: 100 },
-                );
-            }
-        }
-
-        let meta = GgufTensorMeta {
-            tensors,
-            tensor_data_offset: 0,
-            model_name: None,
-            head_count: 8,
-            head_count_kv: 8,
-            block_count: 12,
-            embedding_length: 512,
-            rope_dim: 64,
-            rope_freq_base: 10000.0,
-            rms_norm_eps: 1e-6,
-        };
-
-        // Shard 0: bytes [0, 1800) — layers 0,1 only (layers 10,11 start at byte 1800)
-        let ranges = compute_available_layer_ranges(&meta, 1800, &[0]);
-        assert_eq!(ranges, vec![(0, 2)]);
-
-        // Shard 1: bytes [1800, 3600) — layers 10,11 (GGUF positions 2-3)
-        let ranges = compute_available_layer_ranges(&meta, 1800, &[1]);
-        assert_eq!(ranges, vec![(10, 12)]);
-
-        // Shards 0+1: bytes [0, 3600) — layers 0,1,10,11 → two non-contiguous ranges
-        let ranges = compute_available_layer_ranges(&meta, 1800, &[0, 1]);
-        assert_eq!(ranges, vec![(0, 2), (10, 12)]);
-
-        // Shards 0+1+2: bytes [0, 5400) — layers 0,1,2,3,10,11 → two ranges
-        let ranges = compute_available_layer_ranges(&meta, 1800, &[0, 1, 2]);
-        assert_eq!(ranges, vec![(0, 4), (10, 12)]);
-
-        // compute_local_layer_range still returns the longest
-        let range = compute_local_layer_range(&meta, 1800, &[0, 1, 2]);
-        assert_eq!(range, (0, 4));
+        // All shards → single range
+        let ranges = available_layer_ranges_from_manifest(&manifest, &[0, 1, 2]);
+        assert_eq!(ranges, vec![(0, 12)]);
     }
 
     // ── KvCacheStore tests ──

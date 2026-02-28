@@ -338,8 +338,7 @@ mod tests {
             layer_range: (0, 1),
             size_bytes: data.len() as u64,
             hash: expected_hash,
-            byte_start: None,
-            byte_end: None,
+            tensors: vec![],
         };
 
         // Verify should succeed
@@ -361,8 +360,7 @@ mod tests {
             layer_range: (0, 1),
             size_bytes: data.len() as u64,
             hash: [0xFF; 32], // Wrong hash
-            byte_start: None,
-            byte_end: None,
+            tensors: vec![],
         };
 
         assert!(store.verify_shard(&model_id, &info).is_err());
