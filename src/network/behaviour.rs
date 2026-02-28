@@ -8,20 +8,23 @@ use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, StreamProtocol,
 };
 
-use crate::network::protocol::{SwarmCodec, TensorCodec};
+use crate::network::protocol::SwarmCodec;
 use crate::network::relay::RelayServerConfig;
 
 /// Combined network behaviour for the SwarmLLM node.
 ///
 /// Uses the libp2p `NetworkBehaviour` derive macro to combine multiple
 /// sub-protocols into a single behaviour.
+///
+/// Tensor activation forwarding uses the same `request_response` protocol as
+/// control messages (unified codec with a type-tag byte to distinguish JSON
+/// from binary payloads). This avoids dual-protocol connection routing issues
+/// that cause silent message loss when mDNS creates duplicate connections.
 #[derive(NetworkBehaviour)]
 pub struct SwarmBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
     pub request_response: request_response::Behaviour<SwarmCodec>,
-    /// Cap'n Proto tensor protocol for zero-copy activation forwarding.
-    pub tensor_rr: request_response::Behaviour<TensorCodec>,
     pub identify: identify::Behaviour,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
@@ -85,7 +88,10 @@ pub fn build_behaviour(
     )
     .map_err(|e| format!("GossipSub init error: {e}"))?;
 
-    // Request/Response for direct peer communication (shard transfers, control messages)
+    // Request/Response for all direct peer communication:
+    // - JSON control messages (shard transfers, PEX, health)
+    // - Binary tensor payloads (activation forwarding)
+    // Uses a unified codec with type-tag byte to distinguish formats.
     // NET-C3: 300s timeout for shard transfers (large files need more time)
     let request_response = request_response::Behaviour::new(
         [(
@@ -93,15 +99,6 @@ pub fn build_behaviour(
             request_response::ProtocolSupport::Full,
         )],
         request_response::Config::default().with_request_timeout(Duration::from_secs(300)),
-    );
-
-    // Tensor request/response for zero-copy activation forwarding (Cap'n Proto)
-    let tensor_rr = request_response::Behaviour::new(
-        [(
-            StreamProtocol::new("/swarmllm/tensor/1.0.0"),
-            request_response::ProtocolSupport::Full,
-        )],
-        request_response::Config::default().with_request_timeout(Duration::from_secs(120)),
     );
 
     // Identify protocol
@@ -144,7 +141,6 @@ pub fn build_behaviour(
         kademlia,
         gossipsub,
         request_response,
-        tensor_rr,
         identify,
         autonat,
         dcutr,

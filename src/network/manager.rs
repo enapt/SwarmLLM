@@ -18,7 +18,7 @@ use crate::model::shard::ShardStore;
 use crate::network::behaviour::{self, SwarmBehaviour, SwarmBehaviourEvent};
 use crate::network::discovery;
 use crate::network::protocol::{
-    self, SwarmRequest, SwarmResponse, TensorRequest, TensorResponse, TOPIC_MODELS,
+    self, SwarmRequest, SwarmResponse, TOPIC_MODELS,
 };
 use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
@@ -279,140 +279,58 @@ impl NetworkManager {
                 request_response::Message::Request {
                     request, channel, ..
                 } => {
-                    tracing::debug!(%peer, "Received request");
+                    let kind = match &request {
+                        SwarmRequest::Message(_) => "message",
+                        SwarmRequest::ShardTransfer(_) => "shard",
+                        SwarmRequest::TensorPayload(_) => "tensor",
+                    };
+                    tracing::info!(%peer, kind, "Received request");
                     self.handle_request(peer, request, channel).await;
                 }
                 request_response::Message::Response {
                     request_id,
                     response,
                 } => {
-                    tracing::debug!(%peer, "Received response");
+                    let kind = match &response {
+                        SwarmResponse::Message(_) => "message",
+                        SwarmResponse::ShardData(_) => "shard",
+                        SwarmResponse::Ack => "ack",
+                        SwarmResponse::TensorPayload(_) => "tensor",
+                    };
+                    tracing::info!(%peer, kind, "Received response");
                     self.handle_response(peer, request_id, response).await;
                 }
             },
 
-            // ── Tensor request/response (Cap'n Proto, zero-copy) ──
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::TensorRr(
-                request_response::Event::Message { peer, message },
-            )) => match message {
-                request_response::Message::Request {
-                    request, channel, ..
-                } => {
-                    // Dispatch based on the message type tag (first byte)
-                    let tag = request.payload.first().copied().unwrap_or(0);
-                    match tag {
-                        protocol::TENSOR_TAG_FORWARD => {
-                            tracing::debug!(%peer, "Received tensor LayerForward");
-                            match protocol::decode_layer_forward(&request.payload) {
-                                Ok(mut forward) => {
-                                    forward.sender_peer_bytes = Some(peer.to_bytes());
-                                    let msg = SwarmMessage::LayerForward(forward);
-                                    // NET-I8: try_send for non-blocking dispatch
-                                    if let Err(e) = self.outbound_tx.try_send(msg) {
-                                        tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Failed to decode tensor forward");
-                                }
-                            }
-                        }
-                        protocol::TENSOR_TAG_RESULT => {
-                            tracing::debug!(%peer, "Received tensor LayerResult");
-                            match protocol::decode_layer_result(&request.payload) {
-                                Ok(result) => {
-                                    // NET-I8: try_send for non-blocking dispatch
-                                    if let Err(e) =
-                                        self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
-                                    {
-                                        tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Failed to decode tensor result");
-                                }
-                            }
-                        }
-                        protocol::TENSOR_TAG_ENCRYPTED => {
-                            tracing::debug!(%peer, "Received encrypted tensor");
-                            match protocol::decode_layer_forward_encrypted(&request.payload) {
-                                Ok((mut forward, sealed, aad)) => {
-                                    // Find the sender's NodeId to decrypt
-                                    let sender_node_id = self.find_node_id_for_peer(&peer);
-                                    if let Some(node_id) = sender_node_id {
-                                        match self
-                                            .shared_state
-                                            .session_manager
-                                            .open(&node_id, &sealed, &aad)
-                                        {
-                                            Ok(plaintext) => {
-                                                forward.activations = plaintext;
-                                                forward.sender_peer_bytes = Some(peer.to_bytes());
-                                                // NET-I8: try_send for non-blocking dispatch
-                                                if let Err(e) = self
-                                                    .outbound_tx
-                                                    .try_send(SwarmMessage::LayerForward(forward))
-                                                {
-                                                    tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    %peer,
-                                                    "Failed to decrypt tensor — dropping"
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        tracing::warn!(
-                                            %peer,
-                                            "Encrypted tensor from unknown peer — dropping"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Failed to decode encrypted tensor");
-                                }
-                            }
-                        }
-                        _ => {
-                            tracing::warn!(%peer, tag, "Unknown tensor message tag");
-                        }
-                    }
-                    // ACK the tensor request
-                    let resp = TensorResponse {
-                        payload: protocol::encode_ack(),
-                    };
-                    // NET-M7: Log send_response errors
-                    if self
-                        .swarm
-                        .behaviour_mut()
-                        .tensor_rr
-                        .send_response(channel, resp)
-                        .is_err()
-                    {
-                        tracing::debug!(%peer, "Failed to send tensor ACK (channel closed)");
-                    }
+            // ── Request/response failures ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
+                request_response::Event::OutboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                },
+            )) => {
+                tracing::warn!(%peer, ?request_id, %error, "Request outbound failure");
+                // Check if this was a pending shard download request
+                if let Some((_peer_id, shard_id)) =
+                    self.pending_shard_requests.remove(&request_id)
+                {
+                    tracing::error!(
+                        %peer, shard = ?shard_id,
+                        "Shard request failed: {error}"
+                    );
                 }
-                request_response::Message::Response { response, .. } => {
-                    // Check for LayerResult in response (legacy path)
-                    if response.payload.len() > 1 {
-                        let tag = response.payload[0];
-                        if tag == protocol::TENSOR_TAG_RESULT {
-                            if let Ok(result) = protocol::decode_layer_result(&response.payload) {
-                                // NET-I8: try_send for non-blocking dispatch
-                                if let Err(e) =
-                                    self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
-                                {
-                                    tracing::warn!(error = %e, "Outbound channel full, dropping legacy tensor result");
-                                }
-                            }
-                        }
-                    }
-                    // Single byte = ACK, ignore
-                }
-            },
+            }
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
+                request_response::Event::InboundFailure {
+                    peer, error, ..
+                },
+            )) => {
+                tracing::debug!(%peer, %error, "Request inbound failure");
+            }
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
+                request_response::Event::ResponseSent { .. },
+            )) => {}
 
             // ── GossipSub peer subscribed — flush buffered messages (NET-I4) ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(
@@ -619,14 +537,21 @@ impl NetworkManager {
             ))) => {
                 for (peer_id, addr) in peers {
                     tracing::info!(%peer_id, %addr, "mDNS: discovered LAN peer");
-                    // Add to Kademlia for DHT routing
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, addr.clone());
-                    // Dial the peer
-                    if let Err(e) = self.swarm.dial(addr) {
-                        tracing::debug!(%peer_id, error = %e, "mDNS: failed to dial peer");
+                    // Do NOT add mDNS addresses to Kademlia. Kademlia's periodic
+                    // routing table refresh dials all known addresses, creating
+                    // duplicate connections every 30s that corrupt request_response
+                    // routing. The identify protocol handles address exchange after
+                    // connection is established.
+                    if !self.swarm.is_connected(&peer_id) {
+                        let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                            .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                            .addresses(vec![addr])
+                            .build();
+                        if let Err(e) = self.swarm.dial(opts) {
+                            tracing::debug!(%peer_id, error = %e, "mDNS: dial skipped");
+                        }
+                    } else {
+                        tracing::debug!(%peer_id, "mDNS: already connected, skipping");
                     }
                     // Mark as LAN peer if we can derive their NodeId
                     if let Some(node_id) = self.peer_to_node.get(&peer_id) {
@@ -645,12 +570,17 @@ impl NetworkManager {
                 }
             }
 
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                tracing::info!(%peer_id, "Connection established");
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                num_established,
+                ..
+            } => {
+                tracing::info!(%peer_id, %connection_id, count = num_established, "Connection established");
                 self.update_peer_count().await;
 
-                // Layer 5: Peer Exchange — send PEX request to newly connected peer
-                if self.shared_state.config.network.peer_exchange {
+                // Layer 5: Peer Exchange — send PEX request on first connection only
+                if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
                     let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
                     self.swarm
                         .behaviour_mut()
@@ -671,6 +601,11 @@ impl NetworkManager {
                 // Skip cleanup if other connections to this peer remain
                 if num_established > 0 {
                     tracing::debug!(%peer_id, remaining = num_established, "Other connections remain, skipping cleanup");
+                } else if self.swarm.is_connected(&peer_id) {
+                    // Swarm still considers peer connected (race: another
+                    // connection was just established) — skip cleanup.
+                    tracing::debug!(%peer_id, "Peer still connected per swarm, skipping cleanup");
+                    self.update_peer_count().await;
                 } else {
                     self.update_peer_count().await;
 
@@ -727,7 +662,9 @@ impl NetworkManager {
                     .set_mode(Some(libp2p::kad::Mode::Server));
             }
 
-            _ => {}
+            other => {
+                tracing::trace!(?other, "Unhandled swarm event");
+            }
         }
     }
 
@@ -821,6 +758,20 @@ impl NetworkManager {
                     tracing::debug!(%peer, "Failed to send shard data response (channel closed)");
                 }
             }
+            SwarmRequest::TensorPayload(payload) => {
+                self.handle_tensor_payload(peer, &payload);
+                // ACK the tensor request
+                let resp = SwarmResponse::Ack;
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .request_response
+                    .send_response(channel, resp)
+                    .is_err()
+                {
+                    tracing::debug!(%peer, "Failed to send tensor ACK (channel closed)");
+                }
+            }
         }
     }
 
@@ -912,6 +863,10 @@ impl NetworkManager {
                         "Received shard data but no pending request found"
                     );
                 }
+            }
+            SwarmResponse::TensorPayload(payload) => {
+                // Tensor data in a response (e.g. LayerResult sent as response)
+                self.handle_tensor_payload(peer, &payload);
             }
             SwarmResponse::Ack => {
                 tracing::debug!(%peer, "Received ACK");
@@ -1068,21 +1023,26 @@ impl NetworkManager {
             }
         };
 
-        let req = TensorRequest { payload };
-        self.swarm
+        let payload_len = payload.len();
+        let is_connected = self.swarm.is_connected(&peer_id);
+        let req = SwarmRequest::TensorPayload(payload);
+        let outbound_id = self.swarm
             .behaviour_mut()
-            .tensor_rr
+            .request_response
             .send_request(&peer_id, req);
-        tracing::debug!(
+        tracing::info!(
             %peer_id,
             request_id = %forward.request_id,
             seq = forward.sequence_num,
             encrypted = use_encryption,
+            payload_len,
+            ?outbound_id,
+            is_connected,
             "Sent tensor forward"
         );
     }
 
-    /// Send a tensor result to a specific peer via the Cap'n Proto tensor protocol.
+    /// Send a tensor result to a specific peer via the unified protocol.
     fn handle_send_tensor_result(
         &mut self,
         target_peer_bytes: Vec<u8>,
@@ -1098,10 +1058,10 @@ impl NetworkManager {
 
         match protocol::encode_layer_result(&result) {
             Ok(payload) => {
-                let req = TensorRequest { payload };
+                let req = SwarmRequest::TensorPayload(payload);
                 self.swarm
                     .behaviour_mut()
-                    .tensor_rr
+                    .request_response
                     .send_request(&peer_id, req);
                 tracing::debug!(
                     %peer_id,
@@ -1111,6 +1071,87 @@ impl NetworkManager {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to encode tensor result");
+            }
+        }
+    }
+
+    /// Process an inbound binary tensor payload (from either request or response).
+    fn handle_tensor_payload(&mut self, peer: libp2p::PeerId, payload: &[u8]) {
+        let tag = payload.first().copied().unwrap_or(0);
+        match tag {
+            protocol::TENSOR_TAG_FORWARD => {
+                tracing::debug!(%peer, "Received tensor LayerForward");
+                match protocol::decode_layer_forward(payload) {
+                    Ok(mut forward) => {
+                        forward.sender_peer_bytes = Some(peer.to_bytes());
+                        let msg = SwarmMessage::LayerForward(forward);
+                        if let Err(e) = self.outbound_tx.try_send(msg) {
+                            tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to decode tensor forward");
+                    }
+                }
+            }
+            protocol::TENSOR_TAG_RESULT => {
+                tracing::debug!(%peer, "Received tensor LayerResult");
+                match protocol::decode_layer_result(payload) {
+                    Ok(result) => {
+                        if let Err(e) =
+                            self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
+                        {
+                            tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to decode tensor result");
+                    }
+                }
+            }
+            protocol::TENSOR_TAG_ENCRYPTED => {
+                tracing::debug!(%peer, "Received encrypted tensor");
+                match protocol::decode_layer_forward_encrypted(payload) {
+                    Ok((mut forward, sealed, aad)) => {
+                        let sender_node_id = self.find_node_id_for_peer(&peer);
+                        if let Some(node_id) = sender_node_id {
+                            match self
+                                .shared_state
+                                .session_manager
+                                .open(&node_id, &sealed, &aad)
+                            {
+                                Ok(plaintext) => {
+                                    forward.activations = plaintext;
+                                    forward.sender_peer_bytes = Some(peer.to_bytes());
+                                    if let Err(e) = self
+                                        .outbound_tx
+                                        .try_send(SwarmMessage::LayerForward(forward))
+                                    {
+                                        tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        %peer,
+                                        "Failed to decrypt tensor — dropping"
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                %peer,
+                                "Encrypted tensor from unknown peer — dropping"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to decode encrypted tensor");
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(%peer, tag, "Unknown tensor message tag");
             }
         }
     }

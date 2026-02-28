@@ -44,6 +44,9 @@ pub struct SwarmCodec;
 pub enum SwarmRequest {
     Message(Box<SwarmMessage>),
     ShardTransfer(ShardRequest),
+    /// Binary tensor data (LayerForward or LayerResult, already encoded).
+    /// Sent as raw bytes to avoid JSON overhead on large activation tensors.
+    TensorPayload(Vec<u8>),
 }
 
 /// Response type for the request_response protocol.
@@ -52,7 +55,14 @@ pub enum SwarmResponse {
     Message(Box<SwarmMessage>),
     ShardData(ShardResponse),
     Ack,
+    /// Binary tensor response data (already encoded).
+    TensorPayload(Vec<u8>),
 }
+
+/// Wire format type tags for the unified codec.
+/// First byte of each message distinguishes JSON from binary tensor payloads.
+const WIRE_TAG_JSON: u8 = 0x00;
+const WIRE_TAG_TENSOR: u8 = 0x01;
 
 #[async_trait]
 impl request_response::Codec for SwarmCodec {
@@ -68,6 +78,10 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        // Read type tag
+        let mut tag_buf = [0u8; 1];
+        io.read_exact(&mut tag_buf).await?;
+
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -82,7 +96,11 @@ impl request_response::Codec for SwarmCodec {
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
 
-        serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        match tag_buf[0] {
+            WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
+            _ => serde_json::from_slice(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        }
     }
 
     async fn read_response<T>(
@@ -93,6 +111,9 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        let mut tag_buf = [0u8; 1];
+        io.read_exact(&mut tag_buf).await?;
+
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -107,7 +128,11 @@ impl request_response::Codec for SwarmCodec {
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
 
-        serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        match tag_buf[0] {
+            WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
+            _ => serde_json::from_slice(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        }
     }
 
     async fn write_request<T>(
@@ -119,11 +144,22 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data =
-            serde_json::to_vec(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let len = (data.len() as u32).to_be_bytes();
-        io.write_all(&len).await?;
-        io.write_all(&data).await?;
+        match req {
+            SwarmRequest::TensorPayload(payload) => {
+                io.write_all(&[WIRE_TAG_TENSOR]).await?;
+                let len = (payload.len() as u32).to_be_bytes();
+                io.write_all(&len).await?;
+                io.write_all(&payload).await?;
+            }
+            other => {
+                io.write_all(&[WIRE_TAG_JSON]).await?;
+                let data = serde_json::to_vec(&other)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let len = (data.len() as u32).to_be_bytes();
+                io.write_all(&len).await?;
+                io.write_all(&data).await?;
+            }
+        }
         io.close().await?;
         Ok(())
     }
@@ -137,11 +173,22 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data =
-            serde_json::to_vec(&resp).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let len = (data.len() as u32).to_be_bytes();
-        io.write_all(&len).await?;
-        io.write_all(&data).await?;
+        match resp {
+            SwarmResponse::TensorPayload(payload) => {
+                io.write_all(&[WIRE_TAG_TENSOR]).await?;
+                let len = (payload.len() as u32).to_be_bytes();
+                io.write_all(&len).await?;
+                io.write_all(&payload).await?;
+            }
+            other => {
+                io.write_all(&[WIRE_TAG_JSON]).await?;
+                let data = serde_json::to_vec(&other)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let len = (data.len() as u32).to_be_bytes();
+                io.write_all(&len).await?;
+                io.write_all(&data).await?;
+            }
+        }
         io.close().await?;
         Ok(())
     }
@@ -197,9 +244,11 @@ impl request_response::Codec for TensorCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        tracing::debug!("TensorCodec::read_request called");
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        tracing::debug!(len, "TensorCodec::read_request payload len");
 
         if len > 256 * 1024 * 1024 {
             return Err(io::Error::new(
@@ -210,6 +259,7 @@ impl request_response::Codec for TensorCodec {
 
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
+        tracing::debug!(len, "TensorCodec::read_request complete");
         Ok(TensorRequest { payload: buf })
     }
 
@@ -221,6 +271,7 @@ impl request_response::Codec for TensorCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        tracing::debug!("TensorCodec::read_response called");
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -234,6 +285,7 @@ impl request_response::Codec for TensorCodec {
 
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
+        tracing::debug!(len, "TensorCodec::read_response complete");
         Ok(TensorResponse { payload: buf })
     }
 
@@ -246,10 +298,13 @@ impl request_response::Codec for TensorCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        let payload_len = req.payload.len();
+        tracing::debug!(payload_len, "TensorCodec::write_request called");
         let len = (req.payload.len() as u32).to_be_bytes();
         io.write_all(&len).await?;
         io.write_all(&req.payload).await?;
         io.close().await?;
+        tracing::debug!(payload_len, "TensorCodec::write_request complete");
         Ok(())
     }
 
@@ -262,10 +317,13 @@ impl request_response::Codec for TensorCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        let payload_len = resp.payload.len();
+        tracing::debug!(payload_len, "TensorCodec::write_response called");
         let len = (resp.payload.len() as u32).to_be_bytes();
         io.write_all(&len).await?;
         io.write_all(&resp.payload).await?;
         io.close().await?;
+        tracing::debug!(payload_len, "TensorCodec::write_response complete");
         Ok(())
     }
 }
@@ -681,6 +739,8 @@ pub fn decode_layer_forward_encrypted(
 }
 
 // Serde impls for SwarmRequest/SwarmResponse
+// Note: TensorPayload variants are never JSON-serialized (handled by binary codec path),
+// but serde impls must be exhaustive.
 impl serde::Serialize for SwarmRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         #[derive(serde::Serialize)]
@@ -694,6 +754,9 @@ impl serde::Serialize for SwarmRequest {
             SwarmRequest::ShardTransfer(s) => {
                 Inner::ShardTransfer { data: s }.serialize(serializer)
             }
+            SwarmRequest::TensorPayload(_) => Err(serde::ser::Error::custom(
+                "TensorPayload should not be JSON-serialized",
+            )),
         }
     }
 }
@@ -727,6 +790,9 @@ impl serde::Serialize for SwarmResponse {
             SwarmResponse::Message(m) => Inner::Message { data: m }.serialize(serializer),
             SwarmResponse::ShardData(s) => Inner::ShardData { data: s }.serialize(serializer),
             SwarmResponse::Ack => Inner::Ack.serialize(serializer),
+            SwarmResponse::TensorPayload(_) => Err(serde::ser::Error::custom(
+                "TensorPayload should not be JSON-serialized",
+            )),
         }
     }
 }
