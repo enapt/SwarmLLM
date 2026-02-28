@@ -11,11 +11,8 @@ use crate::types::{
     TensorFormat,
 };
 
-/// Protocol ID for SwarmLLM JSON request/response (control messages, shard transfers).
+/// Protocol ID for SwarmLLM unified request/response (JSON control + binary tensor).
 pub const PROTOCOL_ID: &str = "/swarmllm/1.0.0";
-
-/// Protocol ID for SwarmLLM tensor request/response (Cap'n Proto, zero-copy).
-pub const TENSOR_PROTOCOL_ID: &str = "/swarmllm/tensor/1.0.0";
 
 /// GossipSub topic for model coordination (shard announcements, capacity updates).
 pub const TOPIC_MODELS: &str = "swarm/models";
@@ -204,131 +201,7 @@ pub fn decode_message(data: &[u8]) -> Result<SwarmMessage, serde_json::Error> {
     serde_json::from_slice(data)
 }
 
-// ---- Cap'n Proto Tensor Protocol ----
-
-/// Request type for the tensor request_response protocol.
-///
-/// Carries raw serialized tensor data for zero-copy efficiency on the
-/// hot path (activation forwarding between pipeline nodes).
-#[derive(Debug, Clone)]
-pub struct TensorRequest {
-    pub payload: Vec<u8>,
-}
-
-/// Response type for the tensor request_response protocol.
-#[derive(Debug, Clone)]
-pub struct TensorResponse {
-    pub payload: Vec<u8>,
-}
-
-/// Codec for the tensor protocol.
-///
-/// Uses a length-prefixed binary format. The payload is a manually encoded
-/// tensor envelope (compatible with the Cap'n Proto schema in proto/messages.capnp).
-/// When the capnp compiler is available, the schema-generated code can replace
-/// the manual encode/decode functions below.
-#[derive(Debug, Clone, Default)]
-pub struct TensorCodec;
-
-#[async_trait]
-impl request_response::Codec for TensorCodec {
-    type Protocol = StreamProtocol;
-    type Request = TensorRequest;
-    type Response = TensorResponse;
-
-    async fn read_request<T>(
-        &mut self,
-        _protocol: &Self::Protocol,
-        io: &mut T,
-    ) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        tracing::debug!("TensorCodec::read_request called");
-        let mut len_buf = [0u8; 4];
-        io.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        tracing::debug!(len, "TensorCodec::read_request payload len");
-
-        if len > 256 * 1024 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Tensor payload too large (>256MB)",
-            ));
-        }
-
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-        tracing::debug!(len, "TensorCodec::read_request complete");
-        Ok(TensorRequest { payload: buf })
-    }
-
-    async fn read_response<T>(
-        &mut self,
-        _protocol: &Self::Protocol,
-        io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        tracing::debug!("TensorCodec::read_response called");
-        let mut len_buf = [0u8; 4];
-        io.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        if len > 256 * 1024 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Tensor response too large (>256MB)",
-            ));
-        }
-
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-        tracing::debug!(len, "TensorCodec::read_response complete");
-        Ok(TensorResponse { payload: buf })
-    }
-
-    async fn write_request<T>(
-        &mut self,
-        _protocol: &Self::Protocol,
-        io: &mut T,
-        req: Self::Request,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        let payload_len = req.payload.len();
-        tracing::debug!(payload_len, "TensorCodec::write_request called");
-        let len = (req.payload.len() as u32).to_be_bytes();
-        io.write_all(&len).await?;
-        io.write_all(&req.payload).await?;
-        io.close().await?;
-        tracing::debug!(payload_len, "TensorCodec::write_request complete");
-        Ok(())
-    }
-
-    async fn write_response<T>(
-        &mut self,
-        _protocol: &Self::Protocol,
-        io: &mut T,
-        resp: Self::Response,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        let payload_len = resp.payload.len();
-        tracing::debug!(payload_len, "TensorCodec::write_response called");
-        let len = (resp.payload.len() as u32).to_be_bytes();
-        io.write_all(&len).await?;
-        io.write_all(&resp.payload).await?;
-        io.close().await?;
-        tracing::debug!(payload_len, "TensorCodec::write_response complete");
-        Ok(())
-    }
-}
-
-// ---- Manual Tensor Encoding (Cap'n Proto compatible wire format) ----
+// ---- Tensor Encoding (binary wire format) ----
 
 // Binary layout for LayerForward envelope:
 //   [0..16]  request_id (UUID bytes)
