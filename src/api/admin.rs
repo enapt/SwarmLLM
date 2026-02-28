@@ -212,8 +212,7 @@ pub async fn reload_config(
         "Config reload requested via API"
     );
 
-    let params = crate::config::reload_operational_params(&config_path)
-        .map_err(ApiError)?;
+    let params = crate::config::reload_operational_params(&config_path).map_err(ApiError)?;
 
     let old = crate::config::OperationalParams::from_config(&state.config);
     let changed = params != old;
@@ -280,72 +279,73 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     }
 
     // Helper: build per-shard detail for a manifest, including download state
-    let build_shard_detail =
-        |m: &crate::types::ModelManifest, state: &AppState| -> Vec<serde_json::Value> {
-            let acq = state.shared_state.acquisition_progress.get(&m.id);
-            m.shards
-                .iter()
-                .map(|s| {
-                    let shard_id = crate::types::ShardId {
-                        model_id: m.id.clone(),
-                        index: s.index,
-                    };
-                    let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-                    let local = holders.contains(&local_node_id);
+    let build_shard_detail = |m: &crate::types::ModelManifest,
+                              state: &AppState|
+     -> Vec<serde_json::Value> {
+        let acq = state.shared_state.acquisition_progress.get(&m.id);
+        m.shards
+            .iter()
+            .map(|s| {
+                let shard_id = crate::types::ShardId {
+                    model_id: m.id.clone(),
+                    index: s.index,
+                };
+                let holders = state.shared_state.model_registry.shard_holders(&shard_id);
+                let local = holders.contains(&local_node_id);
 
-                    let mut shard_json = serde_json::json!({
-                        "index": s.index,
-                        "size_bytes": s.size_bytes,
-                        "local": local,
-                        "holders": holders.len(),
-                    });
+                let mut shard_json = serde_json::json!({
+                    "index": s.index,
+                    "size_bytes": s.size_bytes,
+                    "local": local,
+                    "holders": holders.len(),
+                });
 
-                    // Attach per-shard download state if downloading
-                    if let Some(ref p) = acq {
-                        if let Some(sp) = p.shard_progress.get(&s.index) {
-                            if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
-                                let pct = if sp.total_bytes > 0 {
-                                    (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
-                                } else {
-                                    0
-                                };
-                                shard_json.as_object_mut().unwrap().insert(
-                                    "download".to_string(),
-                                    serde_json::json!({
-                                        "state": "Downloading",
-                                        "progress_pct": pct,
-                                        "downloaded_bytes": sp.downloaded_bytes,
-                                        "total_bytes": sp.total_bytes,
-                                    }),
-                                );
-                            }
-                        }
-                    }
-
-                    // Attach peer download state
-                    if let Some(peer_dl) = state.shared_state.peer_shard_downloads.get(&shard_id) {
-                        let peers: Vec<serde_json::Value> = peer_dl
-                            .value()
-                            .iter()
-                            .map(|(nid, pct)| {
+                // Attach per-shard download state if downloading
+                if let Some(ref p) = acq {
+                    if let Some(sp) = p.shard_progress.get(&s.index) {
+                        if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                            let pct = if sp.total_bytes > 0 {
+                                (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
+                            } else {
+                                0
+                            };
+                            shard_json.as_object_mut().unwrap().insert(
+                                "download".to_string(),
                                 serde_json::json!({
-                                    "node_id": format!("{}", nid),
+                                    "state": "Downloading",
                                     "progress_pct": pct,
-                                })
-                            })
-                            .collect();
-                        if !peers.is_empty() {
-                            shard_json
-                                .as_object_mut()
-                                .unwrap()
-                                .insert("peer_downloads".to_string(), serde_json::json!(peers));
+                                    "downloaded_bytes": sp.downloaded_bytes,
+                                    "total_bytes": sp.total_bytes,
+                                }),
+                            );
                         }
                     }
+                }
 
-                    shard_json
-                })
-                .collect()
-        };
+                // Attach peer download state
+                if let Some(peer_dl) = state.shared_state.peer_shard_downloads.get(&shard_id) {
+                    let peers: Vec<serde_json::Value> = peer_dl
+                        .value()
+                        .iter()
+                        .map(|(nid, pct)| {
+                            serde_json::json!({
+                                "node_id": format!("{}", nid),
+                                "progress_pct": pct,
+                            })
+                        })
+                        .collect();
+                    if !peers.is_empty() {
+                        shard_json
+                            .as_object_mut()
+                            .unwrap()
+                            .insert("peer_downloads".to_string(), serde_json::json!(peers));
+                    }
+                }
+
+                shard_json
+            })
+            .collect()
+    };
 
     // 1. Locally loaded model (full model via --model flag)
     // Even though it's locally loaded, get the real manifest to show shard info
@@ -371,10 +371,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .or_else(|| {
                 // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
                 let slug_id = crate::types::ModelId(slug.clone());
-                state
-                    .shared_state
-                    .model_registry
-                    .get_manifest(&slug_id)
+                state.shared_state.model_registry.get_manifest(&slug_id)
             })
             .or_else(|| {
                 // Try matching by manifest `name` field (auto-manage sets loaded_model_info.name
@@ -1330,8 +1327,10 @@ pub async fn hf_download_shards(
             Ok(info) => info,
             Err(e) => {
                 tracing::error!(error = %e, "HuggingFace probe failed");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
-                    entry.state = crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                {
+                    entry.state =
+                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
                     entry.log.push(format!("Probe failed: {}", e));
                 }
                 return;
@@ -1359,7 +1358,8 @@ pub async fn hf_download_shards(
         {
             tracing::error!(error = %e, "GGUF header download failed");
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
-                entry.state = crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
+                entry.state =
+                    crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
                 entry.log.push(format!("Header download failed: {}", e));
             }
             return;
@@ -1395,7 +1395,9 @@ pub async fn hf_download_shards(
             crate::types::ModelId(model_id_str.clone()),
             hf_source.clone(),
         );
-        let _ = download_shared.db.put_json("hf_sources", &model_id_str, &hf_source);
+        let _ = download_shared
+            .db
+            .put_json("hf_sources", &model_id_str, &hf_source);
         let hf_source_path = dest_dir.join("hf_source.json");
         let _ = std::fs::write(
             &hf_source_path,
@@ -1405,14 +1407,13 @@ pub async fn hf_download_shards(
         // Broadcast HfSourceGossip + ModelManifest EARLY so peers can start
         // auto-acquiring shards immediately (before our shard data downloads finish).
         if let Some(ref ntx) = network_tx {
-            let gossip_msg = crate::types::SwarmMessage::HfSourceGossip(
-                crate::types::HfSourceGossip {
+            let gossip_msg =
+                crate::types::SwarmMessage::HfSourceGossip(crate::types::HfSourceGossip {
                     model_id: crate::types::ModelId(model_id_str.clone()),
                     repo_id: repo_id.clone(),
                     filename: filename.clone(),
                     publisher: download_shared.identity.node_id().clone(),
-                },
-            );
+                });
             let _ = ntx
                 .send(crate::types::NetworkCommand::Broadcast(gossip_msg))
                 .await;
@@ -1479,7 +1480,8 @@ pub async fn hf_download_shards(
             // Check cancellation flag before each shard download
             if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
                 tracing::info!(model = %model_id_str, "Download cancelled by user");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                {
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: "Cancelled by user".to_string(),
                     };
@@ -1491,21 +1493,27 @@ pub async fn hf_download_shards(
             }
 
             if shard_idx >= info.shard_count {
-                tracing::error!(shard_idx, max = info.shard_count - 1, "Shard index out of range");
+                tracing::error!(
+                    shard_idx,
+                    max = info.shard_count - 1,
+                    "Shard index out of range"
+                );
                 failed = true;
                 break;
             }
 
-            let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
+            let (shard_tx, mut shard_rx) =
+                tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
             let progress_tx_clone = ptx.clone();
             let base_downloaded = cumulative_downloaded;
             let total = total_shard_bytes;
             let progress_task = tokio::spawn(async move {
                 while let Some(prog) = shard_rx.recv().await {
-                    let _ = progress_tx_clone.try_send(crate::model::huggingface::DownloadProgress {
-                        downloaded_bytes: base_downloaded + prog.downloaded_bytes,
-                        total_bytes: total,
-                    });
+                    let _ =
+                        progress_tx_clone.try_send(crate::model::huggingface::DownloadProgress {
+                            downloaded_bytes: base_downloaded + prog.downloaded_bytes,
+                            total_bytes: total,
+                        });
                 }
             });
 
@@ -1526,7 +1534,9 @@ pub async fn hf_download_shards(
                     let end = ((shard_idx as u64 + 1) * info.shard_size).min(info.total_size);
                     cumulative_downloaded += end - start;
 
-                    if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                    if let Some(mut entry) =
+                        download_shared.acquisition_progress.get_mut(&download_mid)
+                    {
                         entry.downloaded_shards += 1;
                         entry.log.push(format!("Shard {} downloaded", shard_idx));
                         // Mark this shard's progress as complete so check_and_load_model
@@ -1546,7 +1556,10 @@ pub async fn hf_download_shards(
                     download_shared
                         .model_registry
                         .record_shard_holder(shard_id.clone(), node_id.clone());
-                    let mut holders = download_shared.shard_registry.entry(shard_id.clone()).or_default();
+                    let mut holders = download_shared
+                        .shard_registry
+                        .entry(shard_id.clone())
+                        .or_default();
                     if !holders.contains(&node_id) {
                         holders.push(node_id.clone());
                     }
@@ -1568,7 +1581,9 @@ pub async fn hf_download_shards(
                 Err(e) => {
                     progress_task.abort();
                     tracing::error!(error = %e, shard_idx, "Shard download failed");
-                    if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                    if let Some(mut entry) =
+                        download_shared.acquisition_progress.get_mut(&download_mid)
+                    {
                         entry.failed_shards += 1;
                         entry.log.push(format!("Shard {} failed: {}", shard_idx, e));
                     }
@@ -1612,7 +1627,9 @@ pub async fn hf_download_shards(
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
                 entry.state = crate::model::acquisition::AcquisitionState::Complete;
                 entry.verified_shards = shard_indices.len() as u32;
-                entry.log.push("All shards downloaded and registered".to_string());
+                entry
+                    .log
+                    .push("All shards downloaded and registered".to_string());
             }
 
             // Load available shards for inference (partial is fine)
@@ -1947,9 +1964,10 @@ pub async fn cancel_download(
         .unwrap_or(false);
 
     if !has_active {
-        return Err(ApiError(crate::error::SwarmError::Config(
-            format!("No active download found for model '{}'", model_id),
-        )));
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "No active download found for model '{}'",
+            model_id
+        ))));
     }
 
     // Set the cancel flag (the download loop checks this)
@@ -2000,9 +2018,10 @@ pub async fn delete_model(
 
     // Verify the model exists
     if shared.model_registry.get_manifest(&mid).is_none() {
-        return Err(ApiError(crate::error::SwarmError::Config(
-            format!("Model '{}' not found", model_id),
-        )));
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "Model '{}' not found",
+            model_id
+        ))));
     }
 
     let node_id = shared.identity.node_id().clone();
@@ -2052,9 +2071,7 @@ pub async fn delete_model(
     shared.hf_sources.remove(&mid);
 
     // Remove split models for this model
-    shared
-        .split_models
-        .retain(|key, _| key.0 != mid);
+    shared.split_models.retain(|key, _| key.0 != mid);
 
     // Broadcast shard removal via GossipSub
     if let Some(ref ntx) = state.network_tx {
@@ -2075,4 +2092,98 @@ pub async fn delete_model(
         "model_id": model_id,
         "files_removed": files_removed,
     })))
+}
+
+/// GET /api/admin/network-code — Return this node's network invite code.
+///
+/// Returns a shareable invite code that other nodes can use to connect.
+/// The code encodes the node's QUIC listening address.
+pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let port = state.config.node.listen_port;
+    let peer_count = state.shared_state.peer_registry.len();
+
+    // Build the QUIC listen address with the node's peer ID
+    let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
+    let peer_id_str = match crate::network::transport::ed25519_to_libp2p_keypair(signing_key_bytes)
+    {
+        Ok(kp) => kp.public().to_peer_id().to_string(),
+        Err(_) => {
+            return Json(serde_json::json!({
+                "error": "Failed to derive peer ID"
+            }))
+        }
+    };
+
+    // Use 0.0.0.0 as a placeholder — the UI should show the actual external IP
+    // The multiaddr is still useful for LAN connections
+    let multiaddr_str = format!("/ip4/0.0.0.0/udp/{port}/quic-v1/p2p/{peer_id_str}");
+    let code = if let Ok(addr) = multiaddr_str.parse::<libp2p::Multiaddr>() {
+        crate::network::discovery::encode_network_code(&addr)
+    } else {
+        multiaddr_str.clone()
+    };
+
+    // Determine visibility phase
+    let phase = if peer_count == 0 {
+        "seedling"
+    } else if peer_count < 20 {
+        "growing"
+    } else {
+        "established"
+    };
+
+    Json(serde_json::json!({
+        "code": code,
+        "multiaddr": multiaddr_str,
+        "node_id": format!("{}", state.shared_state.identity.node_id()),
+        "peer_id": peer_id_str,
+        "port": port,
+        "phase": phase,
+        "peer_count": peer_count,
+    }))
+}
+
+/// POST /api/admin/join-network — Join the network using an invite code.
+///
+/// Accepts a network invite code (swarm://...) or raw multiaddr and dials the peer.
+pub async fn join_network(
+    State(state): State<AppState>,
+    Json(body): Json<JoinNetworkRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let addr_str = crate::network::discovery::decode_network_code(&body.code).map_err(ApiError)?;
+
+    // Send the address to the network manager to dial
+    if state.network_tx.is_some() {
+        tracing::info!(addr = %addr_str, "Joining network via invite code");
+
+        // Parse the multiaddr to validate
+        let _addr: libp2p::Multiaddr =
+            addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
+                ApiError(crate::error::SwarmError::Network(format!(
+                    "Invalid address: {e}"
+                )))
+            })?;
+
+        // Save to peer cache so it persists across restarts
+        let mut cached = crate::network::peer_cache::load_peer_cache(&state.shared_state.db);
+        if !cached.contains(&addr_str) {
+            cached.push(addr_str.clone());
+            crate::network::peer_cache::save_peer_cache(&state.shared_state.db, &cached);
+        }
+
+        Ok(Json(serde_json::json!({
+            "status": "ok",
+            "address": addr_str,
+            "message": "Peer address saved. Restart the node or wait for the next discovery cycle to connect."
+        })))
+    } else {
+        Err(ApiError(crate::error::SwarmError::Network(
+            "Network manager not available".to_string(),
+        )))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct JoinNetworkRequest {
+    pub code: String,
 }

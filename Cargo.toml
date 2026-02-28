@@ -36,6 +36,7 @@ libp2p = { version = "0.54", features = [
     "yamux",
     "macros",
     "serde",
+    "mdns",
 ] }
 
 # HTTP server

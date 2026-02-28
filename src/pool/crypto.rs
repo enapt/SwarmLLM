@@ -180,10 +180,7 @@ pub fn blind_invite(
 
 /// Step 2: Pool creator signs the blinded token without seeing the real invitation identity.
 /// The signature covers (commitment, pool_id) — expiry is enforced as policy, not signed.
-pub fn sign_blinded(
-    identity: &Identity,
-    blinded_token: &BlindedToken,
-) -> BlindSignature {
+pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindSignature {
     let payload = blind_token_payload_no_expiry(&blinded_token.commitment, &blinded_token.pool_id);
     let signature = identity.sign(&payload);
 
@@ -221,7 +218,10 @@ pub fn verify_membership(
 }
 
 /// Compute the blind commitment: H(PREFIX || invitation_id || blinding_factor)
-fn compute_blind_commitment(invitation_id: &uuid::Uuid, blinding_factor: &BlindingFactor) -> [u8; 32] {
+fn compute_blind_commitment(
+    invitation_id: &uuid::Uuid,
+    blinding_factor: &BlindingFactor,
+) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_BLIND_INVITE);
     hasher.update(invitation_id.as_bytes());
@@ -229,10 +229,7 @@ fn compute_blind_commitment(invitation_id: &uuid::Uuid, blinding_factor: &Blindi
     *hasher.finalize().as_bytes()
 }
 
-fn blind_token_payload_no_expiry(
-    commitment: &[u8; 32],
-    pool_id: &PoolId,
-) -> Vec<u8> {
+fn blind_token_payload_no_expiry(commitment: &[u8; 32], pool_id: &PoolId) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_BLIND_INVITE);
     hasher.update(commitment);

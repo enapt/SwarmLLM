@@ -4,7 +4,9 @@ use libp2p::connection_limits;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{autonat, dcutr, gossipsub, identify, kad, relay, request_response, StreamProtocol};
+use libp2p::{
+    autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, StreamProtocol,
+};
 
 use crate::network::protocol::{SwarmCodec, TensorCodec};
 use crate::network::relay::RelayServerConfig;
@@ -28,6 +30,8 @@ pub struct SwarmBehaviour {
     pub relay_server: relay::Behaviour,
     /// NET-I5: Connection limits to prevent resource exhaustion.
     pub connection_limits: connection_limits::Behaviour,
+    /// mDNS for automatic LAN peer discovery (zero-config).
+    pub mdns: libp2p::swarm::behaviour::toggle::Toggle<mdns::tokio::Behaviour>,
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
@@ -35,6 +39,7 @@ pub fn build_behaviour(
     local_key: &Keypair,
     relay_behaviour: relay::client::Behaviour,
     relay_server_config: Option<&RelayServerConfig>,
+    enable_mdns: bool,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -123,6 +128,18 @@ pub fn build_behaviour(
         .with_max_established(Some(500));
     let connection_limits = connection_limits::Behaviour::new(conn_limits);
 
+    // mDNS for automatic LAN peer discovery
+    let mdns_behaviour = if enable_mdns {
+        let mdns_config = mdns::Config {
+            ttl: Duration::from_secs(300),
+            query_interval: Duration::from_secs(30),
+            enable_ipv6: false,
+        };
+        Some(mdns::tokio::Behaviour::new(mdns_config, local_peer_id)?)
+    } else {
+        None
+    };
+
     Ok(SwarmBehaviour {
         kademlia,
         gossipsub,
@@ -134,6 +151,7 @@ pub fn build_behaviour(
         relay_client: relay_behaviour,
         relay_server,
         connection_limits,
+        mdns: mdns_behaviour.into(),
     })
 }
 
@@ -147,7 +165,7 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None);
+        let result = build_behaviour(&keypair, relay_behaviour, None, false);
         assert!(result.is_ok());
     }
 
@@ -161,7 +179,7 @@ mod tests {
             max_circuits: 8,
             ..Default::default()
         };
-        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg));
+        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false);
         assert!(result.is_ok());
     }
 }

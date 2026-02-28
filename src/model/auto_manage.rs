@@ -463,9 +463,7 @@ impl AutoShardManager {
                 continue;
             }
             // Skip this specific shard if it's already being downloaded
-            if downloading_shards
-                .contains(&(candidate.model_id.0.clone(), candidate.shard_index))
-            {
+            if downloading_shards.contains(&(candidate.model_id.0.clone(), candidate.shard_index)) {
                 continue;
             }
 
@@ -543,12 +541,23 @@ impl AutoShardManager {
             }
 
             // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
-            let shard_store = crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-            let file_ok = if let Some(manifest) = self.shared_state.model_registry.get_manifest(&candidate.model_id) {
-                if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == candidate.shard_index) {
+            let shard_store =
+                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let file_ok = if let Some(manifest) = self
+                .shared_state
+                .model_registry
+                .get_manifest(&candidate.model_id)
+            {
+                if let Some(shard_info) = manifest
+                    .shards
+                    .iter()
+                    .find(|s| s.index == candidate.shard_index)
+                {
                     if shard_info.hash != [0u8; 32] {
                         // Hash available — verify properly
-                        shard_store.verify_shard(&candidate.model_id, shard_info).is_ok()
+                        shard_store
+                            .verify_shard(&candidate.model_id, shard_info)
+                            .is_ok()
                     } else {
                         // Zero-hash placeholder — fall back to size check
                         std::fs::metadata(&shard_path)
@@ -619,14 +628,15 @@ impl AutoShardManager {
                     entry.total_bytes = manifest.total_size_bytes;
                 }
                 // Only add this shard's progress if not already tracked
-                entry.shard_progress.entry(candidate.shard_index).or_insert_with(|| {
-                    crate::model::acquisition::ShardProgress {
+                entry
+                    .shard_progress
+                    .entry(candidate.shard_index)
+                    .or_insert_with(|| crate::model::acquisition::ShardProgress {
                         index: candidate.shard_index,
                         total_bytes: candidate.shard_size_bytes,
                         downloaded_bytes: 0,
                         state: crate::model::acquisition::ShardState::Downloading,
-                    }
-                });
+                    });
                 entry.log.push(format!(
                     "Auto-manage: downloading shard {} (score: {:.1})",
                     candidate.shard_index, candidate.score
@@ -742,22 +752,36 @@ impl AutoShardManager {
                         );
 
                         // Verify the downloaded shard before registering
-                        let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+                        let shard_store =
+                            crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
                         if let Some(manifest) = shared.model_registry.get_manifest(&model_id) {
-                            if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == shard_idx) {
+                            if let Some(shard_info) =
+                                manifest.shards.iter().find(|s| s.index == shard_idx)
+                            {
                                 // Use allow_zero_hash=true since HF downloads may have placeholder hashes
-                                if let Err(e) = shard_store.verify_shard_with_options(&model_id, shard_info, true) {
+                                if let Err(e) = shard_store
+                                    .verify_shard_with_options(&model_id, shard_info, true)
+                                {
                                     tracing::warn!(
                                         model = %model_id,
                                         shard = shard_idx,
                                         error = %e,
                                         "AutoShardManager: HF shard failed verification — not registering"
                                     );
-                                    if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
-                                        entry.state = crate::model::acquisition::AcquisitionState::Failed {
-                                            reason: format!("Shard {} verification failed: {}", shard_idx, e),
-                                        };
-                                        entry.log.push(format!("Shard {} failed verification", shard_idx));
+                                    if let Some(mut entry) =
+                                        shared.acquisition_progress.get_mut(&model_id)
+                                    {
+                                        entry.state =
+                                            crate::model::acquisition::AcquisitionState::Failed {
+                                                reason: format!(
+                                                    "Shard {} verification failed: {}",
+                                                    shard_idx, e
+                                                ),
+                                            };
+                                        entry.log.push(format!(
+                                            "Shard {} failed verification",
+                                            shard_idx
+                                        ));
                                     }
                                     return;
                                 }
@@ -1098,7 +1122,11 @@ pub async fn check_and_load_model(
                 "Loading split model from reconstructed GGUF"
             );
             crate::inference::split::SplitModel::load_from_gguf(
-                &gguf_path, layer_start, layer_end, is_first, is_last,
+                &gguf_path,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
             )
         } else if source_path_file.exists() {
             match std::fs::read_to_string(&source_path_file) {
@@ -1111,7 +1139,11 @@ pub async fn check_and_load_model(
                             "Loading split model from source GGUF"
                         );
                         crate::inference::split::SplitModel::load_from_gguf(
-                            &p, layer_start, layer_end, is_first, is_last,
+                            &p,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
                         )
                     } else {
                         crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {

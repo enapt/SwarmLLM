@@ -102,9 +102,7 @@ impl IntoResponse for ApiError {
             SwarmError::InsufficientCredits { .. } => {
                 (StatusCode::PAYMENT_REQUIRED, self.0.to_string())
             }
-            SwarmError::PeerNotFound(_) => {
-                (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string())
-            }
+            SwarmError::PeerNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
             SwarmError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.0.to_string()),
             SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             SwarmError::InvalidNickname(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),

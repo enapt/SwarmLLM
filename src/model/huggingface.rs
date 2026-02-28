@@ -406,8 +406,7 @@ fn parse_http_date(s: &str) -> Option<SystemTime> {
     // Convert to Unix timestamp using Rata Die algorithm
     let y = if month <= 2 { year - 1 } else { year };
     let m = if month <= 2 { month + 9 } else { month - 3 };
-    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + (day - 1)
-        - 719468; // Unix epoch offset
+    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + (day - 1) - 719468; // Unix epoch offset
     let timestamp = days * 86400 + hour * 3600 + min * 60 + sec;
     if timestamp < 0 {
         return None;
@@ -460,7 +459,10 @@ pub async fn download_shard(
         let len = meta.len();
         if len >= expected_size {
             // tmp file is already complete (or larger) — start fresh to be safe
-            tracing::info!(shard = shard_index, "Tmp file already >= expected size, re-downloading");
+            tracing::info!(
+                shard = shard_index,
+                "Tmp file already >= expected size, re-downloading"
+            );
             0
         } else {
             tracing::info!(
@@ -627,10 +629,7 @@ pub async fn download_shard(
         } else {
             return Err(format!(
                 "Shard {} download failed after {} stream retries (got {}/{} bytes)",
-                shard_index,
-                stream_attempt,
-                total_downloaded,
-                expected_size
+                shard_index, stream_attempt, total_downloaded, expected_size
             ));
         }
     }
@@ -889,8 +888,7 @@ mod tests {
         let total_file_size: u64 = 4_000_000_000;
 
         let range_start = (shard_index as u64) * shard_size;
-        let range_end =
-            ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
         let expected_size = range_end - range_start + 1;
 
         assert_eq!(range_start, 1_610_612_736); // 3 * 512MB
@@ -916,8 +914,7 @@ mod tests {
         let last_shard = shard_count - 1; // shard 8
 
         let range_start = (last_shard as u64) * shard_size;
-        let range_end =
-            ((last_shard as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let range_end = ((last_shard as u64 + 1) * shard_size - 1).min(total_file_size - 1);
         let expected_size = range_end - range_start + 1;
 
         // Last shard should be smaller than shard_size
@@ -939,8 +936,7 @@ mod tests {
         let total_file_size: u64 = 1_000_000_000;
 
         let range_start = (shard_index as u64) * shard_size;
-        let range_end =
-            ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
         let expected_size = range_end - range_start + 1;
 
         // No existing bytes — full range

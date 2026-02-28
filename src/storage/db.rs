@@ -123,8 +123,7 @@ impl Database {
             match serde_json::from_slice(&bytes) {
                 Ok(val) => results.push(val),
                 Err(e) => {
-                    let key_str = std::str::from_utf8(&key)
-                        .unwrap_or("<non-utf8>");
+                    let key_str = std::str::from_utf8(&key).unwrap_or("<non-utf8>");
                     tracing::warn!(
                         tree = tree_name,
                         key = key_str,
@@ -199,8 +198,7 @@ impl Database {
                             valid += 1;
                         } else {
                             corrupt += 1;
-                            let key_str =
-                                std::str::from_utf8(&key).unwrap_or("<non-utf8>");
+                            let key_str = std::str::from_utf8(&key).unwrap_or("<non-utf8>");
                             tracing::warn!(
                                 tree = tree_name,
                                 key = key_str,

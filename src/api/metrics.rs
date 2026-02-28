@@ -17,28 +17,51 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 
     // swarmllm_peers_connected (gauge)
     let peers = shared.peer_registry.len();
-    write_gauge(&mut buf, "swarmllm_peers_connected", "Number of connected peers", peers as f64);
+    write_gauge(
+        &mut buf,
+        "swarmllm_peers_connected",
+        "Number of connected peers",
+        peers as f64,
+    );
 
     // swarmllm_inference_requests_total (counter)
     let requests = shared.inference_requests_total.load(Ordering::Relaxed);
-    write_counter(&mut buf, "swarmllm_inference_requests_total", "Total inference requests processed", requests as f64);
+    write_counter(
+        &mut buf,
+        "swarmllm_inference_requests_total",
+        "Total inference requests processed",
+        requests as f64,
+    );
 
     // swarmllm_credits_balance (gauge)
     let balance = {
         let cb = shared.credit_balance.read().await;
         cb.balance
     };
-    write_gauge(&mut buf, "swarmllm_credits_balance", "Current credit balance", balance as f64);
+    write_gauge(
+        &mut buf,
+        "swarmllm_credits_balance",
+        "Current credit balance",
+        balance as f64,
+    );
 
     // swarmllm_shards_hosted (gauge)
     let local_shards = count_local_shards(shared);
-    write_gauge(&mut buf, "swarmllm_shards_hosted", "Number of locally hosted shards", local_shards as f64);
+    write_gauge(
+        &mut buf,
+        "swarmllm_shards_hosted",
+        "Number of locally hosted shards",
+        local_shards as f64,
+    );
 
     // swarmllm_inference_latency_seconds (histogram)
     write_latency_histogram(&mut buf, shared);
 
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         buf,
     )
         .into_response()
@@ -197,15 +220,15 @@ mod tests {
         for &bound in &buckets {
             let count = samples.iter().filter(|&&s| s <= bound).count();
             match bound {
-                b if (b - 0.01).abs() < f64::EPSILON => assert_eq!(count, 1),  // 0.005
-                b if (b - 0.05).abs() < f64::EPSILON => assert_eq!(count, 2),  // +0.02
-                b if (b - 0.1).abs() < f64::EPSILON => assert_eq!(count, 3),   // +0.08
-                b if (b - 0.25).abs() < f64::EPSILON => assert_eq!(count, 3),  // same
-                b if (b - 0.5).abs() < f64::EPSILON => assert_eq!(count, 4),   // +0.3
-                b if (b - 1.0).abs() < f64::EPSILON => assert_eq!(count, 4),   // same
-                b if (b - 2.5).abs() < f64::EPSILON => assert_eq!(count, 5),   // +1.5
-                b if (b - 5.0).abs() < f64::EPSILON => assert_eq!(count, 5),   // same
-                b if (b - 10.0).abs() < f64::EPSILON => assert_eq!(count, 6),  // +7.0
+                b if (b - 0.01).abs() < f64::EPSILON => assert_eq!(count, 1), // 0.005
+                b if (b - 0.05).abs() < f64::EPSILON => assert_eq!(count, 2), // +0.02
+                b if (b - 0.1).abs() < f64::EPSILON => assert_eq!(count, 3),  // +0.08
+                b if (b - 0.25).abs() < f64::EPSILON => assert_eq!(count, 3), // same
+                b if (b - 0.5).abs() < f64::EPSILON => assert_eq!(count, 4),  // +0.3
+                b if (b - 1.0).abs() < f64::EPSILON => assert_eq!(count, 4),  // same
+                b if (b - 2.5).abs() < f64::EPSILON => assert_eq!(count, 5),  // +1.5
+                b if (b - 5.0).abs() < f64::EPSILON => assert_eq!(count, 5),  // same
+                b if (b - 10.0).abs() < f64::EPSILON => assert_eq!(count, 6), // +7.0
                 _ => {}
             }
         }

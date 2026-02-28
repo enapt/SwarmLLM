@@ -23,6 +23,7 @@ fn make_peer(node_id: NodeId) -> PeerInfo {
         active_request_count: 0,
         first_seen: 0,
         verified_transaction_count: 0,
+        is_lan_peer: false,
     }
 }
 

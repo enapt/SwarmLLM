@@ -101,10 +101,7 @@ impl EscrowManager {
         };
 
         // Persist to sled
-        if let Err(e) = self
-            .db
-            .put_json(TREE_ESCROW, &entry.id.to_string(), &entry)
-        {
+        if let Err(e) = self.db.put_json(TREE_ESCROW, &entry.id.to_string(), &entry) {
             tracing::warn!(error = %e, "Failed to persist escrow entry");
         }
 
@@ -230,10 +227,7 @@ impl EscrowManager {
 
     /// Expire stale pending escrows (older than ESCROW_TTL_SECS).
     /// Returns the number of expired entries.
-    pub async fn cleanup_expired(
-        &self,
-        balance: &Arc<RwLock<CreditBalance>>,
-    ) -> usize {
+    pub async fn cleanup_expired(&self, balance: &Arc<RwLock<CreditBalance>>) -> usize {
         let now = chrono::Utc::now();
         let ttl = chrono::Duration::seconds(ESCROW_TTL_SECS as i64);
         let mut expired_ids = Vec::new();

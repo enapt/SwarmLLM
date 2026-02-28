@@ -122,13 +122,7 @@ fn test_kv_cache_invalidated_on_pipeline_degradation() {
     let internal_id = uuid::Uuid::new_v4();
     let pipeline = make_pipeline(internal_id);
 
-    mgr.register_multi_turn(
-        "conv-789",
-        internal_id,
-        pipeline,
-        42,
-        "Hello".to_string(),
-    );
+    mgr.register_multi_turn("conv-789", internal_id, pipeline, 42, "Hello".to_string());
 
     // Node 2 went offline — only node 1 is active
     let active_peers = vec![NodeId([1u8; 32])];

@@ -154,8 +154,13 @@ impl PoolManager {
             PoolCommand::InboundRemoval { removal } => {
                 self.handle_inbound_removal(removal).await;
             }
-            PoolCommand::InboundMemberLeft { pool_id, node_id, signature } => {
-                self.handle_inbound_member_left(pool_id, node_id, signature).await;
+            PoolCommand::InboundMemberLeft {
+                pool_id,
+                node_id,
+                signature,
+            } => {
+                self.handle_inbound_member_left(pool_id, node_id, signature)
+                    .await;
             }
             PoolCommand::GetState { reply } => {
                 let state = self.shared_state.pool_state.read().await.clone();
@@ -495,7 +500,9 @@ impl PoolManager {
         };
 
         // SEC-C2 + SEC-I7: Owner co-signs the credit forward (verifies member sig internally)
-        if let Err(e) = crypto::cosign_credit_forward(&self.shared_state.identity, &mut forward, &member_key) {
+        if let Err(e) =
+            crypto::cosign_credit_forward(&self.shared_state.identity, &mut forward, &member_key)
+        {
             tracing::warn!(from = %forward.from_node_id, error = %e, "Failed to cosign credit forward");
             return;
         }
@@ -515,7 +522,9 @@ impl PoolManager {
             &self.shared_state.db,
             forward.amount,
             true,
-        ).await {
+        )
+        .await
+        {
             tracing::warn!(error = %e, "Failed to apply forwarded credits to owner balance");
         }
 
@@ -527,7 +536,8 @@ impl PoolManager {
                 .iter_mut()
                 .find(|m| m.node_id == forward.from_node_id)
             {
-                member.credits_contributed = member.credits_contributed.saturating_add(forward.amount);
+                member.credits_contributed =
+                    member.credits_contributed.saturating_add(forward.amount);
             }
             ps.total_lifetime_credits = ps.total_lifetime_credits.saturating_add(forward.amount);
 
@@ -754,7 +764,12 @@ impl PoolManager {
         }
     }
 
-    async fn handle_inbound_member_left(&mut self, pool_id: PoolId, node_id: NodeId, signature: Vec<u8>) {
+    async fn handle_inbound_member_left(
+        &mut self,
+        pool_id: PoolId,
+        node_id: NodeId,
+        signature: Vec<u8>,
+    ) {
         let my_id = self.shared_state.identity.node_id();
 
         // Only the pool owner processes member-left notifications

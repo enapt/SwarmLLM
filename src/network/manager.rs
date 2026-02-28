@@ -80,18 +80,23 @@ impl NetworkManager {
 
         let kp_clone = keypair.clone();
         let relay_cfg = relay_server_config;
+        let enable_mdns = config.network.enable_mdns;
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_quic()
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
             .with_behaviour(|_key, relay_behaviour| {
-                behaviour::build_behaviour(&kp_clone, relay_behaviour, relay_cfg.as_ref()).map_err(
-                    |e| {
-                        Box::new(std::io::Error::other(e.to_string()))
-                            as Box<dyn std::error::Error + Send + Sync>
-                    },
+                behaviour::build_behaviour(
+                    &kp_clone,
+                    relay_behaviour,
+                    relay_cfg.as_ref(),
+                    enable_mdns,
                 )
+                .map_err(|e| {
+                    Box::new(std::io::Error::other(e.to_string()))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })
             })
             .map_err(|e| SwarmError::Network(format!("Behaviour error: {e}")))?
             .with_swarm_config(|c| {
@@ -145,16 +150,32 @@ impl NetworkManager {
         // Subscribe to GossipSub topics
         discovery::subscribe_topics(&mut self.swarm)?;
 
+        // Layer 2: Load cached peers from last session and dial them
+        let cached_peers = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+        if !cached_peers.is_empty() {
+            let cached_count = discovery::bootstrap_peers(&mut self.swarm, &cached_peers)?;
+            if cached_count > 0 {
+                tracing::info!(
+                    count = cached_count,
+                    "Dialing cached peers from last session"
+                );
+            }
+        }
+
         // Bootstrap with configured peers
         let bootstrap_count =
             discovery::bootstrap_peers(&mut self.swarm, &config.network.bootstrap_peers)?;
-        if bootstrap_count > 0 {
+        if bootstrap_count > 0 || !cached_peers.is_empty() {
             discovery::trigger_bootstrap(&mut self.swarm)?;
         }
 
         // Periodic discovery timer
         let mut discovery_interval = tokio::time::interval(discovery::DISCOVERY_INTERVAL);
         discovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Periodic peer cache save timer (every 5 minutes)
+        let mut peer_cache_interval = tokio::time::interval(discovery::PEER_CACHE_SAVE_INTERVAL);
+        peer_cache_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!("NetworkManager running");
 
@@ -163,6 +184,8 @@ impl NetworkManager {
                 // Shutdown signal
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
+                        // Save peer cache on shutdown
+                        self.save_peer_cache();
                         tracing::info!("NetworkManager shutting down");
                         break;
                     }
@@ -176,6 +199,7 @@ impl NetworkManager {
                     match cmd {
                         Some(cmd) => self.handle_outbound_command(cmd).await,
                         None => {
+                            self.save_peer_cache();
                             tracing::info!("Inbound channel closed, shutting down");
                             break;
                         }
@@ -185,6 +209,10 @@ impl NetworkManager {
                 _ = discovery_interval.tick() => {
                     let _ = discovery::trigger_bootstrap(&mut self.swarm);
                     self.update_peer_count().await;
+                }
+                // Periodic peer cache save
+                _ = peer_cache_interval.tick() => {
+                    self.save_peer_cache();
                 }
             }
         }
@@ -294,7 +322,9 @@ impl NetworkManager {
                             match protocol::decode_layer_result(&request.payload) {
                                 Ok(result) => {
                                     // NET-I8: try_send for non-blocking dispatch
-                                    if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result)) {
+                                    if let Err(e) =
+                                        self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
+                                    {
                                         tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
                                     }
                                 }
@@ -319,7 +349,10 @@ impl NetworkManager {
                                                 forward.activations = plaintext;
                                                 forward.sender_peer_bytes = Some(peer.to_bytes());
                                                 // NET-I8: try_send for non-blocking dispatch
-                                                if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerForward(forward)) {
+                                                if let Err(e) = self
+                                                    .outbound_tx
+                                                    .try_send(SwarmMessage::LayerForward(forward))
+                                                {
                                                     tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
                                                 }
                                             }
@@ -369,7 +402,9 @@ impl NetworkManager {
                         if tag == protocol::TENSOR_TAG_RESULT {
                             if let Ok(result) = protocol::decode_layer_result(&response.payload) {
                                 // NET-I8: try_send for non-blocking dispatch
-                                if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result)) {
+                                if let Err(e) =
+                                    self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
+                                {
                                     tracing::warn!(error = %e, "Outbound channel full, dropping legacy tensor result");
                                 }
                             }
@@ -450,7 +485,9 @@ impl NetworkManager {
                                 // Build a relay-listen address without the trailing /p2p
                                 let base: Multiaddr = maddr
                                     .iter()
-                                    .take_while(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                    .take_while(|p| {
+                                        !matches!(p, libp2p::multiaddr::Protocol::P2p(_))
+                                    })
                                     .collect();
                                 let relay_addr =
                                     crate::network::relay::relay_listen_addr(&relay_pid, &base);
@@ -547,10 +584,26 @@ impl NetworkManager {
                     active_request_count: 0,
                     first_seen,
                     verified_transaction_count: 0,
+                    is_lan_peer: false,
                 };
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
-                self.shared_state.peer_registry.insert(node_id, peer_info);
+                self.shared_state
+                    .peer_registry
+                    .insert(node_id.clone(), peer_info);
+
+                // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
+                for addr in &info.listen_addrs {
+                    if let Some(ip_bytes) = extract_ipv4_bytes(addr) {
+                        // Skip private/loopback addresses
+                        if ip_bytes[0] == 127 || ip_bytes[0] == 0 {
+                            continue;
+                        }
+                        let mut anti_gaming = self.shared_state.anti_gaming.lock().await;
+                        anti_gaming.register_subnet(&node_id, ip_bytes);
+                        break; // One IP per peer is enough
+                    }
+                }
             }
 
             // ── Kademlia ──
@@ -560,9 +613,51 @@ impl NetworkManager {
                 tracing::debug!(?result, "Kademlia query progressed");
             }
 
+            // ── mDNS ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Mdns(libp2p::mdns::Event::Discovered(
+                peers,
+            ))) => {
+                for (peer_id, addr) in peers {
+                    tracing::info!(%peer_id, %addr, "mDNS: discovered LAN peer");
+                    // Add to Kademlia for DHT routing
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    // Dial the peer
+                    if let Err(e) = self.swarm.dial(addr) {
+                        tracing::debug!(%peer_id, error = %e, "mDNS: failed to dial peer");
+                    }
+                    // Mark as LAN peer if we can derive their NodeId
+                    if let Some(node_id) = self.peer_to_node.get(&peer_id) {
+                        if let Some(mut peer) = self.shared_state.peer_registry.get_mut(&*node_id) {
+                            peer.is_lan_peer = true;
+                        }
+                    }
+                }
+            }
+
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Mdns(libp2p::mdns::Event::Expired(
+                peers,
+            ))) => {
+                for (peer_id, _addr) in peers {
+                    tracing::debug!(%peer_id, "mDNS: peer expired");
+                }
+            }
+
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::info!(%peer_id, "Connection established");
                 self.update_peer_count().await;
+
+                // Layer 5: Peer Exchange — send PEX request to newly connected peer
+                if self.shared_state.config.network.peer_exchange {
+                    let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
+                    self.swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_request(&peer_id, req);
+                    tracing::debug!(%peer_id, "Sent PEX request");
+                }
             }
 
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
@@ -590,12 +685,13 @@ impl NetworkManager {
 
                 // NET-I2: Remove peer from registry, but skip if in active pipelines
                 if let Some(node_id) = self.peer_to_node.get(&peer_id) {
-                    let in_active_pipeline = self
-                        .shared_state
-                        .active_pipelines
-                        .iter()
-                        .any(|entry| {
-                            entry.value().segments.iter().any(|seg| seg.node_id == *node_id)
+                    let in_active_pipeline =
+                        self.shared_state.active_pipelines.iter().any(|entry| {
+                            entry
+                                .value()
+                                .segments
+                                .iter()
+                                .any(|seg| seg.node_id == *node_id)
                         });
                     if !in_active_pipeline {
                         self.shared_state.peer_registry.remove(&*node_id);
@@ -632,9 +728,51 @@ impl NetworkManager {
     ) {
         match request {
             SwarmRequest::Message(msg) => {
-                tracing::debug!(%peer, "Handling protocol message request");
-                if let Err(e) = self.outbound_tx.send(*msg).await {
-                    tracing::warn!(error = %e, "Failed to forward request message");
+                // Handle PEX messages inline instead of forwarding to dispatcher
+                match *msg {
+                    SwarmMessage::PeerExchangeRequest => {
+                        tracing::debug!(%peer, "Handling PEX request");
+                        // Respond with up to 20 known peer addresses
+                        let peers: Vec<String> = self
+                            .shared_state
+                            .peer_registry
+                            .iter()
+                            .flat_map(|entry| entry.addresses.clone())
+                            .take(20)
+                            .collect();
+                        let pex_resp = SwarmMessage::PeerExchangeResponse(
+                            crate::types::PeerExchangeResponse { peers },
+                        );
+                        let resp = SwarmResponse::Message(Box::new(pex_resp));
+                        if self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, resp)
+                            .is_err()
+                        {
+                            tracing::debug!(%peer, "Failed to send PEX response (channel closed)");
+                        }
+                        return;
+                    }
+                    SwarmMessage::PeerExchangeResponse(ref pex_resp) => {
+                        tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response (via request)");
+                        self.handle_pex_response(&pex_resp.peers);
+                        // ACK and return
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, SwarmResponse::Ack);
+                        return;
+                    }
+                    _ => {
+                        // Forward all other messages to dispatcher
+                        tracing::debug!(%peer, "Handling protocol message request");
+                        if let Err(e) = self.outbound_tx.send(*msg).await {
+                            tracing::warn!(error = %e, "Failed to forward request message");
+                        }
+                    }
                 }
                 // NET-M7: Log send_response errors
                 if self
@@ -681,6 +819,12 @@ impl NetworkManager {
     ) {
         match response {
             SwarmResponse::Message(msg) => {
+                // Handle PEX response inline
+                if let SwarmMessage::PeerExchangeResponse(ref pex_resp) = *msg {
+                    tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response");
+                    self.handle_pex_response(&pex_resp.peers);
+                    return;
+                }
                 if let Err(e) = self.outbound_tx.send(*msg).await {
                     tracing::warn!(%peer, error = %e, "Failed to forward response message");
                 }
@@ -699,9 +843,7 @@ impl NetworkManager {
                 // Route to AcquisitionManager if we have a pending request
                 if let Some(ref acq_tx) = self.acquisition_tx {
                     // NET-C1: Look up by OutboundRequestId for correct correlation
-                    if let Some((_, shard_id)) =
-                        self.pending_shard_requests.remove(&request_id)
-                    {
+                    if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
                         let offset = self
                             .shard_download_progress
                             .get(&shard_id)
@@ -1196,4 +1338,68 @@ impl NetworkManager {
     fn find_node_id_for_peer(&self, peer_id: &libp2p::PeerId) -> Option<crate::types::NodeId> {
         self.peer_to_node.get(peer_id).map(|v| v.clone())
     }
+
+    /// Save current peer addresses to the persistent cache.
+    fn save_peer_cache(&self) {
+        let addrs: Vec<String> = self
+            .shared_state
+            .peer_registry
+            .iter()
+            .flat_map(|entry| entry.addresses.clone())
+            .collect();
+        if !addrs.is_empty() {
+            crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);
+        }
+    }
+
+    /// Handle PEX response — dial unknown peers from the exchanged address list.
+    fn handle_pex_response(&mut self, peer_addrs: &[String]) {
+        let mut dialed = 0;
+        for addr_str in peer_addrs {
+            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                // Extract peer ID to check if already connected
+                let maybe_peer_id = addr.iter().find_map(|proto| {
+                    if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
+                        Some(pid)
+                    } else {
+                        None
+                    }
+                });
+
+                // Skip if already connected
+                if let Some(pid) = &maybe_peer_id {
+                    if self.swarm.is_connected(pid) {
+                        continue;
+                    }
+                }
+
+                // Add to Kademlia
+                if let Some(pid) = &maybe_peer_id {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(pid, addr.clone());
+                }
+
+                if let Err(e) = self.swarm.dial(addr) {
+                    tracing::debug!(error = %e, "PEX: failed to dial peer");
+                } else {
+                    dialed += 1;
+                }
+            }
+        }
+        if dialed > 0 {
+            tracing::info!(count = dialed, "PEX: dialed new peers");
+        }
+    }
+}
+
+/// Extract IPv4 bytes from a multiaddr, if present.
+fn extract_ipv4_bytes(addr: &Multiaddr) -> Option<[u8; 4]> {
+    for proto in addr.iter() {
+        if let libp2p::multiaddr::Protocol::Ip4(ip) = proto {
+            return Some(ip.octets());
+        }
+    }
+    None
 }

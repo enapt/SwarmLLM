@@ -79,6 +79,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/shutdown", post(admin::shutdown_node))
         // API key (requires auth)
         .route("/api/admin/api-key", get(admin::get_api_key))
+        // Network discovery (invite codes)
+        .route("/api/admin/network-code", get(admin::network_code))
+        .route("/api/admin/join-network", post(admin::join_network))
         // Identity & Nickname
         .route(
             "/api/identity/nickname",

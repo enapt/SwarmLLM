@@ -759,7 +759,12 @@ mod tests {
         let encoded = encode_message(&msg).unwrap();
         let decoded = decode_message(&encoded).unwrap();
         match decoded {
-            SwarmMessage::HealthPing { nonce, timestamp, active_request_count, .. } => {
+            SwarmMessage::HealthPing {
+                nonce,
+                timestamp,
+                active_request_count,
+                ..
+            } => {
                 assert_eq!(nonce, 42);
                 assert_eq!(timestamp, 1000);
                 assert_eq!(active_request_count, 3);

@@ -156,8 +156,7 @@ pub async fn leaderboard(
     // Per-peer credit balances aren't tracked in SharedState, so we derive a rough
     // estimate: high trust_score peers likely have positive balances.
     for peer in state.shared_state.peer_registry.iter() {
-        let eligible =
-            is_leaderboard_eligible(peer.first_seen, peer.verified_transaction_count);
+        let eligible = is_leaderboard_eligible(peer.first_seen, peer.verified_transaction_count);
         if !eligible {
             continue;
         }
@@ -165,8 +164,7 @@ pub async fn leaderboard(
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
         // Estimate credit bucket from trust_score (0.0-1.0 → mapped to balance range)
         let estimated_balance = (peer.trust_score * 5000.0) as i64;
-        let peer_tier =
-            crate::credit::priority::PriorityCalculator::tier_name(estimated_balance);
+        let peer_tier = crate::credit::priority::PriorityCalculator::tier_name(estimated_balance);
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),
             "display_name": peer_name,

@@ -72,7 +72,7 @@ fn test_speculative_decoding_high_rejection_rate() {
     let draft_tokens = vec![3]; // Draft likes token 3
     let draft_probs = vec![vec![0.1, 0.1, 0.1, 0.7]]; // p_draft[3] = 0.7
     let target_probs = vec![
-        vec![0.9, 0.05, 0.04, 0.01], // p_target[3] = 0.01 — target disagrees
+        vec![0.9, 0.05, 0.04, 0.01],  // p_target[3] = 0.01 — target disagrees
         vec![0.25, 0.25, 0.25, 0.25], // bonus
     ];
 

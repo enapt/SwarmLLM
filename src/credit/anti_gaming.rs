@@ -3,6 +3,12 @@ use std::time::{Duration, Instant};
 
 use crate::types::NodeId;
 
+/// Maximum number of nodes per /24 subnet before triggering elevated scrutiny.
+pub const SUBNET_CLUSTER_THRESHOLD: usize = 5;
+
+/// Elevated spot-check rate for nodes in clustered subnets.
+pub const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
+
 /// Rate limiter and anti-gaming checks for the credit system.
 ///
 /// Prevents:
@@ -21,6 +27,9 @@ pub struct AntiGaming {
     max_transaction_amount: i64,
     /// Spot-check probability (0.0 to 1.0).
     spot_check_rate: f64,
+    /// Tracks observed /24 subnet clustering (first 3 bytes of IPv4).
+    /// Many nodes from the same /24 may indicate Sybil attack.
+    subnet_counts: HashMap<[u8; 3], Vec<NodeId>>,
 }
 
 impl AntiGaming {
@@ -31,6 +40,7 @@ impl AntiGaming {
             window_duration: Duration::from_secs(300), // 5 minutes
             max_transaction_amount: 100_000,
             spot_check_rate: 0.05, // 5% of transactions
+            subnet_counts: HashMap::new(),
         }
     }
 
@@ -65,8 +75,9 @@ impl AntiGaming {
             });
         }
 
-        // Decide whether to spot-check
-        let should_spot_check = rand::random::<f64>() < self.spot_check_rate;
+        // Decide whether to spot-check (elevated rate for clustered subnets)
+        let effective_rate = self.effective_spot_check_rate(from);
+        let should_spot_check = rand::random::<f64>() < effective_rate;
 
         Ok(if should_spot_check {
             SpotCheckDecision::RequiresVerification
@@ -120,6 +131,40 @@ impl AntiGaming {
         entries.retain(|t| *t > cutoff);
 
         entries.len() < self.max_tx_per_window
+    }
+
+    /// Register a node's observed IPv4 address for subnet clustering detection.
+    /// Extracts the /24 prefix and tracks which NodeIds share it.
+    pub fn register_subnet(&mut self, node_id: &NodeId, ip_bytes: [u8; 4]) {
+        let prefix = [ip_bytes[0], ip_bytes[1], ip_bytes[2]];
+        let nodes = self.subnet_counts.entry(prefix).or_default();
+        if !nodes.contains(node_id) {
+            nodes.push(node_id.clone());
+            if nodes.len() > SUBNET_CLUSTER_THRESHOLD {
+                tracing::warn!(
+                    subnet = format!("{}.{}.{}.0/24", prefix[0], prefix[1], prefix[2]),
+                    node_count = nodes.len(),
+                    "Subnet clustering detected — elevated spot-check rate"
+                );
+            }
+        }
+    }
+
+    /// Check if a node is in a clustered subnet (> SUBNET_CLUSTER_THRESHOLD nodes
+    /// sharing the same /24). Returns true if the node should face elevated scrutiny.
+    pub fn is_subnet_clustered(&self, node_id: &NodeId) -> bool {
+        self.subnet_counts
+            .values()
+            .any(|nodes| nodes.len() > SUBNET_CLUSTER_THRESHOLD && nodes.contains(node_id))
+    }
+
+    /// Get the effective spot-check rate for a node, considering subnet clustering.
+    pub fn effective_spot_check_rate(&self, node_id: &NodeId) -> f64 {
+        if self.is_subnet_clustered(node_id) {
+            SUBNET_CLUSTER_SPOT_CHECK_RATE
+        } else {
+            self.spot_check_rate
+        }
     }
 }
 

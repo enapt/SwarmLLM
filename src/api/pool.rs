@@ -120,12 +120,10 @@ pub async fn pool_accept(
 
     // Check expiry in the API layer before forwarding to pool manager
     if invitation.expires_at < chrono::Utc::now() {
-        return Err(ApiError(crate::error::SwarmError::Config(
-            format!(
-                "Invitation expired at {}",
-                invitation.expires_at.to_rfc3339()
-            ),
-        )));
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "Invitation expired at {}",
+            invitation.expires_at.to_rfc3339()
+        ))));
     }
 
     let (tx, rx) = tokio::sync::oneshot::channel();

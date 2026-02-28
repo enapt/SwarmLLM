@@ -106,7 +106,8 @@ impl SessionManager {
 
         // Store the ephemeral secret and public key temporarily, keyed by peer
         self.pending_ephemeral_pub.insert(peer.clone(), pub_bytes);
-        self.pending_ephemeral.insert(peer.clone(), ephemeral_secret);
+        self.pending_ephemeral
+            .insert(peer.clone(), ephemeral_secret);
 
         tracing::debug!(peer = %peer, "Initiated ephemeral ECDH exchange");
         pub_bytes
@@ -258,7 +259,9 @@ impl SessionManager {
             .map_err(|_| SwarmError::DecryptionFailed)?;
 
         // Update last seen nonce after successful decryption
-        session.last_seen_recv_nonce.fetch_max(recv_nonce, Ordering::SeqCst);
+        session
+            .last_seen_recv_nonce
+            .fetch_max(recv_nonce, Ordering::SeqCst);
 
         Ok(plaintext)
     }
@@ -360,7 +363,12 @@ pub fn ed25519_pubkey_to_x25519(ed_pub_bytes: &[u8; 32]) -> Option<PublicKey> {
 }
 
 /// SEC-C5: Derive a cipher key with session epoch mixed in to prevent key reuse.
-fn derive_cipher_key_with_epoch(shared_secret: &[u8], pub_a: &PublicKey, pub_b: &PublicKey, epoch: u64) -> [u8; 32] {
+fn derive_cipher_key_with_epoch(
+    shared_secret: &[u8],
+    pub_a: &PublicKey,
+    pub_b: &PublicKey,
+    epoch: u64,
+) -> [u8; 32] {
     let (first, second) = if pub_a.as_bytes() < pub_b.as_bytes() {
         (pub_a.as_bytes(), pub_b.as_bytes())
     } else {

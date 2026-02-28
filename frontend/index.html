@@ -319,6 +319,30 @@
             </div>
           </div>
 
+          <!-- Network invite code (hidden when network is established) -->
+          <div class="panel mb-2" id="invite-code-panel" style="display:none">
+            <div class="panel-header">
+              <h2>Network Discovery</h2>
+              <span class="badge" id="network-phase-badge">seedling</span>
+            </div>
+            <div id="invite-code-share" style="margin-bottom:0.75rem">
+              <label style="font-size:0.85rem;margin-bottom:0.25rem">Your Network Code</label>
+              <div style="display:flex;gap:0.5rem">
+                <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.75rem;flex:1">
+                <button class="btn btn-sm" onclick="SwarmLLM.copyNetworkCode()" title="Copy to clipboard">Copy</button>
+              </div>
+              <div class="text-muted" style="font-size:0.75rem;margin-top:0.25rem">Share this code with a friend to connect your nodes</div>
+            </div>
+            <div style="margin-top:0.75rem">
+              <label style="font-size:0.85rem;margin-bottom:0.25rem">Join Network</label>
+              <div style="display:flex;gap:0.5rem">
+                <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste a friend's code" style="font-size:0.75rem;flex:1">
+                <button class="btn btn-sm btn-primary" onclick="SwarmLLM.joinNetwork()">Join</button>
+              </div>
+              <div class="text-muted" id="join-status" style="font-size:0.75rem;margin-top:0.25rem"></div>
+            </div>
+          </div>
+
           <div class="grid grid-2">
             <!-- Node panel -->
             <div class="panel">

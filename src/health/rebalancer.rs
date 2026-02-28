@@ -146,11 +146,9 @@ impl ShardRebalancer {
                     }
                 } else {
                     // We don't hold this shard — request acquisition to download it
-                    let _ = self
-                        .acquisition_tx
-                        .try_send(AcquisitionCommand::Acquire {
-                            model_id: shard_id.model_id.clone(),
-                        });
+                    let _ = self.acquisition_tx.try_send(AcquisitionCommand::Acquire {
+                        model_id: shard_id.model_id.clone(),
+                    });
                     tracing::info!(
                         model = %shard_id.model_id,
                         shard = shard_id.index,

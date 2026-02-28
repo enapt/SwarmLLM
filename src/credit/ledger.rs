@@ -6,8 +6,8 @@ use tokio::sync::{mpsc, watch, RwLock};
 use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, CreditGossip, CreditTransaction, NetworkCommand, NodeId, PriorityTier,
-    ShardId, SwarmMessage,
+    CreditBalance, CreditGossip, CreditTransaction, NetworkCommand, NodeId, PriorityTier, ShardId,
+    SwarmMessage,
 };
 
 /// Earning/spending rates (credits per unit).
@@ -229,10 +229,7 @@ impl CreditLedger {
         // Reject implausible balance buckets that could manipulate percentile calculations
         const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000; // 100M credits
         if balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
-            tracing::debug!(
-                balance_bucket,
-                "Ignoring implausible peer balance gossip"
-            );
+            tracing::debug!(balance_bucket, "Ignoring implausible peer balance gossip");
             return;
         }
 
@@ -479,19 +476,19 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<bool, SwarmError> 
         return Err(SwarmError::InvalidSignature);
     }
 
-    let verifying_key = VerifyingKey::from_bytes(&gossip.node_id.0)
-        .map_err(|_| SwarmError::InvalidSignature)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&gossip.node_id.0).map_err(|_| SwarmError::InvalidSignature)?;
 
     let sig = Signature::from_bytes(
-        gossip.signature.as_slice().try_into()
+        gossip
+            .signature
+            .as_slice()
+            .try_into()
             .map_err(|_| SwarmError::InvalidSignature)?,
     );
 
-    let payload = build_balance_report_payload(
-        &gossip.node_id,
-        gossip.balance_bucket,
-        gossip.timestamp,
-    );
+    let payload =
+        build_balance_report_payload(&gossip.node_id, gossip.balance_bucket, gossip.timestamp);
 
     verifying_key
         .verify(&payload, &sig)
@@ -504,10 +501,7 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<bool, SwarmError> 
 ///
 /// Signed reports get weight 1.0, unsigned legacy reports get weight 0.1.
 /// Invalid signatures and stale reports are rejected entirely.
-pub async fn process_balance_gossip(
-    peer_balances: &Arc<RwLock<Vec<i64>>>,
-    gossip: &CreditGossip,
-) {
+pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossip: &CreditGossip) {
     // Reject implausible balance buckets
     const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000;
     if gossip.balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
@@ -808,12 +802,7 @@ mod tests {
         let timestamp = chrono::Utc::now();
 
         // Imposter signs but claims to be real_identity
-        let signature = sign_balance_report(
-            real_identity.node_id(),
-            bucket,
-            timestamp,
-            &imposter,
-        );
+        let signature = sign_balance_report(real_identity.node_id(), bucket, timestamp, &imposter);
 
         let gossip = CreditGossip {
             node_id: real_identity.node_id().clone(),
@@ -914,12 +903,7 @@ mod tests {
         let timestamp = chrono::Utc::now();
 
         // Imposter signs a report claiming to be identity
-        let signature = sign_balance_report(
-            identity.node_id(),
-            500,
-            timestamp,
-            &imposter,
-        );
+        let signature = sign_balance_report(identity.node_id(), 500, timestamp, &imposter);
 
         let peer_balances = Arc::new(RwLock::new(Vec::new()));
 

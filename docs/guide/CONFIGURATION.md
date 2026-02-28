@@ -162,9 +162,16 @@ If you leave `api_key` empty (the default), SwarmLLM generates a random key on f
 
 ---
 
-### Connect to peers on startup
+### Connect to peers
 
-Add bootstrap peers so your node automatically connects when it starts:
+SwarmLLM discovers peers automatically using multiple methods — you usually don't need to configure anything:
+
+- **Same network (LAN):** Peers on the same Wi-Fi/LAN are found automatically via mDNS.
+- **Returning user:** Previously-seen peers are remembered and reconnected on startup.
+- **Invite codes:** Share a simple code with a friend to connect directly (see the Dashboard).
+- **Peer exchange:** Once connected to any peer, you automatically discover more through them.
+
+If you need to manually add a bootstrap peer:
 
 ```toml
 [network]
@@ -178,6 +185,26 @@ bootstrap_peers = [
 ```bash
 ./swarmllm run --bootstrap "/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."
 ```
+
+### Disable LAN discovery
+
+If you don't want SwarmLLM to discover peers on your local network:
+
+```toml
+[network]
+enable_mdns = false
+```
+
+### Create a private network
+
+To run a private network that doesn't mix with the public SwarmLLM network:
+
+```toml
+[network]
+gossip_network_id = "my-private-network"
+```
+
+Nodes with different `gossip_network_id` values can't see each other's gossip messages.
 
 ---
 
@@ -275,6 +302,8 @@ Below is every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `bootstrap_peers` | list of strings | `[]` | Peer addresses to connect to on startup. |
+| `enable_mdns` | boolean | `true` | Discover peers on the same local network automatically. |
+| `gossip_network_id` | string | none | Custom network ID for private networks (default: `"swarmllm-mainnet-v1"`). |
 | `peer_exchange` | boolean | `true` | Share peer lists with connected nodes (helps everyone find each other). |
 | `enable_relay` | boolean | `true` | Act as a relay for peers behind firewalls (helps the network). |
 | `enable_relay_client` | boolean | `true` | Use relays to connect when behind a firewall. |

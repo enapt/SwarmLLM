@@ -160,7 +160,11 @@ pub fn announce_shards(
     }
 
     if !shards.is_empty() {
-        tracing::info!(count = shards.len(), models = by_model.len(), "Announced shards to DHT");
+        tracing::info!(
+            count = shards.len(),
+            models = by_model.len(),
+            "Announced shards to DHT"
+        );
     }
 
     Ok(())
@@ -168,3 +172,89 @@ pub fn announce_shards(
 
 /// Discovery interval for periodic peer discovery.
 pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Peer cache save interval.
+pub const PEER_CACHE_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Network invite code prefix.
+const INVITE_PREFIX: &str = "swarm://";
+
+/// Encode a node's listening address into a shareable network invite code.
+///
+/// Format: `swarm://<multiaddr_base64url>`
+/// The multiaddr is base64url-encoded for safe sharing in chat, email, etc.
+pub fn encode_network_code(addr: &Multiaddr) -> String {
+    use base64::Engine;
+    let bytes = addr.to_string();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_bytes());
+    format!("{INVITE_PREFIX}{encoded}")
+}
+
+/// Decode a network invite code back into a multiaddr string.
+///
+/// Accepts either:
+/// - `swarm://<base64url>` (invite code format)
+/// - A raw multiaddr string (passthrough for advanced users)
+pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
+    let trimmed = code.trim();
+
+    if let Some(encoded) = trimmed.strip_prefix(INVITE_PREFIX) {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(|e| SwarmError::Network(format!("Invalid invite code encoding: {e}")))?;
+        let addr_str = String::from_utf8(bytes)
+            .map_err(|e| SwarmError::Network(format!("Invalid invite code UTF-8: {e}")))?;
+        // Validate it parses as a multiaddr
+        addr_str
+            .parse::<Multiaddr>()
+            .map_err(|e| SwarmError::Network(format!("Invalid multiaddr in invite code: {e}")))?;
+        Ok(addr_str)
+    } else if trimmed.starts_with('/') {
+        // Raw multiaddr — validate and pass through
+        trimmed
+            .parse::<Multiaddr>()
+            .map_err(|e| SwarmError::Network(format!("Invalid multiaddr: {e}")))?;
+        Ok(trimmed.to_string())
+    } else {
+        Err(SwarmError::Network(
+            "Invalid network code: must start with 'swarm://' or '/'".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        let addr: Multiaddr = "/ip4/203.0.113.5/udp/8800/quic-v1".parse().unwrap();
+        let code = encode_network_code(&addr);
+        assert!(code.starts_with("swarm://"));
+
+        let decoded = decode_network_code(&code).unwrap();
+        assert_eq!(decoded, addr.to_string());
+    }
+
+    #[test]
+    fn decode_raw_multiaddr() {
+        let raw = "/ip4/192.168.1.1/udp/8800/quic-v1";
+        let decoded = decode_network_code(raw).unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn decode_invalid_code() {
+        assert!(decode_network_code("http://example.com").is_err());
+        assert!(decode_network_code("swarm://!!!invalid!!!").is_err());
+    }
+
+    #[test]
+    fn decode_with_whitespace() {
+        let addr: Multiaddr = "/ip4/10.0.0.1/udp/8800/quic-v1".parse().unwrap();
+        let code = format!("  {}  ", encode_network_code(&addr));
+        let decoded = decode_network_code(&code).unwrap();
+        assert_eq!(decoded, addr.to_string());
+    }
+}

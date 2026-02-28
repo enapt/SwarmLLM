@@ -7,7 +7,6 @@ use swarmllm::daemon::Daemon;
 use swarmllm::identity::Identity;
 use swarmllm::storage::db::Database;
 
-
 #[derive(Parser)]
 #[command(
     name = "swarmllm",
@@ -208,12 +207,10 @@ async fn test_split_inference(
         }];
         let bos = model.bos_token();
         let eos = model.eos_token_str();
-        swarmllm::inference::chat_template::apply_chat_template(
-            template, &messages, bos, eos, true,
-        )
-        .unwrap_or_else(|| {
-            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
-        })
+        swarmllm::inference::chat_template::apply_chat_template(template, &messages, bos, eos, true)
+            .unwrap_or_else(|| {
+                format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+            })
     } else {
         format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     };
@@ -228,7 +225,8 @@ async fn test_split_inference(
     println!("Prompt tokens ({}): {:?}", token_ids.len(), token_ids);
 
     // Prefill: run all tokens through
-    let kv_store = swarmllm::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+    let kv_store =
+        swarmllm::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
     let test_request_id = "test-generate";
 
     let input = candle_core::Tensor::from_vec(

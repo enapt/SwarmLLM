@@ -97,7 +97,10 @@ impl PipelineExecutor {
         // Use the atomic flag to avoid locking the executor mutex just to check.
         if num_segments == 1
             && self.assignment.segments[0].node_id == *self.shared_state.identity.node_id()
-            && self.shared_state.model_loaded.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .shared_state
+                .model_loaded
+                .load(std::sync::atomic::Ordering::Acquire)
         {
             return self.execute_local().await;
         }
@@ -474,7 +477,14 @@ impl PipelineExecutor {
                         self.shared_state.pending_layer_results.remove(&request_id);
                         // Attempt failover to standby
                         return self
-                            .failover_segment(idx, request_id, sequence_num, index_pos, &activations, is_last)
+                            .failover_segment(
+                                idx,
+                                request_id,
+                                sequence_num,
+                                index_pos,
+                                &activations,
+                                is_last,
+                            )
                             .await;
                     }
                 }
@@ -554,9 +564,7 @@ impl PipelineExecutor {
                     layers = format!("[{layer_start}..{layer_end})"),
                     "Loading split model from GGUF"
                 );
-                SplitModel::load_from_gguf(
-                    &gguf_path, layer_start, layer_end, is_first, is_last,
-                )
+                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
             } else if source_path_file.exists() {
                 let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
                 let path = std::path::PathBuf::from(p.trim());
@@ -607,7 +615,8 @@ impl PipelineExecutor {
                 );
             }
             // Re-check before inserting to handle concurrent loaders
-            self.shared_state.split_models
+            self.shared_state
+                .split_models
                 .entry(split_key.clone())
                 .or_insert(new_entry);
         }
@@ -620,15 +629,17 @@ impl PipelineExecutor {
                 .get(&split_key)
                 .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
             entry.value().touch();
-            (entry.value().model.clone(), entry.value().batch_forwarder.clone())
+            (
+                entry.value().model.clone(),
+                entry.value().batch_forwarder.clone(),
+            )
         };
 
         let request_id_str = self.request.id.to_string();
 
         // Try batch path for decode steps (seq_num > 0) when batching is enabled
         // and this is NOT the first segment (which needs tokenization under the model lock).
-        let use_batch = batch_forwarder.is_some()
-            && sequence_num > 0;
+        let use_batch = batch_forwarder.is_some() && sequence_num > 0;
 
         if use_batch {
             let forwarder = batch_forwarder.unwrap();
@@ -645,7 +656,9 @@ impl PipelineExecutor {
             };
 
             // Submit to batch forwarder — will be grouped with other concurrent requests
-            let output = forwarder.submit(input_tensor, index_pos, request_id_str.clone()).await?;
+            let output = forwarder
+                .submit(input_tensor, index_pos, request_id_str.clone())
+                .await?;
 
             // Track credits
             {

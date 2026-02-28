@@ -409,7 +409,13 @@ impl ModelExecutor {
         params: &SamplingParams,
         gamma: u32,
         mut callback: F,
-    ) -> Result<(GenerationResult, crate::inference::speculative::SpeculativeDraftState), SwarmError>
+    ) -> Result<
+        (
+            GenerationResult,
+            crate::inference::speculative::SpeculativeDraftState,
+        ),
+        SwarmError,
+    >
     where
         F: FnMut(&str) -> bool,
     {
@@ -417,9 +423,7 @@ impl ModelExecutor {
             return Err(SwarmError::NoModelLoaded);
         }
         if !draft.loaded {
-            return Err(SwarmError::Inference(
-                "Draft model not loaded".to_string(),
-            ));
+            return Err(SwarmError::Inference("Draft model not loaded".to_string()));
         }
 
         tracing::info!(
@@ -467,7 +471,13 @@ impl ModelExecutor {
         params: &SamplingParams,
         gamma: u32,
         mut callback: F,
-    ) -> Result<(GenerationResult, crate::inference::speculative::SpeculativeDraftState), SwarmError>
+    ) -> Result<
+        (
+            GenerationResult,
+            crate::inference::speculative::SpeculativeDraftState,
+        ),
+        SwarmError,
+    >
     where
         F: FnMut(&str) -> bool,
     {
@@ -495,8 +505,7 @@ impl ModelExecutor {
             .ok_or_else(|| SwarmError::Inference("Target model not loaded".into()))?;
 
         let t_n_ctx = target_model.n_ctx_train();
-        let t_ctx_params =
-            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(t_n_ctx));
+        let t_ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(t_n_ctx));
         let mut target_ctx = target_model
             .new_context(target_backend, t_ctx_params)
             .map_err(|e| SwarmError::Inference(format!("Target context failed: {e}")))?;
@@ -512,8 +521,7 @@ impl ModelExecutor {
             .ok_or_else(|| SwarmError::Inference("Draft model not loaded".into()))?;
 
         let d_n_ctx = draft_model.n_ctx_train();
-        let d_ctx_params =
-            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(d_n_ctx));
+        let d_ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(d_n_ctx));
         let mut draft_ctx = draft_model
             .new_context(draft_backend, d_ctx_params)
             .map_err(|e| SwarmError::Inference(format!("Draft context failed: {e}")))?;
@@ -552,8 +560,7 @@ impl ModelExecutor {
         let draft_n_vocab = draft_model.n_vocab() as usize;
 
         // get_logits() returns the logits for the last token in the batch (no index check)
-        let initial_target_logits: Vec<f32> =
-            target_ctx.get_logits()[..target_n_vocab].to_vec();
+        let initial_target_logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
         let mut next_target_probs = speculative::softmax(&initial_target_logits);
 
         // --- Prefill draft model ---
@@ -587,17 +594,14 @@ impl ModelExecutor {
 
             for _ in 0..effective_gamma {
                 // get_logits() returns logits for the last decoded token
-                let draft_logits: Vec<f32> =
-                    draft_ctx.get_logits()[..draft_n_vocab].to_vec();
+                let draft_logits: Vec<f32> = draft_ctx.get_logits()[..draft_n_vocab].to_vec();
                 let probs = speculative::softmax(&draft_logits);
 
                 // Greedy sample from draft (maximizes acceptance rate)
                 let draft_token = probs
                     .iter()
                     .enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(i, _)| i as u32)
                     .unwrap_or(0);
 
@@ -640,8 +644,7 @@ impl ModelExecutor {
                     SwarmError::Inference(format!("Target verify decode failed: {e}"))
                 })?;
 
-                let logits: Vec<f32> =
-                    target_ctx.get_logits()[..target_n_vocab].to_vec();
+                let logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
                 verify_probs.push(speculative::softmax(&logits));
                 verify_pos += 1;
             }
@@ -713,11 +716,7 @@ impl ModelExecutor {
             // Target KV cache: keep prompt + accepted + bonus, remove rejected candidates.
             let target_keep = target_pos + emitted_this_round;
             if target_keep < verify_pos {
-                let _ = target_ctx.clear_kv_cache_seq(
-                    Some(0),
-                    Some(target_keep as u32),
-                    None,
-                );
+                let _ = target_ctx.clear_kv_cache_seq(Some(0), Some(target_keep as u32), None);
             }
             target_pos = target_keep;
 
@@ -730,11 +729,7 @@ impl ModelExecutor {
             // If we rejected some tokens, the bonus token replaced them.
             // We need to trim draft KV to the accepted prefix.
             if num_accepted < num_drafted {
-                let _ = draft_ctx.clear_kv_cache_seq(
-                    Some(0),
-                    Some(draft_keep as u32),
-                    None,
-                );
+                let _ = draft_ctx.clear_kv_cache_seq(Some(0), Some(draft_keep as u32), None);
                 draft_pos = draft_keep;
             }
 
@@ -809,8 +804,7 @@ impl ModelExecutor {
                     target_ctx.decode(&mut target_batch).map_err(|e| {
                         SwarmError::Inference(format!("Target re-eval decode failed: {e}"))
                     })?;
-                    let logits: Vec<f32> =
-                        target_ctx.get_logits()[..target_n_vocab].to_vec();
+                    let logits: Vec<f32> = target_ctx.get_logits()[..target_n_vocab].to_vec();
                     next_target_probs = speculative::softmax(&logits);
                 }
             }

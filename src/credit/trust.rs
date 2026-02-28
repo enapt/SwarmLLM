@@ -15,6 +15,8 @@ pub const TRUST_SPOT_CHECK_FAIL: f32 = -0.1;
 pub const TRUST_INVALID_GOSSIP: f32 = -0.05;
 pub const TRUST_VALID_TRANSACTION: f32 = 0.02;
 pub const TRUST_SIGNATURE_VIOLATION: f32 = -0.2;
+/// Trust penalty for nodes sharing a /24 subnet with many other nodes (Sybil indicator).
+pub const TRUST_SUBNET_CLUSTERING: f32 = -0.03;
 
 /// Decay rate toward the default trust per health ping cycle.
 /// Each ping, trust moves 1% toward DEFAULT_TRUST.
@@ -28,6 +30,8 @@ pub enum TrustEvent {
     InvalidGossip,
     ValidTransaction,
     SignatureViolation,
+    /// Multiple nodes sharing the same /24 subnet — potential Sybil attack.
+    SubnetClustering,
 }
 
 impl TrustEvent {
@@ -38,6 +42,7 @@ impl TrustEvent {
             Self::InvalidGossip => TRUST_INVALID_GOSSIP,
             Self::ValidTransaction => TRUST_VALID_TRANSACTION,
             Self::SignatureViolation => TRUST_SIGNATURE_VIOLATION,
+            Self::SubnetClustering => TRUST_SUBNET_CLUSTERING,
         }
     }
 
@@ -48,6 +53,7 @@ impl TrustEvent {
             Self::InvalidGossip => "invalid_gossip",
             Self::ValidTransaction => "valid_transaction",
             Self::SignatureViolation => "signature_violation",
+            Self::SubnetClustering => "subnet_clustering",
         }
     }
 }
@@ -119,7 +125,9 @@ impl TrustManager {
             entry.trust_score = old + TRUST_DECAY_RATE * (DEFAULT_TRUST - old);
             // Persist the decayed score
             let key = hex::encode(entry.node_id.0);
-            let _ = self.db.put_json(TREE_TRUST_SCORES, &key, &entry.trust_score);
+            let _ = self
+                .db
+                .put_json(TREE_TRUST_SCORES, &key, &entry.trust_score);
         }
     }
 
@@ -172,6 +180,7 @@ mod tests {
             active_request_count: 0,
             first_seen: 0,
             verified_transaction_count: 0,
+            is_lan_peer: false,
         }
     }
 

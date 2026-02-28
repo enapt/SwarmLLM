@@ -147,14 +147,8 @@ pub fn accept_reject(
         let token_idx = token as usize;
 
         // Get probabilities for this token from both models
-        let p_target = target_probs[i]
-            .get(token_idx)
-            .copied()
-            .unwrap_or(0.0);
-        let p_draft = draft_probs[i]
-            .get(token_idx)
-            .copied()
-            .unwrap_or(0.0);
+        let p_target = target_probs[i].get(token_idx).copied().unwrap_or(0.0);
+        let p_draft = draft_probs[i].get(token_idx).copied().unwrap_or(0.0);
 
         // Acceptance criterion: accept with probability min(1, p_target / p_draft)
         if p_draft <= 0.0 {
@@ -345,10 +339,7 @@ mod tests {
         let draft_tokens = vec![2];
         // Draft says token 2 has 0 probability (contradicts sampling it)
         let draft_probs = vec![vec![0.5, 0.5, 0.0, 0.0]];
-        let target_probs = vec![
-            vec![0.25, 0.25, 0.25, 0.25],
-            vec![0.25, 0.25, 0.25, 0.25],
-        ];
+        let target_probs = vec![vec![0.25, 0.25, 0.25, 0.25], vec![0.25, 0.25, 0.25, 0.25]];
 
         let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
         // Token should be rejected since draft prob is 0
@@ -363,7 +354,7 @@ mod tests {
         let draft_tokens = vec![3];
         let draft_probs = vec![vec![0.1, 0.1, 0.1, 0.7]]; // draft likes 3
         let target_probs = vec![
-            vec![0.9, 0.05, 0.04, 0.01], // target likes 0
+            vec![0.9, 0.05, 0.04, 0.01],  // target likes 0
             vec![0.25, 0.25, 0.25, 0.25], // bonus
         ];
 
@@ -376,7 +367,10 @@ mod tests {
             }
         }
         // p_target[3]/p_draft[3] = 0.01/0.7 ≈ 0.014, so ~98.6% rejection rate
-        assert!(rejection_count > 80, "Expected high rejection rate, got {rejection_count}/100");
+        assert!(
+            rejection_count > 80,
+            "Expected high rejection rate, got {rejection_count}/100"
+        );
     }
 
     #[test]

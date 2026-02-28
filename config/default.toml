@@ -14,6 +14,8 @@ bootstrap_peers = []
 enable_relay = true
 enable_relay_client = true
 max_peers = 200
+enable_mdns = true                 # LAN discovery via mDNS (finds peers on same network)
+# gossip_network_id = "my-private-net"  # Uncomment for private networks (default: "swarmllm-mainnet-v1")
 
 [inference]
 default_model = ""             # Empty = first available

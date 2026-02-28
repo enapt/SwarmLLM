@@ -412,7 +412,7 @@ fn is_private_ip(ip: &str) -> bool {
             || (segs[0] & 0xfe00) == 0xfc00                                 // fc00::/7 (ULA)
             || (segs[0] & 0xffc0) == 0xfe80                                 // fe80::/10 (link-local)
             || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0
-                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff);     // ::ffff:0:0/96 (IPv4-mapped)
+                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff); // ::ffff:0:0/96 (IPv4-mapped)
     }
     true // block unparseable addresses
 }
@@ -904,7 +904,11 @@ pub async fn completions(
         temperature: req.temperature.clamp(0.0, 2.0),
         top_p: req.top_p.clamp(f32::EPSILON, 1.0),
         top_k: 40,
-        max_tokens: if req.max_tokens == 0 { 1 } else { req.max_tokens.min(32768) },
+        max_tokens: if req.max_tokens == 0 {
+            1
+        } else {
+            req.max_tokens.min(32768)
+        },
         stop,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

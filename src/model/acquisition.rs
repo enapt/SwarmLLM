@@ -353,7 +353,11 @@ impl AcquisitionManager {
             for attempt in 0..3u32 {
                 // Find peers that hold this shard, excluding previously failed ones
                 let holders = self.shared_state.model_registry.shard_holders(shard_id);
-                let eligible: Vec<_> = holders.iter().filter(|h| !failed_peers.contains(h)).cloned().collect();
+                let eligible: Vec<_> = holders
+                    .iter()
+                    .filter(|h| !failed_peers.contains(h))
+                    .cloned()
+                    .collect();
 
                 if eligible.is_empty() {
                     if attempt == 0 && holders.is_empty() {
@@ -404,7 +408,10 @@ impl AcquisitionManager {
                             );
                             failed_peers.push(target);
                             if attempt < 2 {
-                                tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    retry_delays[attempt as usize],
+                                ))
+                                .await;
                             }
                             continue;
                         }
@@ -418,7 +425,10 @@ impl AcquisitionManager {
                         );
                         failed_peers.push(target);
                         if attempt < 2 {
-                            tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(
+                                retry_delays[attempt as usize],
+                            ))
+                            .await;
                         }
                         continue;
                     }
@@ -439,7 +449,10 @@ impl AcquisitionManager {
                 let msg = if success {
                     format!("Requesting shard {}", shard_id.index)
                 } else {
-                    format!("Failed to request shard {} after 3 attempts", shard_id.index)
+                    format!(
+                        "Failed to request shard {} after 3 attempts",
+                        shard_id.index
+                    )
                 };
                 job.status.log.push(msg);
                 if success {
@@ -720,24 +733,39 @@ impl AcquisitionManager {
                     let eos_tokens = {
                         let mut tokens = Vec::new();
                         if let Ok(mut f) = std::fs::File::open(&gguf_path) {
-                            if let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut f) {
-                                if let Some(eos_id) = ct.metadata.get("tokenizer.ggml.eos_token_id").and_then(|v| v.to_u32().ok()) {
+                            if let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut f)
+                            {
+                                if let Some(eos_id) = ct
+                                    .metadata
+                                    .get("tokenizer.ggml.eos_token_id")
+                                    .and_then(|v| v.to_u32().ok())
+                                {
                                     tokens.push(eos_id);
                                 }
-                                let arch = ct.metadata.get("general.architecture").and_then(|v| v.to_string().ok().cloned()).unwrap_or_default();
+                                let arch = ct
+                                    .metadata
+                                    .get("general.architecture")
+                                    .and_then(|v| v.to_string().ok().cloned())
+                                    .unwrap_or_default();
                                 match arch.as_str() {
                                     "qwen2" => {
                                         for &id in &[151643u32, 151645] {
-                                            if !tokens.contains(&id) { tokens.push(id); }
+                                            if !tokens.contains(&id) {
+                                                tokens.push(id);
+                                            }
                                         }
                                     }
                                     _ => {
-                                        if !tokens.contains(&2) { tokens.push(2); }
+                                        if !tokens.contains(&2) {
+                                            tokens.push(2);
+                                        }
                                     }
                                 }
                             }
                         }
-                        if tokens.is_empty() { tokens.push(2); }
+                        if tokens.is_empty() {
+                            tokens.push(2);
+                        }
                         tokens
                     };
                     let info = crate::daemon::LoadedModelInfo {

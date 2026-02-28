@@ -158,10 +158,7 @@ impl KvCacheManager {
         };
 
         if session.last_accessed.elapsed() > self.ttl {
-            tracing::debug!(
-                user_session_id,
-                "Multi-turn session expired"
-            );
+            tracing::debug!(user_session_id, "Multi-turn session expired");
             self.sessions.remove(&internal_id);
             self.multi_turn_sessions.remove(user_session_id);
             return CacheReuse::Miss;
@@ -187,10 +184,7 @@ impl KvCacheManager {
 
         // Check prefix match: new prompt must start with the cached prompt
         if !new_prompt.starts_with(&session.cached_prompt) || session.cached_prompt.is_empty() {
-            tracing::debug!(
-                user_session_id,
-                "Prompt prefix mismatch, cache miss"
-            );
+            tracing::debug!(user_session_id, "Prompt prefix mismatch, cache miss");
             // Invalidate stale session since the conversation diverged
             self.sessions.remove(&internal_id);
             self.multi_turn_sessions.remove(user_session_id);

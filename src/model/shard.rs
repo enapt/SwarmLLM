@@ -43,7 +43,12 @@ impl ShardStore {
     /// (placeholder from HF download before hashes are known) skip verification.
     /// This should ONLY be true for the local HF download path.
     /// Network-received shards must always have a real hash.
-    pub fn verify_shard_with_options(&self, model_id: &ModelId, info: &ShardInfo, allow_zero_hash: bool) -> Result<(), SwarmError> {
+    pub fn verify_shard_with_options(
+        &self,
+        model_id: &ModelId,
+        info: &ShardInfo,
+        allow_zero_hash: bool,
+    ) -> Result<(), SwarmError> {
         let path = self.shard_path(model_id, info.index);
         if !path.exists() {
             return Err(SwarmError::ShardNotFound(crate::types::ShardId {
@@ -312,7 +317,9 @@ impl ShardStore {
                 let mut buf = [0u8; 64 * 1024];
                 loop {
                     let n = file.read(&mut buf).map_err(SwarmError::Io)?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buf[..n]);
                 }
                 let _file_hash = hasher.finalize();

@@ -106,7 +106,11 @@ impl GossipSealer {
 
     /// SEC-C6: Seal a gossip message with Ed25519 signature from the originating node.
     /// Output format: `[32B sender_pubkey][64B ed25519_signature][4B epoch_tag][12B nonce][ciphertext+tag]`
-    pub fn seal_signed(&self, plaintext: &[u8], identity: &Identity) -> Result<Vec<u8>, SwarmError> {
+    pub fn seal_signed(
+        &self,
+        plaintext: &[u8],
+        identity: &Identity,
+    ) -> Result<Vec<u8>, SwarmError> {
         let inner_sealed = self.seal(plaintext)?;
 
         // Sign the sealed payload (epoch+nonce+ciphertext)

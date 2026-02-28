@@ -74,10 +74,8 @@ pub struct SharedState {
     /// Keyed by (model_id, layer_start, layer_end) so a node can cache multiple
     /// non-contiguous segments (e.g., layers [0,2) and [10,14)) for the same model.
     /// Each entry tracks last-used time for VRAM-aware LRU eviction.
-    pub split_models: DashMap<
-        crate::inference::split::SplitModelKey,
-        crate::inference::split::SplitModelEntry,
-    >,
+    pub split_models:
+        DashMap<crate::inference::split::SplitModelKey, crate::inference::split::SplitModelEntry>,
     /// Per-request KV-cache storage for split inference.
     /// Keyed by (model_key, request_id) — isolates KV-cache per request,
     /// allowing concurrent requests to use the same model without corruption.
@@ -174,27 +172,15 @@ impl SharedState {
         let session_manager = Arc::new(crate::crypto::SessionManager::from_ed25519_key(
             &identity.signing_key_bytes(),
         ));
-        // Derive gossip network ID from sorted bootstrap addresses so nodes on the
-        // same network share gossip encryption keys. Standalone nodes use the default.
-        let gossip_network_id = {
-            let mut bootstraps: Vec<String> = config
-                .network
-                .bootstrap_peers
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            bootstraps.sort();
-            if bootstraps.is_empty() {
-                b"swarmllm-default-network".to_vec()
-            } else {
-                let mut h = blake3::Hasher::new();
-                h.update(b"swarmllm-network-id-v1");
-                for b in &bootstraps {
-                    h.update(b.as_bytes());
-                }
-                h.finalize().as_bytes().to_vec()
-            }
-        };
+        // Use a fixed network ID so all public nodes share gossip encryption keys.
+        // Private networks can override via config: gossip_network_id = "my-private-net"
+        let gossip_network_id = config
+            .network
+            .gossip_network_id
+            .as_deref()
+            .unwrap_or("swarmllm-mainnet-v1")
+            .as_bytes()
+            .to_vec();
         let gossip_sealer = Arc::new(crate::crypto::GossipSealer::new(&gossip_network_id));
 
         // Load persisted HF sources from sled
@@ -476,9 +462,7 @@ impl Daemon {
                     ),
                 }
             } else {
-                tracing::info!(
-                    "Speculative decoding enabled but no draft_model_path configured"
-                );
+                tracing::info!("Speculative decoding enabled but no draft_model_path configured");
             }
         }
 
@@ -897,7 +881,11 @@ impl Daemon {
 
         subsystems.spawn(async move {
             let result = acquisition_manager.run().await.map_err(|e| e.to_string());
-            ("AcquisitionManager", SubsystemCriticality::NonCritical, result)
+            (
+                "AcquisitionManager",
+                SubsystemCriticality::NonCritical,
+                result,
+            )
         });
 
         // Spawn PoolManager (9th subsystem task)
@@ -924,7 +912,11 @@ impl Daemon {
         );
         subsystems.spawn(async move {
             auto_manage.run().await;
-            ("AutoShardManager", SubsystemCriticality::NonCritical, Ok(()))
+            (
+                "AutoShardManager",
+                SubsystemCriticality::NonCritical,
+                Ok(()),
+            )
         });
 
         // Spawn API server (pass router_cmd_tx + acquisition_tx + network_tx so API can submit requests)
@@ -2451,10 +2443,16 @@ async fn handle_layer_forward(
                         new_entry.estimated_vram_mb,
                     );
                     if evicted > 0 {
-                        tracing::info!(evicted, budget_mb, "Evicted LRU split models for VRAM budget");
+                        tracing::info!(
+                            evicted,
+                            budget_mb,
+                            "Evicted LRU split models for VRAM budget"
+                        );
                     }
                 }
-                shared_state.split_models.insert(split_key.clone(), new_entry);
+                shared_state
+                    .split_models
+                    .insert(split_key.clone(), new_entry);
             }
             Err(e) => {
                 send_error_result(
@@ -2571,7 +2569,9 @@ async fn handle_layer_forward(
     let req_id_str = request_id.to_string();
     if forward.sequence_num == 0 {
         let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
-        shared_state.kv_cache_store.clear_request(&model_key, &req_id_str);
+        shared_state
+            .kv_cache_store
+            .clear_request(&model_key, &req_id_str);
     }
 
     // Run the forward pass with per-request KV-cache isolation
@@ -2704,16 +2704,14 @@ async fn send_error_result(
 /// Map a GGUF file's `general.architecture` metadata to our ModelArchitecture enum.
 fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitecture {
     let arch_str = match std::fs::File::open(path) {
-        Ok(mut f) => {
-            match candle_core::quantized::gguf_file::Content::read(&mut f) {
-                Ok(ct) => ct
-                    .metadata
-                    .get("general.architecture")
-                    .and_then(|v| v.to_string().ok().cloned())
-                    .unwrap_or_else(|| "llama".to_string()),
-                Err(_) => "llama".to_string(),
-            }
-        }
+        Ok(mut f) => match candle_core::quantized::gguf_file::Content::read(&mut f) {
+            Ok(ct) => ct
+                .metadata
+                .get("general.architecture")
+                .and_then(|v| v.to_string().ok().cloned())
+                .unwrap_or_else(|| "llama".to_string()),
+            Err(_) => "llama".to_string(),
+        },
         Err(_) => "llama".to_string(),
     };
     match arch_str.as_str() {
@@ -2757,7 +2755,6 @@ fn open_browser(url: &str) -> Result<(), String> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2782,8 +2779,14 @@ mod tests {
     #[test]
     fn subsystem_criticality_classification() {
         // Verify our criticality assignments match the task spec
-        assert_eq!(SubsystemCriticality::Critical, SubsystemCriticality::Critical);
-        assert_ne!(SubsystemCriticality::Critical, SubsystemCriticality::NonCritical);
+        assert_eq!(
+            SubsystemCriticality::Critical,
+            SubsystemCriticality::Critical
+        );
+        assert_ne!(
+            SubsystemCriticality::Critical,
+            SubsystemCriticality::NonCritical
+        );
     }
 
     #[test]
@@ -2807,7 +2810,11 @@ mod tests {
     async fn joinset_returns_task_error() {
         let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
         set.spawn(async {
-            ("TestSubsystem", SubsystemCriticality::NonCritical, Err("boom".to_string()))
+            (
+                "TestSubsystem",
+                SubsystemCriticality::NonCritical,
+                Err("boom".to_string()),
+            )
         });
 
         let result = set.join_next().await.unwrap();
@@ -2821,9 +2828,7 @@ mod tests {
     #[tokio::test]
     async fn joinset_returns_task_success() {
         let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
-        set.spawn(async {
-            ("TestSubsystem", SubsystemCriticality::Critical, Ok(()))
-        });
+        set.spawn(async { ("TestSubsystem", SubsystemCriticality::Critical, Ok(())) });
 
         let result = set.join_next().await.unwrap();
         let (name, crit, task_result) = result.unwrap();
@@ -2839,7 +2844,11 @@ mod tests {
 
         // Task that fails immediately
         set.spawn(async {
-            ("HealthMonitor", SubsystemCriticality::NonCritical, Err("test error".to_string()))
+            (
+                "HealthMonitor",
+                SubsystemCriticality::NonCritical,
+                Err("test error".to_string()),
+            )
         });
 
         // Task that runs until cancelled
@@ -2875,7 +2884,10 @@ mod tests {
         }
 
         // After 5 failures, count should be 5 (at the limit)
-        assert_eq!(*restart_counts.get("HealthMonitor").unwrap(), MAX_RESTART_ATTEMPTS);
+        assert_eq!(
+            *restart_counts.get("HealthMonitor").unwrap(),
+            MAX_RESTART_ATTEMPTS
+        );
 
         // One more would exceed
         let count = restart_counts.entry("HealthMonitor").or_insert(0);

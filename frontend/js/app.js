@@ -365,6 +365,7 @@ var SwarmLLM = (function() {
       } catch (e) {}
 
       dashboard.loadNetworkData();
+      loadNetworkCode();
     },
 
     updateFull: function(data) {
@@ -2026,6 +2027,67 @@ var SwarmLLM = (function() {
   }
 
   // Public API
+  // --- Network invite code ---
+  async function loadNetworkCode() {
+    try {
+      var resp = await fetch('/api/admin/network-code');
+      var data = await resp.json();
+      var panel = document.getElementById('invite-code-panel');
+      if (!panel) return;
+
+      var phase = data.phase || 'seedling';
+      var badge = document.getElementById('network-phase-badge');
+      if (badge) {
+        badge.textContent = phase;
+        badge.className = 'badge ' + (phase === 'established' ? 'badge-green' : phase === 'growing' ? 'badge-blue' : 'badge-orange');
+      }
+
+      // Show panel when network is seedling or growing, hide when established
+      if (phase === 'established') {
+        panel.style.display = 'none';
+      } else {
+        panel.style.display = '';
+        var codeInput = document.getElementById('my-network-code');
+        if (codeInput && data.code) codeInput.value = data.code;
+      }
+    } catch (e) {}
+  }
+
+  function copyNetworkCode() {
+    var input = document.getElementById('my-network-code');
+    if (input && input.value) {
+      navigator.clipboard.writeText(input.value).then(function() {
+        ui.showBanner('success', 'Network code copied to clipboard');
+      });
+    }
+  }
+
+  async function joinNetwork() {
+    var input = document.getElementById('join-code-input');
+    var status = document.getElementById('join-status');
+    if (!input || !input.value.trim()) return;
+
+    try {
+      var resp = await fetch('/api/admin/join-network', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: input.value.trim() })
+      });
+      var data = await resp.json();
+      if (resp.ok) {
+        if (status) status.textContent = 'Peer saved! Will connect on next discovery cycle.';
+        if (status) status.style.color = 'var(--green)';
+        input.value = '';
+      } else {
+        if (status) status.textContent = data.error || 'Failed to join';
+        if (status) status.style.color = 'var(--red, #ff6464)';
+      }
+    } catch (e) {
+      if (status) status.textContent = 'Network error';
+      if (status) status.style.color = 'var(--red, #ff6464)';
+    }
+  }
+
   return {
     ui: ui,
     chat: chat,
@@ -2040,5 +2102,7 @@ var SwarmLLM = (function() {
     cancelDownload: cancelDownload,
     removeModel: removeModel,
     shutdown: shutdown,
+    copyNetworkCode: copyNetworkCode,
+    joinNetwork: joinNetwork,
   };
 })();

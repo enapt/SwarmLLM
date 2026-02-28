@@ -148,6 +148,14 @@ pub struct NetworkConfig {
     /// Automatically activate relay listener when NAT is detected as Private.
     #[serde(default = "default_true")]
     pub auto_relay: bool,
+    /// Enable mDNS for automatic LAN peer discovery (default: true).
+    #[serde(default = "default_true")]
+    pub enable_mdns: bool,
+    /// Gossip network ID for grouping nodes. All nodes sharing the same ID
+    /// can decode each other's sealed gossip. Defaults to "swarmllm-mainnet-v1".
+    /// Set to a custom value (e.g. "my-private-net") for private networks.
+    #[serde(default)]
+    pub gossip_network_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -556,6 +564,8 @@ impl Default for NetworkConfig {
             relay_max_circuit_duration_secs: default_relay_circuit_duration(),
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
+            enable_mdns: true,
+            gossip_network_id: None,
         }
     }
 }
@@ -676,9 +686,7 @@ impl Config {
     fn validate(&self) -> Result<(), SwarmError> {
         // Reject port 0 (DAE-M13)
         if self.node.listen_port == 0 {
-            return Err(SwarmError::Config(
-                "listen_port must not be 0".to_string(),
-            ));
+            return Err(SwarmError::Config("listen_port must not be 0".to_string()));
         }
 
         // Warn on privileged ports (not fatal — user may have permissions)

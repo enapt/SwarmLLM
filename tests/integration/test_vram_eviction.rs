@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use swarmllm::api::server::{AppState, build_router};
+use swarmllm::api::server::{build_router, AppState};
 use swarmllm::config::Config;
 use swarmllm::daemon::SharedState;
 use swarmllm::identity::Identity;
@@ -76,11 +76,26 @@ async fn test_prometheus_metrics_endpoint() {
     let body = resp.text().await.unwrap();
 
     // Verify expected Prometheus metrics are present
-    assert!(body.contains("swarmllm_peers_connected"), "Missing peers_connected metric");
-    assert!(body.contains("swarmllm_inference_requests_total"), "Missing inference_requests_total");
-    assert!(body.contains("swarmllm_credits_balance"), "Missing credits_balance");
-    assert!(body.contains("swarmllm_shards_hosted"), "Missing shards_hosted");
-    assert!(body.contains("swarmllm_inference_latency_seconds"), "Missing latency histogram");
+    assert!(
+        body.contains("swarmllm_peers_connected"),
+        "Missing peers_connected metric"
+    );
+    assert!(
+        body.contains("swarmllm_inference_requests_total"),
+        "Missing inference_requests_total"
+    );
+    assert!(
+        body.contains("swarmllm_credits_balance"),
+        "Missing credits_balance"
+    );
+    assert!(
+        body.contains("swarmllm_shards_hosted"),
+        "Missing shards_hosted"
+    );
+    assert!(
+        body.contains("swarmllm_inference_latency_seconds"),
+        "Missing latency histogram"
+    );
 
     // Verify Prometheus metadata format
     assert!(body.contains("# HELP"), "Missing HELP comments");
@@ -127,7 +142,9 @@ async fn test_download_cancel_no_active_download() {
 
     // Try to cancel a download that doesn't exist
     let resp = client
-        .post(format!("{base}/api/admin/downloads/nonexistent-model/cancel"))
+        .post(format!(
+            "{base}/api/admin/downloads/nonexistent-model/cancel"
+        ))
         .send()
         .await
         .unwrap();

@@ -80,7 +80,12 @@ impl Identity {
                     if let Ok(username) = std::env::var("USERNAME") {
                         let path_str = key_path.display().to_string();
                         let _ = std::process::Command::new("icacls")
-                            .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
+                            .args([
+                                &path_str,
+                                "/inheritance:r",
+                                "/grant:r",
+                                &format!("{username}:F"),
+                            ])
                             .output();
                     }
                 }

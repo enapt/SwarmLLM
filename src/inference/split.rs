@@ -169,8 +169,7 @@ impl SplitModelEntry {
 
     /// Get the last-used timestamp in seconds since epoch.
     pub fn last_used_secs(&self) -> u64 {
-        self.last_used
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.last_used.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1187,9 +1186,7 @@ impl IoRead for ShardReader {
             let shard_info: Vec<String> = self
                 .shards
                 .iter()
-                .map(|(start, _path, len)| {
-                    format!("[{start}..{})", start + len)
-                })
+                .map(|(start, _path, len)| format!("[{start}..{})", start + len))
                 .collect();
             tracing::error!(
                 pos = self.position,
@@ -1510,7 +1507,12 @@ impl SplitModel {
                     tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF"
                 );
-                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type, &tokenizer_model))
+                Some(BpeTokenizer::from_gguf(
+                    vocab,
+                    &merges_raw,
+                    &pre_type,
+                    &tokenizer_model,
+                ))
             } else {
                 None
             }
@@ -1910,7 +1912,12 @@ impl SplitModel {
                     tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF header"
                 );
-                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type, &tokenizer_model))
+                Some(BpeTokenizer::from_gguf(
+                    vocab,
+                    &merges_raw,
+                    &pre_type,
+                    &tokenizer_model,
+                ))
             } else {
                 None
             }
@@ -2081,7 +2088,10 @@ impl SplitModel {
         };
 
         // Build a model_key for the KV-cache store
-        let model_key = format!("{}-{}-{}", self.layer_start, self.layer_end, self.total_layers);
+        let model_key = format!(
+            "{}-{}-{}",
+            self.layer_start, self.layer_end, self.total_layers
+        );
         let num_layers = self.layers.len();
 
         // Get or create the per-request cache entry, extract the layer caches,
@@ -2101,7 +2111,12 @@ impl SplitModel {
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
             let attn = layer
-                .forward_attn(&x, mask.as_ref(), index_pos, &mut layer_kv_caches[layer_idx])
+                .forward_attn(
+                    &x,
+                    mask.as_ref(),
+                    index_pos,
+                    &mut layer_kv_caches[layer_idx],
+                )
                 .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
             let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
 
@@ -2198,28 +2213,35 @@ impl SplitModel {
         }
 
         // Check if all items have seq_len=1 (decode mode) — only then can we batch
-        let all_decode = per_request.iter().all(|t| {
-            t.dim(1).unwrap_or(0) == 1
-        });
+        let all_decode = per_request.iter().all(|t| t.dim(1).unwrap_or(0) == 1);
 
         if !all_decode {
             // Mixed or prefill batch: fall back to sequential processing
             let mut results = Vec::with_capacity(items.len());
             for item in items {
-                results.push(self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?);
+                results.push(self.forward(
+                    item.input,
+                    item.index_pos,
+                    kv_cache_store,
+                    item.request_id,
+                )?);
             }
             return Ok(results);
         }
 
         let batch_size = items.len();
-        let model_key = format!("{}-{}-{}", self.layer_start, self.layer_end, self.total_layers);
+        let model_key = format!(
+            "{}-{}-{}",
+            self.layer_start, self.layer_end, self.total_layers
+        );
         let num_layers = self.layers.len();
 
         // Extract all per-request KV-caches up front (drop DashMap guards immediately)
         let mut all_kv_caches: Vec<Vec<Option<(Tensor, Tensor)>>> = items
             .iter()
             .map(|item| {
-                let mut entry = kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
+                let mut entry =
+                    kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
                 entry.last_accessed = std::time::Instant::now();
                 entry.layers.clone()
             })
@@ -2265,8 +2287,7 @@ impl SplitModel {
                 .map_err(|e| SwarmError::Internal(format!("attn restack: {e}")))?;
 
             // Batched residual add
-            let x = (&attn_batched + &residual)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+            let x = (&attn_batched + &residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
 
             // Batched FFN norm + MLP (these are position-independent)
             let residual2 = x.clone();
@@ -2278,8 +2299,7 @@ impl SplitModel {
                 .mlp
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
-            batched = (&x + &residual2)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+            batched = (&x + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
         }
 
         // Write updated KV-caches back
@@ -3065,7 +3085,8 @@ mod tests {
     fn lru_eviction_respects_budget() {
         use crate::types::*;
 
-        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> =
+            dashmap::DashMap::new();
         let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
             dashmap::DashMap::new();
 
@@ -3094,7 +3115,8 @@ mod tests {
     fn lru_eviction_no_eviction_under_budget() {
         use crate::types::*;
 
-        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> =
+            dashmap::DashMap::new();
         let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
             dashmap::DashMap::new();
 
@@ -3112,7 +3134,8 @@ mod tests {
     fn lru_eviction_protects_active_models() {
         use crate::types::*;
 
-        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> =
+            dashmap::DashMap::new();
         let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
             dashmap::DashMap::new();
 
@@ -3153,7 +3176,8 @@ mod tests {
     fn lru_eviction_multiple_models() {
         use crate::types::*;
 
-        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> =
+            dashmap::DashMap::new();
         let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
             dashmap::DashMap::new();
 
@@ -3276,7 +3300,10 @@ mod tests {
 
         // Clear KV for a fresh comparison
         kv_store.clear_request(
-            &format!("{}-{}-{}", model.layer_start, model.layer_end, model.total_layers),
+            &format!(
+                "{}-{}-{}",
+                model.layer_start, model.layer_end, model.total_layers
+            ),
             "seq-a",
         );
 
@@ -3284,7 +3311,10 @@ mod tests {
             .forward(&input_b, index_pos, &kv_store, "seq-b")
             .unwrap();
         kv_store.clear_request(
-            &format!("{}-{}-{}", model.layer_start, model.layer_end, model.total_layers),
+            &format!(
+                "{}-{}-{}",
+                model.layer_start, model.layer_end, model.total_layers
+            ),
             "seq-b",
         );
 
@@ -3365,9 +3395,7 @@ mod tests {
         let kv_store = std::sync::Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let forwarder = std::sync::Arc::new(BatchForwarder::new(
-            model_arc,
-            kv_store,
-            4, // max batch size
+            model_arc, kv_store, 4, // max batch size
         ));
 
         // Spawn 3 concurrent forward requests
@@ -3376,9 +3404,7 @@ mod tests {
             let forwarder = forwarder.clone();
             let input = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
             handles.push(tokio::spawn(async move {
-                forwarder
-                    .submit(input, 0, format!("req-{i}"))
-                    .await
+                forwarder.submit(input, 0, format!("req-{i}")).await
             }));
         }
 

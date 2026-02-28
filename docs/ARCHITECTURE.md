@@ -95,7 +95,61 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
     PoolManager, AutoShardManager)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
-15. Signal graceful shutdown via watch channel, flush sled database
+15. Signal graceful shutdown via watch channel, save peer cache, flush sled database
+```
+
+## Peer Discovery
+
+SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent — losing any layer doesn't break the others.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Discovery Stack                          │
+│                                                             │
+│  Layer 1: mDNS (LAN)                                        │
+│    Toggle-wrapped libp2p mdns — discovers peers on same      │
+│    network in seconds. Config: enable_mdns = true (default) │
+│                                                             │
+│  Layer 2: Persistent Peer Cache (sled)                       │
+│    Saves up to 200 peer multiaddrs every 5 min + shutdown   │
+│    Loads on startup → fastest reconnect path                │
+│    File: src/network/peer_cache.rs                          │
+│                                                             │
+│  Layer 3: Network Invite Codes                               │
+│    Format: swarm://<base64url_encoded_multiaddr>            │
+│    API: GET /api/admin/network-code                         │
+│          POST /api/admin/join-network                       │
+│    UI auto-hides once 20+ peers known                       │
+│                                                             │
+│  Layer 4: Peer Exchange (PEX)                                │
+│    On each ConnectionEstablished, exchange up to 20 known   │
+│    peer addresses. Uses request_response channel.           │
+│                                                             │
+│  Layer 5: Kademlia DHT + Bootstrap                           │
+│    Existing: --bootstrap flag, Kademlia re-bootstrap 60s    │
+│                                                             │
+│  Anti-Gaming: Subnet Clustering Detection                    │
+│    Tracks /24 IPv4 prefixes. >5 nodes per /24 → 25%        │
+│    spot-check rate (up from 5%). SubnetClustering trust     │
+│    event penalty (-0.03).                                   │
+│                                                             │
+│  Gossip Network ID: "swarmllm-mainnet-v1" (fixed)           │
+│    Configurable via gossip_network_id for private networks  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Discovery Startup Sequence
+
+```
+1. Listen on QUIC + TCP (unchanged)
+2. Subscribe to GossipSub topics (unchanged)
+3. mDNS starts immediately (discovers LAN peers in seconds)
+4. Dial cached peers from last session (fastest reconnect)
+5. Dial user-configured --bootstrap peers and invite codes (if any)
+6. Trigger Kademlia bootstrap
+7. PEX fires on each ConnectionEstablished (exchanges peer lists)
+8. Periodic: Kademlia re-bootstrap every 60s, peer cache save every 5min
+9. On shutdown: save peer cache
 ```
 
 ## Networking Stack
@@ -121,6 +175,7 @@ libp2p Swarm
 │   ├── Tensor channel (120s timeout) — LayerForward, LayerResult
 │   └── Shard channel (300s timeout) — ShardRequest, ShardResponse
 │
+├── mDNS (optional, LAN peer discovery — auto-dial + Kademlia add)
 ├── connection_limits (max 2/peer, 500 total)
 ├── Identify (protocol identification + peer_to_node reverse map)
 ├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
@@ -334,6 +389,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | credits | "balance" | CreditBalance |
 | credit_txns | {uuid} | CreditTransaction |
 | peer_trust | {node_id_hex} | TrustScore |
+| peer_cache | {multiaddr_string} | () (presence key) |
 | shard_meta | {model_id}/{shard_index} | ShardInfo + path |
 | model_meta | {model_id} | ModelManifest |
 | sessions | {session_id} | KV-cache metadata |
@@ -440,6 +496,8 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - Balance reports are Ed25519-signed with timestamp freshness check (5 min window)
 - Signed reports weighted at 1.0, unsigned legacy at 0.1 for tier calculations
 - Stale/replayed reports rejected
+- Subnet clustering detection: >5 nodes per /24 → elevated spot-check rate (25% vs 5%)
+- SubnetClustering trust penalty (-0.03 per cycle while clustered)
 
 ## Credit System Security
 
@@ -517,6 +575,10 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `POST /api/pool/leave` — Leave the current pool
 - `GET  /api/pool/invitations` — List pending invitations
 - `GET  /api/pool/leaderboard` — Pool member contribution rankings
+
+### Discovery
+- `GET    /api/admin/network-code` — Get shareable invite code, multiaddr, and network phase
+- `POST   /api/admin/join-network` — Join network via invite code or multiaddr
 
 ### Utility
 - `POST   /api/admin/shutdown` — Gracefully shut down the node (localhost only)

@@ -134,31 +134,39 @@ SwarmLLM works fine on its own, but it's more powerful when connected to other n
 - **Run bigger models:** Multiple computers can team up to run models that are too large for one machine.
 - **Earn credits:** You earn credits by helping process requests for others, which gives you priority when you need help.
 
-### How to connect
+### Automatic discovery
 
-1. **Get your friend's address:** They need to share their node address, which looks like:
-   ```
-   /ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW...
-   ```
-   They can find this in their Dashboard under the Network section.
+SwarmLLM finds peers automatically in several ways:
 
-2. **Add it as a bootstrap peer:** You have two options:
+- **Same network (LAN):** If you and a friend are on the same Wi-Fi or local network, your nodes discover each other automatically via mDNS — no configuration needed.
+- **Returning users:** SwarmLLM remembers peers from previous sessions and reconnects on startup.
+- **Peer exchange:** Once connected to any peer, your node automatically discovers more through them.
 
-   **Option A — From the command line** (when starting SwarmLLM):
-   ```bash
-   ./swarmllm run --bootstrap "/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."
-   ```
+### Using invite codes (easiest way to connect)
 
-   **Option B — In the config file** (for permanent connections):
-   Edit your `config.toml` file (see the [Configuration Guide](CONFIGURATION.md) for the file location) and add:
-   ```toml
-   [network]
-   bootstrap_peers = ["/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."]
-   ```
+1. In the Dashboard, look for the **"Your Network Code"** section. Copy the code shown there.
+2. Share it with your friend (text, email, chat — whatever works).
+3. Your friend pastes the code into the **"Join Network"** field on their Dashboard and clicks **Join**.
+4. Done! Both nodes connect and start discovering the wider network.
 
-3. **Check the connection:** After restarting (if you edited config.toml), your Dashboard should show "Connected Peers: 1" (or more). You'll also discover other nodes through your peers — the network grows automatically.
+> The invite code panel automatically hides itself once your node knows 20+ peers — at that point, the network is self-sustaining.
 
-> **Tip:** If you're both on the same local network (same Wi-Fi), the address will use a local IP like `192.168.x.x` and should connect instantly.
+### Manual bootstrap (advanced)
+
+You can also connect using raw multiaddr strings:
+
+**Command line:**
+```bash
+./swarmllm run --bootstrap "/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."
+```
+
+**Config file:**
+```toml
+[network]
+bootstrap_peers = ["/ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW..."]
+```
+
+After connecting, your Dashboard should show "Connected Peers: 1" (or more). The network grows automatically from there.
 
 ---
 

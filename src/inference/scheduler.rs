@@ -186,13 +186,18 @@ impl PipelineScheduler {
             let active_load = if &node_id == local_node_id {
                 self.shared_state.active_pipelines.len() as f32
             } else {
-                self.shared_state.peer_registry
+                self.shared_state
+                    .peer_registry
                     .get(&node_id)
                     .map(|p| p.active_request_count as f32)
                     .unwrap_or_else(|| {
                         // Fallback: estimate from active pipelines (pre-health-ping behavior)
-                        self.shared_state.active_pipelines.iter()
-                            .filter(|entry| entry.value().segments.iter().any(|s| s.node_id == node_id))
+                        self.shared_state
+                            .active_pipelines
+                            .iter()
+                            .filter(|entry| {
+                                entry.value().segments.iter().any(|s| s.node_id == node_id)
+                            })
                             .count() as f32
                     })
             };
@@ -288,8 +293,11 @@ impl PipelineScheduler {
 
             // First segment must be assigned to a node that can serve as first
             if is_first_segment {
-                let first_capable: Vec<_> =
-                    options.iter().filter(|(c, _)| c.can_be_first).cloned().collect();
+                let first_capable: Vec<_> = options
+                    .iter()
+                    .filter(|(c, _)| c.can_be_first)
+                    .cloned()
+                    .collect();
                 if !first_capable.is_empty() {
                     options = first_capable;
                 }
@@ -330,12 +338,25 @@ impl PipelineScheduler {
             let best = options.into_iter().max_by(|(ca, ra), (cb, rb)| {
                 let cov_a = ra.1 - current_layer;
                 let cov_b = rb.1 - current_layer;
-                let local_a = if ca.node_id == *local_node_id { 1u32 } else { 0u32 };
-                let local_b = if cb.node_id == *local_node_id { 1u32 } else { 0u32 };
-                cov_a.cmp(&cov_b)
+                let local_a = if ca.node_id == *local_node_id {
+                    1u32
+                } else {
+                    0u32
+                };
+                let local_b = if cb.node_id == *local_node_id {
+                    1u32
+                } else {
+                    0u32
+                };
+                cov_a
+                    .cmp(&cov_b)
                     .then_with(|| local_a.cmp(&local_b))
                     // Lower load is better → reverse comparison
-                    .then_with(|| cb.load.partial_cmp(&ca.load).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| {
+                        cb.load
+                            .partial_cmp(&ca.load)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .then_with(|| ca.latency_ms.cmp(&cb.latency_ms).reverse())
             });
 
@@ -533,6 +554,7 @@ mod tests {
                 active_request_count: 0,
                 first_seen: 0,
                 verified_transaction_count: 0,
+                is_lan_peer: false,
             },
         );
         state.peer_registry.insert(
@@ -548,6 +570,7 @@ mod tests {
                 active_request_count: 0,
                 first_seen: 0,
                 verified_transaction_count: 0,
+                is_lan_peer: false,
             },
         );
 
@@ -715,6 +738,7 @@ mod tests {
                 active_request_count: 10, // high load
                 first_seen: 0,
                 verified_transaction_count: 0,
+                is_lan_peer: false,
             },
         );
         state.peer_registry.insert(
@@ -730,6 +754,7 @@ mod tests {
                 active_request_count: 1, // low load
                 first_seen: 0,
                 verified_transaction_count: 0,
+                is_lan_peer: false,
             },
         );
 

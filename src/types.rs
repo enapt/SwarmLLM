@@ -343,6 +343,10 @@ pub enum SwarmMessage {
 
     // Forward secrecy — ephemeral ECDH key exchange
     EphemeralKeyExchange(EphemeralKeyExchange),
+
+    // Peer Exchange (PEX) — exchange known peer addresses on connection
+    PeerExchangeRequest,
+    PeerExchangeResponse(PeerExchangeResponse),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -445,6 +449,13 @@ pub struct HfSourceGossip {
     pub publisher: NodeId,
 }
 
+/// Peer Exchange response — a list of known peer multiaddrs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerExchangeResponse {
+    /// Up to 20 known peer multiaddrs.
+    pub peers: Vec<String>,
+}
+
 /// Finish reason for network protocol messages (distinct from inference::executor::FinishReason).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NetworkFinishReason {
@@ -514,7 +525,11 @@ pub enum PoolMessage {
     StateGossip(crate::pool::types::PoolState),
     CreditForward(crate::pool::types::PoolCreditForward),
     Removal(crate::pool::types::PoolRemoval),
-    MemberLeft { pool_id: NodeId, node_id: NodeId, signature: Vec<u8> },
+    MemberLeft {
+        pool_id: NodeId,
+        node_id: NodeId,
+        signature: Vec<u8>,
+    },
 }
 
 // ---- Network Commands ----
@@ -582,6 +597,10 @@ pub struct PeerInfo {
     /// Used for leaderboard eligibility: peers need `min_verified_transactions`.
     #[serde(default)]
     pub verified_transaction_count: u32,
+    /// Whether this peer was discovered via mDNS (on the same LAN).
+    /// LAN peers have ~1ms latency and are automatically preferred by the scheduler.
+    #[serde(default)]
+    pub is_lan_peer: bool,
 }
 
 // ---- Node Stats ----
@@ -685,7 +704,12 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: SwarmMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SwarmMessage::HealthPing { nonce, timestamp, node_id, active_request_count } => {
+            SwarmMessage::HealthPing {
+                nonce,
+                timestamp,
+                node_id,
+                active_request_count,
+            } => {
                 assert_eq!(nonce, 42);
                 assert_eq!(timestamp, 1000);
                 assert_eq!(node_id, Some(NodeId([1u8; 32])));
@@ -701,7 +725,11 @@ mod tests {
         let json = r#"{"HealthPing":{"nonce":1,"timestamp":2}}"#;
         let parsed: SwarmMessage = serde_json::from_str(json).unwrap();
         match parsed {
-            SwarmMessage::HealthPing { active_request_count, node_id, .. } => {
+            SwarmMessage::HealthPing {
+                active_request_count,
+                node_id,
+                ..
+            } => {
                 assert_eq!(active_request_count, 0);
                 assert_eq!(node_id, None);
             }

@@ -29,6 +29,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
 - **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection, transaction replay prevention, and credit escrow for large requests
+- **Zero-Config Discovery** — 5-layer discovery stack: mDNS (LAN auto-discovery), persistent peer cache (reconnect across restarts), shareable invite codes, peer exchange (PEX), and Kademlia DHT — no bootstrap config needed
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay on NAT detection), connection limits, and gossip replay protection
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via ephemeral ECDH), pipeline sealing, and authenticated sealed gossip
 - **Sybil Resistance** — Ed25519-signed balance reports with timestamp freshness, peer reputation scoring with trust decay, leaderboard spoofing protection
@@ -83,7 +84,7 @@ Single Rust binary, three simultaneous functions:
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
-| P2P Node | Peer discovery, shard hosting, distributed inference, credits | libp2p / QUIC |
+| P2P Node | Peer discovery (mDNS + peer cache + invite codes + PEX + DHT), shard hosting, distributed inference, credits | libp2p / QUIC |
 | LLM API Server | OpenAI-compatible inference endpoint | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
@@ -209,7 +210,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 |---------|-------------|
 | `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
-| `[network]` | `bootstrap_peers`, `enable_relay`, `max_peers` |
+| `[network]` | `bootstrap_peers`, `enable_relay`, `max_peers`, `enable_mdns`, `gossip_network_id` |
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_concurrent_requests` |
 | `[credit]` | Starting balance, earn/spend rates |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |

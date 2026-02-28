@@ -119,9 +119,9 @@ async fn test_escrow_threshold_check() {
     let db = Database::open_temp().unwrap();
     let em = EscrowManager::new(db, 10);
 
-    assert!(!em.needs_escrow(5));  // Below threshold
+    assert!(!em.needs_escrow(5)); // Below threshold
     assert!(!em.needs_escrow(10)); // At threshold (not above)
-    assert!(em.needs_escrow(11));  // Above threshold
+    assert!(em.needs_escrow(11)); // Above threshold
     assert!(em.needs_escrow(100)); // Well above threshold
 }
 

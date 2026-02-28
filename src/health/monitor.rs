@@ -84,7 +84,12 @@ impl HealthMonitor {
 
         let active_request_count = self.shared_state.active_pipelines.len() as u32;
         let node_id = Some(self.shared_state.identity.node_id().clone());
-        let msg = SwarmMessage::HealthPing { nonce, timestamp, node_id, active_request_count };
+        let msg = SwarmMessage::HealthPing {
+            nonce,
+            timestamp,
+            node_id,
+            active_request_count,
+        };
 
         if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
             tracing::warn!(error = %e, "Failed to send health ping");
@@ -151,7 +156,11 @@ impl HealthMonitor {
             .map(|d| d.available_space() / (1024 * 1024))
             .unwrap_or_else(|| {
                 // Fallback: sum of all disks if data_dir mount not found
-                disks.list().iter().map(|d| d.available_space() / (1024 * 1024)).sum()
+                disks
+                    .list()
+                    .iter()
+                    .map(|d| d.available_space() / (1024 * 1024))
+                    .sum()
             });
 
         let cap = crate::types::NodeCapability {
@@ -260,7 +269,10 @@ impl HealthMonitor {
             .map(|entry| *entry.key())
             .collect();
         if !stale_layer.is_empty() {
-            tracing::debug!(count = stale_layer.len(), "Cleaning up stale pending_layer_results");
+            tracing::debug!(
+                count = stale_layer.len(),
+                "Cleaning up stale pending_layer_results"
+            );
             for key in stale_layer {
                 self.shared_state.pending_layer_results.remove(&key);
             }
@@ -275,7 +287,10 @@ impl HealthMonitor {
             .map(|entry| *entry.key())
             .collect();
         if !stale_stream.is_empty() {
-            tracing::debug!(count = stale_stream.len(), "Cleaning up stale streaming_token_txs");
+            tracing::debug!(
+                count = stale_stream.len(),
+                "Cleaning up stale streaming_token_txs"
+            );
             for key in stale_stream {
                 self.shared_state.streaming_token_txs.remove(&key);
             }
@@ -296,7 +311,10 @@ impl HealthMonitor {
             .map(|entry| *entry.key())
             .collect();
         if !to_remove.is_empty() {
-            tracing::debug!(count = to_remove.len(), "Cleaning up old model vote tallies");
+            tracing::debug!(
+                count = to_remove.len(),
+                "Cleaning up old model vote tallies"
+            );
             for key in to_remove {
                 self.shared_state.model_vote_tallies.remove(&key);
             }
