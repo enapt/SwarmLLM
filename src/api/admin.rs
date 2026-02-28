@@ -6,6 +6,48 @@ use crate::api::server::AppState;
 use crate::config::ContributionMode;
 use crate::error::ApiError;
 
+/// Extract EOS token IDs from a GGUF file, with architecture-specific fallbacks.
+/// Mirrors the logic in inference/split.rs for consistency.
+fn extract_eos_token_ids(path: &std::path::Path) -> Vec<u32> {
+    let mut eos_tokens = Vec::new();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return vec![2];
+    };
+    let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut file) else {
+        return vec![2];
+    };
+    if let Some(eos_id) = ct
+        .metadata
+        .get("tokenizer.ggml.eos_token_id")
+        .and_then(|v| v.to_u32().ok())
+    {
+        eos_tokens.push(eos_id);
+    }
+    let arch = ct
+        .metadata
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok().cloned())
+        .unwrap_or_default();
+    match arch.as_str() {
+        "qwen2" => {
+            for &id in &[151643u32, 151645] {
+                if !eos_tokens.contains(&id) {
+                    eos_tokens.push(id);
+                }
+            }
+        }
+        _ => {
+            if !eos_tokens.contains(&2) {
+                eos_tokens.push(2);
+            }
+        }
+    }
+    if eos_tokens.is_empty() {
+        eos_tokens.push(2);
+    }
+    eos_tokens
+}
+
 /// GET /api/admin/stats — Full dashboard stats snapshot.
 pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let node_id = format!("{}", state.shared_state.identity.node_id());
@@ -857,10 +899,9 @@ pub async fn hf_download(
     let filename = body.filename;
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "status": "error",
-            "message": "repo_id and filename are required",
-        })));
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "repo_id and filename are required".into(),
+        )));
     }
 
     let dest_dir = state
@@ -956,11 +997,12 @@ pub async fn hf_download(
                     Ok(()) => {
                         let size = exec.model_size_bytes().unwrap_or(0);
                         let gguf_meta = crate::inference::executor::extract_gguf_metadata(&path);
+                        let eos_tokens = extract_eos_token_ids(&path);
                         *download_shared.loaded_model_info.write().await =
                             Some(crate::daemon::LoadedModelInfo {
                                 name: model_name.clone(),
                                 size_bytes: size,
-                                eos_tokens: vec![2],
+                                eos_tokens,
                                 chat_template: gguf_meta
                                     .as_ref()
                                     .and_then(|m| m.chat_template.clone()),
@@ -1077,10 +1119,9 @@ pub async fn hf_probe(
     let filename = params.filename.unwrap_or_default();
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "status": "error",
-            "message": "repo_id and filename query params are required",
-        })));
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "repo_id and filename query params are required".into(),
+        )));
     }
 
     let shard_size = state.config.model.shard_size_bytes();
@@ -1096,10 +1137,7 @@ pub async fn hf_probe(
             "shard_count": info.shard_count,
             "shard_size": info.shard_size,
         }))),
-        Err(e) => Ok(Json(serde_json::json!({
-            "status": "error",
-            "message": e,
-        }))),
+        Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
     }
 }
 
@@ -1123,17 +1161,15 @@ pub async fn hf_download_shards(
     let shard_indices = body.shards;
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "status": "error",
-            "message": "repo_id and filename are required",
-        })));
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "repo_id and filename are required".into(),
+        )));
     }
 
     if shard_indices.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "status": "error",
-            "message": "shards array is required (e.g. [0, 1, 2])",
-        })));
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "shards array is required (e.g. [0, 1, 2])".into(),
+        )));
     }
 
     // Use provided model_id if it matches an existing model, otherwise derive from filename

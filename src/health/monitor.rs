@@ -63,6 +63,8 @@ impl HealthMonitor {
                     self.broadcast_manifests().await;
                     self.check_peer_health().await;
                     self.cleanup_acquisition_progress();
+                    self.cleanup_stale_channels();
+                    self.cleanup_model_vote_tallies();
                     // Cleanup expired anti-gaming rate limit entries
                     self.shared_state.anti_gaming.lock().await.cleanup();
                 }
@@ -134,12 +136,19 @@ impl HealthMonitor {
         let ram_total_mb = sys.total_memory() / (1024 * 1024);
         let ram_available_mb = sys.available_memory() / (1024 * 1024);
 
+        // Get disk space for the data_dir partition, not all disks combined.
         let disks = sysinfo::Disks::new_with_refreshed_list();
+        let data_dir = &self.shared_state.config.node.data_dir;
         let disk_available_mb: u64 = disks
             .list()
             .iter()
+            .filter(|d| data_dir.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
             .map(|d| d.available_space() / (1024 * 1024))
-            .sum();
+            .unwrap_or_else(|| {
+                // Fallback: sum of all disks if data_dir mount not found
+                disks.list().iter().map(|d| d.available_space() / (1024 * 1024)).sum()
+            });
 
         let cap = crate::types::NodeCapability {
             node_id: node_id.clone(),
@@ -149,7 +158,7 @@ impl HealthMonitor {
             disk_available_mb,
             bandwidth_mbps: 0.0,
             hosted_shards: hosted_shards.clone(),
-            max_contribution: crate::types::ContributionLevel::Moderate,
+            max_contribution: self.shared_state.config.node.contribution.clone().into(),
             uptime_seconds,
             version: env!("CARGO_PKG_VERSION").to_string(),
             region: self.shared_state.config.identity.region.clone(),
@@ -232,6 +241,61 @@ impl HealthMonitor {
             let _ = self
                 .rebalance_tx
                 .try_send(RebalanceEvent::PeerLeft(peer_id));
+        }
+    }
+
+    /// Remove stale pending_layer_results (closed oneshot channels) and
+    /// streaming_token_txs (closed mpsc channels) to prevent memory leaks.
+    fn cleanup_stale_channels(&self) {
+        // pending_layer_results: remove entries where the receiver has been dropped
+        let stale_layer: Vec<_> = self
+            .shared_state
+            .pending_layer_results
+            .iter()
+            .filter(|entry| entry.value().is_closed())
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_layer.is_empty() {
+            tracing::debug!(count = stale_layer.len(), "Cleaning up stale pending_layer_results");
+            for key in stale_layer {
+                self.shared_state.pending_layer_results.remove(&key);
+            }
+        }
+
+        // streaming_token_txs: remove entries where the receiver has been dropped
+        let stale_stream: Vec<_> = self
+            .shared_state
+            .streaming_token_txs
+            .iter()
+            .filter(|entry| entry.value().is_closed())
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_stream.is_empty() {
+            tracing::debug!(count = stale_stream.len(), "Cleaning up stale streaming_token_txs");
+            for key in stale_stream {
+                self.shared_state.streaming_token_txs.remove(&key);
+            }
+        }
+    }
+
+    /// Periodic cleanup for model_vote_tallies — remove closed entries older than 24 hours (DAE-M11).
+    fn cleanup_model_vote_tallies(&self) {
+        let to_remove: Vec<_> = self
+            .shared_state
+            .model_vote_tallies
+            .iter()
+            .filter(|entry| {
+                let tally = entry.value();
+                let age = chrono::Utc::now() - tally.opened_at;
+                tally.closed && age > chrono::Duration::hours(24)
+            })
+            .map(|entry| *entry.key())
+            .collect();
+        if !to_remove.is_empty() {
+            tracing::debug!(count = to_remove.len(), "Cleaning up old model vote tallies");
+            for key in to_remove {
+                self.shared_state.model_vote_tallies.remove(&key);
+            }
         }
     }
 

@@ -20,25 +20,54 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> imp
 async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Spawn a task to push stats every 2 seconds
+    // Track last pong timestamp for dead connection detection
+    let last_pong = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
+    let last_pong_push = last_pong.clone();
+
+    // Spawn a task to push stats every 2 seconds + ping every 30 seconds
     let push_state = shared_state.clone();
     let push_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         // Track previous shard registry snapshot for change detection
         let mut prev_shard_snapshot: HashMap<String, Vec<ShardSnapshot>> = HashMap::new();
+        let mut tick_count: u64 = 0;
         loop {
-            interval.tick().await;
-            let msg = build_stats_message(&push_state, &mut prev_shard_snapshot).await;
-            if sender.send(Message::Text(msg)).await.is_err() {
-                break;
+            tokio::select! {
+                _ = stats_interval.tick() => {
+                    let msg = build_stats_message(&push_state, &mut prev_shard_snapshot).await;
+                    if sender.send(Message::Text(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    tick_count += 1;
+                    // Skip the first tick (fires immediately)
+                    if tick_count <= 1 {
+                        continue;
+                    }
+                    // Check if last pong was within 10s of the last ping
+                    let last = *last_pong_push.lock().await;
+                    if last.elapsed() > Duration::from_secs(40) {
+                        tracing::debug!("WebSocket client failed pong check — closing");
+                        break;
+                    }
+                    let ping_data = chrono::Utc::now().timestamp().to_le_bytes().to_vec();
+                    if sender.send(Message::Ping(ping_data)).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
 
-    // Read incoming messages (keep-alive; clients don't send much)
+    // Read incoming messages (keep-alive + pong tracking)
     while let Some(msg) = receiver.next().await {
         match msg {
             Ok(Message::Close(_)) | Err(_) => break,
+            Ok(Message::Pong(_)) => {
+                *last_pong.lock().await = tokio::time::Instant::now();
+            }
             _ => {} // Ignore other messages
         }
     }

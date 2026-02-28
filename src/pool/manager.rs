@@ -154,8 +154,8 @@ impl PoolManager {
             PoolCommand::InboundRemoval { removal } => {
                 self.handle_inbound_removal(removal).await;
             }
-            PoolCommand::InboundMemberLeft { pool_id, node_id } => {
-                self.handle_inbound_member_left(pool_id, node_id).await;
+            PoolCommand::InboundMemberLeft { pool_id, node_id, signature } => {
+                self.handle_inbound_member_left(pool_id, node_id, signature).await;
             }
             PoolCommand::GetState { reply } => {
                 let state = self.shared_state.pool_state.read().await.clone();
@@ -294,6 +294,9 @@ impl PoolManager {
         self.pending_invitations
             .insert(invitation.id, invitation.clone());
 
+        // SEC-M18: TODO — Broadcasting full PoolInvitation with invitee_node_id exposes the
+        // invitee's identity to the network. Consider using a blinded commitment (hash of
+        // invitee_node_id) in the broadcast and sending the full invitation via direct P2P message.
         let msg =
             SwarmMessage::PoolMessage(crate::types::PoolMessage::Invitation(invitation.clone()));
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
@@ -453,11 +456,20 @@ impl PoolManager {
             .db
             .put_json(TREE_POOL_STATE, KEY_MY_POOL, &Option::<PoolState>::None)?;
 
-        // Broadcast member-left notice
+        // Broadcast signed member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
+        let leave_payload = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"pool_member_left_v1");
+            h.update(&pool_id.0);
+            h.update(&my_id.0);
+            h.finalize().as_bytes().to_vec()
+        };
+        let leave_signature = self.shared_state.identity.sign(&leave_payload);
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::MemberLeft {
             pool_id,
             node_id: my_id,
+            signature: leave_signature,
         });
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
@@ -466,7 +478,13 @@ impl PoolManager {
         Ok(())
     }
 
-    async fn handle_credit_forward(&mut self, forward: PoolCreditForward) {
+    async fn handle_credit_forward(&mut self, mut forward: PoolCreditForward) {
+        // SEC-I4: Validate forward amount > 0
+        if forward.amount <= 0 {
+            tracing::warn!(from = %forward.from_node_id, amount = forward.amount, "Rejecting credit forward with non-positive amount");
+            return;
+        }
+
         // Verify member signature before accepting
         let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&forward.from_node_id.0) {
             Ok(k) => k,
@@ -475,27 +493,10 @@ impl PoolManager {
                 return;
             }
         };
-        let payload = {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"pool_credit_forward_v1");
-            hasher.update(forward.id.as_bytes());
-            hasher.update(&forward.pool_id.0);
-            hasher.update(&forward.from_node_id.0);
-            hasher.update(&forward.to_node_id.0);
-            hasher.update(&forward.amount.to_le_bytes());
-            hasher.update(forward.timestamp.to_rfc3339().as_bytes());
-            hasher.finalize().as_bytes().to_vec()
-        };
-        let sig_bytes: &[u8; 64] = match forward.member_signature.as_slice().try_into() {
-            Ok(b) => b,
-            Err(_) => {
-                tracing::warn!("Credit forward has invalid signature length");
-                return;
-            }
-        };
-        let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
-        if member_key.verify(&payload, &sig).is_err() {
-            tracing::warn!(from = %forward.from_node_id, "Invalid member signature on credit forward");
+
+        // SEC-C2 + SEC-I7: Owner co-signs the credit forward (verifies member sig internally)
+        if let Err(e) = crypto::cosign_credit_forward(&self.shared_state.identity, &mut forward, &member_key) {
+            tracing::warn!(from = %forward.from_node_id, error = %e, "Failed to cosign credit forward");
             return;
         }
 
@@ -508,6 +509,16 @@ impl PoolManager {
             tracing::warn!(error = %e, "Failed to persist credit forward");
         }
 
+        // SEC-C2: Apply credit to the pool owner's balance
+        if let Err(e) = crate::credit::ledger::apply_credit_direct(
+            &self.shared_state.credit_balance,
+            &self.shared_state.db,
+            forward.amount,
+            true,
+        ).await {
+            tracing::warn!(error = %e, "Failed to apply forwarded credits to owner balance");
+        }
+
         // Update the member's contribution in pool state
         let mut state = self.shared_state.pool_state.write().await;
         if let Some(ref mut ps) = *state {
@@ -516,16 +527,16 @@ impl PoolManager {
                 .iter_mut()
                 .find(|m| m.node_id == forward.from_node_id)
             {
-                member.credits_contributed += forward.amount;
+                member.credits_contributed = member.credits_contributed.saturating_add(forward.amount);
             }
-            ps.total_lifetime_credits += forward.amount;
+            ps.total_lifetime_credits = ps.total_lifetime_credits.saturating_add(forward.amount);
 
             if let Err(e) = self.persist_pool_state(ps) {
                 tracing::warn!(error = %e, "Failed to persist pool state after credit forward");
             }
         }
 
-        // Broadcast the credit forward
+        // Broadcast the co-signed credit forward
         let msg =
             SwarmMessage::PoolMessage(crate::types::PoolMessage::CreditForward(forward.clone()));
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
@@ -566,6 +577,42 @@ impl PoolManager {
         if owner_key.verify(&payload, &sig).is_err() {
             tracing::warn!(pool_id = %state.pool_id, "Invalid owner signature in pool state gossip");
             return;
+        }
+
+        // SEC-C7: Verify acceptance_signature of each member
+        for member in &state.members {
+            // The pool owner's own membership uses the pool creation signature, skip it
+            if member.node_id == state.pool_id {
+                continue;
+            }
+            let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&member.node_id.0) {
+                Ok(k) => k,
+                Err(_) => {
+                    tracing::warn!(member = %member.node_id, "Invalid member key in pool state gossip");
+                    return;
+                }
+            };
+            // Verify the acceptance signature using the acceptance payload
+            let acceptance_payload = {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(b"pool_acceptance_v1");
+                hasher.update(member.invitation_id.as_bytes());
+                hasher.update(&state.pool_id.0);
+                hasher.update(&member.node_id.0);
+                hasher.finalize().as_bytes().to_vec()
+            };
+            let sig_bytes: &[u8; 64] = match member.acceptance_signature.as_slice().try_into() {
+                Ok(b) => b,
+                Err(_) => {
+                    tracing::warn!(member = %member.node_id, "Invalid acceptance signature length in pool state gossip");
+                    return;
+                }
+            };
+            let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+            if member_key.verify(&acceptance_payload, &sig).is_err() {
+                tracing::warn!(member = %member.node_id, "Invalid acceptance signature in pool state gossip");
+                return;
+            }
         }
 
         // Store in registry for network-wide visibility
@@ -707,11 +754,39 @@ impl PoolManager {
         }
     }
 
-    async fn handle_inbound_member_left(&mut self, pool_id: PoolId, node_id: NodeId) {
+    async fn handle_inbound_member_left(&mut self, pool_id: PoolId, node_id: NodeId, signature: Vec<u8>) {
         let my_id = self.shared_state.identity.node_id();
 
         // Only the pool owner processes member-left notifications
         if pool_id != *my_id {
+            return;
+        }
+
+        // Verify the leave notice is signed by the departing node
+        let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&node_id.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!(node = %node_id, "Invalid member key in member-left notice");
+                return;
+            }
+        };
+        let payload = {
+            let mut h = blake3::Hasher::new();
+            h.update(b"pool_member_left_v1");
+            h.update(&pool_id.0);
+            h.update(&node_id.0);
+            h.finalize().as_bytes().to_vec()
+        };
+        let sig_bytes: &[u8; 64] = match signature.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::warn!("Member-left notice has invalid signature length");
+                return;
+            }
+        };
+        let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+        if member_key.verify(&payload, &sig).is_err() {
+            tracing::warn!(node = %node_id, "Invalid signature on member-left notice");
             return;
         }
 

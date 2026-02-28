@@ -6,6 +6,8 @@
 
 var SwarmLLM = (function() {
   var ws = null;
+  var wsHealthy = false;
+  var pollTimers = [];
   var creditHistory = [];
   var activeAcquisitions = {};
   var isStreaming = false;
@@ -420,9 +422,12 @@ var SwarmLLM = (function() {
         document.getElementById('credit-balance').textContent = bal.toLocaleString();
         document.getElementById('credit-earned').textContent = '+' + earned.toLocaleString();
         document.getElementById('credit-spent').textContent = '-' + spent.toLocaleString();
-        creditHistory.push(Math.abs(bal));
+        // Track credit deltas for sparkline (shows rate of change, not absolute)
+        var prevBal = creditHistory.length > 0 ? creditHistory[creditHistory.length - 1]._bal : bal;
+        var delta = bal - prevBal;
+        creditHistory.push({ _bal: bal, v: delta });
         if (creditHistory.length > 30) creditHistory.shift();
-        renderSparkline('credit-sparkline', creditHistory);
+        renderSparkline('credit-sparkline', creditHistory.map(function(e) { return e.v; }));
       }
       if (data.requests_served !== undefined) document.getElementById('stat-served').textContent = data.requests_served;
       if (data.requests_made !== undefined) document.getElementById('stat-requests-made').textContent = data.requests_made;
@@ -896,14 +901,16 @@ var SwarmLLM = (function() {
           var vramTag = '';
           if (model.size_bytes && model.size_bytes > 0) {
             var estVramMb = Math.ceil(model.size_bytes * 1.15 / (1024 * 1024));
+            var estStr = escapeHtml(formatMB(estVramMb));
+            var poolStr = escapeHtml(formatMB(poolVram));
             if (poolVram > 0) {
               if (estVramMb <= poolVram) {
-                vramTag = '<span style="color:var(--green)" title="Fits in network VRAM pool (' + formatMB(poolVram) + ')">' + formatMB(estVramMb) + ' VRAM</span>';
+                vramTag = '<span style="color:var(--green)" title="Fits in network VRAM pool (' + poolStr + ')">' + estStr + ' VRAM</span>';
               } else {
-                vramTag = '<span style="color:var(--red)" title="Exceeds network VRAM pool (' + formatMB(poolVram) + '). Can still download but won\'t run yet.">' + formatMB(estVramMb) + ' VRAM (exceeds pool)</span>';
+                vramTag = '<span style="color:var(--red)" title="Exceeds network VRAM pool (' + poolStr + '). Can still download but won\'t run yet.">' + estStr + ' VRAM (exceeds pool)</span>';
               }
             } else {
-              vramTag = '<span class="text-muted">' + formatMB(estVramMb) + ' VRAM est.</span>';
+              vramTag = '<span class="text-muted">' + estStr + ' VRAM est.</span>';
             }
           }
 
@@ -1052,12 +1059,14 @@ var SwarmLLM = (function() {
               var tooLarge = poolVram > 0 && vramNeeded > poolVram;
               var vramTag = '';
               if (vramNeeded > 0) {
+                var vramStr = escapeHtml(formatMB(vramNeeded));
+                var poolVramStr = escapeHtml(formatMB(poolVram));
                 if (fits) {
-                  vramTag = ' <span style="color:var(--green)">' + formatMB(vramNeeded) + ' VRAM</span>';
+                  vramTag = ' <span style="color:var(--green)">' + vramStr + ' VRAM</span>';
                 } else if (tooLarge) {
-                  vramTag = ' <span style="color:var(--red)" title="Exceeds pool VRAM (' + formatMB(poolVram) + ')">' + formatMB(vramNeeded) + ' VRAM</span>';
+                  vramTag = ' <span style="color:var(--red)" title="Exceeds pool VRAM (' + poolVramStr + ')">' + vramStr + ' VRAM</span>';
                 } else {
-                  vramTag = ' <span class="text-muted">' + formatMB(vramNeeded) + ' VRAM</span>';
+                  vramTag = ' <span class="text-muted">' + vramStr + ' VRAM</span>';
                 }
               }
               var div = document.createElement('div');
@@ -1249,6 +1258,14 @@ var SwarmLLM = (function() {
         });
       } catch (e) {}
       localStorage.setItem(SETUP_DONE_KEY, 'true');
+      // Also persist to server so other clients / restarts see setup as done
+      try {
+        await fetch('/api/admin/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ setup_done: true }),
+        });
+      } catch (e) {}
       document.getElementById('setup-modal').classList.add('hidden');
     }
   };
@@ -1259,6 +1276,13 @@ var SwarmLLM = (function() {
   function connectWebSocket() {
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
+
+    ws.onopen = function() {
+      wsHealthy = true;
+      // Pause REST polling while WebSocket is delivering live updates
+      pollTimers.forEach(function(t) { clearInterval(t); });
+      pollTimers = [];
+    };
 
     ws.onmessage = function(event) {
       try {
@@ -1275,8 +1299,19 @@ var SwarmLLM = (function() {
       } catch (e) {}
     };
 
-    ws.onclose = function() { setTimeout(connectWebSocket, 3000); };
+    ws.onclose = function() {
+      wsHealthy = false;
+      // Resume REST polling as fallback while WebSocket is disconnected
+      startPolling();
+      setTimeout(connectWebSocket, 3000);
+    };
     ws.onerror = function() { ws.close(); };
+  }
+
+  function startPolling() {
+    if (pollTimers.length > 0) return; // already polling
+    pollTimers.push(setInterval(dashboard.loadInitial, 30000));
+    pollTimers.push(setInterval(loadModels, 30000));
   }
 
   // ========================================================================
@@ -1289,13 +1324,17 @@ var SwarmLLM = (function() {
       var sel = document.getElementById('model-select');
       sel.innerHTML = '';
       if (data.data && data.data.length > 0) {
-        currentModel = data.data[0].id;
+        var savedModel = null;
+        try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
+        var found = savedModel && data.data.some(function(m) { return m.id === savedModel; });
+        currentModel = found ? savedModel : data.data[0].id;
         data.data.forEach(function(m) {
           var opt = document.createElement('option');
           opt.value = m.id;
           opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
           sel.appendChild(opt);
         });
+        sel.value = currentModel;
       } else {
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
@@ -1319,6 +1358,7 @@ var SwarmLLM = (function() {
 
   function selectModel(modelId) {
     currentModel = modelId;
+    try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
     var sel = document.getElementById('model-select');
     if (sel) {
       // Ensure model is in the dropdown
@@ -1355,11 +1395,7 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Helpers
   // ========================================================================
-  function escapeHtml(str) {
-    var div = document.createElement('div');
-    div.appendChild(document.createTextNode(str));
-    return div.innerHTML;
-  }
+  // escapeHtml is defined once at the top of the IIFE (handles null via || '')
 
   function setTierBadge(elementId, tier) {
     var el = document.getElementById(elementId);
@@ -1805,8 +1841,8 @@ var SwarmLLM = (function() {
     connectWebSocket();
     identity.loadNickname();
 
-    setInterval(dashboard.loadInitial, 30000);
-    setInterval(loadModels, 30000);
+    // Start polling as fallback — will be paused once WebSocket connects
+    startPolling();
   }
 
   // Start when DOM is ready

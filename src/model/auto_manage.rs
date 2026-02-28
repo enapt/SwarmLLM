@@ -522,10 +522,29 @@ impl AutoShardManager {
                 return;
             }
 
-            // Verify file size is plausible (at least 90% of expected, to handle last-shard truncation)
-            let file_ok = std::fs::metadata(&shard_path)
-                .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
-                .unwrap_or(false);
+            // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
+            let shard_store = crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let file_ok = if let Some(manifest) = self.shared_state.model_registry.get_manifest(&candidate.model_id) {
+                if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == candidate.shard_index) {
+                    if shard_info.hash != [0u8; 32] {
+                        // Hash available — verify properly
+                        shard_store.verify_shard(&candidate.model_id, shard_info).is_ok()
+                    } else {
+                        // Zero-hash placeholder — fall back to size check
+                        std::fs::metadata(&shard_path)
+                            .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
+                            .unwrap_or(false)
+                    }
+                } else {
+                    std::fs::metadata(&shard_path)
+                        .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
+                        .unwrap_or(false)
+                }
+            } else {
+                std::fs::metadata(&shard_path)
+                    .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
+                    .unwrap_or(false)
+            };
 
             if file_ok {
                 tracing::debug!(
@@ -573,17 +592,21 @@ impl AutoShardManager {
             // and each needs its own shard_progress entry tracked.
             if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(&mid) {
                 entry.state = crate::model::acquisition::AcquisitionState::Downloading;
-                entry.total_shards += 1;
-                entry.total_bytes += candidate.shard_size_bytes;
-                entry.shard_progress.insert(
-                    candidate.shard_index,
+                // Set total_shards from the manifest, not by incrementing
+                // (incrementing causes inflated counts when merging progress entries)
+                if let Some(manifest) = self.shared_state.model_registry.get_manifest(&mid) {
+                    entry.total_shards = manifest.shard_count;
+                    entry.total_bytes = manifest.total_size_bytes;
+                }
+                // Only add this shard's progress if not already tracked
+                entry.shard_progress.entry(candidate.shard_index).or_insert_with(|| {
                     crate::model::acquisition::ShardProgress {
                         index: candidate.shard_index,
                         total_bytes: candidate.shard_size_bytes,
                         downloaded_bytes: 0,
                         state: crate::model::acquisition::ShardState::Downloading,
-                    },
-                );
+                    }
+                });
                 entry.log.push(format!(
                     "Auto-manage: downloading shard {} (score: {:.1})",
                     candidate.shard_index, candidate.score
@@ -668,7 +691,7 @@ impl AutoShardManager {
                                         index: shard_idx,
                                     },
                                     progress_pct: pct,
-                                    state: "downloading".to_string(),
+                                    state: crate::types::DownloadState::Downloading,
                                 },
                             );
                             let _ = prog_net_tx
@@ -694,6 +717,29 @@ impl AutoShardManager {
                             shard = shard_idx,
                             "AutoShardManager: shard downloaded from HF"
                         );
+
+                        // Verify the downloaded shard before registering
+                        let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+                        if let Some(manifest) = shared.model_registry.get_manifest(&model_id) {
+                            if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == shard_idx) {
+                                // Use allow_zero_hash=true since HF downloads may have placeholder hashes
+                                if let Err(e) = shard_store.verify_shard_with_options(&model_id, shard_info, true) {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        shard = shard_idx,
+                                        error = %e,
+                                        "AutoShardManager: HF shard failed verification — not registering"
+                                    );
+                                    if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
+                                        entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                                            reason: format!("Shard {} verification failed: {}", shard_idx, e),
+                                        };
+                                        entry.log.push(format!("Shard {} failed verification", shard_idx));
+                                    }
+                                    return;
+                                }
+                            }
+                        }
 
                         // Register the shard
                         let node_id = shared.identity.node_id().clone();
@@ -729,7 +775,7 @@ impl AutoShardManager {
                                 node_id: node_id.clone(),
                                 shard_id: sid.clone(),
                                 progress_pct: 100,
-                                state: "complete".to_string(),
+                                state: crate::types::DownloadState::Complete,
                             },
                         );
                         let _ =

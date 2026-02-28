@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use libp2p::connection_limits;
 use libp2p::identity::Keypair;
 use libp2p::kad::store::MemoryStore;
 use libp2p::swarm::NetworkBehaviour;
@@ -25,6 +26,8 @@ pub struct SwarmBehaviour {
     pub relay_client: relay::client::Behaviour,
     /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
     pub relay_server: relay::Behaviour,
+    /// NET-I5: Connection limits to prevent resource exhaustion.
+    pub connection_limits: connection_limits::Behaviour,
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
@@ -38,11 +41,17 @@ pub fn build_behaviour(
     // Kademlia DHT for peer and shard discovery
     let store = MemoryStore::new(local_peer_id);
     let mut kademlia = kad::Behaviour::new(local_peer_id, store);
-    kademlia.set_mode(Some(kad::Mode::Server));
+    // NET-I7: Start in Client mode, switch to Server when external address is confirmed
+    kademlia.set_mode(Some(kad::Mode::Client));
 
     // GossipSub for network-wide announcements
     // Use blake3 for deterministic message IDs across processes
     // (DefaultHasher is seeded randomly per process, breaking deduplication)
+    //
+    // NET-M9: The message_id_fn includes both data and source peer to distinguish
+    // identical payloads from different peers. This means the same logical message
+    // (e.g. a shard announce) sent by different peers will NOT be deduplicated —
+    // this is intentional since each peer's announcement is meaningful.
     let message_id_fn = |message: &gossipsub::Message| {
         let mut input = message.data.clone();
         if let Some(ref source) = message.source {
@@ -61,7 +70,8 @@ pub fn build_behaviour(
         .mesh_n(2)
         .mesh_n_low(1)
         .mesh_n_high(4)
-        .mesh_outbound_min(0)
+        // NET-M2: At least 1 outbound mesh peer for message delivery
+        .mesh_outbound_min(1)
         .build()
         .map_err(|e| format!("GossipSub config error: {e}"))?;
     let gossipsub = gossipsub::Behaviour::new(
@@ -71,12 +81,13 @@ pub fn build_behaviour(
     .map_err(|e| format!("GossipSub init error: {e}"))?;
 
     // Request/Response for direct peer communication (shard transfers, control messages)
+    // NET-C3: 300s timeout for shard transfers (large files need more time)
     let request_response = request_response::Behaviour::new(
         [(
             StreamProtocol::new("/swarmllm/1.0.0"),
             request_response::ProtocolSupport::Full,
         )],
-        request_response::Config::default(),
+        request_response::Config::default().with_request_timeout(Duration::from_secs(300)),
     );
 
     // Tensor request/response for zero-copy activation forwarding (Cap'n Proto)
@@ -106,6 +117,12 @@ pub fn build_behaviour(
         .unwrap_or_default();
     let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
 
+    // NET-I5: Connection limits to prevent resource exhaustion
+    let conn_limits = connection_limits::ConnectionLimits::default()
+        .with_max_established_per_peer(Some(2))
+        .with_max_established(Some(500));
+    let connection_limits = connection_limits::Behaviour::new(conn_limits);
+
     Ok(SwarmBehaviour {
         kademlia,
         gossipsub,
@@ -116,6 +133,7 @@ pub fn build_behaviour(
         dcutr,
         relay_client: relay_behaviour,
         relay_server,
+        connection_limits,
     })
 }
 

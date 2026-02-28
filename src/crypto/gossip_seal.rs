@@ -1,10 +1,12 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
 
 use crate::error::SwarmError;
+use crate::identity::Identity;
 
 /// Seals and opens GossipSub messages with an epoch-based group key.
 /// The group key rotates every hour (epoch = unix_timestamp / 3600).
@@ -39,7 +41,7 @@ impl GossipSealer {
         (now / 3600) as u32
     }
 
-    /// Seal a gossip message.
+    /// Seal a gossip message (without Ed25519 signature — use `seal_signed` for authenticated gossip).
     /// Output format: `[4B epoch_tag][12B nonce][ciphertext+tag]`
     pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SwarmError> {
         let epoch = Self::current_epoch();
@@ -100,6 +102,49 @@ impl GossipSealer {
         }
 
         Err(SwarmError::DecryptionFailed)
+    }
+
+    /// SEC-C6: Seal a gossip message with Ed25519 signature from the originating node.
+    /// Output format: `[32B sender_pubkey][64B ed25519_signature][4B epoch_tag][12B nonce][ciphertext+tag]`
+    pub fn seal_signed(&self, plaintext: &[u8], identity: &Identity) -> Result<Vec<u8>, SwarmError> {
+        let inner_sealed = self.seal(plaintext)?;
+
+        // Sign the sealed payload (epoch+nonce+ciphertext)
+        let signature = identity.sign(&inner_sealed);
+        let pubkey = identity.node_id().0;
+
+        let mut out = Vec::with_capacity(32 + 64 + inner_sealed.len());
+        out.extend_from_slice(&pubkey);
+        out.extend_from_slice(&signature);
+        out.extend_from_slice(&inner_sealed);
+        Ok(out)
+    }
+
+    /// SEC-C6: Open a signed gossip message, verifying the Ed25519 signature.
+    /// Returns `(sender_node_id_bytes, plaintext)`.
+    pub fn open_signed(&self, sealed: &[u8]) -> Result<([u8; 32], Vec<u8>), SwarmError> {
+        if sealed.len() < 32 + 64 + 16 {
+            return Err(SwarmError::DecryptionFailed);
+        }
+
+        let sender_pub_bytes: [u8; 32] = sealed[..32]
+            .try_into()
+            .map_err(|_| SwarmError::DecryptionFailed)?;
+        let sig_bytes: [u8; 64] = sealed[32..96]
+            .try_into()
+            .map_err(|_| SwarmError::DecryptionFailed)?;
+        let inner_sealed = &sealed[96..];
+
+        // Verify Ed25519 signature
+        let vk = VerifyingKey::from_bytes(&sender_pub_bytes)
+            .map_err(|_| SwarmError::InvalidSignature)?;
+        let sig = Signature::from_bytes(&sig_bytes);
+        vk.verify(inner_sealed, &sig)
+            .map_err(|_| SwarmError::InvalidSignature)?;
+
+        // Decrypt the inner payload
+        let plaintext = self.open(inner_sealed)?;
+        Ok((sender_pub_bytes, plaintext))
     }
 }
 

@@ -235,8 +235,9 @@ impl ModelExecutor {
             .as_ref()
             .ok_or_else(|| SwarmError::Inference("Model not loaded".into()))?;
 
-        // Create a fresh context for this generation
-        let ctx_size = NonZeroU32::new(4096);
+        // Read context length from GGUF metadata if available, otherwise use default
+        let n_ctx = model.n_ctx_train();
+        let ctx_size = NonZeroU32::new(n_ctx);
         let ctx_params = LlamaContextParams::default().with_n_ctx(ctx_size);
         let mut ctx = model
             .new_context(backend, ctx_params)
@@ -248,7 +249,6 @@ impl ModelExecutor {
             .map_err(|e| SwarmError::Inference(format!("Tokenization failed: {e}")))?;
 
         let prompt_tokens = tokens.len() as u32;
-        let n_ctx = 4096u32;
         let max_gen = params.max_tokens.min(n_ctx.saturating_sub(prompt_tokens));
 
         if prompt_tokens >= n_ctx {
@@ -281,9 +281,9 @@ impl ModelExecutor {
         // Build sampler chain: top-k → top-p → temperature → dist
         let sampler = LlamaSampler::chain_simple([
             LlamaSampler::top_k(params.top_k as i32),
-            LlamaSampler::top_p(0.95, 1),
+            LlamaSampler::top_p(params.top_p, 1),
             LlamaSampler::temp(params.temperature),
-            LlamaSampler::dist(42),
+            LlamaSampler::dist(rand::random::<u32>()),
         ]);
         let mut sampler = sampler;
 

@@ -73,6 +73,17 @@ impl Identity {
             {
                 std::fs::write(&key_path, identity.signing_key.to_bytes())
                     .map_err(SwarmError::Io)?;
+                // SEC-I6: On Windows, restrict key file permissions to current user only.
+                // Uses icacls to remove inherited permissions and grant only the current user.
+                #[cfg(target_os = "windows")]
+                {
+                    if let Ok(username) = std::env::var("USERNAME") {
+                        let path_str = key_path.display().to_string();
+                        let _ = std::process::Command::new("icacls")
+                            .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
+                            .output();
+                    }
+                }
             }
             tracing::info!(node_id = %identity.node_id, "Generated new identity");
             Ok(identity)

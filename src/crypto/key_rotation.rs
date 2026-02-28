@@ -11,7 +11,11 @@ const SESSION_EVICTION_INTERVAL: Duration = Duration::from_secs(600);
 /// Maximum session age before eviction (10 minutes).
 const MAX_SESSION_AGE: Duration = Duration::from_secs(600);
 
-/// Run the background key rotation task.
+/// Run the background session cleanup task.
+///
+/// SEC-M19: This module is named `key_rotation` but currently only performs session eviction.
+/// TODO: Add actual key rotation — periodically re-establish sessions with active peers
+/// using fresh ephemeral keys, or rename this module to `session_cleanup`.
 ///
 /// - Evicts stale encryption sessions every 10 minutes.
 /// - Runs until shutdown signal.

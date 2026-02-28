@@ -396,19 +396,36 @@ fn is_private_ip(ip: &str) -> bool {
             || octets[0] == 0; // 0.0.0.0/8
     }
     if let Ok(addr) = ip.parse::<std::net::Ipv6Addr>() {
+        let segs = addr.segments();
         return addr.is_loopback()                                           // ::1
-            || (addr.segments()[0] & 0xfe00) == 0xfc00; // fc00::/7
+            || (segs[0] & 0xfe00) == 0xfc00                                 // fc00::/7 (ULA)
+            || (segs[0] & 0xffc0) == 0xfe80                                 // fe80::/10 (link-local)
+            || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0
+                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff);     // ::ffff:0:0/96 (IPv4-mapped)
     }
     true // block unparseable addresses
 }
 
 /// Forward a chat completion request to a peer's HTTP API.
+/// Lazily-initialized shared reqwest client for peer forwarding.
+/// Avoids creating a new TLS + connection pool on every request.
+static PEER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn get_peer_client() -> &'static reqwest::Client {
+    PEER_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn forward_to_peer(
     peer_url: &str,
     req: &ChatCompletionRequest,
     stream: bool,
 ) -> Result<axum::response::Response, ApiError> {
-    let client = reqwest::Client::new();
+    let client = get_peer_client();
     let url = format!("{}/v1/chat/completions", peer_url);
 
     let peer_resp = client
@@ -831,17 +848,34 @@ pub struct CompletionChoice {
     pub finish_reason: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CompletionChunk {
+    pub id: String,
+    pub object: &'static str,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<CompletionChunkChoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompletionChunkChoice {
+    pub index: u32,
+    pub text: String,
+    pub finish_reason: Option<String>,
+}
+
 /// POST /v1/completions — OpenAI-compatible text completions endpoint.
 pub async fn completions(
     State(state): State<AppState>,
     Json(req): Json<CompletionRequest>,
-) -> Result<Json<CompletionResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
 
     tracing::info!(
         request_id = %request_id,
         model = %req.model,
+        stream = req.stream,
         "Completion request"
     );
 
@@ -852,38 +886,108 @@ pub async fn completions(
     };
 
     let params = SamplingParams {
-        temperature: req.temperature,
-        top_p: req.top_p,
+        temperature: req.temperature.clamp(0.0, 2.0),
+        top_p: req.top_p.clamp(f32::EPSILON, 1.0),
         top_k: 40,
-        max_tokens: req.max_tokens,
+        max_tokens: if req.max_tokens == 0 { 1 } else { req.max_tokens.min(32768) },
         stop,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
     };
 
-    let mut executor = state.executor.lock().await;
-    if !executor.is_loaded() {
-        return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+    if req.stream {
+        // Streaming: SSE response similar to chat completions streaming
+        let model_name = req.model.clone();
+        let rid = request_id.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+        tokio::spawn(async move {
+            let mut executor = state.executor.lock().await;
+            if !executor.is_loaded() {
+                let _ = tx
+                    .send(StreamEvent::Delta {
+                        content: Some("Error: no model loaded".into()),
+                        role: None,
+                        finish_reason: Some("error".into()),
+                    })
+                    .await;
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+            let result = executor.generate_stream(&req.prompt, &params, |token| {
+                let send_result = tx.try_send(StreamEvent::Delta {
+                    content: Some(token.to_string()),
+                    role: None,
+                    finish_reason: None,
+                });
+                send_result.is_ok()
+            });
+
+            let finish = match result {
+                Ok(r) => r.finish_reason.as_str().to_string(),
+                Err(_) => "error".to_string(),
+            };
+            let _ = tx
+                .send(StreamEvent::Delta {
+                    content: None,
+                    role: None,
+                    finish_reason: Some(finish),
+                })
+                .await;
+            let _ = tx.send(StreamEvent::Done).await;
+        });
+
+        let stream =
+            tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
+                StreamEvent::Delta {
+                    content,
+                    role: _,
+                    finish_reason,
+                } => {
+                    let chunk = CompletionChunk {
+                        id: rid.clone(),
+                        object: "text_completion",
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![CompletionChunkChoice {
+                            index: 0,
+                            text: content.unwrap_or_default(),
+                            finish_reason,
+                        }],
+                    };
+                    let json = serde_json::to_string(&chunk).unwrap_or_default();
+                    Ok::<_, Infallible>(Event::default().data(json))
+                }
+                StreamEvent::Done => Ok(Event::default().data("[DONE]")),
+            });
+
+        Ok(Sse::new(stream).into_response())
+    } else {
+        let mut executor = state.executor.lock().await;
+        if !executor.is_loaded() {
+            return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+        }
+
+        let (content, result) = executor.generate(&req.prompt, &params).map_err(ApiError)?;
+
+        Ok(Json(CompletionResponse {
+            id: request_id,
+            object: "text_completion",
+            created,
+            model: req.model,
+            choices: vec![CompletionChoice {
+                index: 0,
+                text: content,
+                finish_reason: result.finish_reason.as_str().into(),
+            }],
+            usage: Usage {
+                prompt_tokens: result.prompt_tokens,
+                completion_tokens: result.completion_tokens,
+                total_tokens: result.prompt_tokens + result.completion_tokens,
+            },
+        })
+        .into_response())
     }
-
-    let (content, result) = executor.generate(&req.prompt, &params).map_err(ApiError)?;
-
-    Ok(Json(CompletionResponse {
-        id: request_id,
-        object: "text_completion",
-        created,
-        model: req.model,
-        choices: vec![CompletionChoice {
-            index: 0,
-            text: content,
-            finish_reason: result.finish_reason.as_str().into(),
-        }],
-        usage: Usage {
-            prompt_tokens: result.prompt_tokens,
-            completion_tokens: result.completion_tokens,
-            total_tokens: result.prompt_tokens + result.completion_tokens,
-        },
-    }))
 }
 
 /// GET /v1/models

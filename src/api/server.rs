@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::response::Redirect;
 use axum::routing::{get, post};
 use axum::Router;
@@ -99,7 +100,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/admin") }))
         // Health check
         .route("/health", get(health))
-        // Middleware (layers run bottom-to-top: CORS first, then auth, then handler)
+        // Middleware (layers run bottom-to-top: CORS first, then auth, then body limit, then handler)
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB request body limit
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

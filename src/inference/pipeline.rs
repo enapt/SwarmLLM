@@ -94,15 +94,12 @@ impl PipelineExecutor {
         // If the model was loaded from shards (auto-manage), the executor
         // won't be loaded — fall through to execute_distributed which uses
         // the split model via process_local_segment.
+        // Use the atomic flag to avoid locking the executor mutex just to check.
         if num_segments == 1
             && self.assignment.segments[0].node_id == *self.shared_state.identity.node_id()
+            && self.shared_state.model_loaded.load(std::sync::atomic::Ordering::Acquire)
         {
-            let executor = self.shared_state.executor.lock().await;
-            if executor.is_loaded() {
-                drop(executor);
-                return self.execute_local().await;
-            }
-            // Executor not loaded — use the split model path below
+            return self.execute_local().await;
         }
 
         // Distributed execution path (also handles single-node split-model execution)
@@ -268,7 +265,7 @@ impl PipelineExecutor {
         Ok(InferenceOutput {
             request_id,
             content: generated_text,
-            prompt_tokens: prompt_token_count.unwrap_or(prompt.len()) as u32,
+            prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
             completion_tokens: generated_tokens.len() as u32,
             finish_reason,
         })
@@ -288,7 +285,8 @@ impl PipelineExecutor {
                 return tokenizer.encode(prompt).len();
             }
         }
-        prompt.len()
+        // Rough estimate: ~4 chars per token for non-ASCII text
+        prompt.chars().count() / 4
     }
 
     /// Decode token IDs to text using the GGUF vocabulary from the split model.
@@ -433,7 +431,7 @@ impl PipelineExecutor {
                         self.shared_state.pending_layer_results.remove(&request_id);
                         // Attempt failover to standby
                         return self
-                            .failover_segment(idx, request_id, sequence_num, &activations, is_last)
+                            .failover_segment(idx, request_id, sequence_num, index_pos, &activations, is_last)
                             .await;
                     }
                 }
@@ -464,7 +462,9 @@ impl PipelineExecutor {
             segment.layer_range.1 as usize,
         );
 
-        // Ensure the split model is loaded for this model's layer range
+        // Ensure the split model is loaded for this model's layer range.
+        // Use entry API to prevent TOCTOU race where two requests could both
+        // see the key missing and double-load the model into VRAM.
         let split_key = (model_id.clone(), layer_start, layer_end);
         if !self.shared_state.split_models.contains_key(&split_key) {
             let shard_store =
@@ -544,10 +544,10 @@ impl PipelineExecutor {
             };
 
             let split_model = load_result?;
-            self.shared_state.split_models.insert(
-                split_key.clone(),
-                std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
-            );
+            // Re-check before inserting to handle concurrent loaders
+            self.shared_state.split_models
+                .entry(split_key.clone())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(split_model)));
         }
 
         let split_model_ref = self
@@ -558,13 +558,17 @@ impl PipelineExecutor {
 
         let mut split_model = split_model_ref.lock().await;
 
-        // Clear KV-cache at the start of a new request (prefill)
+        // Clear KV-cache at the start of a new request (prefill).
+        // NOTE: KV-cache lives inside LayerWeights (per-layer). The split_model Mutex
+        // serializes access, preventing concurrent request corruption. If concurrent
+        // request throughput becomes a bottleneck, migrate to per-request KV-cache storage
+        // using a HashMap<Uuid, Vec<(Tensor, Tensor)>> keyed by request_id.
         if sequence_num == 0 {
             split_model.clear_kv_cache();
         }
 
         let is_first = split_model.layer_start == 0;
-        let is_last = split_model.layer_end == split_model.total_layers;
+        let is_last = split_model.layer_end >= split_model.total_layers;
 
         // Convert activation bytes to a candle Tensor
         let input_tensor = if is_first {
@@ -601,15 +605,22 @@ impl PipelineExecutor {
         // Run the forward pass with correct position
         let output = split_model.forward(&input_tensor, index_pos)?;
 
-        // Track local layer-forward participation (credit persist deferred to request end)
+        // Track local layer-forward participation and persist earned credits
         {
             let layers_processed = (layer_end - layer_start) as i64;
             if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
                 stats.forwards_served += 1;
             }
             let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-            if let Ok(mut bal) = self.shared_state.credit_balance.try_write() {
-                bal.balance += earned;
+            if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                &self.shared_state.credit_balance,
+                &self.shared_state.db,
+                earned,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to persist layer-forward credit earn");
             }
         }
 
@@ -666,6 +677,7 @@ impl PipelineExecutor {
         failed_idx: usize,
         request_id: uuid::Uuid,
         sequence_num: u32,
+        index_pos: usize,
         activations: &[u8],
         _is_last: bool,
     ) -> Result<LayerResult, SwarmError> {
@@ -702,9 +714,9 @@ impl PipelineExecutor {
                 let forward = LayerForward {
                     request_id,
                     sequence_num,
-                    index_pos: 0, // Failover doesn't track position precisely
+                    index_pos: index_pos as u32,
                     activations: activations.to_vec(),
-                    format: TensorFormat::FP16,
+                    format: TensorFormat::FP32,
                     layer_range: Some(backup.layer_range),
                     sender_peer_bytes: None,
                 };

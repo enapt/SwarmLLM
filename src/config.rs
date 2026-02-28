@@ -131,7 +131,7 @@ pub struct InferenceConfig {
     pub speculative_gamma: u32,
     /// Optional shard range for split inference (e.g. "0-4").
     /// When set, the node only claims these shard indices instead of all shards.
-    #[serde(skip)]
+    #[serde(default)]
     pub shard_range: Option<(u32, u32)>,
     /// Maximum number of requests to batch together for inference.
     /// Default 1 means no batching (sequential, backward-compatible).
@@ -367,7 +367,17 @@ fn default_theme() -> String {
 
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| {
+            // Fallback to a well-known path instead of "." (current directory)
+            #[cfg(unix)]
+            {
+                PathBuf::from("/var/lib/swarmllm")
+            }
+            #[cfg(not(unix))]
+            {
+                PathBuf::from(".")
+            }
+        })
         .join("swarmllm")
 }
 
@@ -543,8 +553,14 @@ impl Config {
 
         // 3. Apply environment variable overrides (SWARMLLM_ prefix)
         if let Ok(val) = std::env::var("SWARMLLM_NODE_LISTEN_PORT") {
-            if let Ok(port) = val.parse() {
-                config.node.listen_port = port;
+            match val.parse() {
+                Ok(port) => config.node.listen_port = port,
+                Err(e) => tracing::warn!(
+                    var = "SWARMLLM_NODE_LISTEN_PORT",
+                    value = %val,
+                    error = %e,
+                    "Failed to parse env var, ignoring"
+                ),
             }
         }
         if let Ok(val) = std::env::var("SWARMLLM_NODE_DATA_DIR") {
@@ -557,8 +573,14 @@ impl Config {
             config.inference.model_path = Some(PathBuf::from(val));
         }
         if let Ok(val) = std::env::var("SWARMLLM_INFERENCE_GPU_LAYERS") {
-            if let Ok(n) = val.parse() {
-                config.inference.gpu_layers = n;
+            match val.parse() {
+                Ok(n) => config.inference.gpu_layers = n,
+                Err(e) => tracing::warn!(
+                    var = "SWARMLLM_INFERENCE_GPU_LAYERS",
+                    value = %val,
+                    error = %e,
+                    "Failed to parse env var, ignoring"
+                ),
             }
         }
 
@@ -586,12 +608,51 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), SwarmError> {
+        // Reject port 0 (DAE-M13)
+        if self.node.listen_port == 0 {
+            return Err(SwarmError::Config(
+                "listen_port must not be 0".to_string(),
+            ));
+        }
+
         // Warn on privileged ports (not fatal — user may have permissions)
-        if self.node.listen_port > 0 && self.node.listen_port < 1024 {
+        if self.node.listen_port < 1024 {
             tracing::warn!(
                 port = self.node.listen_port,
                 "Using privileged port — may require elevated permissions"
             );
+        }
+
+        // Validate inference config (DAE-I4)
+        if self.inference.max_concurrent_requests < 1 {
+            return Err(SwarmError::Config(
+                "max_concurrent_requests must be >= 1".to_string(),
+            ));
+        }
+        if self.inference.session_timeout_seconds == 0 {
+            return Err(SwarmError::Config(
+                "session_timeout_seconds must be > 0".to_string(),
+            ));
+        }
+        if self.inference.speculative_gamma == 0 {
+            return Err(SwarmError::Config(
+                "speculative_gamma must be > 0".to_string(),
+            ));
+        }
+        if self.network.relay_max_circuits == 0 {
+            return Err(SwarmError::Config(
+                "relay_max_circuits must be > 0".to_string(),
+            ));
+        }
+        if self.resources.schedule.reduced_hours_start > 23 {
+            return Err(SwarmError::Config(
+                "reduced_hours_start must be 0-23".to_string(),
+            ));
+        }
+        if self.resources.schedule.reduced_hours_end > 23 {
+            return Err(SwarmError::Config(
+                "reduced_hours_end must be 0-23".to_string(),
+            ));
         }
 
         // Validate model path exists if specified

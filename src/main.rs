@@ -7,6 +7,7 @@ use swarmllm::daemon::Daemon;
 use swarmllm::identity::Identity;
 use swarmllm::storage::db::Database;
 
+
 #[derive(Parser)]
 #[command(
     name = "swarmllm",
@@ -137,37 +138,20 @@ async fn query_status(port: u16) -> anyhow::Result<()> {
     let url = format!("http://localhost:{port}/v1/status");
     println!("Querying daemon at {url}...");
 
-    // Simple HTTP GET using TCP directly to avoid adding reqwest dep
-    let addr = format!("localhost:{port}");
-    let stream = match tokio::net::TcpStream::connect(&addr).await {
-        Ok(s) => s,
+    let client = reqwest::Client::new();
+    match client.get(&url).send().await {
+        Ok(resp) => {
+            let body = resp.text().await?;
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("{body}");
+            }
+        }
         Err(_) => {
             eprintln!("Error: SwarmLLM daemon is not running on port {port}");
             std::process::exit(1);
         }
-    };
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let request =
-        format!("GET /v1/status HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
-    let (mut reader, mut writer) = stream.into_split();
-    writer.write_all(request.as_bytes()).await?;
-    writer.shutdown().await?;
-
-    let mut response = String::new();
-    reader.read_to_string(&mut response).await?;
-
-    // Extract body from HTTP response
-    if let Some(body_start) = response.find("\r\n\r\n") {
-        let body = &response[body_start + 4..];
-        // Pretty-print JSON
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-            println!("{}", serde_json::to_string_pretty(&json)?);
-        } else {
-            println!("{body}");
-        }
-    } else {
-        println!("{response}");
     }
 
     Ok(())
@@ -192,8 +176,23 @@ async fn test_split_inference(
         total_layers, model.hidden_dim
     );
 
-    // Build chat prompt
-    let chat_prompt = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+    // Build chat prompt — use model's chat template if available, else fallback to ChatML
+    let chat_prompt = if let Some(template) = model.chat_template() {
+        let messages = vec![swarmllm::types::ChatMessage {
+            role: swarmllm::types::Role::User,
+            content: prompt.to_string(),
+        }];
+        let bos = model.bos_token();
+        let eos = model.eos_token_str();
+        swarmllm::inference::chat_template::apply_chat_template(
+            template, &messages, bos, eos, true,
+        )
+        .unwrap_or_else(|| {
+            format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+        })
+    } else {
+        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+    };
     println!("Chat prompt: {:?}", chat_prompt);
 
     // Tokenize
@@ -271,15 +270,35 @@ async fn test_split_inference(
 }
 
 fn init_tracing(verbose: u8) {
-    let filter = match verbose {
-        0 => "swarmllm=info",
-        1 => "swarmllm=debug",
-        2 => "swarmllm=debug,libp2p=info,tower_http=debug",
-        _ => "trace",
+    // CLI verbose flags override any config file setting
+    let filter = if verbose > 0 {
+        match verbose {
+            1 => "swarmllm=debug".to_string(),
+            2 => "swarmllm=debug,libp2p=info,tower_http=debug".to_string(),
+            _ => "trace".to_string(),
+        }
+    } else {
+        // Try to read logging.level from default config location
+        let config_level = dirs::data_dir()
+            .map(|d| d.join("swarmllm").join("config.toml"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
+            .and_then(|v| {
+                v.get("logging")
+                    .and_then(|l| l.get("level"))
+                    .and_then(|l| l.as_str().map(String::from))
+            });
+        match config_level.as_deref() {
+            Some("debug") => "swarmllm=debug".to_string(),
+            Some("trace") => "trace".to_string(),
+            Some("warn") => "swarmllm=warn".to_string(),
+            Some("error") => "swarmllm=error".to_string(),
+            _ => "swarmllm=info".to_string(),
+        }
     };
 
     tracing_subscriber::fmt()
-        .with_env_filter(filter)
+        .with_env_filter(&filter)
         .with_target(true)
         .with_thread_ids(false)
         .init();

@@ -11,6 +11,8 @@ pub struct RelayServerConfig {
     pub max_reservations: usize,
     pub max_circuits: usize,
     pub max_circuit_duration: Duration,
+    /// NET-M5: Reservation duration is independently configurable from circuit duration.
+    pub reservation_duration: Duration,
     pub max_circuit_bytes: u64,
 }
 
@@ -20,6 +22,7 @@ impl Default for RelayServerConfig {
             max_reservations: 128,
             max_circuits: 16,
             max_circuit_duration: Duration::from_secs(3600),
+            reservation_duration: Duration::from_secs(3600),
             max_circuit_bytes: 1 << 30, // 1 GB
         }
     }
@@ -32,7 +35,8 @@ pub fn build_relay_server_config(config: &RelayServerConfig) -> libp2p::relay::C
     libp2p::relay::Config {
         max_reservations: config.max_reservations,
         max_reservations_per_peer: 4,
-        reservation_duration: config.max_circuit_duration,
+        // NET-M5: Use independent reservation_duration instead of reusing max_circuit_duration
+        reservation_duration: config.reservation_duration,
         max_circuits: config.max_circuits,
         max_circuits_per_peer: 4,
         max_circuit_duration: config.max_circuit_duration,
@@ -86,6 +90,20 @@ pub fn handle_relay_server_event(event: libp2p::relay::Event) {
                 dst = %dst_peer_id,
                 ?error,
                 "Relay circuit closed"
+            );
+        }
+        // NET-M6: Log relay denial events at warn level
+        Event::ReservationReqDenied { src_peer_id } => {
+            tracing::warn!(peer = %src_peer_id, "Relay reservation denied");
+        }
+        Event::CircuitReqDenied {
+            src_peer_id,
+            dst_peer_id,
+        } => {
+            tracing::warn!(
+                src = %src_peer_id,
+                dst = %dst_peer_id,
+                "Relay circuit denied"
             );
         }
         _ => {}

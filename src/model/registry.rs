@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dashmap::DashMap;
 
 use crate::error::SwarmError;
@@ -11,7 +13,8 @@ pub struct ModelRegistry {
     /// Known model manifests, keyed by model ID.
     manifests: DashMap<ModelId, ModelManifest>,
     /// Shard location tracking: which nodes hold which shards.
-    shard_holders: DashMap<ShardId, Vec<NodeId>>,
+    /// Uses HashSet for O(1) deduplication.
+    shard_holders: DashMap<ShardId, HashSet<NodeId>>,
 }
 
 impl ModelRegistry {
@@ -29,18 +32,16 @@ impl ModelRegistry {
     }
 
     /// Record that a node holds a specific shard.
-    /// Deduplicates — won't add the same node_id twice.
+    /// Uses HashSet for O(1) deduplication.
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
         let mut holders = self.shard_holders.entry(shard_id).or_default();
-        if !holders.contains(&node_id) {
-            holders.push(node_id);
-        }
+        holders.insert(node_id);
     }
 
     /// Remove a node from shard holders (e.g., node went offline).
     pub fn remove_shard_holder(&self, shard_id: &ShardId, node_id: &NodeId) {
         if let Some(mut holders) = self.shard_holders.get_mut(shard_id) {
-            holders.retain(|id| id != node_id);
+            holders.remove(node_id);
         }
     }
 
@@ -48,7 +49,7 @@ impl ModelRegistry {
     pub fn shard_holders(&self, shard_id: &ShardId) -> Vec<NodeId> {
         self.shard_holders
             .get(shard_id)
-            .map(|v| v.clone())
+            .map(|v| v.iter().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -89,7 +90,7 @@ impl ModelRegistry {
     pub fn all_shard_entries(&self) -> Vec<(ShardId, Vec<NodeId>)> {
         self.shard_holders
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .map(|entry| (entry.key().clone(), entry.value().iter().cloned().collect()))
             .collect()
     }
 

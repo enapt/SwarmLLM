@@ -373,13 +373,53 @@ pub async fn download_shard(
     let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
     let expected_size = range_end - range_start + 1;
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
-        .header("Range", format!("bytes={range_start}-{range_end}"))
-        .send()
-        .await
-        .map_err(|e| format!("Shard download failed: {e}"))?;
+    // Retry with exponential backoff for 429/503
+    let mut resp = None;
+    let retry_delays = [5u64, 30, 120];
+    for attempt in 0..=3u32 {
+        let result = client
+            .get(&url)
+            .header("User-Agent", "SwarmLLM/0.1")
+            .header("Range", format!("bytes={range_start}-{range_end}"))
+            .send()
+            .await;
+
+        match result {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                if status == 429 || status == 503 {
+                    if attempt < 3 {
+                        let retry_after = r
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(retry_delays[attempt as usize]);
+                        tracing::warn!(
+                            status,
+                            retry_after_secs = retry_after,
+                            attempt = attempt + 1,
+                            "HF rate limited, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+                        continue;
+                    }
+                    return Err(format!("Shard download returned {} after retries", status));
+                }
+                resp = Some(r);
+                break;
+            }
+            Err(e) => {
+                if attempt < 3 {
+                    tracing::warn!(error = %e, attempt = attempt + 1, "Shard download request failed, retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
+                    continue;
+                }
+                return Err(format!("Shard download failed after retries: {e}"));
+            }
+        }
+    }
+    let resp = resp.ok_or("Shard download failed: no response")?;
 
     if resp.status().as_u16() != 206 && !resp.status().is_success() {
         return Err(format!("Shard download returned {}", resp.status()));
@@ -501,7 +541,9 @@ pub async fn download_shards(
         )
         .await?;
 
-        progress_task.abort();
+        // shard_tx was moved into download_shard and is now dropped,
+        // so shard_rx.recv() will return None and the progress task exits gracefully.
+        let _ = progress_task.await;
 
         // Update cumulative for next shard
         let start = (shard_idx as u64) * info.shard_size;

@@ -275,9 +275,10 @@ impl request_response::Codec for TensorCodec {
 // Binary layout for LayerForward envelope:
 //   [0..16]  request_id (UUID bytes)
 //   [16..20] sequence_num (u32 LE)
-//   [20]     format tag: 0=FP16, 1=FP32, 2=INT8
-//   [21..25] data_len (u32 LE)
-//   [25..]   activation data
+//   [20..24] index_pos (u32 LE)
+//   [24]     format tag: 0=FP16, 1=FP32, 2=INT8
+//   [25..29] data_len (u32 LE)
+//   [29..]   activation data
 
 /// Tensor message type tag — first byte of every tensor protocol message.
 pub const TENSOR_TAG_FORWARD: u8 = 0x01;

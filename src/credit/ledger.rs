@@ -10,6 +10,11 @@ use crate::types::{
 
 /// Earning/spending rates (credits per unit).
 /// These are initial values — tunable via config in the future.
+///
+/// SEC-M16: TODO — Credit inflation risk: RATE_INFERENCE_SERVE (10) > RATE_INFERENCE_CONSUME (8)
+/// means a serving node earns more than the requesting node spends per unit of work.
+/// Over time this creates net credit inflation. Consider equalizing rates or adding a
+/// configurable network-wide burn/fee mechanism to balance supply.
 pub const RATE_INFERENCE_SERVE: i64 = 10; // per layer per token
 pub const RATE_SHARD_HOSTING: i64 = 1; // per GB per hour
 pub const RATE_SHARD_SEEDING: i64 = 5; // per GB transferred
@@ -208,7 +213,19 @@ impl CreditLedger {
 
     /// Update the peer balance list from a gossip message.
     /// Balances are bucketed (rounded to nearest 100) for privacy.
+    /// SEC-M17: Rejects implausibly extreme balance values to prevent
+    /// percentile manipulation via gossip.
     pub async fn update_peer_balance(&self, balance_bucket: i64) {
+        // Reject implausible balance buckets that could manipulate percentile calculations
+        const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000; // 100M credits
+        if balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
+            tracing::debug!(
+                balance_bucket,
+                "Ignoring implausible peer balance gossip"
+            );
+            return;
+        }
+
         let mut balances = self.peer_balances.write().await;
         balances.push(balance_bucket);
         // Keep a rolling window of the most recent 1000 observations
@@ -249,15 +266,16 @@ impl CreditLedger {
     }
 
     /// Apply a credit delta to the balance.
+    /// SEC-I1: Uses saturating arithmetic to prevent overflow.
     async fn apply_credit(&self, delta: i64, is_earning: bool) -> Result<(), SwarmError> {
         let mut bal = self.balance.write().await;
-        bal.balance += delta;
+        bal.balance = bal.balance.saturating_add(delta);
         bal.last_updated = chrono::Utc::now();
 
         if is_earning {
-            bal.lifetime_earned += delta.unsigned_abs();
+            bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
         } else {
-            bal.lifetime_spent += delta.unsigned_abs();
+            bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
         }
 
         tracing::debug!(
@@ -353,13 +371,14 @@ pub async fn apply_credit_direct(
 ) -> Result<(), SwarmError> {
     {
         let mut bal = balance.write().await;
-        bal.balance += delta;
+        // SEC-I1: saturating arithmetic to prevent overflow
+        bal.balance = bal.balance.saturating_add(delta);
         bal.last_updated = chrono::Utc::now();
 
         if is_earning {
-            bal.lifetime_earned += delta.unsigned_abs();
+            bal.lifetime_earned = bal.lifetime_earned.saturating_add(delta.unsigned_abs());
         } else {
-            bal.lifetime_spent += delta.unsigned_abs();
+            bal.lifetime_spent = bal.lifetime_spent.saturating_add(delta.unsigned_abs());
         }
 
         tracing::debug!(

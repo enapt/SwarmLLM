@@ -1,9 +1,7 @@
-use tokio::sync::mpsc;
-
 use crate::error::SwarmError;
 use crate::model::registry::ModelRegistry;
 use crate::model::shard::ShardStore;
-use crate::types::{ModelManifest, ShardId, ShardRequest, SwarmMessage};
+use crate::types::{ModelManifest, ShardId};
 
 /// Manages shard distribution — selecting which shards to download
 /// and coordinating transfers with peers.
@@ -20,13 +18,32 @@ impl ShardDistributor {
     ///
     /// This implements the "rarest first" strategy similar to BitTorrent,
     /// prioritizing shards that have the fewest replicas in the network.
+    ///
+    /// If `local_shards` is provided, already-held shard indices are excluded
+    /// from the result so callers don't re-download shards they already have.
     pub fn select_rarest_shards(
         manifest: &ModelManifest,
         registry: &ModelRegistry,
     ) -> Vec<ShardId> {
+        Self::select_rarest_shards_excluding(manifest, registry, None)
+    }
+
+    /// Select the rarest shards, optionally excluding already-held shard indices.
+    pub fn select_rarest_shards_excluding(
+        manifest: &ModelManifest,
+        registry: &ModelRegistry,
+        local_shards: Option<&[u32]>,
+    ) -> Vec<ShardId> {
         let mut shard_counts: Vec<(ShardId, usize)> = manifest
             .shards
             .iter()
+            .filter(|shard| {
+                // Exclude shards we already hold locally
+                match local_shards {
+                    Some(held) => !held.contains(&shard.index),
+                    None => true,
+                }
+            })
             .map(|shard| {
                 let shard_id = ShardId {
                     model_id: manifest.id.clone(),
@@ -41,41 +58,6 @@ impl ShardDistributor {
         shard_counts.sort_by_key(|(_, count)| *count);
 
         shard_counts.into_iter().map(|(id, _)| id).collect()
-    }
-
-    /// Send a shard transfer request to a peer via the network channel.
-    pub async fn request_shard(
-        shard_id: &ShardId,
-        network_tx: &mpsc::Sender<crate::types::NetworkCommand>,
-    ) -> Result<(), SwarmError> {
-        tracing::info!(
-            model = %shard_id.model_id,
-            index = shard_id.index,
-            "Requesting shard transfer"
-        );
-
-        // Create a shard announce request to trigger the download
-        // The actual shard transfer uses the request_response protocol
-        // which is handled in NetworkManager
-        let _request = ShardRequest {
-            shard_id: shard_id.clone(),
-            chunk_offset: 0,
-            chunk_size: 1024 * 1024, // 1MB chunks
-        };
-
-        // For now, announce interest via gossipsub
-        let announce = SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-            node_id: crate::types::NodeId([0u8; 32]), // Will be filled by caller
-            shards: vec![shard_id.clone()],
-            timestamp: chrono::Utc::now(),
-        });
-
-        network_tx
-            .send(crate::types::NetworkCommand::Broadcast(announce))
-            .await
-            .map_err(|e| SwarmError::Network(format!("Failed to send shard request: {e}")))?;
-
-        Ok(())
     }
 
     /// Handle received shard data by writing it to disk and verifying.

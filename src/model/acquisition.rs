@@ -343,69 +343,108 @@ impl AcquisitionManager {
             return;
         }
 
-        // Request each needed shard from the network
+        // Request each needed shard from the network with retry logic
         for shard_id in &needed {
-            // Find peers that hold this shard
-            let holders = self.shared_state.model_registry.shard_holders(shard_id);
-            if holders.is_empty() {
-                tracing::warn!(
-                    model = %model_id,
-                    shard = shard_id.index,
-                    "No known holders for shard"
-                );
-                continue;
-            }
+            let mut failed_peers: Vec<NodeId> = Vec::new();
+            let retry_delays = [5u64, 30, 120]; // exponential backoff: 5s, 30s, 120s
+            let mut success = false;
 
-            // Pick the best peer (lowest latency, highest trust)
-            let target = self.select_best_peer(&holders);
+            for attempt in 0..3u32 {
+                // Find peers that hold this shard, excluding previously failed ones
+                let holders = self.shared_state.model_registry.shard_holders(shard_id);
+                let eligible: Vec<_> = holders.iter().filter(|h| !failed_peers.contains(h)).cloned().collect();
 
-            // Send directed shard transfer request to the target peer
-            let request = crate::types::ShardRequest {
-                shard_id: shard_id.clone(),
-                chunk_offset: 0,
-                chunk_size: 32 * 1024 * 1024, // 32MB chunks
-            };
+                if eligible.is_empty() {
+                    if attempt == 0 && holders.is_empty() {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_id.index,
+                            "No known holders for shard"
+                        );
+                    } else {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_id.index,
+                            attempt = attempt + 1,
+                            "No eligible holders remaining after excluding failed peers"
+                        );
+                    }
+                    break;
+                }
 
-            // Look up the peer's libp2p PeerId bytes for directed request_response
-            let peer_id_bytes = self
-                .shared_state
-                .peer_registry
-                .get(&target)
-                .and_then(|p| p.peer_id_bytes.clone());
+                // Pick the best peer (lowest latency, highest trust)
+                let target = self.select_best_peer(&eligible);
 
-            match peer_id_bytes {
-                Some(bytes) => {
-                    let cmd = NetworkCommand::SendShardRequest {
-                        target_peer_bytes: bytes,
-                        request,
-                    };
-                    if let Err(e) = self.network_tx.send(cmd).await {
-                        tracing::warn!(error = %e, "Failed to send shard request");
+                // Send directed shard transfer request to the target peer
+                let request = crate::types::ShardRequest {
+                    shard_id: shard_id.clone(),
+                    chunk_offset: 0,
+                    chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                };
+
+                // Look up the peer's libp2p PeerId bytes for directed request_response
+                let peer_id_bytes = self
+                    .shared_state
+                    .peer_registry
+                    .get(&target)
+                    .and_then(|p| p.peer_id_bytes.clone());
+
+                match peer_id_bytes {
+                    Some(bytes) => {
+                        let cmd = NetworkCommand::SendShardRequest {
+                            target_peer_bytes: bytes,
+                            request,
+                        };
+                        if let Err(e) = self.network_tx.send(cmd).await {
+                            tracing::warn!(
+                                error = %e,
+                                attempt = attempt + 1,
+                                "Failed to send shard request, retrying"
+                            );
+                            failed_peers.push(target);
+                            if attempt < 2 {
+                                tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
+                            }
+                            continue;
+                        }
+                        success = true;
+                    }
+                    None => {
+                        tracing::warn!(
+                            peer = %target,
+                            attempt = attempt + 1,
+                            "Cannot send shard request: peer_id_bytes not available"
+                        );
+                        failed_peers.push(target);
+                        if attempt < 2 {
+                            tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
+                        }
+                        continue;
                     }
                 }
-                None => {
-                    tracing::warn!(
-                        peer = %target,
-                        "Cannot send shard request: peer_id_bytes not available"
-                    );
-                }
-            }
 
-            tracing::info!(
-                model = %model_id,
-                shard = shard_id.index,
-                peer = %target,
-                "Requested shard transfer"
-            );
+                tracing::info!(
+                    model = %model_id,
+                    shard = shard_id.index,
+                    peer = %target,
+                    attempt = attempt + 1,
+                    "Requested shard transfer"
+                );
+                break;
+            }
 
             // Update status log and mark shard as downloading
             if let Some(job) = self.jobs.get_mut(&model_id) {
-                job.status.log.push(format!(
-                    "Requesting shard {} from peer {}",
-                    shard_id.index, target
-                ));
-                if let Some(sp) = job.status.shard_progress.get_mut(&shard_id.index) {
-                    sp.state = ShardState::Downloading;
+                let msg = if success {
+                    format!("Requesting shard {}", shard_id.index)
+                } else {
+                    format!("Failed to request shard {} after 3 attempts", shard_id.index)
+                };
+                job.status.log.push(msg);
+                if success {
+                    if let Some(sp) = job.status.shard_progress.get_mut(&shard_id.index) {
+                        sp.state = ShardState::Downloading;
+                    }
                 }
                 self.shared_state
                     .acquisition_progress
@@ -483,6 +522,16 @@ impl AcquisitionManager {
 
         // Check if this shard is complete
         if *received >= total_size {
+            // Atomically finalize the shard file (.tmp → .bin)
+            if let Err(e) = self.shard_store.finalize_shard(&model_id, shard_index) {
+                tracing::error!(
+                    model = %model_id,
+                    shard = shard_index,
+                    error = %e,
+                    "Failed to finalize shard file"
+                );
+            }
+
             // SECURITY: Verify the completed shard against the manifest hash
             let shard_info_cloned = job
                 .manifest
@@ -666,10 +715,34 @@ impl AcquisitionManager {
                 Ok(()) => {
                     let size = exec.model_size_bytes().unwrap_or(0);
                     let gguf_meta = crate::inference::executor::extract_gguf_metadata(&gguf_path);
+                    // Extract EOS tokens from GGUF metadata with architecture-specific fallbacks
+                    let eos_tokens = {
+                        let mut tokens = Vec::new();
+                        if let Ok(mut f) = std::fs::File::open(&gguf_path) {
+                            if let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut f) {
+                                if let Some(eos_id) = ct.metadata.get("tokenizer.ggml.eos_token_id").and_then(|v| v.to_u32().ok()) {
+                                    tokens.push(eos_id);
+                                }
+                                let arch = ct.metadata.get("general.architecture").and_then(|v| v.to_string().ok().cloned()).unwrap_or_default();
+                                match arch.as_str() {
+                                    "qwen2" => {
+                                        for &id in &[151643u32, 151645] {
+                                            if !tokens.contains(&id) { tokens.push(id); }
+                                        }
+                                    }
+                                    _ => {
+                                        if !tokens.contains(&2) { tokens.push(2); }
+                                    }
+                                }
+                            }
+                        }
+                        if tokens.is_empty() { tokens.push(2); }
+                        tokens
+                    };
                     let info = crate::daemon::LoadedModelInfo {
                         name: model_name.clone(),
                         size_bytes: size,
-                        eos_tokens: vec![2],
+                        eos_tokens,
                         chat_template: gguf_meta.as_ref().and_then(|m| m.chat_template.clone()),
                         bos_token: gguf_meta
                             .as_ref()

@@ -19,13 +19,21 @@ pub fn apply_top_k(logits: &mut [f32], k: u32) {
         return;
     }
 
-    // Find the k-th largest value
-    let mut sorted: Vec<f32> = logits.to_vec();
-    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let threshold = sorted[k as usize - 1];
+    // Find the k-th largest value using partial sort (nth element)
+    let k_usize = k as usize;
+    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    indexed.select_nth_unstable_by(k_usize, |a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    for logit in logits.iter_mut() {
-        if *logit < threshold {
+    // Only the first k elements (indices 0..k) are in the top-k set
+    let mut keep = vec![false; logits.len()];
+    for &(idx, _) in &indexed[..k_usize] {
+        keep[idx] = true;
+    }
+
+    for (i, logit) in logits.iter_mut().enumerate() {
+        if !keep[i] {
             *logit = f32::NEG_INFINITY;
         }
     }
@@ -132,20 +140,10 @@ fn argmax(logits: &[f32]) -> u32 {
         .unwrap_or(0)
 }
 
-/// Simple pseudo-random float in [0, 1) using thread-local state.
+/// Random float in [0, 1) using the `rand` crate.
 /// Not cryptographically secure — fine for sampling.
 fn simple_random() -> f32 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut hasher = s.build_hasher();
-    hasher.write_u64(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64,
-    );
-    (hasher.finish() as f32) / (u64::MAX as f32)
+    rand::random::<f32>()
 }
 
 #[cfg(test)]

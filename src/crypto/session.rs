@@ -15,6 +15,8 @@ use crate::types::NodeId;
 pub struct CachedSession {
     cipher_key: [u8; 32],
     send_nonce: AtomicU64,
+    /// SEC-I5: Tracks the highest received nonce to prevent replay attacks.
+    last_seen_recv_nonce: AtomicU64,
     created_at: Instant,
 }
 
@@ -23,6 +25,7 @@ impl CachedSession {
         Self {
             cipher_key,
             send_nonce: AtomicU64::new(0),
+            last_seen_recv_nonce: AtomicU64::new(0),
             created_at: Instant::now(),
         }
     }
@@ -43,6 +46,8 @@ pub struct SessionManager {
     local_secret: StaticSecret,
     local_public: PublicKey,
     sessions: DashMap<NodeId, CachedSession>,
+    /// Monotonic session epoch counter to prevent key reuse across re-established sessions.
+    session_epoch: AtomicU64,
 }
 
 impl SessionManager {
@@ -54,6 +59,7 @@ impl SessionManager {
             local_secret: secret,
             local_public: public,
             sessions: DashMap::new(),
+            session_epoch: AtomicU64::new(0),
         }
     }
 
@@ -63,16 +69,20 @@ impl SessionManager {
     }
 
     /// Establish a session with a peer given their X25519 public key.
+    /// SEC-C5: Each session gets a unique epoch counter mixed into key derivation
+    /// to prevent nonce reuse when sessions are re-established with the same peer.
     pub fn establish_session(&self, peer: &NodeId, peer_x25519_pub: PublicKey) {
+        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
         let shared_secret = self.local_secret.diffie_hellman(&peer_x25519_pub);
-        let cipher_key = derive_cipher_key(
+        let cipher_key = derive_cipher_key_with_epoch(
             shared_secret.as_bytes(),
             &self.local_public,
             &peer_x25519_pub,
+            epoch,
         );
         self.sessions
             .insert(peer.clone(), CachedSession::new(cipher_key));
-        tracing::debug!(peer = %peer, "Established encryption session");
+        tracing::debug!(peer = %peer, epoch, "Established encryption session");
     }
 
     /// Check if a session exists for the given peer.
@@ -109,6 +119,7 @@ impl SessionManager {
     }
 
     /// Open (decrypt) data from a specific peer.
+    /// SEC-I5: Rejects replayed messages by enforcing monotonic nonce ordering.
     pub fn open(&self, peer: &NodeId, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SwarmError> {
         if sealed.len() < 12 {
             return Err(SwarmError::DecryptionFailed);
@@ -117,6 +128,17 @@ impl SessionManager {
             .sessions
             .get(peer)
             .ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
+
+        // Extract and check the nonce counter for replay protection
+        let mut nonce_counter_bytes = [0u8; 8];
+        nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
+        let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
+
+        let last_seen = session.last_seen_recv_nonce.load(Ordering::SeqCst);
+        if recv_nonce > 0 && recv_nonce <= last_seen {
+            tracing::warn!(peer = %peer, recv_nonce, last_seen, "Rejecting replayed nonce");
+            return Err(SwarmError::DecryptionFailed);
+        }
 
         let nonce = Nonce::from_slice(&sealed[..12]);
         let ciphertext = &sealed[12..];
@@ -128,9 +150,14 @@ impl SessionManager {
             msg: ciphertext,
             aad,
         };
-        cipher
+        let plaintext = cipher
             .decrypt(nonce, payload)
-            .map_err(|_| SwarmError::DecryptionFailed)
+            .map_err(|_| SwarmError::DecryptionFailed)?;
+
+        // Update last seen nonce after successful decryption
+        session.last_seen_recv_nonce.fetch_max(recv_nonce, Ordering::SeqCst);
+
+        Ok(plaintext)
     }
 
     /// Evict sessions older than `max_age`.
@@ -227,6 +254,25 @@ pub fn ed25519_pubkey_to_x25519(ed_pub_bytes: &[u8; 32]) -> Option<PublicKey> {
     let edwards_point = compressed.decompress()?;
     let montgomery = edwards_point.to_montgomery();
     Some(PublicKey::from(montgomery.to_bytes()))
+}
+
+/// SEC-C5: Derive a cipher key with session epoch mixed in to prevent key reuse.
+fn derive_cipher_key_with_epoch(shared_secret: &[u8], pub_a: &PublicKey, pub_b: &PublicKey, epoch: u64) -> [u8; 32] {
+    let (first, second) = if pub_a.as_bytes() < pub_b.as_bytes() {
+        (pub_a.as_bytes(), pub_b.as_bytes())
+    } else {
+        (pub_b.as_bytes(), pub_a.as_bytes())
+    };
+    let mut salt = Vec::with_capacity(72);
+    salt.extend_from_slice(first);
+    salt.extend_from_slice(second);
+    salt.extend_from_slice(&epoch.to_le_bytes());
+
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
+    let mut okm = [0u8; 32];
+    hk.expand(b"swarmllm-session-v1", &mut okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
 }
 
 /// Derive a symmetric cipher key from an ECDH shared secret using HKDF-SHA256.

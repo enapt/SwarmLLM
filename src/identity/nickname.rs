@@ -54,7 +54,22 @@ impl NicknameRecord {
     }
 
     /// Verify the Ed25519 signature on this record.
+    /// SEC-I3: Also rejects records older than 1 hour to prevent stale replay.
     pub fn verify(&self) -> Result<(), SwarmError> {
+        // Timestamp freshness check: reject records older than 1 hour
+        let age = chrono::Utc::now() - self.timestamp;
+        if age > chrono::Duration::hours(1) {
+            return Err(SwarmError::InvalidNickname(
+                "Nickname record is stale (older than 1 hour)".into(),
+            ));
+        }
+        // Also reject records with timestamps in the future (clock skew tolerance: 5 min)
+        if self.timestamp > chrono::Utc::now() + chrono::Duration::minutes(5) {
+            return Err(SwarmError::InvalidNickname(
+                "Nickname record has future timestamp".into(),
+            ));
+        }
+
         let payload = Self::signing_payload(&self.node_id, &self.nickname, &self.timestamp);
         let vk = VerifyingKey::from_bytes(&self.node_id.0)
             .map_err(|e| SwarmError::InvalidNickname(format!("Invalid public key: {e}")))?;

@@ -55,7 +55,9 @@ impl ModelManifest {
         hasher.update(format!("{:?}", self.architecture).as_bytes());
         hasher.update(format!("{:?}", self.quantization).as_bytes());
         hasher.update(&self.num_layers.to_le_bytes());
+        hasher.update(&self.num_params_billions.to_le_bytes());
         hasher.update(&self.total_size_bytes.to_le_bytes());
+        hasher.update(self.publish_date.to_rfc3339().as_bytes());
         hasher.update(&self.shard_count.to_le_bytes());
         for shard in &self.shards {
             hasher.update(&shard.index.to_le_bytes());

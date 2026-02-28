@@ -99,21 +99,26 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
 libp2p Swarm
 ├── Kademlia (DHT)
 │   ├── /swarm/node/{node_id}         → NodeCapability
-│   ├── /swarm/shard/{model}/{index}  → Vec<NodeId>
+│   ├── /swarm/shard/{model}/{index}  → Vec<NodeId> (batched per model)
 │   └── /swarm/model/{model_id}       → ModelManifest
+│   └── Records expire after 1 hour, re-published periodically
 │
-├── GossipSub (pub/sub)
+├── GossipSub (pub/sub, mesh_outbound_min=1)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
 │   ├── swarm/governance              → ModelVote
 │   ├── swarm/health                  → trust summaries
-│   ├── swarm/identity                → NicknameRecord (signed)
+│   ├── swarm/identity                → NicknameRecord (signed, timestamp-checked)
 │   └── swarm/pools                   → PoolState, PoolInvitation
+│   └── Messages >5 min old are rejected (replay protection)
+│   └── Failed publishes buffered and replayed on mesh formation
 │
 ├── request_response
-│   └── Direct inference messages (LayerForward, LayerResult, ShardRequest)
+│   ├── Tensor channel (120s timeout) — LayerForward, LayerResult
+│   └── Shard channel (300s timeout) — ShardRequest, ShardResponse
 │
-├── Identify (protocol identification)
-├── AutoNAT (NAT detection)
+├── connection_limits (max 2/peer, 500 total)
+├── Identify (protocol identification + peer_to_node reverse map)
+├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
 ├── DCUtR (hole punching)
 └── relay::client (circuit relay)
 ```
@@ -196,10 +201,12 @@ For a 7B model (hidden_dim=3584):
 
 ### KV-Cache Management
 
-- Each SplitModel maintains per-layer KV-cache
+- Each SplitModel maintains per-layer KV-cache, serialized by Mutex per model
 - KV-cache is cleared when `sequence_num == 0` (start of new request)
 - `index_pos` travels through the wire protocol so all nodes apply correct RoPE positioning
 - Position tracking: `index_pos = prompt_token_count` after prefill, increments by 1 per decode step
+- KvCacheManager tracks sessions and wired to inference router for cache reuse
+- Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
 
 ## Credit System
 
@@ -238,14 +245,14 @@ Network Registry (GossipSub/DHT)
  ┌─────────────────┐     Rarest-first
  │ Shard Selection │────────────────▶ BitTorrent-style
  └────────┬────────┘
-          │ request from peers
+          │ request from peers (3 retries, exponential backoff)
           ▼
- ┌─────────────────┐     Per-chunk write
- │  Download Loop  │────────────────▶ Progressive to disk
+ ┌─────────────────┐     Atomic write to .tmp
+ │  Download Loop  │────────────────▶ Rename to .bin on completion
  └────────┬────────┘
           │ complete shard
           ▼
- ┌─────────────────┐     BLAKE3 vs manifest
+ ┌─────────────────┐     BLAKE3 vs manifest (strict: no zero-hash bypass)
  │ Shard Verify    │────────────────▶ Quarantine + penalize on mismatch
  └────────┬────────┘
           │ all shards verified
@@ -256,10 +263,14 @@ Network Registry (GossipSub/DHT)
 **Key invariants**:
 - Manifests MUST come from the network registry, not from disk
 - Manifest integrity is verified (BLAKE3 self-hash) before trusting shard hashes
-- Each downloaded shard is verified against the manifest hash
+- DB-restored manifests are also hash-verified on startup
+- Each downloaded shard is verified against the manifest hash (zero-hash bypass only for local HF downloads)
 - Failed shards are renamed `.bin.quarantine` and the serving peer's trust is penalized
+- Downloads are retried (3 attempts, 5s/30s/120s backoff) with alternate peer selection
+- Atomic writes: shards written to `.tmp` then renamed, preventing corrupt partial files
 - On startup, `load_all_local()` rejects model directories without a valid manifest
 - On startup, every existing shard is re-verified against its manifest hash
+- Stale `.tmp` files cleaned up on startup
 
 **AcquisitionManager** (`src/model/acquisition.rs`) orchestrates this flow as a
 long-running Tokio task, receiving commands via `mpsc` from the API server.
@@ -336,14 +347,17 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 │                                                             │
 │  Tier 1: Pairwise Sessions (unicast)                        │
 │    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
-│    Established during libp2p Identify handshake             │
+│    Session epoch mixed into key derivation (no nonce reuse) │
+│    Replay protection: recv nonce must be monotonically      │
+│    increasing (rejects nonce ≤ last_seen_recv_nonce)        │
 │                                                             │
 │  Tier 2: Pipeline Sealing (inference prompts)               │
 │    Per-request ephemeral key → sealed prompt/response       │
 │    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
 │                                                             │
 │  Tier 3: Sealed Gossip (broadcasts)                         │
-│    Epoch-based group key derived from network membership    │
+│    Epoch-based group key + Ed25519 origin signature         │
+│    Verifies sender authenticity before processing           │
 │    1hr rotation cycle                                       │
 │                                                             │
 │  Modules: src/crypto/{session, pipeline_seal, gossip_seal,  │
@@ -354,6 +368,7 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 ## Identity & Nicknames
 
 - Ed25519-signed nickname records with timestamp-wins conflict resolution
+- Timestamp freshness check: rejects records older than 1 hour or >5min in future
 - GossipSub topic `swarm/identity` for network-wide propagation
 - Collision handling: `nickname#ab12` suffix from node ID prefix
 - Sled trees: `"nicknames"`, `"identity_prefs"`
@@ -361,18 +376,31 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 ## Device Pools
 
 - Dual-signature invitation/acceptance protocol (owner signs invite, member signs acceptance)
-- Credit forwarding: member inference earnings → `PoolCreditForward` → owner's balance
+- Pool state gossip verifies each member's acceptance signature
+- Member removal requires Ed25519-signed leave notice (prevents forged ejection)
+- Credit forwarding: member inference earnings → `PoolCreditForward` (dual-signed) → `apply_credit_direct` to owner's balance
 - Pool leaderboard aggregates member contributions
+- Invitation expiry checked at API layer with clear error messages
 - Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=3
+
+## Credit System Security
+
+- Transaction replay protection: UUID deduplication checked against DB before accepting
+- Balance arithmetic uses `saturating_add` (no overflow/underflow panics)
+- Priority tier calculation consistent between scheduler and display
+- AntiGaming wired into credit flow: atomic check+record prevents TOCTOU
+- Peer balance gossip rejects implausible values (abs > 100M)
 
 ## API Authentication
 
 - Bearer token middleware in `src/api/middleware.rs`
 - Auto-generated 32-byte hex API key on first run, persisted in sled
-- **Protected paths**: `/v1/*` (OpenAI-compatible inference API)
+- **Protected paths**: `/v1/*` (inference), `/api/admin/config` (PUT), `/api/admin/shutdown`,
+  `/api/admin/hf/*` (downloads), `/api/admin/api-key`
 - **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
-  `/api/admin/*` (except `/api/admin/api-key`), `/api/identity/*`, `/api/pool/*`
-- Frontend dashboard APIs are exempt (already CORS-protected to localhost only)
+  read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
+- Request body size limit: 2MB (configurable via `DefaultBodyLimit`)
+- Content-Security-Policy header enforced on all responses
 
 ## Shard-Only Mode
 

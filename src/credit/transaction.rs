@@ -64,11 +64,26 @@ pub fn cosign_transaction(
 }
 
 /// Verify both signatures on a fully-signed transaction.
+/// Also checks for UUID replay: rejects transactions already recorded in the database.
 pub fn verify_transaction(
     tx: &CreditTransaction,
     from_key: &VerifyingKey,
     to_key: &VerifyingKey,
+    db: Option<&crate::storage::db::Database>,
 ) -> Result<(), SwarmError> {
+    // SEC-C3: Check for transaction replay via UUID deduplication
+    if let Some(db) = db {
+        if let Ok(Some(_)) = db.get_json::<CreditTransaction>(
+            crate::credit::ledger::TREE_TRANSACTIONS,
+            &tx.id.to_string(),
+        ) {
+            return Err(SwarmError::Internal(format!(
+                "Duplicate transaction: {}",
+                tx.id
+            )));
+        }
+    }
+
     verify_single_signature(tx, from_key, true)?;
     verify_single_signature(tx, to_key, false)?;
     Ok(())
@@ -126,7 +141,7 @@ fn build_signing_payload(
     hasher.update(&from.0);
     hasher.update(&to.0);
     hasher.update(&amount.to_le_bytes());
-    hasher.update(&serde_json::to_vec(reason).unwrap_or_default());
+    hasher.update(&serde_json::to_vec(reason).expect("TransactionReason must be serializable"));
     hasher.update(timestamp.to_rfc3339().as_bytes());
     hasher.finalize().as_bytes().to_vec()
 }
@@ -164,7 +179,7 @@ mod tests {
 
         // Now both signatures should be valid
         assert!(!tx.signature_to.is_empty());
-        verify_transaction(&tx, &server.verifying_key(), &client.verifying_key()).unwrap();
+        verify_transaction(&tx, &server.verifying_key(), &client.verifying_key(), None).unwrap();
     }
 
     #[test]

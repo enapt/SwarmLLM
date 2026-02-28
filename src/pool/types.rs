@@ -116,6 +116,7 @@ pub enum PoolCommand {
     InboundMemberLeft {
         pool_id: PoolId,
         node_id: NodeId,
+        signature: Vec<u8>,
     },
     GetState {
         reply: tokio::sync::oneshot::Sender<Option<PoolState>>,

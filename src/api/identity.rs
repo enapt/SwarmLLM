@@ -128,14 +128,20 @@ pub async fn leaderboard(
         "tier": self_tier,
     }));
 
-    // Add known peers — use credit gossip data if available
+    // Add known peers — estimate tier from trust_score as a proxy for credit standing.
+    // Per-peer credit balances aren't tracked in SharedState, so we derive a rough
+    // estimate: high trust_score peers likely have positive balances.
     for peer in state.shared_state.peer_registry.iter() {
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
+        // Estimate credit bucket from trust_score (0.0-1.0 → mapped to balance range)
+        let estimated_balance = (peer.trust_score * 5000.0) as i64;
+        let peer_tier =
+            crate::credit::priority::PriorityCalculator::tier_name(estimated_balance);
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),
             "display_name": peer_name,
-            "credits": 0,
-            "tier": "Silver",
+            "credits": estimated_balance,
+            "tier": peer_tier,
         }));
     }
 

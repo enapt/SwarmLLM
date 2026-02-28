@@ -52,6 +52,16 @@ impl PipelineScheduler {
         model_id: &ModelId,
         local_node_id: &NodeId,
     ) -> Result<PipelineAssignment, SwarmError> {
+        self.assemble_pipeline_for(model_id, local_node_id, uuid::Uuid::new_v4())
+    }
+
+    /// Assemble a pipeline for the given model with a specific request ID.
+    pub fn assemble_pipeline_for(
+        &self,
+        model_id: &ModelId,
+        local_node_id: &NodeId,
+        request_id: uuid::Uuid,
+    ) -> Result<PipelineAssignment, SwarmError> {
         let manifest = self
             .shared_state
             .model_registry
@@ -81,8 +91,6 @@ impl PipelineScheduler {
 
         // Identify standby nodes for each segment
         let standbys = self.find_standbys(&segments, &candidates);
-
-        let request_id = uuid::Uuid::new_v4();
 
         tracing::info!(
             request_id = %request_id,
@@ -173,12 +181,17 @@ impl PipelineScheduler {
             let last_shard_idx = manifest.shard_count.saturating_sub(1);
             let can_be_last = shard_indices.contains(&last_shard_idx);
 
+            // Approximate load from active pipelines targeting this node
+            let active_load = self.shared_state.active_pipelines.iter()
+                .filter(|entry| entry.value().segments.iter().any(|s| s.node_id == node_id))
+                .count() as f32;
+
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
                 available_ranges: ranges,
                 latency_ms,
-                load: 0.0, // TODO: track active requests per node
+                load: active_load,
                 trust_score,
                 can_be_first,
                 can_be_last,

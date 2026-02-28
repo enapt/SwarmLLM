@@ -237,6 +237,10 @@ impl MoeShardStrategy {
 
 /// Compute minimum VRAM (MB) needed to host one layer's expert FFN block
 /// for an MoE model.
+///
+/// Separates attention (~30% of layer) from FFN (~70% of layer) for more
+/// accurate estimates. In MoE models, attention is shared but FFN is split
+/// across experts.
 pub fn moe_min_vram_mb(manifest: &ModelManifest) -> u64 {
     let (num_experts, _experts_per_token) = match &manifest.architecture {
         ModelArchitecture::Mixtral {
@@ -254,11 +258,49 @@ pub fn moe_min_vram_mb(manifest: &ModelManifest) -> u64 {
         return 0;
     }
 
-    // Rough estimate: total model size / num_layers gives per-layer size,
-    // then divide by num_experts for one expert FFN block
+    // Per-layer size from total model size
     let per_layer_bytes = manifest.total_size_bytes / manifest.num_layers as u64;
-    let per_expert_bytes = per_layer_bytes / num_experts as u64;
-    per_expert_bytes / (1024 * 1024)
+
+    // In transformer layers, attention is ~30% and FFN is ~70% of parameters.
+    // For MoE: attention weights are shared, FFN weights are split across experts.
+    let attention_bytes = per_layer_bytes * 30 / 100; // shared attention block
+    let ffn_total_bytes = per_layer_bytes * 70 / 100; // total FFN across all experts
+    let per_expert_ffn_bytes = ffn_total_bytes / num_experts as u64;
+
+    // Minimum VRAM = attention (always needed) + one expert FFN block
+    (attention_bytes + per_expert_ffn_bytes) / (1024 * 1024)
+}
+
+/// Estimate VRAM (MB) needed for a model, factoring in context length for KV cache.
+///
+/// KV cache size per layer = 2 * hidden_dim * context_len * sizeof(fp16)
+/// For a rough estimate without exact hidden_dim, we derive it from model params:
+///   hidden_dim ≈ sqrt(params_billions * 1e9 / (12 * num_layers))
+/// Default context length is 4096 if not specified.
+pub fn estimate_vram_with_context_mb(
+    total_size_bytes: u64,
+    num_layers: u32,
+    num_params_billions: f64,
+    context_length: Option<u32>,
+) -> u64 {
+    let weights_mb = total_size_bytes as f64 / (1024.0 * 1024.0);
+    let ctx_len = context_length.unwrap_or(4096) as f64;
+
+    if num_layers == 0 || num_params_billions <= 0.0 {
+        // Fallback: flat 15% overhead estimate
+        return (weights_mb * 1.15) as u64;
+    }
+
+    // Rough hidden_dim estimate from parameter count
+    // params ≈ 12 * num_layers * hidden_dim^2 (standard transformer scaling)
+    let hidden_dim = ((num_params_billions * 1e9) / (12.0 * num_layers as f64)).sqrt();
+
+    // KV cache: 2 (K+V) * num_layers * hidden_dim * context_len * 2 (fp16 bytes)
+    let kv_cache_bytes = 2.0 * num_layers as f64 * hidden_dim * ctx_len * 2.0;
+    let kv_cache_mb = kv_cache_bytes / (1024.0 * 1024.0);
+
+    // Total = weights + KV cache + ~5% overhead for activations/scratch
+    (weights_mb + kv_cache_mb + weights_mb * 0.05) as u64
 }
 
 #[cfg(test)]

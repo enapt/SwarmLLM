@@ -335,9 +335,11 @@ impl InferenceRouter {
                 break;
             }
 
-            // If batching is enabled and we have a partial batch, wait briefly
-            // for more requests to arrive before dispatching.
+            // If batching is enabled and we have a partial batch (>1 request),
+            // wait briefly for more requests to arrive before dispatching.
+            // Skip the wait for single requests to avoid unnecessary latency.
             if self.max_batch_size > 1
+                && self.queue.len() > 1
                 && self.queue.len() < self.max_batch_size
                 && !self.batch_timeout.is_zero()
             {
@@ -406,6 +408,17 @@ impl InferenceRouter {
 
     /// Dispatch a single request (non-batched path, identical to previous behavior).
     fn dispatch_single(&mut self, queued: QueuedRequest) {
+        // Register KV-cache session for this request
+        self.kv_cache.register_session(
+            queued.request.id,
+            crate::types::PipelineAssignment {
+                request_id: queued.request.id,
+                segments: vec![],
+                standbys: vec![],
+            },
+            0,
+        );
+
         self.active_count.fetch_add(1, Ordering::Relaxed);
         let active_count = self.active_count.clone();
         let shared_state = self.shared_state.clone();
@@ -685,7 +698,7 @@ async fn execute_request(
         "Assembling distributed pipeline"
     );
 
-    let assignment = scheduler.assemble_pipeline(model_id, &local_node_id)?;
+    let assignment = scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?;
 
     tracing::info!(
         request_id = %request.id,

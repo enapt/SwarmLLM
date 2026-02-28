@@ -98,13 +98,25 @@ impl IntoResponse for ApiError {
             SwarmError::NoModelLoaded => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
             SwarmError::InferenceTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.0.to_string()),
             SwarmError::InsufficientCredits { .. } => {
-                (StatusCode::TOO_MANY_REQUESTS, self.0.to_string())
+                (StatusCode::PAYMENT_REQUIRED, self.0.to_string())
+            }
+            SwarmError::PeerNotFound(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string())
             }
             SwarmError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.0.to_string()),
             SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             SwarmError::InvalidNickname(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
         };
+        // Log 5xx errors so they appear in tracing output
+        if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                error = %message,
+                "Internal server error"
+            );
+        }
+
         (
             status,
             Json(serde_json::json!({

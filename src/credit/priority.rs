@@ -20,19 +20,20 @@ pub fn calculate_tier(balance: i64, network_percentile: f32) -> PriorityTier {
 }
 
 /// Utility for tier name resolution (used by admin API).
+/// SEC-I2: Delegates to `calculate_tier()` to avoid inconsistent tier logic.
 pub struct PriorityCalculator;
 
 impl PriorityCalculator {
-    /// Return a human-readable tier name based on balance alone (simplified).
+    /// Return a human-readable tier name based on the tier enum.
+    /// When percentile data is unavailable, uses a default of 0.5.
     pub fn tier_name(balance: i64) -> &'static str {
-        if balance > 10000 {
-            "platinum"
-        } else if balance > 1000 {
-            "gold"
-        } else if balance > 0 {
-            "silver"
-        } else {
-            "bronze"
+        // Delegate to the canonical tier calculation with a default percentile
+        let tier = calculate_tier(balance, if balance > 0 { 0.5 } else { 0.0 });
+        match tier {
+            PriorityTier::Platinum => "platinum",
+            PriorityTier::Gold => "gold",
+            PriorityTier::Silver => "silver",
+            PriorityTier::Bronze => "bronze",
         }
     }
 }

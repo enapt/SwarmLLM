@@ -194,3 +194,114 @@
 - [x] Bug fix: pool/manager.rs signature byte conversion uses safe error handling (no unwrap)
 
 **Acceptance test**: Node starts with incomplete shards. Auto-manager downloads only the missing configured-range shards. Shard grid shows local/peer/missing/downloading status. VRAM fitness influences model scoring.
+
+---
+
+## Phase 10: System-Wide Audit Hardening
+
+**Goal**: Fix all 130 bugs/issues identified by 6-agent parallel audit. Strengthen security, correctness, reliability, and scalability.
+
+**Date**: 2026-02-28 | **Findings**: 31 critical, 51 important, 48 minor
+
+### Security / Credit / Crypto / Pools (21 fixes)
+- [x] Authenticated MemberLeft — Ed25519-signed leave notices required
+- [x] Pool credit forwarding functional — apply_credit_direct to owner + dual-sig cosigning
+- [x] Transaction replay protection — UUID dedup before accepting
+- [x] AntiGaming wired — atomic check_and_record_transaction in credit flow
+- [x] Nonce reuse fix — session epoch mixed into HKDF key derivation
+- [x] Gossip authenticity — Ed25519 origin signature on sealed gossip messages
+- [x] Pool state gossip — acceptance_signature verified per member
+- [x] Saturating arithmetic for balance/lifetime counters
+- [x] Priority tier consistency — tier_name delegates to calculate_tier
+- [x] Nickname timestamp freshness check (1hr window)
+- [x] Credit forward amount validation (>0)
+- [x] Replay detection — monotonic recv nonce tracking
+- [x] Windows key file ACL restriction
+- [x] Dual-sig completion for pool credit forwards
+
+### Networking / P2P (22 fixes)
+- [x] pending_shard_requests keyed by OutboundRequestId (not PeerId)
+- [x] file.seek() errors propagated (not silently ignored)
+- [x] Shard transfer timeout 300s (not 10s default)
+- [x] O(1) PeerId→NodeId reverse lookup (DashMap)
+- [x] Cleanup download state on disconnect
+- [x] Peer registry pruning on disconnect
+- [x] Async peer count updates (write().await)
+- [x] GossipSub publish buffering at startup
+- [x] Connection limits (500 total, 2 per peer)
+- [x] DHT record expiry (1 hour)
+- [x] Kademlia Client/Server mode based on NAT
+- [x] Backpressure on outbound channel (try_send + warn)
+- [x] Dead transport code removed, relay logging, wire format comment, gossip timestamp validation
+
+### Model / Shard Management (18 fixes)
+- [x] EOS tokens from GGUF metadata (not hardcoded [2])
+- [x] Zero-hash bypass restricted (network shards require real hash)
+- [x] Dead request_shard() deleted
+- [x] 3-retry exponential backoff for shard downloads
+- [x] Atomic shard writes (.tmp + rename)
+- [x] reconstruct_gguf hash verification (not just size)
+- [x] Auto-manage HF path verifies shards
+- [x] acquisition_progress total_shards from manifest
+- [x] HF 429/503 retry with Retry-After
+- [x] Graceful progress task shutdown
+- [x] Quarantine rename failure handling
+- [x] Governance vote overflow protection
+- [x] HashSet for shard_holders (O(1) dedup)
+- [x] MoE VRAM estimate + context length factor
+
+### Inference Pipeline (20 fixes)
+- [x] KV-cache concurrent access documented + serialized
+- [x] Random sampler seed (not fixed 42)
+- [x] rand::random PRNG (not homebrew hash)
+- [x] Context window from GGUF metadata (not hardcoded 4096)
+- [x] Failover passes actual index_pos (not 0)
+- [x] top_p from params (not hardcoded 0.95)
+- [x] Earned credits persisted to DB
+- [x] TOCTOU-safe split model loading (entry API)
+- [x] Load-aware scheduling (active pipeline count)
+- [x] Skip batch timeout for single requests
+- [x] LRU mask cache eviction (max 16)
+- [x] ShardReader cached file lengths (no extra seeks)
+- [x] KvCacheManager wired to router
+- [x] Non-ASCII token count estimation
+- [x] Consistent TensorFormat in failover
+- [x] Strict top_k, pass-through request IDs, shard-aware is_first/is_last
+
+### Daemon / Storage / Health (30 fixes)
+- [x] Graceful shutdown with DB flush
+- [x] Rebalancer only announces held shards
+- [x] Blocking I/O wrapped in spawn_blocking
+- [x] SIGTERM handler for systemd/Docker
+- [x] AutoShardManager handle tracked in select!
+- [x] LayerForward semaphore (max 64 concurrent)
+- [x] Stale channel cleanup
+- [x] DB deserialization failure logging
+- [x] Config validation (ranges, port 0)
+- [x] Env var parse failure logging
+- [x] Disk space for data_dir partition only
+- [x] DB schema versioning
+- [x] shard_range persistence
+- [x] Per-model rebalance cooldown
+- [x] GGUF architecture mapping
+- [x] DB manifest hash verification
+- [x] HTTP status codes: 402 (credits), 503 (peer), 5xx logging
+- [x] API key stderr-only, reqwest for status, config log level wiring
+
+### API / Frontend (18 fixes)
+- [x] Auth middleware protects /v1/* and sensitive admin endpoints
+- [x] Leaderboard wired to credit data (not hardcoded)
+- [x] /v1/completions streaming support
+- [x] SSRF: IPv6 link-local + IPv4-mapped blocked
+- [x] EOS from GGUF in HF download path
+- [x] Shared reqwest::Client (LazyLock)
+- [x] Sampling parameter clamping for completions
+- [x] HTTP 400 for admin validation errors (not 200)
+- [x] WebSocket ping/pong heartbeat (30s)
+- [x] Duplicate escapeHtml removed
+- [x] Request body size limit (2MB)
+- [x] Setup wizard server-side persistence
+- [x] Model selection persistence (localStorage)
+- [x] Credit sparkline deltas, REST poll pausing, CSP header
+
+**Test results**: 226 tests passing (210 unit + 16 integration), 0 failures, clean clippy

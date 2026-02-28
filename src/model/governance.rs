@@ -68,9 +68,9 @@ impl VoteTally {
         self.unique_voters.insert(vote.voter.clone());
 
         if vote.vote {
-            self.votes_for += vote.weight;
+            self.votes_for = self.votes_for.saturating_add(vote.weight);
         } else {
-            self.votes_against += vote.weight;
+            self.votes_against = self.votes_against.saturating_add(vote.weight);
         }
 
         Ok(())

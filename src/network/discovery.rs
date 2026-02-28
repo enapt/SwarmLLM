@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libp2p::kad;
 use libp2p::kad::RecordKey;
@@ -101,11 +101,12 @@ pub fn announce_capability(
     let key = RecordKey::new(&format!("/swarm/node/{node_id}"));
     let value = serde_json::to_vec(capability).map_err(|e| SwarmError::Network(e.to_string()))?;
 
+    // NET-I6: Set 1-hour TTL on DHT records
     let record = kad::Record {
         key,
         value,
         publisher: None,
-        expires: None,
+        expires: Some(Instant::now() + Duration::from_secs(3600)),
     };
 
     swarm
@@ -119,31 +120,47 @@ pub fn announce_capability(
 }
 
 /// Announce shard holdings to the DHT.
+///
+/// NET-M4: Batches shards by model into a single DHT record per model,
+/// reducing DHT write pressure for nodes hosting many shards.
 pub fn announce_shards(
     swarm: &mut Swarm<SwarmBehaviour>,
     node_id: &NodeId,
     shards: &[ShardId],
 ) -> Result<(), SwarmError> {
+    // Group shards by model_id for batched announcement
+    let mut by_model: std::collections::HashMap<&crate::types::ModelId, Vec<u32>> =
+        std::collections::HashMap::new();
     for shard in shards {
-        let key = RecordKey::new(&format!("/swarm/shard/{}/{}", shard.model_id, shard.index));
-        let value = serde_json::to_vec(node_id).map_err(|e| SwarmError::Network(e.to_string()))?;
+        by_model
+            .entry(&shard.model_id)
+            .or_default()
+            .push(shard.index);
+    }
 
+    for (model_id, indices) in &by_model {
+        // Single record per model: key = /swarm/shards/<model_id>, value = (node_id, [indices])
+        let key = RecordKey::new(&format!("/swarm/shards/{model_id}"));
+        let value = serde_json::to_vec(&(node_id, indices))
+            .map_err(|e| SwarmError::Network(e.to_string()))?;
+
+        // NET-I6: Set 1-hour TTL on DHT records
         let record = kad::Record {
             key,
             value,
             publisher: None,
-            expires: None,
+            expires: Some(Instant::now() + Duration::from_secs(3600)),
         };
 
         swarm
             .behaviour_mut()
             .kademlia
             .put_record(record, kad::Quorum::One)
-            .map_err(|e| SwarmError::Network(format!("Failed to announce shard: {e}")))?;
+            .map_err(|e| SwarmError::Network(format!("Failed to announce shards: {e}")))?;
     }
 
     if !shards.is_empty() {
-        tracing::info!(count = shards.len(), "Announced shards to DHT");
+        tracing::info!(count = shards.len(), models = by_model.len(), "Announced shards to DHT");
     }
 
     Ok(())

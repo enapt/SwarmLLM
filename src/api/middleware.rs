@@ -56,16 +56,26 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 /// like the OpenAI-compatible inference API (`/v1/...`).
 /// Note: `/api/admin/api-key` requires auth (returns the raw key).
 fn is_exempt_path(path: &str) -> bool {
-    // api-key endpoint must require auth — it returns the raw key
-    if path == "/api/admin/api-key" {
-        return false;
-    }
+    // Frontend routes, health checks, static assets are exempt.
+    // All /v1/* routes require Bearer token (OpenAI-compatible API).
+    // Sensitive /api/admin/* endpoints require auth; only safe read-only
+    // dashboard endpoints are exempt.
     matches!(
         path,
         "/" | "/health" | "/admin" | "/chat" | "/setup"
-    ) || path.starts_with("/v1/")
-        || path.starts_with("/static/")
-        || path.starts_with("/api/admin/")
+    ) || path.starts_with("/static/")
+        || matches!(
+            path,
+            "/api/admin/stats"
+                | "/api/admin/config"
+                | "/api/admin/models"
+                | "/api/admin/peers"
+                | "/api/admin/credits"
+                | "/api/admin/shard-storage"
+                | "/api/admin/hf/search"
+                | "/api/admin/hf/probe"
+                | "/api/admin/network-map"
+        )
         || path.starts_with("/api/identity/")
         || path.starts_with("/api/pool/")
 }
@@ -136,15 +146,23 @@ mod tests {
         assert!(is_exempt_path("/api/admin/stats"));
         assert!(is_exempt_path("/api/admin/config"));
         assert!(is_exempt_path("/api/admin/shard-storage"));
+        assert!(is_exempt_path("/api/admin/peers"));
+        assert!(is_exempt_path("/api/admin/credits"));
+        assert!(is_exempt_path("/api/admin/network-map"));
+        assert!(is_exempt_path("/api/admin/hf/search"));
+        assert!(is_exempt_path("/api/admin/hf/probe"));
         assert!(is_exempt_path("/api/identity/nickname"));
         assert!(is_exempt_path("/api/pool/state"));
-        assert!(is_exempt_path("/v1/models"));
-        assert!(is_exempt_path("/v1/chat/completions"));
-        assert!(is_exempt_path("/v1/completions"));
     }
 
     #[test]
     fn non_exempt_paths() {
         assert!(!is_exempt_path("/api/admin/api-key")); // sensitive — requires auth
+        assert!(!is_exempt_path("/api/admin/shutdown")); // destructive — requires auth
+        assert!(!is_exempt_path("/api/admin/hf/download")); // write op — requires auth
+        assert!(!is_exempt_path("/api/admin/hf/download-shards")); // write op — requires auth
+        assert!(!is_exempt_path("/v1/models")); // OpenAI API — requires auth
+        assert!(!is_exempt_path("/v1/chat/completions")); // OpenAI API — requires auth
+        assert!(!is_exempt_path("/v1/completions")); // OpenAI API — requires auth
     }
 }

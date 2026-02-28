@@ -692,8 +692,8 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
 pub struct ShardReader {
     /// Raw GGUF header bytes (metadata + tensor info table).
     header: Vec<u8>,
-    /// Shard files ordered by index. Each entry: (start_byte_in_gguf, file_path).
-    shards: Vec<(u64, PathBuf)>,
+    /// Shard files ordered by index. Each entry: (start_byte_in_gguf, file_path, cached_length).
+    shards: Vec<(u64, PathBuf, u64)>,
     /// Total size of the virtual file (header + all tensor data).
     total_size: u64,
     /// Current seek position in the virtual file.
@@ -736,17 +736,18 @@ impl ShardReader {
         // The ShardReader serves positions [0, header_len) from the in-memory header,
         // so positions >= header_len fall through to find_shard which maps them to
         // the correct file offset within the appropriate shard.
+        // Cache shard file lengths upfront to avoid repeated seeks during read().
         let mut shards = Vec::new();
         for (idx, path) in &shard_files {
             let start_byte = (*idx as u64) * shard_size;
-            shards.push((start_byte, path.clone()));
+            let file_len = std::fs::metadata(path).map_err(SwarmError::Io)?.len();
+            shards.push((start_byte, path.clone(), file_len));
         }
 
         // Compute total size from last shard
-        let total_size = if let Some((_, last_path)) = shard_files.last() {
+        let total_size = if let Some((_, _, last_len)) = shards.last() {
             let last_idx = shard_files.last().unwrap().0;
-            let last_size = std::fs::metadata(last_path).map_err(SwarmError::Io)?.len();
-            (last_idx as u64) * shard_size + last_size
+            (last_idx as u64) * shard_size + last_len
         } else {
             header.len() as u64
         };
@@ -762,12 +763,9 @@ impl ShardReader {
 
     /// Find which shard (if any) contains the given virtual file position.
     fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
-        for (i, (start, path)) in self.shards.iter().enumerate() {
-            if pos >= *start {
-                let shard_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                if pos < *start + shard_len {
-                    return Some((i, pos - *start));
-                }
+        for (i, (start, _path, shard_len)) in self.shards.iter().enumerate() {
+            if pos >= *start && pos < *start + shard_len {
+                return Some((i, pos - *start));
             }
         }
         None
@@ -815,9 +813,8 @@ impl IoRead for ShardReader {
                 self.current_shard = Some((shard_idx, file));
             }
 
+            let shard_file_len = self.shards[shard_idx].2;
             let (_, ref mut file) = self.current_shard.as_mut().unwrap();
-            file.seek(SeekFrom::Start(offset_in_shard))?;
-            let shard_file_len = file.seek(SeekFrom::End(0))?;
             file.seek(SeekFrom::Start(offset_in_shard))?;
             let available_in_shard = shard_file_len.saturating_sub(offset_in_shard) as usize;
             let to_read = buf.len().min(available_in_shard);
@@ -841,8 +838,7 @@ impl IoRead for ShardReader {
             let shard_info: Vec<String> = self
                 .shards
                 .iter()
-                .map(|(start, path)| {
-                    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                .map(|(start, _path, len)| {
                     format!("[{start}..{})", start + len)
                 })
                 .collect();
@@ -1666,6 +1662,7 @@ impl SplitModel {
     }
 
     /// Build a causal mask for the given sequence length.
+    /// Capped at 16 entries — evicts a random entry when full.
     fn mask(&mut self, t: usize) -> CandleResult<Tensor> {
         if let Some(mask) = self.masks.get(&t) {
             return Ok(mask.clone());
@@ -1674,6 +1671,12 @@ impl SplitModel {
             .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
             .collect();
         let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
+        // Evict an entry if at capacity (simple LRU approximation)
+        if self.masks.len() >= 16 {
+            if let Some(&key) = self.masks.keys().next() {
+                self.masks.remove(&key);
+            }
+        }
         self.masks.insert(t, mask.clone());
         Ok(mask)
     }
@@ -1686,8 +1689,9 @@ impl SplitModel {
     /// - For the last segment: returns logits (f32, [vocab_size]) for the last token position.
     /// - For intermediate segments: returns hidden states (f32, [1, seq, hidden_dim]).
     pub fn forward(&mut self, input: &Tensor, index_pos: usize) -> Result<Tensor, SwarmError> {
-        let is_first = self.layer_start == 0;
-        let is_last = self.layer_end == self.total_layers;
+        // Use component presence rather than layer indices for shard-aware is_first/is_last
+        let is_first = self.tok_embeddings.is_some();
+        let is_last = self.output.is_some();
 
         // Move input to model's device if needed (e.g. CPU → CUDA)
         let input = input

@@ -81,7 +81,22 @@ impl AntiGaming {
         entries.push(Instant::now());
     }
 
+    /// SEC-C4 + SEC-M21: Atomic check-and-record — validates transaction and records it
+    /// in a single call to prevent TOCTOU races.
+    pub fn check_and_record_transaction(
+        &mut self,
+        from: &NodeId,
+        to: &NodeId,
+        amount: i64,
+    ) -> Result<SpotCheckDecision, AntiGamingViolation> {
+        let decision = self.check_transaction(from, to, amount)?;
+        self.record_transaction(from);
+        Ok(decision)
+    }
+
     /// Cleanup expired rate limit entries.
+    /// SEC-M15: Should be called periodically (every 5 minutes) from a background task
+    /// to prevent unbounded memory growth in the rate_limits HashMap.
     pub fn cleanup(&mut self) {
         let cutoff = Instant::now() - self.window_duration;
         self.rate_limits.retain(|_, timestamps| {

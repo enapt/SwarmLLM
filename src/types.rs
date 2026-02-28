@@ -115,6 +115,16 @@ pub enum ContributionLevel {
     Maximum,
 }
 
+impl From<crate::config::ContributionMode> for ContributionLevel {
+    fn from(mode: crate::config::ContributionMode) -> Self {
+        match mode {
+            crate::config::ContributionMode::Minimal => Self::Minimal,
+            crate::config::ContributionMode::Moderate => Self::Moderate,
+            crate::config::ContributionMode::Maximum => Self::Maximum,
+        }
+    }
+}
+
 // ---- Inference ----
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InferenceRequest {
@@ -341,6 +351,29 @@ pub struct StreamingToken {
     pub finish_reason: Option<NetworkFinishReason>,
 }
 
+/// State of a shard download.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadState {
+    Queued,
+    Downloading,
+    Verifying,
+    Complete,
+    Failed,
+}
+
+impl fmt::Display for DownloadState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queued => write!(f, "queued"),
+            Self::Downloading => write!(f, "downloading"),
+            Self::Verifying => write!(f, "verifying"),
+            Self::Complete => write!(f, "complete"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
 /// Shard download progress broadcast — lets other nodes see downloads in real time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShardDownloadProgress {
@@ -348,8 +381,7 @@ pub struct ShardDownloadProgress {
     pub shard_id: ShardId,
     /// 0-100 percentage
     pub progress_pct: u32,
-    /// "downloading" or "complete"
-    pub state: String,
+    pub state: DownloadState,
 }
 
 /// HuggingFace source gossip — tells peers where to download a model's shards from HF CDN.
@@ -409,7 +441,7 @@ pub enum PoolMessage {
     StateGossip(crate::pool::types::PoolState),
     CreditForward(crate::pool::types::PoolCreditForward),
     Removal(crate::pool::types::PoolRemoval),
-    MemberLeft { pool_id: NodeId, node_id: NodeId },
+    MemberLeft { pool_id: NodeId, node_id: NodeId, signature: Vec<u8> },
 }
 
 // ---- Network Commands ----

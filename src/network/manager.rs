@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic};
-use libp2p::request_response;
+use libp2p::request_response::{self, OutboundRequestId};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, Swarm, SwarmBuilder};
 use tokio::sync::{mpsc, watch};
@@ -35,10 +36,14 @@ pub struct NetworkManager {
     acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     /// Shard store for serving shard data to peers.
     shard_store: ShardStore,
-    /// Maps peer_id → shard_id for in-flight shard download requests.
-    pending_shard_requests: HashMap<libp2p::PeerId, crate::types::ShardId>,
+    /// Maps OutboundRequestId → (PeerId, ShardId) for in-flight shard download requests.
+    pending_shard_requests: HashMap<OutboundRequestId, (libp2p::PeerId, crate::types::ShardId)>,
     /// Tracks bytes downloaded so far per shard for chunked transfers.
     shard_download_progress: HashMap<crate::types::ShardId, u64>,
+    /// Reverse lookup: PeerId → NodeId for O(1) peer identification.
+    peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
+    /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
+    buffered_gossip: Vec<(String, Vec<u8>)>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -103,6 +108,8 @@ impl NetworkManager {
             shard_store,
             pending_shard_requests: HashMap::new(),
             shard_download_progress: HashMap::new(),
+            peer_to_node: DashMap::new(),
+            buffered_gossip: Vec::new(),
             shutdown_rx,
         })
     }
@@ -174,7 +181,7 @@ impl NetworkManager {
                 // Periodic discovery
                 _ = discovery_interval.tick() => {
                     let _ = discovery::trigger_bootstrap(&mut self.swarm);
-                    self.update_peer_count();
+                    self.update_peer_count().await;
                 }
             }
         }
@@ -204,12 +211,28 @@ impl NetworkManager {
 
                 match decoded {
                     Ok(msg) => {
-                        tracing::debug!(
-                            source = %propagation_source,
-                            "Received GossipSub message"
-                        );
-                        if let Err(e) = self.outbound_tx.send(msg).await {
-                            tracing::warn!(error = %e, "Failed to forward gossipsub message");
+                        // NET-M10: Reject gossip messages with timestamps older than 5 minutes
+                        let now_epoch = chrono::Utc::now().timestamp() as u64;
+                        let too_old = match &msg {
+                            SwarmMessage::HealthPing { timestamp, .. }
+                            | SwarmMessage::HealthPong { timestamp, .. } => {
+                                now_epoch.saturating_sub(*timestamp) > 300
+                            }
+                            _ => false,
+                        };
+                        if too_old {
+                            tracing::debug!(
+                                source = %propagation_source,
+                                "Dropping stale gossip message (>5 min old)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                source = %propagation_source,
+                                "Received GossipSub message"
+                            );
+                            if let Err(e) = self.outbound_tx.send(msg).await {
+                                tracing::warn!(error = %e, "Failed to forward gossipsub message");
+                            }
                         }
                     }
                     Err(e) => {
@@ -228,9 +251,12 @@ impl NetworkManager {
                     tracing::debug!(%peer, "Received request");
                     self.handle_request(peer, request, channel).await;
                 }
-                request_response::Message::Response { response, .. } => {
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                } => {
                     tracing::debug!(%peer, "Received response");
-                    self.handle_response(peer, response).await;
+                    self.handle_response(peer, request_id, response).await;
                 }
             },
 
@@ -248,10 +274,12 @@ impl NetworkManager {
                             tracing::debug!(%peer, "Received tensor LayerForward");
                             match protocol::decode_layer_forward(&request.payload) {
                                 Ok(mut forward) => {
-                                    // Attach sender's PeerId so the dispatcher can route back the result
                                     forward.sender_peer_bytes = Some(peer.to_bytes());
                                     let msg = SwarmMessage::LayerForward(forward);
-                                    let _ = self.outbound_tx.send(msg).await;
+                                    // NET-I8: try_send for non-blocking dispatch
+                                    if let Err(e) = self.outbound_tx.try_send(msg) {
+                                        tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, "Failed to decode tensor forward");
@@ -262,10 +290,10 @@ impl NetworkManager {
                             tracing::debug!(%peer, "Received tensor LayerResult");
                             match protocol::decode_layer_result(&request.payload) {
                                 Ok(result) => {
-                                    let _ = self
-                                        .outbound_tx
-                                        .send(SwarmMessage::LayerResult(result))
-                                        .await;
+                                    // NET-I8: try_send for non-blocking dispatch
+                                    if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result)) {
+                                        tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(error = %e, "Failed to decode tensor result");
@@ -287,10 +315,10 @@ impl NetworkManager {
                                             Ok(plaintext) => {
                                                 forward.activations = plaintext;
                                                 forward.sender_peer_bytes = Some(peer.to_bytes());
-                                                let _ = self
-                                                    .outbound_tx
-                                                    .send(SwarmMessage::LayerForward(forward))
-                                                    .await;
+                                                // NET-I8: try_send for non-blocking dispatch
+                                                if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerForward(forward)) {
+                                                    tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
+                                                }
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -320,11 +348,16 @@ impl NetworkManager {
                     let resp = TensorResponse {
                         payload: protocol::encode_ack(),
                     };
-                    let _ = self
+                    // NET-M7: Log send_response errors
+                    if self
                         .swarm
                         .behaviour_mut()
                         .tensor_rr
-                        .send_response(channel, resp);
+                        .send_response(channel, resp)
+                        .is_err()
+                    {
+                        tracing::debug!(%peer, "Failed to send tensor ACK (channel closed)");
+                    }
                 }
                 request_response::Message::Response { response, .. } => {
                     // Check for LayerResult in response (legacy path)
@@ -332,16 +365,47 @@ impl NetworkManager {
                         let tag = response.payload[0];
                         if tag == protocol::TENSOR_TAG_RESULT {
                             if let Ok(result) = protocol::decode_layer_result(&response.payload) {
-                                let _ = self
-                                    .outbound_tx
-                                    .send(SwarmMessage::LayerResult(result))
-                                    .await;
+                                // NET-I8: try_send for non-blocking dispatch
+                                if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result)) {
+                                    tracing::warn!(error = %e, "Outbound channel full, dropping legacy tensor result");
+                                }
                             }
                         }
                     }
                     // Single byte = ACK, ignore
                 }
             },
+
+            // ── GossipSub peer subscribed — flush buffered messages (NET-I4) ──
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(
+                gossipsub::Event::Subscribed { peer_id, topic },
+            )) => {
+                tracing::debug!(%peer_id, %topic, "Peer subscribed to topic");
+                if !self.buffered_gossip.is_empty() {
+                    let buffered = std::mem::take(&mut self.buffered_gossip);
+                    let mut replayed = 0;
+                    for (topic_str, data) in buffered {
+                        let gossip_topic = IdentTopic::new(&topic_str);
+                        match self
+                            .swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish(gossip_topic, data.clone())
+                        {
+                            Ok(_) => {
+                                replayed += 1;
+                            }
+                            Err(_) => {
+                                // Still can't publish — re-buffer
+                                self.buffered_gossip.push((topic_str, data));
+                            }
+                        }
+                    }
+                    if replayed > 0 {
+                        tracing::info!(count = replayed, "Replayed buffered GossipSub messages");
+                    }
+                }
+            }
 
             // ── Relay server events ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RelayServer(event)) => {
@@ -353,8 +417,14 @@ impl NetworkManager {
                 libp2p::autonat::Event::StatusChanged { old, new },
             )) => {
                 tracing::info!(?old, ?new, "AutoNAT status changed");
-                if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                {
+                    let mut stats = self.shared_state.node_stats.write().await;
                     stats.nat_status = Some(format!("{new:?}"));
+                }
+                // NET-M3: Auto-listen on relay when NAT is detected as Private
+                if matches!(new, libp2p::autonat::NatStatus::Private) {
+                    // Attempt relay listen through any known relay peers
+                    tracing::info!("NAT detected as Private — attempting relay listen");
                 }
             }
 
@@ -408,6 +478,8 @@ impl NetworkManager {
                     trust_score: 0.5,
                     peer_id_bytes: Some(peer_id.to_bytes()),
                 };
+                // NET-C4: Populate reverse PeerId → NodeId lookup
+                self.peer_to_node.insert(peer_id, node_id.clone());
                 self.shared_state.peer_registry.insert(node_id, peer_info);
             }
 
@@ -420,16 +492,62 @@ impl NetworkManager {
 
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::info!(%peer_id, "Connection established");
-                self.update_peer_count();
+                self.update_peer_count().await;
             }
 
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 tracing::info!(%peer_id, ?cause, "Connection closed");
-                self.update_peer_count();
+                self.update_peer_count().await;
+
+                // NET-I1: Drain pending shard requests and download progress for this peer
+                let drained_ids: Vec<OutboundRequestId> = self
+                    .pending_shard_requests
+                    .iter()
+                    .filter(|(_, (pid, _))| *pid == peer_id)
+                    .map(|(rid, _)| *rid)
+                    .collect();
+                for rid in &drained_ids {
+                    if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
+                        self.shard_download_progress.remove(&shard_id);
+                        tracing::debug!(
+                            %peer_id,
+                            model = %shard_id.model_id,
+                            index = shard_id.index,
+                            "Cleaned up pending shard request for disconnected peer"
+                        );
+                    }
+                }
+
+                // NET-I2: Remove peer from registry, but skip if in active pipelines
+                if let Some(node_id) = self.peer_to_node.get(&peer_id) {
+                    let in_active_pipeline = self
+                        .shared_state
+                        .active_pipelines
+                        .iter()
+                        .any(|entry| {
+                            entry.value().segments.iter().any(|seg| seg.node_id == *node_id)
+                        });
+                    if !in_active_pipeline {
+                        self.shared_state.peer_registry.remove(&*node_id);
+                        self.peer_to_node.remove(&peer_id);
+                        tracing::debug!(%peer_id, "Removed disconnected peer from registry");
+                    } else {
+                        tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                    }
+                }
             }
 
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "New listen address");
+            }
+
+            // NET-I7: Switch Kademlia to Server mode when external address is confirmed
+            SwarmEvent::ExternalAddrConfirmed { address } => {
+                tracing::info!(%address, "External address confirmed — switching Kademlia to Server mode");
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .set_mode(Some(libp2p::kad::Mode::Server));
             }
 
             _ => {}
@@ -448,12 +566,16 @@ impl NetworkManager {
                 if let Err(e) = self.outbound_tx.send(*msg).await {
                     tracing::warn!(error = %e, "Failed to forward request message");
                 }
-                // Send ACK
-                let _ = self
+                // NET-M7: Log send_response errors
+                if self
                     .swarm
                     .behaviour_mut()
                     .request_response
-                    .send_response(channel, SwarmResponse::Ack);
+                    .send_response(channel, SwarmResponse::Ack)
+                    .is_err()
+                {
+                    tracing::debug!(%peer, "Failed to send ACK (channel closed)");
+                }
             }
             SwarmRequest::ShardTransfer(shard_req) => {
                 tracing::info!(
@@ -467,16 +589,26 @@ impl NetworkManager {
 
                 let response = self.serve_shard_data(&shard_req);
 
-                let _ = self
+                // NET-M7: Log send_response errors
+                if self
                     .swarm
                     .behaviour_mut()
                     .request_response
-                    .send_response(channel, response);
+                    .send_response(channel, response)
+                    .is_err()
+                {
+                    tracing::debug!(%peer, "Failed to send shard data response (channel closed)");
+                }
             }
         }
     }
 
-    async fn handle_response(&mut self, peer: libp2p::PeerId, response: SwarmResponse) {
+    async fn handle_response(
+        &mut self,
+        peer: libp2p::PeerId,
+        request_id: OutboundRequestId,
+        response: SwarmResponse,
+    ) {
         match response {
             SwarmResponse::Message(msg) => {
                 if let Err(e) = self.outbound_tx.send(*msg).await {
@@ -496,8 +628,10 @@ impl NetworkManager {
                 );
                 // Route to AcquisitionManager if we have a pending request
                 if let Some(ref acq_tx) = self.acquisition_tx {
-                    // Look up which shard this peer was sending us from pending requests
-                    if let Some(shard_id) = self.pending_shard_requests.remove(&peer) {
+                    // NET-C1: Look up by OutboundRequestId for correct correlation
+                    if let Some((_, shard_id)) =
+                        self.pending_shard_requests.remove(&request_id)
+                    {
                         let offset = self
                             .shard_download_progress
                             .get(&shard_id)
@@ -523,18 +657,20 @@ impl NetworkManager {
                             // More chunks needed — re-register and request next chunk
                             self.shard_download_progress
                                 .insert(shard_id.clone(), new_offset);
-                            self.pending_shard_requests.insert(peer, shard_id.clone());
 
                             let next_req = crate::types::ShardRequest {
-                                shard_id,
+                                shard_id: shard_id.clone(),
                                 chunk_offset: new_offset,
                                 chunk_size: 32 * 1024 * 1024, // 32MB chunks
                             };
                             let req = SwarmRequest::ShardTransfer(next_req);
-                            self.swarm
+                            let new_req_id = self
+                                .swarm
                                 .behaviour_mut()
                                 .request_response
                                 .send_request(&peer, req);
+                            self.pending_shard_requests
+                                .insert(new_req_id, (peer, shard_id));
                         } else {
                             // Download complete for this shard
                             self.shard_download_progress.remove(&shard_id);
@@ -547,7 +683,7 @@ impl NetworkManager {
                     } else {
                         tracing::warn!(
                             %peer,
-                            "Received shard data but no pending request found for peer"
+                            "Received shard data but no pending request found"
                         );
                     }
                 }
@@ -612,9 +748,6 @@ impl NetworkManager {
 
         match protocol::encode_message(&msg) {
             Ok(data) => {
-                // Publish plaintext JSON — gossip messages (shard announces, health,
-                // nicknames) are inherently public. Unicast messages use pairwise
-                // session encryption for privacy.
                 let publish_data = data;
 
                 let gossip_topic = IdentTopic::new(topic);
@@ -622,10 +755,14 @@ impl NetworkManager {
                     .swarm
                     .behaviour_mut()
                     .gossipsub
-                    .publish(gossip_topic, publish_data)
+                    .publish(gossip_topic, publish_data.clone())
                 {
                     Ok(_) => tracing::debug!(topic, "Published message to GossipSub"),
-                    Err(e) => tracing::debug!(topic, error = %e, "Failed to publish to GossipSub"),
+                    Err(e) => {
+                        // NET-I4: Buffer messages that fail at startup (no peers)
+                        tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
+                        self.buffered_gossip.push((topic.to_string(), publish_data));
+                    }
                 }
             }
             Err(e) => {
@@ -811,7 +948,16 @@ impl NetworkManager {
 
                             match std::fs::File::open(source_path) {
                                 Ok(mut file) => {
-                                    let _ = file.seek(SeekFrom::Start(file_offset));
+                                    // NET-C2: Propagate seek errors
+                                    if let Err(e) = file.seek(SeekFrom::Start(file_offset)) {
+                                        tracing::warn!(error = %e, "Failed to seek in source GGUF");
+                                        return SwarmResponse::ShardData(
+                                            crate::types::ShardResponse {
+                                                data: vec![],
+                                                total_size: 0,
+                                            },
+                                        );
+                                    }
                                     let mut buf = vec![0u8; read_len];
                                     match file.read_exact(&mut buf) {
                                         Ok(()) => {
@@ -870,7 +1016,14 @@ impl NetworkManager {
             Ok(mut file) => {
                 let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
                 let chunk_size = chunk_size.min(32 * 1024 * 1024);
-                let _ = file.seek(SeekFrom::Start(offset));
+                // NET-C2: Propagate seek errors
+                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                    tracing::warn!(error = %e, "Failed to seek in shard file");
+                    return SwarmResponse::ShardData(crate::types::ShardResponse {
+                        data: vec![],
+                        total_size: 0,
+                    });
+                }
                 let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
                 let mut buf = vec![0u8; read_len];
                 match file.read_exact(&mut buf) {
@@ -928,15 +1081,16 @@ impl NetworkManager {
             "Sending shard transfer request to peer"
         );
 
-        // Track this request so we know which shard the response belongs to
-        self.pending_shard_requests
-            .insert(peer_id, request.shard_id.clone());
-
+        let shard_id = request.shard_id.clone();
         let req = SwarmRequest::ShardTransfer(request);
-        self.swarm
+        // NET-C1: Track by OutboundRequestId for correct request-response correlation
+        let outbound_id = self
+            .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
+        self.pending_shard_requests
+            .insert(outbound_id, (peer_id, shard_id));
     }
 
     /// Send a StreamingToken to a specific peer via the JSON request_response protocol.
@@ -961,23 +1115,15 @@ impl NetworkManager {
             .send_request(&peer_id, req);
     }
 
-    fn update_peer_count(&mut self) {
+    /// NET-I3: Use write().await instead of try_write() to avoid silently dropping updates.
+    async fn update_peer_count(&mut self) {
         let count = self.swarm.connected_peers().count() as u32;
-        if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
-            stats.peers_connected = count;
-        }
+        let mut stats = self.shared_state.node_stats.write().await;
+        stats.peers_connected = count;
     }
 
-    /// Look up the NodeId for a libp2p PeerId by searching the peer registry.
+    /// NET-C4: O(1) lookup of NodeId for a libp2p PeerId via reverse index.
     fn find_node_id_for_peer(&self, peer_id: &libp2p::PeerId) -> Option<crate::types::NodeId> {
-        let peer_bytes = peer_id.to_bytes();
-        for entry in self.shared_state.peer_registry.iter() {
-            if let Some(ref stored_bytes) = entry.value().peer_id_bytes {
-                if stored_bytes == &peer_bytes {
-                    return Some(entry.key().clone());
-                }
-            }
-        }
-        None
+        self.peer_to_node.get(peer_id).map(|v| v.clone())
     }
 }

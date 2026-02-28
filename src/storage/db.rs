@@ -2,6 +2,10 @@ use std::path::Path;
 
 use crate::error::SwarmError;
 
+/// Current database schema version. Increment when making breaking changes
+/// to the sled storage format.
+pub const DB_SCHEMA_VERSION: u32 = 1;
+
 /// Wrapper around sled embedded database.
 ///
 /// In Phase 1 this only stores persisted config. Later phases add
@@ -17,7 +21,34 @@ impl Database {
         let db_path = data_dir.join("db");
         let inner = sled::open(&db_path)?;
         tracing::info!(path = %db_path.display(), "Opened database");
-        Ok(Self { inner })
+
+        let db = Self { inner };
+        db.check_schema_version()?;
+        Ok(db)
+    }
+
+    /// Check and store the DB schema version. Warn on mismatch.
+    fn check_schema_version(&self) -> Result<(), SwarmError> {
+        let tree = self.tree("meta")?;
+        match tree.get("schema_version")? {
+            Some(bytes) => {
+                if bytes.len() == 4 {
+                    let stored = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+                    if stored != DB_SCHEMA_VERSION {
+                        tracing::warn!(
+                            stored_version = stored,
+                            current_version = DB_SCHEMA_VERSION,
+                            "Database schema version mismatch — data may need migration"
+                        );
+                    }
+                }
+            }
+            None => {
+                // First run — store the current version
+                tree.insert("schema_version", &DB_SCHEMA_VERSION.to_le_bytes())?;
+            }
+        }
+        Ok(())
     }
 
     /// Open a temporary in-memory database (for testing).
@@ -69,9 +100,19 @@ impl Database {
         let tree = self.tree(tree_name)?;
         let mut results = Vec::new();
         for entry in tree.iter() {
-            let (_, bytes) = entry?;
-            if let Ok(val) = serde_json::from_slice(&bytes) {
-                results.push(val);
+            let (key, bytes) = entry?;
+            match serde_json::from_slice(&bytes) {
+                Ok(val) => results.push(val),
+                Err(e) => {
+                    let key_str = std::str::from_utf8(&key)
+                        .unwrap_or("<non-utf8>");
+                    tracing::warn!(
+                        tree = tree_name,
+                        key = key_str,
+                        error = %e,
+                        "Failed to deserialize entry in iter_json, skipping"
+                    );
+                }
             }
         }
         Ok(results)

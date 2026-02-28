@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
+use crate::model::acquisition::AcquisitionCommand;
 use crate::types::{NetworkCommand, NodeId, RebalanceEvent, ShardId, SwarmMessage};
 
 /// Minimum replication factor for each shard.
@@ -23,8 +24,12 @@ pub struct ShardRebalancer {
     shared_state: Arc<SharedState>,
     rebalance_rx: mpsc::Receiver<RebalanceEvent>,
     network_tx: mpsc::Sender<NetworkCommand>,
+    acquisition_tx: mpsc::Sender<AcquisitionCommand>,
     shutdown_rx: watch::Receiver<bool>,
-    last_rebalance: Option<Instant>,
+    /// Per-model cooldown tracking (DAE-I10).
+    last_rebalance_per_model: std::collections::HashMap<crate::types::ModelId, Instant>,
+    /// Queued PeerLeft events to batch-process after cooldown.
+    pending_peer_left: Vec<NodeId>,
 }
 
 impl ShardRebalancer {
@@ -32,14 +37,17 @@ impl ShardRebalancer {
         shared_state: Arc<SharedState>,
         rebalance_rx: mpsc::Receiver<RebalanceEvent>,
         network_tx: mpsc::Sender<NetworkCommand>,
+        acquisition_tx: mpsc::Sender<AcquisitionCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             shared_state,
             rebalance_rx,
             network_tx,
+            acquisition_tx,
             shutdown_rx,
-            last_rebalance: None,
+            last_rebalance_per_model: std::collections::HashMap::new(),
+            pending_peer_left: Vec::new(),
         }
     }
 
@@ -71,21 +79,15 @@ impl ShardRebalancer {
     }
 
     async fn handle_event(&mut self, event: RebalanceEvent) {
-        // Check cooldown
-        if let Some(last) = self.last_rebalance {
-            if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
-                tracing::debug!("Rebalance cooldown active, skipping");
-                return;
-            }
-        }
-
         match event {
             RebalanceEvent::PeerLeft(departed_peer) => {
                 tracing::info!(
                     peer = %departed_peer,
-                    "Peer departed, checking shard replication"
+                    "Peer departed, queuing for batch rebalance"
                 );
-                self.handle_peer_left(&departed_peer).await;
+                self.pending_peer_left.push(departed_peer);
+                // Batch-process after cooldown by processing all queued departures
+                self.process_pending_departures().await;
             }
             RebalanceEvent::PeerJoined(new_peer) => {
                 tracing::info!(
@@ -105,46 +107,59 @@ impl ShardRebalancer {
                 self.check_all_shards().await;
             }
         }
-
-        self.last_rebalance = Some(Instant::now());
     }
 
-    async fn handle_peer_left(&self, departed_peer: &NodeId) {
-        let underreplicated = self.find_underreplicated_shards(departed_peer);
-
-        if underreplicated.is_empty() {
-            tracing::debug!("No under-replicated shards found");
+    /// Batch-process queued PeerLeft events, respecting per-model cooldown.
+    async fn process_pending_departures(&mut self) {
+        let departed: Vec<NodeId> = self.pending_peer_left.drain(..).collect();
+        if departed.is_empty() {
             return;
         }
 
-        tracing::info!(
-            count = underreplicated.len(),
-            "Found under-replicated shards after peer departure"
-        );
-
         let local_node_id = self.shared_state.identity.node_id().clone();
+        let now = Instant::now();
 
-        for (shard_id, holders) in &underreplicated {
-            // Skip if we already hold this shard
-            if holders.contains(&local_node_id) {
-                continue;
-            }
+        for departed_peer in &departed {
+            let underreplicated = self.find_underreplicated_shards(departed_peer);
+            for (shard_id, holders) in &underreplicated {
+                // Per-model cooldown check
+                if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
+                    if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
+                        tracing::debug!(
+                            model = %shard_id.model_id,
+                            "Rebalance cooldown active for model, skipping"
+                        );
+                        continue;
+                    }
+                }
 
-            // Announce willingness to host by re-broadcasting shard info
-            let announce = crate::types::ShardAnnounce {
-                node_id: local_node_id.clone(),
-                shards: vec![shard_id.clone()],
-                timestamp: chrono::Utc::now(),
-            };
+                if holders.contains(&local_node_id) {
+                    // We hold this shard — re-announce it so peers know it's still available
+                    let announce = crate::types::ShardAnnounce {
+                        node_id: local_node_id.clone(),
+                        shards: vec![shard_id.clone()],
+                        timestamp: chrono::Utc::now(),
+                    };
+                    let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
+                    if let Err(e) = self.network_tx.send(msg).await {
+                        tracing::warn!(error = %e, "Failed to broadcast shard rebalance announce");
+                    }
+                } else {
+                    // We don't hold this shard — request acquisition to download it
+                    let _ = self
+                        .acquisition_tx
+                        .try_send(AcquisitionCommand::Acquire {
+                            model_id: shard_id.model_id.clone(),
+                        });
+                    tracing::info!(
+                        model = %shard_id.model_id,
+                        shard = shard_id.index,
+                        "Requesting acquisition of under-replicated shard"
+                    );
+                }
 
-            let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-            if let Err(e) = self.network_tx.send(msg).await {
-                tracing::warn!(
-                    error = %e,
-                    model = %shard_id.model_id,
-                    index = shard_id.index,
-                    "Failed to broadcast shard rebalance offer"
-                );
+                self.last_rebalance_per_model
+                    .insert(shard_id.model_id.clone(), now);
             }
         }
     }

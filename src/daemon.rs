@@ -359,6 +359,14 @@ impl Daemon {
             {
                 for manifest in manifests {
                     let model_id = manifest.id.clone();
+                    // Verify manifest hash before trusting DB data (MOD-I2)
+                    if manifest.verify_hash().is_err() {
+                        tracing::warn!(
+                            model = %model_id,
+                            "Manifest from DB failed hash verification — skipping"
+                        );
+                        continue;
+                    }
                     // Register the manifest if not already in-memory
                     if shared_state
                         .model_registry
@@ -702,6 +710,7 @@ impl Daemon {
             shared_state.clone(),
             rebalance_rx,
             network_tx.clone(),
+            acquisition_tx.clone(),
             shutdown_rx.clone(),
         );
 
@@ -765,7 +774,7 @@ impl Daemon {
             network_tx.clone(),
             shutdown_rx.clone(),
         );
-        let _auto_manage_handle = tokio::spawn(async move {
+        let auto_manage_handle = tokio::spawn(async move {
             auto_manage.run().await;
         });
 
@@ -889,9 +898,28 @@ impl Daemon {
 
         // Wait for shutdown signal or task exit
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Shutdown signal received (Ctrl+C)");
-            }
+            _ = async {
+                let ctrl_c = tokio::signal::ctrl_c();
+                #[cfg(unix)]
+                {
+                    let mut sigterm = tokio::signal::unix::signal(
+                        tokio::signal::unix::SignalKind::terminate(),
+                    ).expect("Failed to register SIGTERM handler");
+                    tokio::select! {
+                        _ = ctrl_c => {
+                            tracing::info!("Shutdown signal received (Ctrl+C)");
+                        }
+                        _ = sigterm.recv() => {
+                            tracing::info!("Shutdown signal received (SIGTERM)");
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    ctrl_c.await.ok();
+                    tracing::info!("Shutdown signal received (Ctrl+C)");
+                }
+            } => {}
             result = network_handle => {
                 tracing::error!(?result, "NetworkManager task exited");
             }
@@ -919,15 +947,27 @@ impl Daemon {
             result = dispatcher_handle => {
                 tracing::error!(?result, "Message dispatcher task exited");
             }
+            result = auto_manage_handle => {
+                tracing::error!(?result, "AutoShardManager task exited");
+            }
         }
 
         // Signal graceful shutdown
         shared_state.shutdown();
+
+        // Flush database before exiting to ensure all pending writes are persisted
+        if let Err(e) = shared_state.db.flush() {
+            tracing::error!(error = %e, "Failed to flush database during shutdown");
+        }
+
         tracing::info!("Daemon shutdown complete");
 
         Ok(())
     }
 }
+
+/// Maximum number of concurrent LayerForward tasks.
+const MAX_CONCURRENT_FORWARDS: usize = 64;
 
 /// Dispatch inbound network messages to the appropriate subsystem.
 ///
@@ -945,6 +985,7 @@ async fn dispatch_network_messages(
     network_tx: mpsc::Sender<NetworkCommand>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FORWARDS));
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -981,7 +1022,12 @@ async fn dispatch_network_messages(
                             SwarmMessage::LayerForward(forward) => {
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
+                                let sem = forward_semaphore.clone();
                                 tokio::spawn(async move {
+                                    let _permit = match sem.acquire().await {
+                                        Ok(p) => p,
+                                        Err(_) => return, // semaphore closed
+                                    };
                                     handle_layer_forward(ss, ntx, forward).await;
                                 });
                             }
@@ -1242,10 +1288,11 @@ async fn dispatch_network_messages(
                                                 removal: rem,
                                             })
                                         }
-                                        crate::types::PoolMessage::MemberLeft { pool_id, node_id } => {
+                                        crate::types::PoolMessage::MemberLeft { pool_id, node_id, signature } => {
                                             Some(crate::pool::types::PoolCommand::InboundMemberLeft {
                                                 pool_id,
                                                 node_id,
+                                                signature,
                                             })
                                         }
                                     };
@@ -1282,7 +1329,7 @@ async fn dispatch_network_messages(
                                 // Update peer download state in shared state
                                 let local_nid = shared_state.identity.node_id();
                                 if progress.node_id != *local_nid {
-                                    if progress.state == "complete" || progress.progress_pct >= 100 {
+                                    if progress.state == crate::types::DownloadState::Complete || progress.progress_pct >= 100 {
                                         // Download finished — remove from download tracking
                                         if let Some(mut entry) = shared_state.peer_shard_downloads.get_mut(&progress.shard_id) {
                                             entry.retain(|(nid, _)| *nid != progress.node_id);
@@ -1363,10 +1410,8 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
         tracing::warn!(error = %e, "Failed to persist API key to database");
     }
 
-    tracing::info!(
-        api_key = %key,
-        "Generated new API key (save this for API access)"
-    );
+    // Print API key to stderr only (not to tracing logs which may be persisted/shipped)
+    eprintln!("Generated new API key (save this for API access): {key}");
 
     key
 }
@@ -1444,8 +1489,11 @@ pub fn generate_and_register_local_manifest(
     let node_id = shared_state.identity.node_id().clone();
     let shard_count = file_size.div_ceil(shard_size).max(1) as u32;
 
-    // Compute per-shard BLAKE3 hashes by reading byte ranges
-    let mut shards = match compute_shard_hashes(path, file_size, shard_size) {
+    // Compute per-shard BLAKE3 hashes by reading byte ranges (blocking I/O)
+    let hash_path = path.to_path_buf();
+    let mut shards = match tokio::task::block_in_place(|| {
+        compute_shard_hashes(&hash_path, file_size, shard_size)
+    }) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to compute shard hashes");
@@ -1478,7 +1526,9 @@ pub fn generate_and_register_local_manifest(
                 }
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
-                (num_layers, crate::types::ModelArchitecture::Llama)
+                // Map GGUF general.architecture string to our ModelArchitecture enum
+                let arch = map_gguf_architecture(path);
+                (num_layers, arch)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to extract GGUF metadata, using defaults");
@@ -2306,6 +2356,29 @@ async fn send_error_result(
             result,
         })
         .await;
+}
+
+/// Map a GGUF file's `general.architecture` metadata to our ModelArchitecture enum.
+fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitecture {
+    let arch_str = match std::fs::File::open(path) {
+        Ok(mut f) => {
+            match candle_core::quantized::gguf_file::Content::read(&mut f) {
+                Ok(ct) => ct
+                    .metadata
+                    .get("general.architecture")
+                    .and_then(|v| v.to_string().ok().cloned())
+                    .unwrap_or_else(|| "llama".to_string()),
+                Err(_) => "llama".to_string(),
+            }
+        }
+        Err(_) => "llama".to_string(),
+    };
+    match arch_str.as_str() {
+        "qwen2" => crate::types::ModelArchitecture::Qwen2,
+        "mistral" => crate::types::ModelArchitecture::Mistral,
+        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
+        _ => crate::types::ModelArchitecture::Llama,
+    }
 }
 
 /// Try to open a URL in the default browser.

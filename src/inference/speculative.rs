@@ -1,5 +1,10 @@
 use crate::types::{ModelId, ModelManifest};
 
+// TODO: This module contains data structures and validation only.
+// Speculative decoding is not yet wired into the inference pipeline.
+// Integration requires: draft model selection in scheduler, parallel
+// draft/verify forward passes, and acceptance sampling in the token loop.
+
 /// State for an in-flight speculative decoding session.
 ///
 /// Speculative decoding uses a small "draft" model to propose multiple tokens
