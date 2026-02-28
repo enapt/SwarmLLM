@@ -202,10 +202,6 @@ pub struct GgufFileInfo {
     pub header_size: u64,
     pub shard_count: u32,
     pub shard_size: u64,
-    /// Tensor metadata extracted from the GGUF header (v2 layer-aligned sharding).
-    /// Populated during probe for use by repack_to_layer_shards.
-    #[serde(skip)]
-    pub tensor_meta: Option<crate::inference::split::GgufTensorMeta>,
 }
 
 /// Default shard size in bytes (512MB) — used when no config is available.
@@ -286,9 +282,6 @@ pub async fn probe_gguf_file_with_shard_size(
     let header_size = ct.tensor_data_offset;
     let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
 
-    // Extract tensor metadata for v2 layer-aligned sharding
-    let tensor_meta = extract_tensor_meta_from_content(&ct);
-
     tracing::info!(
         repo = %repo_id,
         file = %filename,
@@ -304,7 +297,6 @@ pub async fn probe_gguf_file_with_shard_size(
         header_size,
         shard_count,
         shard_size,
-        tensor_meta,
     })
 }
 
@@ -421,151 +413,6 @@ fn parse_http_date(s: &str) -> Option<SystemTime> {
     }
 
     Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64))
-}
-
-/// Extract GgufTensorMeta from a parsed GGUF Content struct.
-///
-/// This is used during the probe phase to capture tensor layout information
-/// without needing a file path (we already have the Content from the probe bytes).
-fn extract_tensor_meta_from_content(
-    ct: &candle_core::quantized::gguf_file::Content,
-) -> Option<crate::inference::split::GgufTensorMeta> {
-    let arch = ct
-        .metadata
-        .get("general.architecture")
-        .and_then(|v| v.to_string().ok().cloned())
-        .unwrap_or_else(|| "llama".to_string());
-
-    let md_get_u32 = |suffix: &str| -> Option<u32> {
-        let key = format!("{arch}.{suffix}");
-        ct.metadata.get(&key).and_then(|v| v.to_u32().ok())
-    };
-
-    let head_count = md_get_u32("attention.head_count")? as usize;
-    let head_count_kv = md_get_u32("attention.head_count_kv")? as usize;
-    let block_count = md_get_u32("block_count")? as usize;
-    let embedding_length = md_get_u32("embedding_length")? as usize;
-    let rope_dim = md_get_u32("rope.dimension_count")
-        .unwrap_or((embedding_length / head_count) as u32) as usize;
-    let rms_norm_eps = ct
-        .metadata
-        .get(&format!("{arch}.attention.layer_norm_rms_epsilon"))
-        .and_then(|v| v.to_f32().ok())
-        .unwrap_or(1e-5) as f64;
-    let rope_freq_base = ct
-        .metadata
-        .get(&format!("{arch}.rope.freq_base"))
-        .and_then(|v| v.to_f32().ok())
-        .unwrap_or(10000f32);
-    let model_name = ct
-        .metadata
-        .get("general.name")
-        .and_then(|v| v.to_string().ok().cloned());
-
-    let mut tensors = std::collections::HashMap::new();
-    for (name, info) in &ct.tensor_infos {
-        let size =
-            info.ggml_dtype.type_size() * info.shape.elem_count() / info.ggml_dtype.block_size();
-        tensors.insert(
-            name.clone(),
-            crate::inference::split::TensorLocation {
-                offset: info.offset,
-                size: size as u64,
-            },
-        );
-    }
-
-    Some(crate::inference::split::GgufTensorMeta {
-        tensors,
-        tensor_data_offset: ct.tensor_data_offset,
-        model_name,
-        head_count,
-        head_count_kv,
-        block_count,
-        embedding_length,
-        rope_dim,
-        rope_freq_base,
-        rms_norm_eps,
-    })
-}
-
-/// Download the full GGUF file from HuggingFace with progress reporting.
-///
-/// Unlike `download_model` which saves with the original filename, this saves
-/// to a deterministic `full.gguf` path for subsequent repacking.
-pub async fn download_full_gguf(
-    repo_id: &str,
-    filename: &str,
-    dest_dir: &std::path::Path,
-    progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
-) -> Result<std::path::PathBuf, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(7200))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let url = download_url(repo_id, filename);
-
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
-        .send()
-        .await
-        .map_err(|e| format!("Download request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Download returned {}", resp.status()));
-    }
-
-    let total_size = resp.content_length().unwrap_or(0);
-
-    std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
-
-    let tmp_path = dest_dir.join("full.gguf.tmp");
-    let final_path = dest_dir.join("full.gguf");
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(|e| format!("Failed to create file: {e}"))?;
-
-    use tokio::io::AsyncWriteExt;
-
-    let mut downloaded: u64 = 0;
-    let mut stream = resp.bytes_stream();
-
-    use futures::StreamExt;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download chunk error: {e}"))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("Write error: {e}"))?;
-        downloaded += chunk.len() as u64;
-
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.try_send(DownloadProgress {
-                downloaded_bytes: downloaded,
-                total_bytes: total_size,
-            });
-        }
-    }
-
-    file.flush()
-        .await
-        .map_err(|e| format!("Flush error: {e}"))?;
-
-    // Atomic rename
-    tokio::fs::rename(&tmp_path, &final_path)
-        .await
-        .map_err(|e| format!("Rename error: {e}"))?;
-
-    tracing::info!(
-        repo = %repo_id,
-        file = %filename,
-        size = downloaded,
-        "Full GGUF download complete for repacking"
-    );
-
-    Ok(final_path)
 }
 
 /// Download a specific shard (byte range) of a remote GGUF file from HuggingFace.
@@ -827,51 +674,7 @@ pub async fn download_shards(
     // Step 2: Download the GGUF header
     download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
 
-    // V2 layer-aligned path: if we have tensor metadata and are downloading ALL
-    // shards, download the full GGUF and repack into layer-aligned shard files.
-    if let Some(ref tensor_meta) = info.tensor_meta {
-        let all_shards: Vec<u32> = (0..info.shard_count).collect();
-        let downloading_all = shard_indices == all_shards.as_slice()
-            || (shard_indices.len() == info.shard_count as usize);
-
-        if downloading_all {
-            tracing::info!(
-                repo = %repo_id,
-                shard_count = info.shard_count,
-                "V2 layer-aligned path: downloading full GGUF for repacking"
-            );
-
-            // Download full GGUF
-            let gguf_path =
-                download_full_gguf(repo_id, filename, dest_dir, progress_tx.clone()).await?;
-
-            // Repack in a blocking task (4GB+ sequential I/O)
-            let meta_clone = tensor_meta.clone();
-            let sc = info.shard_count;
-            let dd = dest_dir.to_path_buf();
-            let gp = gguf_path.clone();
-            let repack_result = tokio::task::spawn_blocking(move || {
-                crate::inference::split::repack_to_layer_shards(&gp, &meta_clone, sc, &dd)
-            })
-            .await
-            .map_err(|e| format!("Repack task panicked: {e}"))?
-            .map_err(|e| format!("Repack failed: {e}"))?;
-
-            // Clean up the full GGUF (we have the shard files now)
-            if let Err(e) = std::fs::remove_file(&gguf_path) {
-                tracing::warn!(error = %e, "Failed to remove temp full GGUF after repack");
-            }
-
-            tracing::info!(
-                shards = repack_result.len(),
-                "V2 layer-aligned repack complete"
-            );
-
-            return Ok((dest_dir.to_path_buf(), info));
-        }
-    }
-
-    // V1 fallback: byte-range shard download (for partial downloads or missing tensor_meta)
+    // Download each requested shard via byte-range requests (no full GGUF needed)
     let total_shard_bytes: u64 = shard_indices
         .iter()
         .map(|&idx| {
@@ -1023,7 +826,6 @@ mod tests {
             header_size: 5_954_048,
             shard_count: 8,
             shard_size: DEFAULT_SHARD_SIZE,
-            tensor_meta: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: GgufFileInfo = serde_json::from_str(&json).unwrap();
