@@ -171,11 +171,11 @@ libp2p Swarm
 │   └── Messages >5 min old are rejected (replay protection)
 │   └── Failed publishes buffered and replayed on mesh formation
 │
-├── request_response
-│   ├── Tensor channel (120s timeout) — LayerForward, LayerResult
-│   └── Shard channel (300s timeout) — ShardRequest, ShardResponse
+├── request_response (unified protocol, /swarmllm/1.0.0, 300s timeout)
+│   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
+│   └── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor)
 │
-├── mDNS (optional, LAN peer discovery — auto-dial + Kademlia add)
+├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
 ├── connection_limits (max 2/peer, 500 total)
 ├── Identify (protocol identification + peer_to_node reverse map)
 ├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
