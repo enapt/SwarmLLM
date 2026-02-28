@@ -75,6 +75,8 @@ fn is_exempt_path(path: &str) -> bool {
                 | "/api/admin/hf/search"
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
+                | "/api/admin/network-code"
+                | "/api/admin/join-network"
         )
         || path.starts_with("/api/identity/")
         || path.starts_with("/api/pool/")
@@ -153,6 +155,8 @@ mod tests {
         assert!(is_exempt_path("/api/admin/hf/probe"));
         assert!(is_exempt_path("/api/identity/nickname"));
         assert!(is_exempt_path("/api/pool/state"));
+        assert!(is_exempt_path("/api/admin/network-code"));
+        assert!(is_exempt_path("/api/admin/join-network"));
         assert!(is_exempt_path("/health/ready"));
         assert!(is_exempt_path("/metrics"));
     }

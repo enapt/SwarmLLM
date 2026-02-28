@@ -2114,9 +2114,41 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
         }
     };
 
-    // Use 0.0.0.0 as a placeholder — the UI should show the actual external IP
-    // The multiaddr is still useful for LAN connections
-    let multiaddr_str = format!("/ip4/0.0.0.0/udp/{port}/quic-v1/p2p/{peer_id_str}");
+    // Pick a real IP by scanning peer addresses that other nodes see for us,
+    // or fall back to detecting the local machine's non-loopback IP.
+    let best_ip = {
+        // Try to find a non-loopback IP from peers' addresses for our node
+        let mut found_ip = None;
+        for peer in state.shared_state.peer_registry.iter() {
+            for addr in &peer.addresses {
+                if addr.starts_with("/ip4/") {
+                    let parts: Vec<&str> = addr.split('/').collect();
+                    if parts.len() >= 3 {
+                        let ip = parts[2];
+                        if ip != "127.0.0.1" && ip != "0.0.0.0" && ip != "10.255.255.254" {
+                            found_ip = Some(ip.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            if found_ip.is_some() {
+                break;
+            }
+        }
+        found_ip.unwrap_or_else(|| {
+            // Fall back: try to detect local non-loopback IP via UDP socket trick
+            std::net::UdpSocket::bind("0.0.0.0:0")
+                .and_then(|s| {
+                    s.connect("8.8.8.8:80")?;
+                    s.local_addr()
+                })
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|_| "127.0.0.1".to_string())
+        })
+    };
+
+    let multiaddr_str = format!("/ip4/{best_ip}/udp/{port}/quic-v1/p2p/{peer_id_str}");
     let code = if let Ok(addr) = multiaddr_str.parse::<libp2p::Multiaddr>() {
         crate::network::discovery::encode_network_code(&addr)
     } else {
