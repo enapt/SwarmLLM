@@ -660,8 +660,14 @@ impl NetworkManager {
                 }
             }
 
-            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                tracing::info!(%peer_id, ?cause, "Connection closed");
+            SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
+                tracing::info!(%peer_id, ?cause, remaining = num_established, "Connection closed");
+
+                // Skip cleanup if other connections to this peer remain
+                if num_established > 0 {
+                    tracing::debug!(%peer_id, remaining = num_established, "Other connections remain, skipping cleanup");
+                } else {
+
                 self.update_peer_count().await;
 
                 // NET-I1: Drain pending shard requests and download progress for this peer
@@ -701,6 +707,7 @@ impl NetworkManager {
                         tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
                     }
                 }
+                } // end else (num_established == 0)
             }
 
             SwarmEvent::NewListenAddr { address, .. } => {
