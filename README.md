@@ -26,14 +26,19 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
-- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection and transaction replay prevention
-- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal, connection limits, and gossip replay protection
-- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305), pipeline sealing, and authenticated sealed gossip
-- **Identity & Pools** — Cryptographic nicknames, leaderboard, and multi-device credit pooling with dual-signature invitation protocol
-- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace and peers with popularity/rarity scoring
-- **Built-in Web UI** — Admin dashboard, chat interface, model browser, shard visualization, and first-run setup wizard
-- **Fault Tolerant** — Hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
-- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, and Content-Security-Policy
+- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection, transaction replay prevention, and credit escrow for large requests
+- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay on NAT detection), connection limits, and gossip replay protection
+- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via ephemeral ECDH), pipeline sealing, and authenticated sealed gossip
+- **Sybil Resistance** — Ed25519-signed balance reports with timestamp freshness, peer reputation scoring with trust decay, leaderboard spoofing protection
+- **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol and privacy-preserving blind signatures
+- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring
+- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
+- **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
+- **Multi-turn KV-cache** — Session-aware cache reuse skips redundant prefill across chat messages
+- **Built-in Web UI** — Admin dashboard, chat interface, model browser, shard visualization, first-run setup wizard, mobile-responsive layout
+- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
+- **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
+- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, config hot-reload via SIGHUP
 
 ## Quick Start
 
@@ -183,7 +188,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_concurrent_requests` |
 | `[credit]` | Starting balance, earn/spend rates |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
-| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards` |
+| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `max_concurrent_downloads` |
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start` |
 

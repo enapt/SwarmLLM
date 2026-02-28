@@ -28,7 +28,12 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<PoolId, PoolState>     — pool registry     │  │
 │  │  DashMap<String, AcqProgress>   — download progress │  │
 │  │  AtomicBool                     — model_loaded flag  │  │
+│  │  AtomicBool                     — is_ready flag      │  │
+│  │  AtomicU64                      — inference_requests  │  │
 │  │  Notify                         — queue drain signal │  │
+│  │  DashMap<ModelId, CancelFlag>   — download cancels   │  │
+│  │  TrustManager                   — peer trust scores  │  │
+│  │  watch::Sender<OperationalParams> — config reload    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -201,12 +206,39 @@ For a 7B model (hidden_dim=3584):
 
 ### KV-Cache Management
 
-- Each SplitModel maintains per-layer KV-cache, serialized by Mutex per model
+- Per-request KV-cache isolation via `DashMap<(ModelKey, RequestId), Vec<(Tensor, Tensor)>>`
+- Each concurrent request gets its own cache — no corruption under concurrency
+- Multi-turn reuse: session_id tracks conversations, prefix matching skips redundant prefill
 - KV-cache is cleared when `sequence_num == 0` (start of new request)
 - `index_pos` travels through the wire protocol so all nodes apply correct RoPE positioning
 - Position tracking: `index_pos = prompt_token_count` after prefill, increments by 1 per decode step
 - KvCacheManager tracks sessions and wired to inference router for cache reuse
 - Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
+- Abandoned cache entries cleaned up after 10 minutes
+
+### Speculative Decoding
+
+- Draft model (small/fast) proposes K candidate tokens per step (default 4)
+- Target model verifies all K in one forward pass (amortized GPU cost)
+- Rejection sampling ensures output distribution identical to non-speculative
+- KV-cache resynchronization on rejection (trim + reseed)
+- Config: `speculative_decoding`, `speculative_gamma`, `draft_model_path`
+- Falls back to standard decoding if no draft model available
+
+### Batched Inference
+
+- `BatchForwarder` collects concurrent decode-step requests into GPU batches
+- Position-independent ops (norms, MLP) run on stacked `[batch, seq, dim]` tensors
+- Attention runs per-request (different KV-caches and positions)
+- Output split back via `Tensor::narrow` per request
+- Prefill and single-item batches use sequential path
+
+### VRAM-Aware Cache Eviction
+
+- `SplitModelEntry` wraps models with `last_used` timestamp and `estimated_vram_mb`
+- Configurable `max_split_model_memory_mb` budget (default unlimited)
+- LRU eviction: least-recently-used models evicted when over budget
+- Active models (with in-flight pipelines) are never evicted
 
 ## Credit System
 
@@ -309,6 +341,9 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | identity_prefs | "nickname" | Local nickname preference |
 | pool_state | "pool" | PoolState |
 | pool_forwards | {uuid} | PoolCreditForward |
+| trust_scores | {node_id_hex} | f64 trust score |
+| escrow | {escrow_id} | EscrowEntry |
+| hf_sources | {model_id} | HfSource metadata |
 
 ## Auto-Manage Shards
 
@@ -347,9 +382,11 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 │                                                             │
 │  Tier 1: Pairwise Sessions (unicast)                        │
 │    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
+│    Forward secrecy: ephemeral X25519 per session            │
 │    Session epoch mixed into key derivation (no nonce reuse) │
 │    Replay protection: recv nonce must be monotonically      │
 │    increasing (rejects nonce ≤ last_seen_recv_nonce)        │
+│    Fallback to static derivation for legacy peers           │
 │                                                             │
 │  Tier 2: Pipeline Sealing (inference prompts)               │
 │    Per-request ephemeral key → sealed prompt/response       │
@@ -382,6 +419,27 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - Pool leaderboard aggregates member contributions
 - Invitation expiry checked at API layer with clear error messages
 - Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=3
+
+## Reputation & Trust
+
+- `TrustManager` in `src/credit/trust.rs` tracks per-peer trust scores (0.0–1.0, default 0.5)
+- Trust-affecting events: InferenceSuccess (+0.01), SpotCheckFail (-0.1), InvalidGossip (-0.05), ValidTransaction (+0.02), SignatureViolation (-0.2)
+- Decay toward 0.5 over time (1% per health ping cycle) — prevents permanent punishment
+- Persisted in sled `trust_scores` tree, hydrated on startup
+- Trust factors into pipeline scheduling and credit tier weighting
+
+## Credit Escrow
+
+- `EscrowManager` in `src/credit/escrow.rs` holds credits for large requests (> threshold)
+- Lifecycle: `create_escrow()` → `release_escrow()` (success) or `refund_escrow()` (failure)
+- Entries expire after 10 minutes with automatic refund
+- Persisted in sled `escrow` tree
+
+## Sybil Resistance
+
+- Balance reports are Ed25519-signed with timestamp freshness check (5 min window)
+- Signed reports weighted at 1.0, unsigned legacy at 0.1 for tier calculations
+- Stale/replayed reports rejected
 
 ## Credit System Security
 
@@ -461,7 +519,12 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `GET  /api/pool/leaderboard` — Pool member contribution rankings
 
 ### Utility
-- `POST /api/admin/shutdown` — Gracefully shut down the node (localhost only)
+- `POST   /api/admin/shutdown` — Gracefully shut down the node (localhost only)
+- `POST   /api/admin/config/reload` — Hot-reload operational config parameters
+- `POST   /api/admin/downloads/:model_id/cancel` — Cancel in-progress HF download
+- `DELETE /api/admin/models/:model_id` — Remove model (shards + manifest + state)
+- `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
+- `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 
 ### Static
 - `/admin` — Dashboard SPA (single-page app — all routes serve index.html)

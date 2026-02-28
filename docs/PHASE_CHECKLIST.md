@@ -305,3 +305,54 @@
 - [x] Credit sparkline deltas, REST poll pausing, CSP header
 
 **Test results**: 226 tests passing (210 unit + 16 integration), 0 failures, clean clippy
+
+---
+
+## Phase 11: Roadmap Blitz
+
+**Goal**: Implement all 32 remaining roadmap items from IDEAS_ROADMAP.md via parallel agent teams.
+
+**Date**: 2026-02-28 | **Method**: Two waves of parallel agents (5 + 7 agents in isolated worktrees)
+
+### Wave 1 — Quick Wins + Core Improvements (18 items, 5 agents)
+- [x] A6: Prometheus `/metrics` endpoint (OpenMetrics text format, 5 metrics)
+- [x] A7: Structured startup log with resolved config
+- [x] A8: Database integrity check at startup (4 critical sled trees)
+- [x] B1: Per-request KV-cache isolation (DashMap keyed by request_id)
+- [x] B3: Load-aware scheduling via health ping piggybacking
+- [x] B5: Manifest versioning with `schema_version` field
+- [x] B6: Shard download concurrency cap via Semaphore (default 3)
+- [x] C7: JoinSet-based task supervisor with restart-on-crash + exponential backoff
+- [x] C8: Startup readiness probe `GET /health/ready` with subsystem status
+- [x] D5: Auto-activate relay on NAT detection
+- [x] D6: API key copy button in settings UI
+- [x] D7: Token counter in chat input (~N tokens, color warnings)
+- [x] D8: Filter model selector to ready models only
+- [x] D9: WebSocket reconnect indicator banner
+- [x] D11: Cancel button for in-progress HF downloads + backend endpoint
+- [x] D12: Shard storage cleanup UI + `DELETE /api/admin/models/:id` endpoint
+- [x] Backend: `POST /api/admin/downloads/:model_id/cancel` (CancellationToken-based)
+- [x] Backend: `DELETE /api/admin/models/:model_id` (disk + DB + SharedState cleanup)
+
+### Wave 2 — Major Features (14 items, 7 agents)
+- [x] B2: Multi-turn KV-cache reuse (skip prefill for cached prefix, session_id tracking)
+- [x] B4: HuggingFace download resilience (resume from partial, Range headers, Retry-After parsing)
+- [x] B7: Config hot-reloading via SIGHUP + `POST /api/admin/config/reload`
+- [x] B8: VRAM-aware split_models LRU cache eviction (SplitModelEntry, configurable budget)
+- [x] B9: Persist shard_range to database (CLI override, restore on restart)
+- [x] C1: Sybil resistance via Ed25519-signed balance reports (freshness check, weighted scoring)
+- [x] C2: Reputation scoring (TrustManager, 5 event types, decay toward 0.5, sled persistence)
+- [x] C3: Forward secrecy with ephemeral ECDH (per-session X25519, automatic zeroization)
+- [x] C4: Credit escrow for large requests (create/release/refund lifecycle, 10min expiry)
+- [x] C5: Speculative decoding (draft model + rejection sampling, 2-3x throughput)
+- [x] C6: True batched split inference (BatchForwarder, stacked tensors, per-request attention)
+- [x] D1: Privacy-preserving pool membership (blind signatures, BLAKE3 commitments)
+- [x] D2: Leaderboard spoofing protection (min lifetime + verified tx count filters)
+- [x] D10: Mobile-responsive layout (hamburger menu, media queries, 44px touch targets)
+
+### New modules created:
+- `src/api/metrics.rs` — Prometheus metrics
+- `src/credit/trust.rs` — TrustManager with reputation scoring
+- `src/credit/escrow.rs` — EscrowManager with credit escrow lifecycle
+
+**Test results**: 340 tests passing (324 unit + 16 integration), 0 failures, clean clippy
