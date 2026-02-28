@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -17,6 +17,8 @@ pub struct CachedSession {
     send_nonce: AtomicU64,
     /// SEC-I5: Tracks the highest received nonce to prevent replay attacks.
     last_seen_recv_nonce: AtomicU64,
+    /// Whether nonce=0 has been seen (prevents replay of the first message).
+    nonce_zero_seen: AtomicBool,
     created_at: Instant,
 }
 
@@ -26,6 +28,7 @@ impl CachedSession {
             cipher_key,
             send_nonce: AtomicU64::new(0),
             last_seen_recv_nonce: AtomicU64::new(0),
+            nonce_zero_seen: AtomicBool::new(false),
             created_at: Instant::now(),
         }
     }
@@ -239,8 +242,16 @@ impl SessionManager {
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
 
         let last_seen = session.last_seen_recv_nonce.load(Ordering::SeqCst);
-        if recv_nonce > 0 && recv_nonce <= last_seen {
+        // Reject replayed or out-of-order nonces. We use fetch_max below so
+        // any nonce <= last_seen has already been accepted once.
+        if recv_nonce <= last_seen && last_seen != 0 {
             tracing::warn!(peer = %peer, recv_nonce, last_seen, "Rejecting replayed nonce");
+            return Err(SwarmError::DecryptionFailed);
+        }
+        // Also reject nonce=0 if we've already seen nonce=0 (last_seen==0 means
+        // either fresh session or nonce=0 was already accepted; use a flag to distinguish).
+        if recv_nonce == 0 && session.nonce_zero_seen.swap(true, Ordering::SeqCst) {
+            tracing::warn!(peer = %peer, "Rejecting replayed nonce=0");
             return Err(SwarmError::DecryptionFailed);
         }
 

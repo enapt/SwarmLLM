@@ -127,10 +127,20 @@ impl CreditLedger {
             "Earned credits for inference serving"
         );
 
-        // Forward credits to pool owner if we're a member (not owner)
+        // Forward credits to pool owner if we're a member (not owner).
+        // Deduct the forwarded amount from the member's balance to prevent double-spend.
         if let Some(ref ss) = self.shared_state {
-            if let Err(e) = crate::pool::forward::forward_credits_to_owner(ss, amount).await {
-                tracing::debug!(error = %e, "Pool credit forwarding skipped");
+            match crate::pool::forward::forward_credits_to_owner(ss, amount).await {
+                Ok(true) => {
+                    // Credits were forwarded — deduct from member's local balance
+                    self.apply_credit(-amount, false).await?;
+                    self.persist_balance().await?;
+                    tracing::info!(amount, "Forwarded earned credits to pool owner");
+                }
+                Ok(false) => {} // Not in a pool or is the owner — keep credits
+                Err(e) => {
+                    tracing::debug!(error = %e, "Pool credit forwarding skipped");
+                }
             }
         }
 

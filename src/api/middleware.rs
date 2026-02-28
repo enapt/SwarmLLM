@@ -49,22 +49,29 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
     response
 }
 
-/// Paths exempt from Bearer token authentication.
-/// Frontend routes, health checks, static assets, and admin dashboard APIs
-/// are exempt — they're for the embedded UI and already protected by CORS
-/// (localhost only). The Bearer token protects external-facing endpoints
-/// like the OpenAI-compatible inference API (`/v1/...`).
-/// Note: `/api/admin/api-key` requires auth (returns the raw key).
-fn is_exempt_path(path: &str) -> bool {
-    // Frontend routes, health checks, static assets are exempt.
-    // All /v1/* routes require Bearer token (OpenAI-compatible API).
-    // Sensitive /api/admin/* endpoints require auth; only safe read-only
-    // dashboard endpoints are exempt.
-    matches!(
+/// Check whether a request is exempt from Bearer token authentication.
+///
+/// Only GET requests to read-only dashboard endpoints are exempt.
+/// All state-mutating operations (POST/PUT/DELETE) require auth, with
+/// the exception of `/api/admin/join-network` (POST, but non-destructive
+/// and needed by the frontend without auth).
+///
+/// Frontend routes, health checks, and static assets are always exempt.
+/// The Bearer token protects external-facing endpoints (`/v1/...`)
+/// and all sensitive/destructive operations.
+fn is_exempt_request(path: &str, method: &Method) -> bool {
+    // Frontend routes, health checks, static assets — always exempt
+    if matches!(
         path,
         "/" | "/health" | "/health/ready" | "/metrics" | "/admin" | "/chat" | "/setup"
     ) || path.starts_with("/static/")
-        || matches!(
+    {
+        return true;
+    }
+
+    // Read-only dashboard endpoints — GET only
+    if *method == Method::GET {
+        return matches!(
             path,
             "/api/admin/stats"
                 | "/api/admin/config"
@@ -76,10 +83,16 @@ fn is_exempt_path(path: &str) -> bool {
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
-                | "/api/admin/join-network"
-        )
-        || path.starts_with("/api/identity/")
-        || path.starts_with("/api/pool/")
+        ) || path.starts_with("/api/identity/")
+            || path.starts_with("/api/pool/");
+    }
+
+    // POST /api/admin/join-network is exempt (frontend needs it, non-destructive)
+    if *method == Method::POST && path == "/api/admin/join-network" {
+        return true;
+    }
+
+    false
 }
 
 /// Bearer token authentication middleware.
@@ -89,9 +102,10 @@ fn is_exempt_path(path: &str) -> bool {
 /// passed through without authentication.
 pub async fn auth_middleware(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    let method = req.method().clone();
 
-    // Exempt frontend routes, health, and static assets
-    if is_exempt_path(&path) {
+    // Exempt frontend routes, health, read-only dashboard endpoints
+    if is_exempt_request(&path, &method) {
         return next.run(req).await;
     }
 
@@ -137,38 +151,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exempt_paths() {
-        assert!(is_exempt_path("/"));
-        assert!(is_exempt_path("/health"));
-        assert!(is_exempt_path("/admin"));
-        assert!(is_exempt_path("/chat"));
-        assert!(is_exempt_path("/setup"));
-        assert!(is_exempt_path("/static/css/style.css"));
-        assert!(is_exempt_path("/static/js/app.js"));
-        assert!(is_exempt_path("/api/admin/stats"));
-        assert!(is_exempt_path("/api/admin/config"));
-        assert!(is_exempt_path("/api/admin/shard-storage"));
-        assert!(is_exempt_path("/api/admin/peers"));
-        assert!(is_exempt_path("/api/admin/credits"));
-        assert!(is_exempt_path("/api/admin/network-map"));
-        assert!(is_exempt_path("/api/admin/hf/search"));
-        assert!(is_exempt_path("/api/admin/hf/probe"));
-        assert!(is_exempt_path("/api/identity/nickname"));
-        assert!(is_exempt_path("/api/pool/state"));
-        assert!(is_exempt_path("/api/admin/network-code"));
-        assert!(is_exempt_path("/api/admin/join-network"));
-        assert!(is_exempt_path("/health/ready"));
-        assert!(is_exempt_path("/metrics"));
+    fn exempt_get_requests() {
+        let get = Method::GET;
+        // Frontend routes, health, static — always exempt
+        assert!(is_exempt_request("/", &get));
+        assert!(is_exempt_request("/health", &get));
+        assert!(is_exempt_request("/health/ready", &get));
+        assert!(is_exempt_request("/metrics", &get));
+        assert!(is_exempt_request("/admin", &get));
+        assert!(is_exempt_request("/chat", &get));
+        assert!(is_exempt_request("/setup", &get));
+        assert!(is_exempt_request("/static/css/style.css", &get));
+        assert!(is_exempt_request("/static/js/app.js", &get));
+        // Read-only dashboard endpoints — GET exempt
+        assert!(is_exempt_request("/api/admin/stats", &get));
+        assert!(is_exempt_request("/api/admin/config", &get));
+        assert!(is_exempt_request("/api/admin/models", &get));
+        assert!(is_exempt_request("/api/admin/peers", &get));
+        assert!(is_exempt_request("/api/admin/credits", &get));
+        assert!(is_exempt_request("/api/admin/shard-storage", &get));
+        assert!(is_exempt_request("/api/admin/hf/search", &get));
+        assert!(is_exempt_request("/api/admin/hf/probe", &get));
+        assert!(is_exempt_request("/api/admin/network-map", &get));
+        assert!(is_exempt_request("/api/admin/network-code", &get));
+        assert!(is_exempt_request("/api/identity/nickname", &get));
+        assert!(is_exempt_request("/api/pool/state", &get));
     }
 
     #[test]
-    fn non_exempt_paths() {
-        assert!(!is_exempt_path("/api/admin/api-key")); // sensitive — requires auth
-        assert!(!is_exempt_path("/api/admin/shutdown")); // destructive — requires auth
-        assert!(!is_exempt_path("/api/admin/hf/download")); // write op — requires auth
-        assert!(!is_exempt_path("/api/admin/hf/download-shards")); // write op — requires auth
-        assert!(!is_exempt_path("/v1/models")); // OpenAI API — requires auth
-        assert!(!is_exempt_path("/v1/chat/completions")); // OpenAI API — requires auth
-        assert!(!is_exempt_path("/v1/completions")); // OpenAI API — requires auth
+    fn exempt_post_join_network() {
+        // POST /api/admin/join-network is exempt (frontend needs it)
+        assert!(is_exempt_request("/api/admin/join-network", &Method::POST));
+    }
+
+    #[test]
+    fn non_exempt_mutations() {
+        let put = Method::PUT;
+        let post = Method::POST;
+        let delete = Method::DELETE;
+        // PUT /api/admin/config requires auth (C4 fix)
+        assert!(!is_exempt_request("/api/admin/config", &put));
+        // POST /api/pool/* require auth (C5 fix)
+        assert!(!is_exempt_request("/api/pool/create", &post));
+        assert!(!is_exempt_request("/api/pool/invite", &post));
+        assert!(!is_exempt_request("/api/pool/leave", &post));
+        assert!(!is_exempt_request("/api/pool/remove", &post));
+        assert!(!is_exempt_request("/api/pool/accept", &post));
+        // PUT /api/identity/nickname requires auth
+        assert!(!is_exempt_request("/api/identity/nickname", &put));
+        assert!(!is_exempt_request("/api/identity/nickname", &delete));
+        // Sensitive admin endpoints require auth
+        assert!(!is_exempt_request("/api/admin/api-key", &Method::GET));
+        assert!(!is_exempt_request("/api/admin/shutdown", &post));
+        assert!(!is_exempt_request("/api/admin/hf/download", &post));
+        assert!(!is_exempt_request("/api/admin/hf/download-shards", &post));
+        // OpenAI API always requires auth
+        assert!(!is_exempt_request("/v1/models", &Method::GET));
+        assert!(!is_exempt_request("/v1/chat/completions", &post));
+        assert!(!is_exempt_request("/v1/completions", &post));
     }
 }

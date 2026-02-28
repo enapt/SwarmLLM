@@ -148,7 +148,7 @@ var SwarmLLM = (function() {
         div.onclick = function() { chat.switchSession(s.id); };
         var title = s.title.length > 28 ? s.title.substring(0, 28) + '...' : s.title;
         div.innerHTML = '<span class="session-title">' + escapeHtml(title) + '</span>' +
-          '<button class="btn btn-ghost btn-sm session-delete" onclick="SwarmLLM.chat.deleteSession(\'' + s.id + '\', event)" title="Delete">&times;</button>';
+          '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
         list.appendChild(div);
       });
     },
@@ -571,18 +571,18 @@ var SwarmLLM = (function() {
         if (m.status === 'loaded') {
           // already active — no button needed
         } else if (isReady) {
-          actionHtml = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.selectModel(\'' + escapeHtml(m.id) + '\')">Use</button>';
+          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + escapeHtml(m.id) + '">Use</button>';
         } else if (isDownloading) {
           // Cancel download button
-          actionHtml = '<button class="shard-cancel-btn" onclick="SwarmLLM.cancelDownload(\'' + escapeHtml(m.id) + '\')" title="Cancel download">&times;</button>';
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + escapeHtml(m.id) + '" title="Cancel download">&times;</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download Missing</button>';
+          actionHtml = '<button class="btn btn-sm" data-request-model="' + escapeHtml(m.id) + '">Download Missing</button>';
         }
 
         // Remove model button (for models with local shards, not currently downloading)
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = ' <button class="model-remove-btn" onclick="SwarmLLM.removeModel(\'' + escapeHtml(m.id) + '\')">Remove</button>';
+          removeHtml = ' <button class="model-remove-btn" data-remove-model="' + escapeHtml(m.id) + '">Remove</button>';
         }
 
         var name = m.name || m.id;
@@ -940,7 +940,7 @@ var SwarmLLM = (function() {
             '<option value="shards">Download shards (rarest first)</option>' +
             '<option value="full">Download full model</option>' +
             '</select>' +
-            '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.hf.download(\'' + escapeHtml(model.repo_id || model.id) + '\', \'' + escapeHtml(model.filename || '') + '\')">Download</button>' +
+            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(model.repo_id || model.id) + '" data-hf-filename="' + escapeHtml(model.filename || '') + '">Download</button>' +
             '</div>';
           results.appendChild(card);
         });
@@ -2046,6 +2046,32 @@ var SwarmLLM = (function() {
 
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
+
+    // Delegated handlers for dynamically generated elements (CSP-safe)
+    document.addEventListener('click', function(e) {
+      var target = e.target;
+
+      // Session delete button
+      var delId = target.getAttribute('data-delete-session');
+      if (delId) { e.stopPropagation(); chat.deleteSession(delId, e); return; }
+
+      // Model action buttons
+      var selectId = target.getAttribute('data-select-model');
+      if (selectId) { selectModel(selectId); return; }
+
+      var cancelId = target.getAttribute('data-cancel-download');
+      if (cancelId) { cancelDownload(cancelId); return; }
+
+      var requestId = target.getAttribute('data-request-model');
+      if (requestId) { requestModel(requestId); return; }
+
+      var removeId = target.getAttribute('data-remove-model');
+      if (removeId) { removeModel(removeId); return; }
+
+      // HF download button
+      var hfRepo = target.getAttribute('data-hf-download');
+      if (hfRepo) { hf.download(hfRepo, target.getAttribute('data-hf-filename') || ''); return; }
+    });
   }
 
   function init() {

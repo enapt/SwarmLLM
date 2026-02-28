@@ -961,7 +961,9 @@ impl Daemon {
                         *geo_state.detected_region.write().await = Some(code);
                     }
                     None => {
-                        tracing::debug!("IP geolocation unavailable — network map will show unknown region");
+                        tracing::debug!(
+                            "IP geolocation unavailable — network map will show unknown region"
+                        );
                     }
                 }
             });
@@ -1237,10 +1239,38 @@ impl Daemon {
             }
         }
 
-        // Signal graceful shutdown
+        // Signal graceful shutdown to all subsystems
         shared_state.shutdown();
 
-        // Flush database before exiting to ensure all pending writes are persisted
+        // Drain the JoinSet with a timeout so subsystems can run their cleanup
+        // (e.g., save peer cache, close connections, flush data).
+        tracing::info!("Waiting for subsystems to shut down (10s timeout)...");
+        let drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
+        tokio::pin!(drain_deadline);
+        loop {
+            tokio::select! {
+                _ = &mut drain_deadline => {
+                    tracing::warn!("Shutdown timeout — aborting remaining subsystems");
+                    break;
+                }
+                result = subsystems.join_next() => {
+                    match result {
+                        Some(Ok((name, _, _))) => {
+                            tracing::debug!(subsystem = name, "Subsystem exited cleanly");
+                        }
+                        Some(Err(e)) => {
+                            tracing::debug!(error = %e, "Subsystem join error during shutdown");
+                        }
+                        None => {
+                            tracing::info!("All subsystems shut down cleanly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush database after subsystems have had a chance to write final state
         if let Err(e) = shared_state.db.flush() {
             tracing::error!(error = %e, "Failed to flush database during shutdown");
         }

@@ -490,6 +490,16 @@ impl PoolManager {
             return;
         }
 
+        // Dedup check: reject replayed credit forwards
+        if let Ok(Some(_)) = self
+            .shared_state
+            .db
+            .get_json::<PoolCreditForward>(TREE_POOL_FORWARDS, &forward.id.to_string())
+        {
+            tracing::warn!(id = %forward.id, from = %forward.from_node_id, "Rejecting replayed credit forward");
+            return;
+        }
+
         // Verify member signature before accepting
         let member_key = match ed25519_dalek::VerifyingKey::from_bytes(&forward.from_node_id.0) {
             Ok(k) => k,

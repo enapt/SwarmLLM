@@ -9,12 +9,13 @@ use crate::pool::types::PoolCommand;
 ///
 /// Called from the credit earning path when this node is a pool member (not owner).
 /// Creates a member-signed PoolCreditForward and sends it to the pool manager.
+/// Returns `Ok(true)` if credits were forwarded, `Ok(false)` if not in a pool or is owner.
 pub async fn forward_credits_to_owner(
     shared_state: &Arc<SharedState>,
     amount: i64,
-) -> Result<(), SwarmError> {
+) -> Result<bool, SwarmError> {
     if amount <= 0 {
-        return Ok(());
+        return Ok(false);
     }
 
     // Extract pool info while holding the read lock, then release it.
@@ -22,14 +23,14 @@ pub async fn forward_credits_to_owner(
         let guard = shared_state.pool_state.read().await;
         let ps = match guard.as_ref() {
             Some(ps) => ps,
-            None => return Ok(()), // Not in a pool
+            None => return Ok(false), // Not in a pool
         };
 
         let my_id = shared_state.identity.node_id();
 
         // Only forward if we're a member (not the owner)
         if ps.pool_id == *my_id {
-            return Ok(()); // Owner keeps their own credits
+            return Ok(false); // Owner keeps their own credits
         }
 
         (ps.pool_id.clone(), ps.pool_id.clone())
@@ -45,5 +46,5 @@ pub async fn forward_credits_to_owner(
         let _ = tx.send(PoolCommand::ProcessCreditForward { forward }).await;
     }
 
-    Ok(())
+    Ok(true)
 }

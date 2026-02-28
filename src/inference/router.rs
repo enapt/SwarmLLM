@@ -637,6 +637,7 @@ async fn execute_local_batch(
     for queued in batch {
         let request = queued.request;
         let result_tx = queued.result_tx;
+        let token_tx = queued.token_tx;
 
         let output = if executor.is_loaded() {
             let prompt = {
@@ -658,16 +659,53 @@ async fn execute_local_batch(
                 "Executing inference locally (batched)"
             );
 
-            match executor.generate(&prompt, &request.sampling_params) {
-                Ok((content, gen_result)) => Ok(InferenceOutput {
-                    request_id: request.id,
-                    content,
-                    prompt_tokens: gen_result.prompt_tokens,
-                    completion_tokens: gen_result.completion_tokens,
-                    finish_reason: gen_result.finish_reason.as_str().to_string(),
-                    session_id: request.session_id.clone(),
-                }),
-                Err(e) => Err(e),
+            // Use streaming generation if the request has a token channel
+            if let Some(ref tx) = token_tx {
+                let tx_clone = tx.clone();
+                let session_id = request.session_id.clone();
+                let mut accumulated = String::new();
+                match executor.generate_stream(
+                    &prompt,
+                    &request.sampling_params,
+                    |token: &str| -> bool {
+                        accumulated.push_str(token);
+                        let event = StreamingTokenEvent {
+                            text: token.to_string(),
+                            finish_reason: None,
+                        };
+                        tx_clone.try_send(event).is_ok()
+                    },
+                ) {
+                    Ok(gen_result) => {
+                        // Send final done event
+                        let done_event = StreamingTokenEvent {
+                            text: String::new(),
+                            finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
+                        };
+                        let _ = tx.try_send(done_event);
+                        Ok(InferenceOutput {
+                            request_id: request.id,
+                            content: accumulated,
+                            prompt_tokens: gen_result.prompt_tokens,
+                            completion_tokens: gen_result.completion_tokens,
+                            finish_reason: gen_result.finish_reason.as_str().to_string(),
+                            session_id,
+                        })
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                match executor.generate(&prompt, &request.sampling_params) {
+                    Ok((content, gen_result)) => Ok(InferenceOutput {
+                        request_id: request.id,
+                        content,
+                        prompt_tokens: gen_result.prompt_tokens,
+                        completion_tokens: gen_result.completion_tokens,
+                        finish_reason: gen_result.finish_reason.as_str().to_string(),
+                        session_id: request.session_id.clone(),
+                    }),
+                    Err(e) => Err(e),
+                }
             }
         } else {
             Err(SwarmError::NoModelLoaded)
