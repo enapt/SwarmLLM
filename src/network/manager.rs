@@ -1151,7 +1151,7 @@ impl NetworkManager {
                     let manifest = self.shared_state.model_registry.get_manifest(model_id);
                     if let Some(manifest) = manifest {
                         // Skip source GGUF fallback for v2 manifests — byte offsets don't match
-                        if manifest.shards.iter().any(|s| s.byte_start.is_some()) {
+                        if manifest.is_v2() {
                             tracing::debug!(
                                 model = %model_id,
                                 shard = shard_index,

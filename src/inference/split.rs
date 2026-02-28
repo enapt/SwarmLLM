@@ -1109,98 +1109,6 @@ impl ShardReader {
         })
     }
 
-    /// Create a v2 ShardReader from layer-aligned shard files.
-    ///
-    /// In v2 shards, each shard file contains only the tensor data for its
-    /// assigned layers, written sequentially. The remap table maps GGUF
-    /// virtual positions to (shard_index, local_offset) pairs.
-    pub fn new_v2(
-        header: Vec<u8>,
-        _meta: &GgufTensorMeta,
-        layouts: &[LayerShardLayout],
-        model_dir: &Path,
-    ) -> Result<Self, SwarmError> {
-        // Build a remap: for each tensor in the GGUF, figure out which shard
-        // file contains it and at what offset within that shard file.
-        //
-        // The ShardReader's `shards` vec stores (virtual_start, path, len).
-        // For v2, we create virtual shard entries that map GGUF tensor positions
-        // to the correct shard file offset.
-        //
-        // Strategy: For each tensor in each layout, we know:
-        //   - its GGUF absolute offset = tensor_data_offset + tensor.offset
-        //   - its position in the shard file (cumulative offset within the shard)
-        // We build shard entries where start_byte = gguf_abs_offset - local_offset
-        // so that find_shard(gguf_abs_offset) = (shard_idx, local_offset).
-        //
-        // Since tensors are reordered within shards, each tensor needs its own
-        // virtual "shard" entry in the worst case. We can optimize by only creating
-        // entries when the delta changes.
-
-        let mut shards_vec: Vec<(u64, PathBuf, u64)> = Vec::new();
-
-        for layout in layouts {
-            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
-            let file_len = std::fs::metadata(&shard_path)
-                .map_err(SwarmError::Io)?
-                .len();
-
-            let mut local_offset: u64 = 0;
-            for (_name, abs_offset, size) in &layout.tensors {
-                // Virtual start is chosen so that: abs_offset - virtual_start = local_offset
-                // → virtual_start = abs_offset - local_offset
-                let virtual_start = abs_offset - local_offset;
-
-                // Check if we can merge with the previous entry (same shard, contiguous)
-                let can_merge =
-                    shards_vec
-                        .last()
-                        .is_some_and(|(prev_start, prev_path, prev_len)| {
-                            prev_path == &shard_path
-                                && *prev_start + *prev_len == virtual_start + local_offset
-                        });
-
-                if can_merge {
-                    // Extend previous entry
-                    if let Some(last) = shards_vec.last_mut() {
-                        last.2 += size;
-                    }
-                } else {
-                    shards_vec.push((
-                        virtual_start,
-                        shard_path.clone(),
-                        local_offset + size, // len covers from 0 to end of this tensor
-                    ));
-                }
-
-                local_offset += size;
-            }
-
-            // Overwrite the last entry for this shard to use the full file length
-            if let Some(last) = shards_vec.last_mut() {
-                if last.1 == shard_path {
-                    last.2 = file_len;
-                }
-            }
-        }
-
-        // Compute total virtual size: header + largest (virtual_start + shard_len)
-        let max_virtual = shards_vec
-            .iter()
-            .map(|(start, _, len)| start + len)
-            .max()
-            .unwrap_or(0);
-        let total_size = max_virtual.max(header.len() as u64);
-
-        Ok(Self {
-            header,
-            shards: shards_vec,
-            total_size,
-            position: 0,
-            current_shard: None,
-        })
-    }
-
     /// Find which shard (if any) contains the given virtual file position.
     fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
         for (i, (start, _path, shard_len)) in self.shards.iter().enumerate() {
@@ -2877,11 +2785,11 @@ pub fn repack_to_layer_shards(
     Ok(shard_infos)
 }
 
-/// Return all contiguous layer ranges from a v2 manifest's ShardInfo entries.
+/// Return all contiguous layer ranges from manifest ShardInfo entries.
 ///
-/// For v2 manifests (byte_start is Some), this reads layer_range directly from
-/// each shard — no tensor byte-range analysis needed. Falls back to the v1
-/// bitmap-based approach when byte_start is None.
+/// Reads layer_range directly from each shard — accurate for v2 manifests
+/// (use `manifest.is_v2()` to check). For v1 manifests, layer ranges are
+/// approximate; prefer `compute_available_layer_ranges` with tensor metadata.
 pub fn available_layer_ranges_from_manifest(
     manifest: &crate::types::ModelManifest,
     local_shard_indices: &[u32],

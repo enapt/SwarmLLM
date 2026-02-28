@@ -68,6 +68,13 @@ impl ModelManifest {
     pub fn stamp_version(&mut self) {
         self.schema_version = MANIFEST_SCHEMA_VERSION;
     }
+
+    /// Whether this manifest uses v2 layer-aligned shards.
+    /// V2 shards have `byte_start`/`byte_end` set, meaning each shard file
+    /// contains complete layers (not arbitrary byte ranges of the GGUF).
+    pub fn is_v2(&self) -> bool {
+        self.shards.iter().any(|s| s.byte_start.is_some())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -140,10 +140,9 @@ impl PipelineScheduler {
             shard_indices.sort();
 
             // Compute ALL contiguous layer ranges for this node's shards.
-            // V2 manifests (byte_start is set) have accurate layer_range per shard,
-            // so we can read directly from the manifest without tensor analysis.
-            let is_v2 = manifest.shards.iter().any(|s| s.byte_start.is_some());
-            let ranges = if is_v2 {
+            // V2 manifests have accurate layer_range per shard, so we can
+            // read directly from the manifest without tensor analysis.
+            let ranges = if manifest.is_v2() {
                 crate::inference::split::available_layer_ranges_from_manifest(
                     manifest,
                     &shard_indices,

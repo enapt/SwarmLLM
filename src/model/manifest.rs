@@ -90,6 +90,95 @@ impl ModelManifest {
     }
 }
 
+/// Build `ShardInfo` entries from on-disk shard files and GGUF tensor metadata.
+///
+/// Detects v2 layer-aligned shards (repacked files matching layout sizes) and
+/// falls back to v1 byte-range shards otherwise. Used by both daemon startup
+/// manifest regeneration and the admin API manifest generation.
+pub fn build_shard_infos(
+    model_dir: &Path,
+    meta: &crate::inference::split::GgufTensorMeta,
+    shard_count: u32,
+    shard_size: u64,
+    total_size: u64,
+) -> Vec<crate::types::ShardInfo> {
+    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, shard_count);
+    let v2_matches = !layouts.is_empty()
+        && layouts.iter().all(|layout| {
+            let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+            if let Ok(file_meta) = std::fs::metadata(&shard_path) {
+                let diff = (file_meta.len() as i64 - layout.size_bytes as i64).unsigned_abs();
+                diff <= layout.size_bytes / 100 + 1
+            } else {
+                false
+            }
+        });
+
+    if v2_matches {
+        // V2 layer-aligned shards
+        tracing::info!(shard_count, "Building v2 layer-aligned shard infos");
+        layouts
+            .iter()
+            .map(|layout| {
+                let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
+                let hash = if shard_path.exists() {
+                    match std::fs::read(&shard_path) {
+                        Ok(data) => *blake3::hash(&data).as_bytes(),
+                        Err(_) => [0u8; 32],
+                    }
+                } else {
+                    [0u8; 32]
+                };
+                let file_size = std::fs::metadata(&shard_path)
+                    .map(|m| m.len())
+                    .unwrap_or(layout.size_bytes);
+                crate::types::ShardInfo {
+                    index: layout.index,
+                    layer_range: (layout.layer_start, layout.layer_end),
+                    size_bytes: file_size,
+                    hash,
+                    byte_start: Some(0),
+                    byte_end: Some(file_size),
+                }
+            })
+            .collect()
+    } else {
+        // V1 byte-range shards (legacy, needed for partial downloads)
+        (0..shard_count)
+            .map(|idx| {
+                let shard_path = model_dir.join(format!("shard_{idx:03}.bin"));
+                let expected_size = if idx == shard_count - 1 {
+                    total_size - (idx as u64) * shard_size
+                } else {
+                    shard_size
+                };
+                let file_size = std::fs::metadata(&shard_path)
+                    .map(|m| m.len())
+                    .unwrap_or(expected_size);
+                let (ls, le) = crate::inference::split::compute_local_layer_range(
+                    meta, shard_size, &[idx],
+                );
+                let hash = if shard_path.exists() {
+                    match std::fs::read(&shard_path) {
+                        Ok(data) => *blake3::hash(&data).as_bytes(),
+                        Err(_) => [0u8; 32],
+                    }
+                } else {
+                    [0u8; 32]
+                };
+                crate::types::ShardInfo {
+                    index: idx,
+                    layer_range: (ls as u32, le as u32),
+                    size_bytes: file_size,
+                    hash,
+                    byte_start: None,
+                    byte_end: None,
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::types::*;
