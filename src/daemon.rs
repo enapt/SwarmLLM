@@ -133,6 +133,9 @@ pub struct SharedState {
     pub config_watch_tx: watch::Sender<crate::config::OperationalParams>,
     /// Trust score manager — tracks per-peer reputation, persisted to sled.
     pub trust_manager: crate::credit::trust::TrustManager,
+    /// Auto-detected country code from IP geolocation (e.g. "US", "DE").
+    /// Falls back to config.identity.region if geolocation fails.
+    pub detected_region: RwLock<Option<String>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -254,6 +257,7 @@ impl SharedState {
             is_ready: AtomicBool::new(false),
             config_watch_tx,
             trust_manager,
+            detected_region: RwLock::new(None),
             shutdown_tx,
         });
 
@@ -946,6 +950,26 @@ impl Daemon {
             port = self.config.node.listen_port,
             "SwarmLLM daemon running"
         );
+
+        // Auto-detect region via IP geolocation (non-blocking, best-effort)
+        if shared_state.config.identity.region.is_none() {
+            let geo_state = shared_state.clone();
+            tokio::spawn(async move {
+                match detect_region_from_ip().await {
+                    Some(code) => {
+                        tracing::info!(region = %code, "Auto-detected region via IP geolocation");
+                        *geo_state.detected_region.write().await = Some(code);
+                    }
+                    None => {
+                        tracing::debug!("IP geolocation unavailable — network map will show unknown region");
+                    }
+                }
+            });
+        } else {
+            // User configured a region explicitly — use it
+            *shared_state.detected_region.write().await =
+                shared_state.config.identity.region.clone();
+        }
 
         // Broadcast shard announcements and manifests shortly after startup
         // so peers discover our shards quickly (don't wait for the 30s health tick).
@@ -2752,6 +2776,31 @@ fn open_browser(url: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+}
+
+/// Best-effort IP geolocation using a free API (ip-api.com).
+/// Returns an ISO 3166-1 alpha-2 country code (e.g. "US", "DE") or None on failure.
+/// Timeout: 5 seconds. No API key required.
+async fn detect_region_from_ip() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    // ip-api.com returns JSON with a "countryCode" field for free, no key needed.
+    // Rate limit: 45 requests/min (we only call once at startup).
+    let resp = client
+        .get("http://ip-api.com/json/?fields=status,countryCode")
+        .send()
+        .await
+        .ok()?;
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    if json.get("status")?.as_str()? == "success" {
+        json.get("countryCode")?.as_str().map(|s| s.to_string())
+    } else {
+        None
     }
 }
 

@@ -1884,9 +1884,11 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
 
     let mut regions: HashMap<String, (u64, HashMap<String, u64>)> = HashMap::new();
 
-    // Include our own node if it has a region configured
-    if let Some(ref region) = state.shared_state.config.identity.region {
-        let code = region.to_uppercase();
+    // Always include our own node on the map.
+    // Use auto-detected region (IP geolocation), configured region, or "??" as fallback.
+    {
+        let detected = state.shared_state.detected_region.read().await;
+        let code = detected.as_deref().unwrap_or("??").to_uppercase();
         let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
         // Add our hosted models

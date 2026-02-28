@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self';">
   <title>SwarmLLM</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -81,9 +81,9 @@
         </div>
       </div>
       <div class="wizard-footer">
-        <button class="btn hidden" id="btn-prev" onclick="SwarmLLM.setup.prevStep()">Back</button>
+        <button class="btn hidden" id="btn-prev">Back</button>
         <div></div>
-        <button class="btn btn-primary btn-lg" id="btn-next" onclick="SwarmLLM.setup.nextStep()">Continue</button>
+        <button class="btn btn-primary btn-lg" id="btn-next">Continue</button>
       </div>
     </div>
   </div>
@@ -93,13 +93,13 @@
     <div class="modal">
       <div class="modal-header">
         <h2>Settings</h2>
-        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeSettings()">&times;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-close-settings">&times;</button>
       </div>
       <div class="form-group">
         <label>API Key</label>
         <div class="flex gap-1" style="align-items:center">
           <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
-          <button class="btn btn-sm" id="btn-copy-api-key" onclick="SwarmLLM.settings.copyApiKey()" title="Copy API key">Copy</button>
+          <button class="btn btn-sm" id="btn-copy-api-key" title="Copy API key">Copy</button>
         </div>
         <span class="text-muted" style="font-size:0.75rem">Bearer token for API authentication</span>
       </div>
@@ -168,7 +168,7 @@
         </div>
       </details>
       <div class="mt-2">
-        <button class="btn btn-primary" onclick="SwarmLLM.settings.save()">Save Settings</button>
+        <button class="btn btn-primary" id="btn-save-settings">Save Settings</button>
       </div>
     </div>
   </div>
@@ -178,11 +178,11 @@
     <div class="modal modal-lg">
       <div class="modal-header">
         <h2>Browse Models</h2>
-        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeModelBrowser()">&times;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser">&times;</button>
       </div>
       <div class="model-browser-search">
-        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, mistral)..." onkeydown="if(event.key==='Enter')SwarmLLM.hf.search()">
-        <button class="btn btn-primary" onclick="SwarmLLM.hf.search()">Search</button>
+        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, mistral)...">
+        <button class="btn btn-primary" id="btn-hf-search">Search</button>
       </div>
       <div class="model-browser-filters">
         <select id="hf-filter-quant">
@@ -213,46 +213,46 @@
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
-      <button class="hamburger-btn" id="hamburger-btn" onclick="SwarmLLM.ui.toggleMobileSidebar()" aria-label="Toggle sidebar">&#9776;</button>
+      <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle sidebar">&#9776;</button>
       <div class="logo">SwarmLLM</div>
     </div>
     <div class="header-center">
-      <button class="tab-btn" data-tab="chat" onclick="SwarmLLM.ui.switchTab('chat')">Chat</button>
-      <button class="tab-btn active" data-tab="dashboard" onclick="SwarmLLM.ui.switchTab('dashboard')">Dashboard</button>
-      <button class="tab-btn" data-tab="leaderboard" onclick="SwarmLLM.ui.switchTab('leaderboard')">Leaderboard</button>
-      <button class="tab-btn" data-tab="network-map" onclick="SwarmLLM.ui.switchTab('network-map')">Network Map</button>
+      <button class="tab-btn" data-tab="chat">Chat</button>
+      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
+      <button class="tab-btn" data-tab="network-map">Network Map</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
         <select id="model-select" title="Active model">
           <option value="">No model loaded</option>
         </select>
-        <button class="btn btn-sm" onclick="SwarmLLM.ui.openModelBrowser()" title="Browse models">+</button>
+        <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models">+</button>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.openSettings()" title="Settings">&#9881;</button>
+      <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings">&#9881;</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
       </div>
-      <button class="btn btn-ghost btn-sm btn-shutdown" onclick="SwarmLLM.shutdown()" title="Shutdown node">&#9211;</button>
+      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Shutdown node">&#9211;</button>
     </div>
   </header>
 
   <!-- Main layout: sidebar + content -->
   <div class="app-layout">
     <!-- Sidebar overlay (mobile) -->
-    <div class="sidebar-overlay" id="sidebar-overlay" onclick="SwarmLLM.ui.toggleMobileSidebar()"></div>
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
     <!-- Sidebar: chat sessions -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <span class="sidebar-title">Sessions</span>
-        <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.chat.newSession()" title="New chat">+</button>
+        <button class="btn btn-ghost btn-sm" id="btn-new-session" title="New chat">+</button>
       </div>
       <div class="session-list" id="session-list"></div>
       <div class="sidebar-footer">
-        <button class="btn btn-ghost btn-sm sidebar-toggle" onclick="SwarmLLM.ui.toggleSidebar()" title="Collapse sidebar">&#9664;</button>
+        <button class="btn btn-ghost btn-sm sidebar-toggle" id="btn-toggle-sidebar" title="Collapse sidebar">&#9664;</button>
       </div>
     </aside>
 
@@ -270,9 +270,8 @@
           </div>
           <div class="chat-input-area">
             <div class="chat-input-wrap">
-              <textarea id="chat-input" placeholder="Type a message..." rows="1"
-                        onkeydown="SwarmLLM.chat.handleKey(event)"></textarea>
-              <button class="btn btn-primary" id="send-btn" onclick="SwarmLLM.chat.send()">Send</button>
+              <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+              <button class="btn btn-primary" id="send-btn">Send</button>
             </div>
             <div class="token-counter" id="token-counter"></div>
           </div>
@@ -329,7 +328,7 @@
               <label style="font-size:0.85rem;margin-bottom:0.25rem">Your Network Code</label>
               <div style="display:flex;gap:0.5rem">
                 <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.75rem;flex:1">
-                <button class="btn btn-sm" onclick="SwarmLLM.copyNetworkCode()" title="Copy to clipboard">Copy</button>
+                <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
               </div>
               <div class="text-muted" style="font-size:0.75rem;margin-top:0.25rem">Share this code with a friend to connect your nodes</div>
             </div>
@@ -337,7 +336,7 @@
               <label style="font-size:0.85rem;margin-bottom:0.25rem">Join Network</label>
               <div style="display:flex;gap:0.5rem">
                 <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste a friend's code" style="font-size:0.75rem;flex:1">
-                <button class="btn btn-sm btn-primary" onclick="SwarmLLM.joinNetwork()">Join</button>
+                <button class="btn btn-sm btn-primary" id="btn-join-network">Join</button>
               </div>
               <div class="text-muted" id="join-status" style="font-size:0.75rem;margin-top:0.25rem"></div>
             </div>
@@ -415,13 +414,13 @@
           <div class="panel mt-2">
             <div class="panel-header">
               <h2>Models</h2>
-              <button class="btn btn-sm" onclick="SwarmLLM.ui.openModelBrowser()">Browse HuggingFace</button>
+              <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
             </div>
             <div id="models-container">
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty">
                 <div class="empty-icon">&#128229;</div>
-                <p>No models available. <a href="#" onclick="SwarmLLM.ui.openModelBrowser();return false">Browse HuggingFace</a> to find models, or connect to peers.</p>
+                <p>No models available. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to find models, or connect to peers.</p>
               </div>
             </div>
           </div>
@@ -451,10 +450,10 @@
             <div class="panel-header">
               <h2>Network Map</h2>
               <div class="flex gap-1" style="align-items:center">
-                <select id="map-model-filter" onchange="SwarmLLM.networkMap.applyFilter()" style="width:auto;min-width:120px;padding:5px 10px;font-size:0.78rem">
+                <select id="map-model-filter" style="width:auto;min-width:120px;padding:5px 10px;font-size:0.78rem">
                   <option value="">All models</option>
                 </select>
-                <button class="btn btn-sm" onclick="SwarmLLM.networkMap.refresh()">Refresh</button>
+                <button class="btn btn-sm" id="btn-refresh-map">Refresh</button>
               </div>
             </div>
             <div id="world-map-container" class="world-map-container">
@@ -481,7 +480,7 @@
           <div class="panel">
             <div class="panel-header">
               <h2>Network Leaderboard</h2>
-              <button class="btn btn-sm" onclick="SwarmLLM.identity.loadLeaderboard()">Refresh</button>
+              <button class="btn btn-sm" id="btn-refresh-leaderboard">Refresh</button>
             </div>
             <table class="data-table" id="leaderboard-table">
               <thead>

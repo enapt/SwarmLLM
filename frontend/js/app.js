@@ -1414,30 +1414,26 @@ var SwarmLLM = (function() {
         if (isReady) readySet[m.id] = true;
       });
 
-      var resp = await fetch('/v1/models');
-      var data = await resp.json();
+      // Build model selector from admin model list (auth-exempt)
       var sel = document.getElementById('model-select');
       sel.innerHTML = '';
 
-      if (data.data && data.data.length > 0) {
-        // Filter to only ready models for the chat selector
-        var readyModels = data.data.filter(function(m) { return readySet[m.id]; });
+      var readyModels = adminModels.filter(function(m) { return readySet[m.id]; });
 
-        if (readyModels.length > 0) {
-          var savedModel = null;
-          try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
-          var found = savedModel && readyModels.some(function(m) { return m.id === savedModel; });
-          currentModel = found ? savedModel : readyModels[0].id;
-          readyModels.forEach(function(m) {
-            var opt = document.createElement('option');
-            opt.value = m.id;
-            opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
-            sel.appendChild(opt);
-          });
-          sel.value = currentModel;
-        } else {
-          sel.innerHTML = '<option value="" disabled>No models ready</option>';
-        }
+      if (readyModels.length > 0) {
+        var savedModel = null;
+        try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
+        var found = savedModel && readyModels.some(function(m) { return m.id === savedModel; });
+        currentModel = found ? savedModel : readyModels[0].id;
+        readyModels.forEach(function(m) {
+          var opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
+          sel.appendChild(opt);
+        });
+        sel.value = currentModel;
+      } else if (adminModels.length > 0) {
+        sel.innerHTML = '<option value="" disabled>No models ready</option>';
       } else {
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
@@ -1997,7 +1993,64 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Init
   // ========================================================================
+  // Bind all UI event listeners (replaces inline onclick handlers)
+  function bindEvents() {
+    function on(id, event, fn) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener(event, fn);
+    }
+
+    // Tab buttons
+    document.querySelectorAll('.tab-btn[data-tab]').forEach(function(btn) {
+      btn.addEventListener('click', function() { ui.switchTab(btn.dataset.tab); });
+    });
+
+    // Setup wizard
+    on('btn-prev', 'click', function() { setup.prevStep(); });
+    on('btn-next', 'click', function() { setup.nextStep(); });
+
+    // Settings modal
+    on('btn-close-settings', 'click', function() { ui.closeSettings(); });
+    on('btn-copy-api-key', 'click', function() { settings.copyApiKey(); });
+    on('btn-save-settings', 'click', function() { settings.save(); });
+    on('btn-open-settings', 'click', function() { ui.openSettings(); });
+
+    // Model browser
+    on('btn-close-model-browser', 'click', function() { ui.closeModelBrowser(); });
+    on('btn-hf-search', 'click', function() { hf.search(); });
+    on('hf-search-input', 'keydown', function(e) { if (e.key === 'Enter') hf.search(); });
+    on('btn-open-model-browser', 'click', function() { ui.openModelBrowser(); });
+    on('btn-browse-hf', 'click', function() { ui.openModelBrowser(); });
+    on('link-browse-hf', 'click', function(e) { e.preventDefault(); ui.openModelBrowser(); });
+
+    // Header
+    on('hamburger-btn', 'click', function() { ui.toggleMobileSidebar(); });
+    on('btn-shutdown', 'click', function() { shutdown(); });
+
+    // Sidebar
+    on('sidebar-overlay', 'click', function() { ui.toggleMobileSidebar(); });
+    on('btn-new-session', 'click', function() { chat.newSession(); });
+    on('btn-toggle-sidebar', 'click', function() { ui.toggleSidebar(); });
+
+    // Chat
+    on('send-btn', 'click', function() { chat.send(); });
+    on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
+
+    // Network discovery
+    on('btn-copy-network-code', 'click', function() { copyNetworkCode(); });
+    on('btn-join-network', 'click', function() { joinNetwork(); });
+
+    // Network map
+    on('map-model-filter', 'change', function() { networkMap.applyFilter(); });
+    on('btn-refresh-map', 'click', function() { networkMap.refresh(); });
+
+    // Leaderboard
+    on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
+  }
+
   function init() {
+    bindEvents();
+
     inputEl = document.getElementById('chat-input');
     if (inputEl) {
       inputEl.addEventListener('input', autoResizeInput);
