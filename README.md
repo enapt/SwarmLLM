@@ -24,13 +24,16 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 ## Features
 
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2) with correct RoPE, attention biases, and context lengths
-- **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
-- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses
-- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal
-- **Built-in Web UI** — Admin dashboard, chat interface, and first-run setup wizard
-- **Fault Tolerant** — Hot-standby failover, shard replication, automatic rebalancing
-- **Self-Updating** — Decentralized governance, proposals, voting, and canary rollouts
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
+- **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
+- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection and transaction replay prevention
+- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal, connection limits, and gossip replay protection
+- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305), pipeline sealing, and authenticated sealed gossip
+- **Identity & Pools** — Cryptographic nicknames, leaderboard, and multi-device credit pooling with dual-signature invitation protocol
+- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace and peers with popularity/rarity scoring
+- **Built-in Web UI** — Admin dashboard, chat interface, model browser, shard visualization, and first-run setup wizard
+- **Fault Tolerant** — Hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
+- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, and Content-Security-Policy
 
 ## Quick Start
 
@@ -46,8 +49,13 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 Or use the API directly:
 
 ```bash
+# Get your API key from the dashboard or:
+curl http://localhost:8800/api/admin/api-key
+
+# Use it for inference:
 curl http://localhost:8800/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{
     "model": "llama3-70b-q4km",
     "messages": [{"role": "user", "content": "Hello!"}],
@@ -65,16 +73,18 @@ Single Rust binary, three simultaneous functions:
 | LLM API Server | OpenAI-compatible inference endpoint | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
-Internally, the daemon runs 8 async Tokio tasks communicating via channels:
+Internally, the daemon runs 10 async Tokio tasks communicating via channels:
 
 - **NetworkManager** — libp2p swarm lifecycle, peer discovery, message routing
 - **InferenceRouter** — request queuing, pipeline assembly, execution
 - **MessageDispatcher** — routes inbound network messages to subsystems
-- **CreditLedger** — balance tracking, transaction signing, priority tiers
-- **HealthMonitor** — periodic checks, rebalancing triggers
+- **CreditLedger** — balance tracking, transaction signing, anti-gaming
+- **HealthMonitor** — periodic checks, rebalancing triggers, stale channel cleanup
 - **ShardRebalancer** — shard redistribution on node join/leave
-- **AcquisitionManager** — BLAKE3-verified model download from peers
-- **ApiServer** — Axum HTTP server, WebSocket for live updates
+- **AcquisitionManager** — BLAKE3-verified model download from peers with retry/backoff
+- **ApiServer** — Axum HTTP server, WebSocket with ping/pong heartbeat
+- **PoolManager** — device pool management, credit forwarding, invitation protocol
+- **AutoShardManager** — VRAM-aware automatic shard acquisition from HuggingFace/peers
 
 ## Node Tiers
 
@@ -155,7 +165,7 @@ Options:
 
 ## Configuration
 
-Config lives at `~/.swarmllm/config.toml`. All values can be overridden with environment variables using the `SWARMLLM_` prefix:
+Config lives at `~/.swarmllm/config.toml`. All values can be overridden with environment variables using the `SWARMLLM_` prefix (invalid values log warnings instead of silently falling back):
 
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000
@@ -171,6 +181,9 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
 | `[network]` | `bootstrap_peers`, `enable_relay`, `max_peers` |
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_concurrent_requests` |
+| `[credit]` | Starting balance, earn/spend rates |
+| `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
+| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards` |
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start` |
 
@@ -190,12 +203,12 @@ SWARMLLM_LOGGING_LEVEL=debug
 |-------|-----------|
 | Language | Rust (2021 edition) |
 | Async Runtime | Tokio |
-| Networking | libp2p (QUIC transport) |
+| Networking | libp2p 0.54 (QUIC transport) |
 | Serialization | Cap'n Proto (tensors), serde_json (API) |
-| HTTP Server | Axum |
-| Inference | candle (split/distributed), llama.cpp (single-node) |
-| Database | sled (embedded) |
-| Cryptography | Ed25519, BLAKE3, Argon2id |
+| HTTP Server | Axum 0.7 |
+| Inference | candle (split/distributed, CUDA), llama.cpp (single-node) |
+| Database | sled (embedded, schema-versioned) |
+| Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 
 ## License
 

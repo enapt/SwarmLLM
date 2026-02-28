@@ -1,5 +1,7 @@
 # SwarmLLM — Developer Build Specification
 
+> **Status (2026-02-28)**: All 10 build phases are COMPLETE. This spec was the authoritative reference during initial development (Phases 1-9). The codebase has since evolved beyond this spec in several areas — Phase 10 (system-wide audit) applied 130 fixes and introduced security/reliability improvements not reflected here. For current architecture, see `docs/ARCHITECTURE.md`. For the audit findings and forward roadmap, see `docs/plans/AUDIT_REPORT.md` and `docs/plans/IDEAS_ROADMAP.md`.
+
 > **Purpose**: This document is the authoritative build reference for implementing SwarmLLM. It is intended to be read by an AI coding agent (Claude Code) and used as the source of truth for architecture decisions, file structure, dependencies, APIs, data structures, and implementation order. Every section is written to be actionable — not aspirational.
 
 ---
