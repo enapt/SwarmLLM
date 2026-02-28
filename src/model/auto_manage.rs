@@ -834,6 +834,34 @@ impl AutoShardManager {
                             }
                         }
 
+                        // Compute BLAKE3 hash of the downloaded shard and update the manifest
+                        // so startup verification passes on restart.
+                        let shard_path =
+                            dest.join(format!("shard_{:03}.bin", shard_idx));
+                        if let Ok(data) = std::fs::read(&shard_path) {
+                            let hash: [u8; 32] = *blake3::hash(&data).as_bytes();
+                            if let Some(mut manifest) =
+                                shared.model_registry.get_manifest(&model_id)
+                            {
+                                if let Some(si) = manifest
+                                    .shards
+                                    .iter_mut()
+                                    .find(|s| s.index == shard_idx)
+                                {
+                                    si.hash = hash;
+                                }
+                                manifest.manifest_hash = manifest.compute_hash();
+                                let model_dir = shared
+                                    .config
+                                    .node
+                                    .data_dir
+                                    .join("models")
+                                    .join(&model_id.0);
+                                let _ = manifest.save_to_dir(&model_dir);
+                                shared.model_registry.register_manifest(manifest);
+                            }
+                        }
+
                         // Register the shard
                         let node_id = shared.identity.node_id().clone();
                         let sid = crate::types::ShardId {
