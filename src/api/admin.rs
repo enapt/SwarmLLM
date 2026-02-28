@@ -240,16 +240,27 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .or_else(|| {
                 // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
                 let slug_id = crate::types::ModelId(slug.clone());
-                let m = state
+                state
                     .shared_state
                     .model_registry
-                    .get_manifest(&slug_id);
-                if m.is_some() {
-                    // Also mark the slug's model ID as seen
-                    seen_ids.insert(slug_id.0);
-                }
-                m
+                    .get_manifest(&slug_id)
+            })
+            .or_else(|| {
+                // Try matching by manifest `name` field (auto-manage sets loaded_model_info.name
+                // from manifest.name, but the registry key is manifest.id which may differ)
+                state
+                    .shared_state
+                    .model_registry
+                    .models()
+                    .into_iter()
+                    .find(|m| m.name == info.name)
             });
+
+        // Mark the manifest's actual registry ID as seen to prevent duplicates
+        // in section 2 (which iterates by manifest.id)
+        if let Some(ref m) = manifest {
+            seen_ids.insert(m.id.0.clone());
+        }
         let local_node_id = &state.shared_state.identity.node_id().clone();
         let (shard_count, hosted_local, global_available, shard_detail) = match manifest {
             Some(ref m) => {
@@ -285,14 +296,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             None => (1, 1, 1, vec![]),
         };
 
-        // Model is only truly "loaded" if all shards are covered (locally or by peers).
-        // If we only have a partial set, report as "partial" so the UI doesn't claim
-        // the model is ready to use when inference would fail.
+        // A model is "ready" for inference if all layers are covered across the
+        // network — no single node needs all shards. Local shard count doesn't
+        // determine readiness; network-wide coverage does.
         let all_covered = global_available == shard_count as usize;
         let status = if all_covered { "loaded" } else { "partial" };
 
-        // Use slug as ID for consistency with the registry
-        let model_id = slug.clone();
+        // Use the manifest's canonical ID when available (matches what /v1/models returns)
+        let model_id = manifest
+            .as_ref()
+            .map(|m| m.id.0.clone())
+            .unwrap_or_else(|| slug.clone());
         models.push(serde_json::json!({
             "id": model_id,
             "name": info.name,
@@ -302,7 +316,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "global_available": global_available,
             "healthy": all_covered,
             "status": status,
-            "mode": if hosted_local == shard_count as usize { "full" } else { "sharded" },
+            "mode": if hosted_local == shard_count as usize { "full" } else { "distributed" },
             "source": "local",
             "local": true,
             "peers_hosting": peer_count,
@@ -337,9 +351,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let (source, mode) = if hosted_count == m.shard_count as usize {
             ("local", "full")
         } else if hosted_count > 0 {
-            ("hybrid", "sharded")
+            ("hybrid", "distributed")
         } else {
-            ("network", "sharded")
+            ("network", "distributed")
         };
 
         // Compute global shard availability (any holder, not just local)
@@ -357,7 +371,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             })
             .count();
 
-        // Check if the model is loaded and ready for inference
+        // Check if the model is loaded and ready for inference.
+        // A model is "ready" when all layers are covered across the network —
+        // no single node needs all shards. Nodes participate with whatever
+        // shards they have; the pipeline scheduler assembles the full pipeline.
         let is_loaded = state
             .shared_state
             .split_models
@@ -366,16 +383,16 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let all_covered = global_available == m.shard_count as usize;
 
         let status = if is_loaded && all_covered {
-            // Locally loaded AND all shards covered across the network
+            // Local segments loaded AND all layers covered network-wide
             "loaded"
         } else if all_covered {
-            // All shards covered by the network — ready for distributed inference
+            // All layers covered network-wide — ready for distributed inference
             "ready"
-        } else if hosted_count == m.shard_count as usize {
-            "complete"
         } else if hosted_count > 0 {
+            // This node hosts some shards but network doesn't cover all layers yet
             "partial"
         } else {
+            // Known model but no shards held locally
             "available"
         };
 
@@ -1441,7 +1458,7 @@ pub async fn hf_download_shards(
                 entry.log.push("All shards downloaded and registered".to_string());
             }
 
-            // Try to load the model if all shards are now available
+            // Load available shards for inference (partial is fine)
             crate::model::auto_manage::check_and_load_model(
                 &download_shared,
                 &crate::types::ModelId(model_id_str.clone()),

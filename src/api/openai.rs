@@ -176,20 +176,22 @@ pub async fn chat_completions(
         info.as_ref().map(|i| i.name.clone())
     };
 
-    // If no model loaded locally, try to forward to a peer or auto-assemble.
+    // No local full-model executor — use distributed inference or forward.
+    // Nodes are NOT required to have all shards. Any node can initiate inference
+    // as long as the network collectively covers all layers.
     // The `x-swarm-forwarded` header prevents infinite forwarding loops between nodes.
     let is_forwarded = headers.get("x-swarm-forwarded").is_some();
 
     if model_name.is_none() {
-        // Priority 1: Check if all shards exist across the pool for split/distributed
-        // inference. This is preferred over forwarding because it uses the pipeline
-        // scheduler to coordinate multi-node layer processing.
+        // Priority 1: Check if all layers are covered across the network for
+        // distributed inference. The local node may have zero, some, or all shards —
+        // it doesn't matter as long as the network covers every layer.
         if all_shards_available(&state, &req.model) {
             tracing::info!(
                 request_id = %request_id,
                 model = %req.model,
                 stream = req.stream,
-                "All shards available across pool — using distributed inference"
+                "All layers covered across network — using distributed inference"
             );
 
             if let Some(router_tx) = &state.router_tx {
@@ -210,8 +212,8 @@ pub async fn chat_completions(
             }
         }
 
-        // Priority 2: Forward to a peer that has the full model loaded.
-        // The x-swarm-forwarded header prevents infinite forwarding loops.
+        // Priority 2: Forward to a peer that hosts shards for this model.
+        // That peer can handle inference locally or build its own pipeline.
         if !is_forwarded {
             if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
                 tracing::info!(
@@ -228,10 +230,9 @@ pub async fn chat_completions(
 
     let model_name = model_name.unwrap();
 
-    // Prefer distributed inference whenever peers also have shards for this model.
-    // This spreads compute load across the network instead of bottlenecking on one
-    // node, even if the local node has all shards.  Only fall through to the local
-    // executor when no peers have any shards (single-node operation).
+    // Prefer distributed inference whenever the network covers all layers.
+    // This spreads compute load across nodes instead of bottlenecking on one.
+    // Only fall through to the local executor for single-node operation.
     let peers_have_shards = all_shards_available(&state, &req.model)
         || state.shared_state.config.inference.shard_range.is_some();
     if peers_have_shards {
@@ -286,15 +287,13 @@ pub async fn chat_completions(
     }
 }
 
-/// Find a peer that has the full model loaded (not just some shards) and return its HTTP base URL.
-/// This is a fallback for when distributed inference isn't available.
+/// Find a peer that hosts shards for this model and return its HTTP base URL.
+/// This is a fallback for when not all layers are covered network-wide — the
+/// peer may be able to handle the request directly or assemble its own pipeline.
 fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
     for entry in state.shared_state.peer_registry.iter() {
         let peer = entry.value();
         if let Some(ref cap) = peer.capability {
-            // Check if this peer advertises shards matching the requested model.
-            // A peer with `loaded_model_info` broadcasts shard_id index=0 for
-            // the full model — look for that as a signal of full model loaded.
             let has_model = cap.hosted_shards.iter().any(|s| s.model_id.0 == model);
             if has_model {
                 if let Some(url) = peer_http_url(peer) {
@@ -306,7 +305,10 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
     None
 }
 
-/// Check if all shards for a model exist across the network (for split inference).
+/// Check if all layers for a model are covered across the network (for distributed inference).
+/// This does NOT require any single node to have all shards — it only requires that every
+/// shard has at least one holder somewhere in the network so the pipeline scheduler can
+/// assemble a complete pipeline across multiple nodes.
 fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     let model_id = ModelId(model_name.to_string());
 
@@ -336,7 +338,7 @@ fn all_shards_available(state: &AppState, model_name: &str) -> bool {
             tracing::debug!(
                 model = %model_name,
                 shard = shard_info.index,
-                "all_shards_available: missing holders"
+                "all_shards_available: no node in network holds this shard"
             );
             return false;
         }
@@ -348,7 +350,7 @@ fn all_shards_available(state: &AppState, model_name: &str) -> bool {
         shards = total,
         covered,
         num_layers = manifest.num_layers,
-        "all_shards_available: all shards covered"
+        "all_shards_available: all layers covered across network"
     );
     true
 }
@@ -886,10 +888,10 @@ pub async fn completions(
 
 /// GET /v1/models
 ///
-/// Only lists models that are actually usable for inference: either loaded
-/// locally (full model via --model) or with all shards covered across the
-/// network for distributed inference. Models that are partially available
-/// or still downloading are excluded — the admin dashboard shows those.
+/// Lists models usable for inference. A model is usable when all its layers
+/// are covered by at least one node in the network — no single node needs
+/// the full shard set. Models still propagating across the network (some
+/// layers uncovered) are excluded here but visible in the admin dashboard.
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelListResponse> {
     let mut data = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -903,18 +905,37 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
             .replace(' ', "-")
             .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
         seen.insert(slug.clone());
-        // Use the slug as the model ID — the inference endpoint resolves by registry
-        // slug, not display name. Check if the registry has this model under the slug.
-        let model_id = if state
+
+        // Find the registry manifest for this model so we can use its canonical ID
+        // and mark it as seen (prevents duplicates in section 2).
+        let manifest = state
             .shared_state
             .model_registry
             .get_manifest(&crate::types::ModelId(slug.clone()))
-            .is_some()
-        {
-            slug
+            .or_else(|| {
+                state
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&crate::types::ModelId(info.name.clone()))
+            })
+            .or_else(|| {
+                // Match by manifest name field (auto-manage sets loaded_model_info.name
+                // from manifest.name, but registry key is manifest.id)
+                state
+                    .shared_state
+                    .model_registry
+                    .models()
+                    .into_iter()
+                    .find(|m| m.name == info.name)
+            });
+
+        let model_id = if let Some(ref m) = manifest {
+            seen.insert(m.id.0.clone());
+            m.id.0.clone()
         } else {
-            info.name.clone()
+            slug
         };
+
         data.push(ModelInfo {
             id: model_id,
             object: "model",
@@ -923,13 +944,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         });
     }
 
-    // Include models from the registry only if ALL shards are covered (usable)
+    // Include models from the registry if all layers are covered network-wide
     for manifest in state.shared_state.model_registry.models() {
         let id = manifest.id.0.clone();
         if seen.contains(&id) {
             continue;
         }
-        // Check that every shard has at least one holder
+        // Check that every shard has at least one holder somewhere in the network
         let all_covered = (0..manifest.shard_count).all(|idx| {
             let shard_id = crate::types::ShardId {
                 model_id: manifest.id.clone(),

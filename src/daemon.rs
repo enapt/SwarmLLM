@@ -87,9 +87,11 @@ pub struct SharedState {
     pub pool_tx: RwLock<Option<mpsc::Sender<crate::pool::types::PoolCommand>>>,
     /// API Bearer token for authentication.
     pub api_key: String,
-    /// Lock-free flag indicating a full model is loaded in the executor.
+    /// Lock-free flag indicating a model is loaded in the llama-cpp executor.
     /// Set after `executor.load_model()` succeeds; checked by InferenceRouter
     /// to avoid locking the executor mutex just to check readiness.
+    /// Note: this is only for the llama-cpp path. Nodes using split-model
+    /// inference (partial shards) use `split_models` instead.
     pub model_loaded: std::sync::atomic::AtomicBool,
     /// Runtime toggle for auto-manage (mirrors config.auto_manage.enabled).
     /// Updated by the admin API so the AutoShardManager can pick up changes without restart.
@@ -328,8 +330,8 @@ impl Daemon {
         // Set the cached model info (lock-free for admin reads)
         *shared_state.loaded_model_info.write().await = cached_info;
 
-        // Set the model_loaded atomic for lock-free readiness checks in InferenceRouter.
-        // Only true when a full model is loaded (not split mode).
+        // Set the model_loaded atomic for the llama-cpp executor path.
+        // Not set in shard/split mode — those nodes use split_models instead.
         if model_info.is_some() && self.config.inference.shard_range.is_none() {
             shared_state
                 .model_loaded

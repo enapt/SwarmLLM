@@ -746,7 +746,7 @@ impl AutoShardManager {
                         );
                         let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
 
-                        // Check if all shards are now available → auto-load
+                        // Load whatever shards are now available for inference
                         check_and_load_model(&shared, &model_id).await;
 
                         // Self-wake so we immediately re-evaluate and download
@@ -803,7 +803,9 @@ impl AutoShardManager {
         }
     }
 
-    /// Check if all shards for a model are now locally available, and if so, load it.
+    /// Check if any local shards are available for this model and load them.
+    /// A node does NOT need all shards — it loads whatever it has and participates
+    /// in distributed inference for the layers it covers.
     async fn check_model_complete(&self, model_id: &ModelId) {
         check_and_load_model(&self.shared_state, model_id).await;
     }
@@ -857,12 +859,13 @@ impl AutoShardManager {
     }
 }
 
-/// Check if the model can be loaded (fully or partially) and load it for inference.
+/// Load whatever local shards are available for inference.
 ///
-/// This is called after each shard download completes (both auto-manage and manual).
-/// - If ALL shards are local: loads the full model (is_first=true, is_last=true)
-/// - If only a contiguous subset is local: loads those layers for distributed inference
-///   (the node handles its segment, other nodes handle theirs)
+/// Called after each shard download completes (both auto-manage and manual).
+/// A node does NOT need all shards — it loads whatever it has:
+/// - All shards local: loads the full layer range (is_first=true, is_last=true)
+/// - Partial shards: loads the covered layers for distributed inference
+///   (this node handles its segment, other nodes handle theirs)
 pub async fn check_and_load_model(
     shared: &std::sync::Arc<crate::daemon::SharedState>,
     model_id: &ModelId,
