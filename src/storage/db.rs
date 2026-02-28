@@ -150,6 +150,16 @@ impl Database {
         Ok(())
     }
 
+    /// Persist the user's --shards range so it's restored on next startup.
+    pub fn save_shard_range(&self, start: u32, end: u32) -> Result<(), SwarmError> {
+        self.put_json("config", "shard_range", &(start, end))
+    }
+
+    /// Load a previously persisted shard range, if any.
+    pub fn load_shard_range(&self) -> Result<Option<(u32, u32)>, SwarmError> {
+        self.get_json("config", "shard_range")
+    }
+
     /// Check integrity of critical sled trees.
     ///
     /// Scans manifests, credits, identity, and nicknames trees.
@@ -310,5 +320,29 @@ mod tests {
         assert_eq!(manifests.total_entries, 2);
         assert_eq!(manifests.valid_entries, 1);
         assert_eq!(manifests.corrupt_entries, 1);
+    }
+
+    #[test]
+    fn save_and_load_shard_range() {
+        let db = Database::open_temp().unwrap();
+        db.save_shard_range(0, 4).unwrap();
+        let loaded = db.load_shard_range().unwrap();
+        assert_eq!(loaded, Some((0, 4)));
+    }
+
+    #[test]
+    fn load_shard_range_returns_none_when_not_set() {
+        let db = Database::open_temp().unwrap();
+        let loaded = db.load_shard_range().unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn save_shard_range_overwrites_previous() {
+        let db = Database::open_temp().unwrap();
+        db.save_shard_range(0, 4).unwrap();
+        db.save_shard_range(5, 8).unwrap();
+        let loaded = db.load_shard_range().unwrap();
+        assert_eq!(loaded, Some((5, 8)));
     }
 }

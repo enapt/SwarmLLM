@@ -106,7 +106,29 @@ fn default_limit() -> usize {
     50
 }
 
+/// Minimum age (days) for a peer to appear on the leaderboard.
+const MIN_LIFETIME_DAYS: u64 = 7;
+/// Minimum verified dual-signed transactions for leaderboard eligibility.
+const MIN_VERIFIED_TRANSACTIONS: u32 = 10;
+
+/// Check if a peer is eligible for the leaderboard based on anti-spoofing rules.
+fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32) -> bool {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age_days = if first_seen > 0 {
+        (now_ts.saturating_sub(first_seen)) / 86400
+    } else {
+        0
+    };
+    age_days >= MIN_LIFETIME_DAYS && verified_tx_count >= MIN_VERIFIED_TRANSACTIONS
+}
+
 /// GET /api/identity/leaderboard?limit=50 — top N peers by credits.
+///
+/// Anti-spoofing protection: peers must meet minimum age and transaction count
+/// thresholds to appear on the leaderboard. Trust scores are included for each entry.
 pub async fn leaderboard(
     State(state): State<AppState>,
     Query(query): Query<LeaderboardQuery>,
@@ -116,7 +138,7 @@ pub async fn leaderboard(
     // Gather all known peers with their credit info
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Add self
+    // Add self (always eligible)
     let self_id = state.shared_state.identity.node_id();
     let self_credit = state.shared_state.credit_balance.read().await;
     let self_name = display_name(self_id, &state.shared_state.nickname_registry);
@@ -126,12 +148,20 @@ pub async fn leaderboard(
         "display_name": self_name,
         "credits": self_credit.balance,
         "tier": self_tier,
+        "trust_score": 1.0,
+        "eligible": true,
     }));
 
-    // Add known peers — estimate tier from trust_score as a proxy for credit standing.
+    // Add known peers — filter by leaderboard eligibility (anti-spoofing).
     // Per-peer credit balances aren't tracked in SharedState, so we derive a rough
     // estimate: high trust_score peers likely have positive balances.
     for peer in state.shared_state.peer_registry.iter() {
+        let eligible =
+            is_leaderboard_eligible(peer.first_seen, peer.verified_transaction_count);
+        if !eligible {
+            continue;
+        }
+
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
         // Estimate credit bucket from trust_score (0.0-1.0 → mapped to balance range)
         let estimated_balance = (peer.trust_score * 5000.0) as i64;
@@ -142,6 +172,8 @@ pub async fn leaderboard(
             "display_name": peer_name,
             "credits": estimated_balance,
             "tier": peer_tier,
+            "trust_score": peer.trust_score,
+            "eligible": true,
         }));
     }
 

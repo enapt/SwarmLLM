@@ -1147,10 +1147,26 @@ pub async fn check_and_load_model(
                 let chat_template = split_model.chat_template().map(|s| s.to_string());
                 let bos_token = split_model.bos_token().to_string();
                 let eos_token = split_model.eos_token_str().to_string();
-                shared.split_models.insert(
-                    split_key,
-                    std::sync::Arc::new(tokio::sync::Mutex::new(split_model)),
-                );
+                // VRAM-aware eviction before inserting new model
+                let max_batch = shared.config.inference.max_batch_size as usize;
+                let new_entry = if max_batch > 1 {
+                    crate::inference::split::SplitModelEntry::new_with_batching(
+                        split_model,
+                        shared.kv_cache_store.clone(),
+                        max_batch,
+                    )
+                } else {
+                    crate::inference::split::SplitModelEntry::new(split_model)
+                };
+                if let Some(budget_mb) = shared.config.inference.max_split_model_memory_mb {
+                    crate::inference::split::evict_split_models_lru(
+                        &shared.split_models,
+                        &shared.active_pipelines,
+                        budget_mb,
+                        new_entry.estimated_vram_mb,
+                    );
+                }
+                shared.split_models.insert(split_key, new_entry);
 
                 // Update loaded_model_info so the API knows the model is available
                 if !any_loaded {

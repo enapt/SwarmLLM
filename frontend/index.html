@@ -213,6 +213,7 @@
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
+      <button class="hamburger-btn" id="hamburger-btn" onclick="SwarmLLM.ui.toggleMobileSidebar()" aria-label="Toggle sidebar">&#9776;</button>
       <div class="logo">SwarmLLM</div>
     </div>
     <div class="header-center">
@@ -240,6 +241,9 @@
 
   <!-- Main layout: sidebar + content -->
   <div class="app-layout">
+    <!-- Sidebar overlay (mobile) -->
+    <div class="sidebar-overlay" id="sidebar-overlay" onclick="SwarmLLM.ui.toggleMobileSidebar()"></div>
+
     <!-- Sidebar: chat sessions -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">

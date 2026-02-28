@@ -51,6 +51,10 @@ pub struct SharedState {
     pub credit_balance: Arc<RwLock<CreditBalance>>,
     pub node_stats: RwLock<NodeStats>,
     pub executor: SharedExecutor,
+    /// Optional draft model executor for speculative decoding.
+    /// When loaded alongside the main model, enables speculative decoding
+    /// for 2-3x throughput improvement on local inference.
+    pub draft_executor: SharedExecutor,
     /// Cached model info for lock-free reads (set once at startup).
     pub loaded_model_info: RwLock<Option<LoadedModelInfo>>,
     /// Detected GPU info (set once at startup).
@@ -69,9 +73,10 @@ pub struct SharedState {
     /// Loaded split models for distributed inference (layer-range segments).
     /// Keyed by (model_id, layer_start, layer_end) so a node can cache multiple
     /// non-contiguous segments (e.g., layers [0,2) and [10,14)) for the same model.
+    /// Each entry tracks last-used time for VRAM-aware LRU eviction.
     pub split_models: DashMap<
-        (crate::types::ModelId, usize, usize),
-        Arc<tokio::sync::Mutex<crate::inference::split::SplitModel>>,
+        crate::inference::split::SplitModelKey,
+        crate::inference::split::SplitModelEntry,
     >,
     /// Per-request KV-cache storage for split inference.
     /// Keyed by (model_key, request_id) — isolates KV-cache per request,
@@ -125,6 +130,11 @@ pub struct SharedState {
     pub inference_latency_samples: std::sync::RwLock<Vec<f64>>,
     /// Readiness flag — set to true after all subsystem tasks are spawned.
     pub is_ready: AtomicBool,
+    /// Watch channel for hot-reloaded operational config parameters.
+    /// Subsystems can subscribe to changes via `config_watch_rx()`.
+    pub config_watch_tx: watch::Sender<crate::config::OperationalParams>,
+    /// Trust score manager — tracks per-peer reputation, persisted to sled.
+    pub trust_manager: crate::credit::trust::TrustManager,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -205,6 +215,9 @@ impl SharedState {
 
         let auto_manage_enabled = config.auto_manage.enabled;
         let kv_cache_ttl_secs = config.inference.kv_cache_ttl_secs.unwrap_or(600);
+        let initial_ops = crate::config::OperationalParams::from_config(&config);
+        let (config_watch_tx, _config_watch_rx) = watch::channel(initial_ops);
+        let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
         let state = Arc::new(Self {
             config,
             identity,
@@ -222,6 +235,9 @@ impl SharedState {
             })),
             node_stats: RwLock::new(NodeStats::default()),
             executor,
+            draft_executor: Arc::new(tokio::sync::Mutex::new(
+                crate::inference::executor::ModelExecutor::new(),
+            )),
             loaded_model_info: RwLock::new(None),
             gpu_info,
             model_vote_tallies: DashMap::new(),
@@ -250,6 +266,8 @@ impl SharedState {
             inference_requests_total: AtomicU64::new(0),
             inference_latency_samples: std::sync::RwLock::new(Vec::new()),
             is_ready: AtomicBool::new(false),
+            config_watch_tx,
+            trust_manager,
             shutdown_tx,
         });
 
@@ -259,6 +277,16 @@ impl SharedState {
     /// Signal all tasks to shut down.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Subscribe to config hot-reload notifications.
+    pub fn config_watch_rx(&self) -> watch::Receiver<crate::config::OperationalParams> {
+        self.config_watch_tx.subscribe()
+    }
+
+    /// Apply hot-reloaded operational params and notify subscribers.
+    pub fn apply_config_reload(&self, params: crate::config::OperationalParams) {
+        let _ = self.config_watch_tx.send(params);
     }
 }
 
@@ -425,6 +453,33 @@ impl Daemon {
             shared_state
                 .model_loaded
                 .store(true, std::sync::atomic::Ordering::Release);
+        }
+
+        // Load draft model for speculative decoding if configured
+        if self.config.inference.speculative_decoding {
+            if let Some(ref draft_path) = self.config.inference.draft_model_path {
+                let draft_gpu_layers = self
+                    .config
+                    .inference
+                    .draft_gpu_layers
+                    .unwrap_or(self.config.inference.gpu_layers);
+                let mut draft = shared_state.draft_executor.lock().await;
+                match draft.load_model(draft_path, draft_gpu_layers) {
+                    Ok(()) => tracing::info!(
+                        draft_model = %draft.model_name(),
+                        gamma = self.config.inference.speculative_gamma,
+                        "Draft model loaded for speculative decoding"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "Failed to load draft model — falling back to standard decoding"
+                    ),
+                }
+            } else {
+                tracing::info!(
+                    "Speculative decoding enabled but no draft_model_path configured"
+                );
+            }
         }
 
         // Generate a ModelManifest for the locally loaded model so peers can discover it.
@@ -825,6 +880,7 @@ impl Daemon {
             dispatcher_credit_balances.clone(),
         );
         credit_ledger.set_shared_state(shared_state.clone());
+        credit_ledger.set_identity(shared_state.identity.clone());
 
         subsystems.spawn(async move {
             let result = credit_ledger.run().await.map_err(|e| e.to_string());
@@ -989,6 +1045,59 @@ impl Daemon {
                         continue;
                     }
                     crate::model::auto_manage::check_and_load_model(&sm, &m.id).await;
+                }
+            });
+        }
+
+        // ── SIGHUP Config Reload Handler (Unix only) ──
+        #[cfg(unix)]
+        {
+            let sighup_state = shared_state.clone();
+            let sighup_config = self.config.clone();
+            let mut sighup_shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let mut sighup =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                        .expect("Failed to register SIGHUP handler");
+                loop {
+                    tokio::select! {
+                        _ = sighup_shutdown.changed() => {
+                            if *sighup_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                        _ = sighup.recv() => {
+                            let config_path = sighup_config.node.data_dir.join("config.toml");
+                            tracing::info!(
+                                "SIGHUP received — reloading config from {}",
+                                config_path.display()
+                            );
+                            match crate::config::reload_operational_params(&config_path) {
+                                Ok(params) => {
+                                    let old = crate::config::OperationalParams::from_config(
+                                        &sighup_config,
+                                    );
+                                    if params != old {
+                                        tracing::info!(
+                                            ?params,
+                                            "Config reloaded with changes"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "Config reloaded — no changes detected"
+                                        );
+                                    }
+                                    sighup_state.apply_config_reload(params);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Failed to reload config on SIGHUP"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -1220,17 +1329,10 @@ async fn dispatch_network_messages(
                                 }
                             }
                             SwarmMessage::CreditGossip(gossip) => {
-                                tracing::debug!(
-                                    peer = %gossip.node_id,
-                                    bucket = gossip.balance_bucket,
-                                    "Received credit gossip"
-                                );
-                                let mut balances = credit_peer_balances.write().await;
-                                balances.push(gossip.balance_bucket);
-                                if balances.len() > 1000 {
-                                    let excess = balances.len() - 1000;
-                                    balances.drain(..excess);
-                                }
+                                crate::credit::ledger::process_balance_gossip(
+                                    &credit_peer_balances,
+                                    &gossip,
+                                ).await;
                             }
                             SwarmMessage::ModelVote(vote) => {
                                 tracing::info!(
@@ -2329,10 +2431,30 @@ async fn handle_layer_forward(
 
         match load_result {
             Ok(model) => {
-                shared_state.split_models.insert(
-                    split_key.clone(),
-                    std::sync::Arc::new(tokio::sync::Mutex::new(model)),
-                );
+                // VRAM-aware eviction: if a memory budget is set, evict LRU
+                // models before inserting the new one.
+                let max_batch = shared_state.config.inference.max_batch_size as usize;
+                let new_entry = if max_batch > 1 {
+                    crate::inference::split::SplitModelEntry::new_with_batching(
+                        model,
+                        shared_state.kv_cache_store.clone(),
+                        max_batch,
+                    )
+                } else {
+                    crate::inference::split::SplitModelEntry::new(model)
+                };
+                if let Some(budget_mb) = shared_state.config.inference.max_split_model_memory_mb {
+                    let evicted = crate::inference::split::evict_split_models_lru(
+                        &shared_state.split_models,
+                        &shared_state.active_pipelines,
+                        budget_mb,
+                        new_entry.estimated_vram_mb,
+                    );
+                    if evicted > 0 {
+                        tracing::info!(evicted, budget_mb, "Evicted LRU split models for VRAM budget");
+                    }
+                }
+                shared_state.split_models.insert(split_key.clone(), new_entry);
             }
             Err(e) => {
                 send_error_result(
@@ -2348,7 +2470,10 @@ async fn handle_layer_forward(
     }
 
     let split_model_ref = match shared_state.split_models.get(&split_key) {
-        Some(r) => r.clone(),
+        Some(r) => {
+            r.value().touch();
+            r.value().model.clone()
+        }
         None => {
             send_error_result(
                 &network_tx,

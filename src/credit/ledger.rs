@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, CreditTransaction, NetworkCommand, NodeId, PriorityTier, ShardId, SwarmMessage,
+    CreditBalance, CreditGossip, CreditTransaction, NetworkCommand, NodeId, PriorityTier,
+    ShardId, SwarmMessage,
 };
 
 /// Earning/spending rates (credits per unit).
@@ -42,6 +44,8 @@ pub struct CreditLedger {
     peer_balances: Arc<RwLock<Vec<i64>>>,
     /// Reference to SharedState for pool credit forwarding.
     shared_state: Option<std::sync::Arc<crate::daemon::SharedState>>,
+    /// Node identity for signing balance reports (Sybil resistance).
+    identity: Option<crate::identity::Identity>,
 }
 
 impl CreditLedger {
@@ -83,12 +87,18 @@ impl CreditLedger {
             shutdown_rx,
             peer_balances,
             shared_state: None,
+            identity: None,
         }
     }
 
     /// Set a shared state reference for pool credit forwarding.
     pub fn set_shared_state(&mut self, shared_state: std::sync::Arc<crate::daemon::SharedState>) {
         self.shared_state = Some(shared_state);
+    }
+
+    /// Set the node identity for signing balance reports (Sybil resistance).
+    pub fn set_identity(&mut self, identity: crate::identity::Identity) {
+        self.identity = Some(identity);
     }
 
     /// Get the current credit balance.
@@ -335,11 +345,19 @@ impl CreditLedger {
                         "Gossiping credit balance"
                     );
 
-                    // Send credit gossip via network
-                    let msg = SwarmMessage::CreditGossip(crate::types::CreditGossip {
+                    // Sign the balance report if identity is available
+                    let timestamp = chrono::Utc::now();
+                    let signature = if let Some(ref identity) = self.identity {
+                        sign_balance_report(&self.node_id, bucket, timestamp, identity)
+                    } else {
+                        Vec::new()
+                    };
+
+                    let msg = SwarmMessage::CreditGossip(CreditGossip {
                         node_id: self.node_id.clone(),
                         balance_bucket: bucket,
-                        timestamp: chrono::Utc::now(),
+                        timestamp,
+                        signature,
                     });
 
                     if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
@@ -394,6 +412,155 @@ pub async fn apply_credit_direct(
     }
 
     Ok(())
+}
+
+/// Maximum staleness for a signed balance report (5 minutes).
+const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
+
+/// Weight for signed (verified) balance reports in percentile estimation.
+const SIGNED_REPORT_WEIGHT: f64 = 1.0;
+
+/// Weight for unsigned (legacy) balance reports in percentile estimation.
+const UNSIGNED_REPORT_WEIGHT: f64 = 0.1;
+
+/// Build the deterministic signing payload for a balance report.
+/// Format: "swarmllm-balance-v1" || node_id(32) || balance_bucket(8) || timestamp_secs(8)
+fn build_balance_report_payload(
+    node_id: &NodeId,
+    balance_bucket: i64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(56);
+    payload.extend_from_slice(b"swarmllm-balance-v1");
+    payload.extend_from_slice(&node_id.0);
+    payload.extend_from_slice(&balance_bucket.to_le_bytes());
+    payload.extend_from_slice(&timestamp.timestamp().to_le_bytes());
+    payload
+}
+
+/// Sign a balance report with the node's Ed25519 identity.
+pub fn sign_balance_report(
+    node_id: &NodeId,
+    balance_bucket: i64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    identity: &crate::identity::Identity,
+) -> Vec<u8> {
+    let payload = build_balance_report_payload(node_id, balance_bucket, timestamp);
+    identity.sign(&payload)
+}
+
+/// Verify a signed balance report.
+///
+/// Checks:
+/// 1. Signature is valid Ed25519 over the canonical payload
+/// 2. The signing key matches the claimed node_id (node_id == verifying_key bytes)
+/// 3. Timestamp is within `BALANCE_REPORT_MAX_AGE_SECS` of `now`
+///
+/// Returns `Ok(true)` for valid signed reports, `Ok(false)` for unsigned legacy reports,
+/// and `Err` for invalid signatures or stale timestamps.
+pub fn verify_balance_report(gossip: &CreditGossip) -> Result<bool, SwarmError> {
+    // Legacy unsigned report — accept at reduced weight
+    if gossip.signature.is_empty() {
+        return Ok(false);
+    }
+
+    // Timestamp freshness check
+    let now = chrono::Utc::now();
+    let age_secs = (now - gossip.timestamp).num_seconds().abs();
+    if age_secs > BALANCE_REPORT_MAX_AGE_SECS {
+        return Err(SwarmError::Internal(format!(
+            "Stale balance report from {}: {}s old (max {}s)",
+            gossip.node_id, age_secs, BALANCE_REPORT_MAX_AGE_SECS,
+        )));
+    }
+
+    // Verify Ed25519 signature
+    if gossip.signature.len() != 64 {
+        return Err(SwarmError::InvalidSignature);
+    }
+
+    let verifying_key = VerifyingKey::from_bytes(&gossip.node_id.0)
+        .map_err(|_| SwarmError::InvalidSignature)?;
+
+    let sig = Signature::from_bytes(
+        gossip.signature.as_slice().try_into()
+            .map_err(|_| SwarmError::InvalidSignature)?,
+    );
+
+    let payload = build_balance_report_payload(
+        &gossip.node_id,
+        gossip.balance_bucket,
+        gossip.timestamp,
+    );
+
+    verifying_key
+        .verify(&payload, &sig)
+        .map_err(|_| SwarmError::InvalidSignature)?;
+
+    Ok(true)
+}
+
+/// Process a received balance gossip message with Sybil resistance.
+///
+/// Signed reports get weight 1.0, unsigned legacy reports get weight 0.1.
+/// Invalid signatures and stale reports are rejected entirely.
+pub async fn process_balance_gossip(
+    peer_balances: &Arc<RwLock<Vec<i64>>>,
+    gossip: &CreditGossip,
+) {
+    // Reject implausible balance buckets
+    const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000;
+    if gossip.balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
+        tracing::debug!(
+            balance_bucket = gossip.balance_bucket,
+            "Ignoring implausible peer balance gossip"
+        );
+        return;
+    }
+
+    match verify_balance_report(gossip) {
+        Ok(is_signed) => {
+            let weight = if is_signed {
+                SIGNED_REPORT_WEIGHT
+            } else {
+                UNSIGNED_REPORT_WEIGHT
+            };
+
+            let mut balances = peer_balances.write().await;
+
+            if weight >= 1.0 {
+                // Signed report: full weight — add once
+                balances.push(gossip.balance_bucket);
+            } else {
+                // Unsigned legacy: reduced weight — only add if we randomly
+                // decide to include it (probabilistic weighting)
+                if rand::random::<f64>() < weight {
+                    balances.push(gossip.balance_bucket);
+                }
+            }
+
+            // Keep a rolling window of the most recent 1000 observations
+            if balances.len() > 1000 {
+                let excess = balances.len() - 1000;
+                balances.drain(..excess);
+            }
+
+            tracing::debug!(
+                peer = %gossip.node_id,
+                bucket = gossip.balance_bucket,
+                signed = is_signed,
+                weight,
+                "Processed credit gossip"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                peer = %gossip.node_id,
+                error = %e,
+                "Rejected invalid balance report"
+            );
+        }
+    }
 }
 
 /// Bucket a balance value for privacy-preserving gossip.
@@ -593,5 +760,202 @@ mod tests {
         let stored: CreditBalance = db.get_json(TREE_CREDITS, KEY_BALANCE).unwrap().unwrap();
         assert_eq!(stored.balance, 100); // 10 * 1 * 10
         assert_eq!(stored.node_id, node_id);
+    }
+
+    // ---- Signed balance report tests ----
+
+    #[test]
+    fn sign_and_verify_balance_report() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let bucket = 500;
+        let timestamp = chrono::Utc::now();
+
+        let signature = sign_balance_report(&node_id, bucket, timestamp, &identity);
+
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: bucket,
+            timestamp,
+            signature,
+        };
+
+        let result = verify_balance_report(&gossip);
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // true = signed
+    }
+
+    #[test]
+    fn unsigned_legacy_report_accepted_at_low_weight() {
+        let identity = crate::identity::Identity::generate();
+        let gossip = CreditGossip {
+            node_id: identity.node_id().clone(),
+            balance_bucket: 300,
+            timestamp: chrono::Utc::now(),
+            signature: Vec::new(), // unsigned
+        };
+
+        let result = verify_balance_report(&gossip);
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // false = unsigned
+    }
+
+    #[test]
+    fn wrong_signer_rejected() {
+        let real_identity = crate::identity::Identity::generate();
+        let imposter = crate::identity::Identity::generate();
+        let bucket = 500;
+        let timestamp = chrono::Utc::now();
+
+        // Imposter signs but claims to be real_identity
+        let signature = sign_balance_report(
+            real_identity.node_id(),
+            bucket,
+            timestamp,
+            &imposter,
+        );
+
+        let gossip = CreditGossip {
+            node_id: real_identity.node_id().clone(),
+            balance_bucket: bucket,
+            timestamp,
+            signature,
+        };
+
+        let result = verify_balance_report(&gossip);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tampered_balance_rejected() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let timestamp = chrono::Utc::now();
+
+        let signature = sign_balance_report(&node_id, 500, timestamp, &identity);
+
+        // Tamper: change the balance_bucket
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 999,
+            timestamp,
+            signature,
+        };
+
+        assert!(verify_balance_report(&gossip).is_err());
+    }
+
+    #[test]
+    fn stale_report_rejected() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        // Timestamp 10 minutes ago — beyond the 5 min window
+        let old_timestamp = chrono::Utc::now() - chrono::Duration::seconds(600);
+
+        let signature = sign_balance_report(&node_id, 500, old_timestamp, &identity);
+
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 500,
+            timestamp: old_timestamp,
+            signature,
+        };
+
+        let result = verify_balance_report(&gossip);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fresh_report_accepted() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        // Timestamp 2 minutes ago — within the 5 min window
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(120);
+
+        let signature = sign_balance_report(&node_id, 500, recent, &identity);
+
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 500,
+            timestamp: recent,
+            signature,
+        };
+
+        assert!(verify_balance_report(&gossip).unwrap());
+    }
+
+    #[tokio::test]
+    async fn process_signed_gossip_adds_balance() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let timestamp = chrono::Utc::now();
+        let signature = sign_balance_report(&node_id, 500, timestamp, &identity);
+
+        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 500,
+            timestamp,
+            signature,
+        };
+
+        process_balance_gossip(&peer_balances, &gossip).await;
+
+        let balances = peer_balances.read().await;
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances[0], 500);
+    }
+
+    #[tokio::test]
+    async fn process_invalid_gossip_rejected() {
+        let identity = crate::identity::Identity::generate();
+        let imposter = crate::identity::Identity::generate();
+        let timestamp = chrono::Utc::now();
+
+        // Imposter signs a report claiming to be identity
+        let signature = sign_balance_report(
+            identity.node_id(),
+            500,
+            timestamp,
+            &imposter,
+        );
+
+        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+
+        let gossip = CreditGossip {
+            node_id: identity.node_id().clone(),
+            balance_bucket: 500,
+            timestamp,
+            signature,
+        };
+
+        process_balance_gossip(&peer_balances, &gossip).await;
+
+        // Should have been rejected — no balance added
+        let balances = peer_balances.read().await;
+        assert_eq!(balances.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn process_implausible_balance_ignored() {
+        let identity = crate::identity::Identity::generate();
+        let node_id = identity.node_id().clone();
+        let timestamp = chrono::Utc::now();
+        let signature = sign_balance_report(&node_id, 200_000_000, timestamp, &identity);
+
+        let peer_balances = Arc::new(RwLock::new(Vec::new()));
+
+        let gossip = CreditGossip {
+            node_id,
+            balance_bucket: 200_000_000,
+            timestamp,
+            signature,
+        };
+
+        process_balance_gossip(&peer_balances, &gossip).await;
+
+        let balances = peer_balances.read().await;
+        assert_eq!(balances.len(), 0);
     }
 }

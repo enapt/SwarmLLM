@@ -94,6 +94,280 @@ impl KvCacheStore {
     }
 }
 
+// ── Split model entry with LRU tracking ──
+
+/// Key type for split_models DashMap: (model_id, layer_start, layer_end).
+pub type SplitModelKey = (crate::types::ModelId, usize, usize);
+
+/// Wrapper around a SplitModel that tracks last-used time for LRU eviction.
+pub struct SplitModelEntry {
+    pub model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
+    pub last_used: std::sync::atomic::AtomicU64,
+    /// Estimated VRAM usage in MB for this model segment.
+    pub estimated_vram_mb: u64,
+    /// Optional batch forwarder for this model segment.
+    pub batch_forwarder: Option<std::sync::Arc<BatchForwarder>>,
+}
+
+impl SplitModelEntry {
+    /// Create a new entry wrapping a split model.
+    pub fn new(model: SplitModel) -> Self {
+        let estimated_vram_mb = model.estimate_vram_mb();
+        Self {
+            model: std::sync::Arc::new(tokio::sync::Mutex::new(model)),
+            last_used: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            estimated_vram_mb,
+            batch_forwarder: None,
+        }
+    }
+
+    /// Create a new entry with batching enabled.
+    pub fn new_with_batching(
+        model: SplitModel,
+        kv_cache_store: std::sync::Arc<KvCacheStore>,
+        max_batch_size: usize,
+    ) -> Self {
+        let estimated_vram_mb = model.estimate_vram_mb();
+        let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
+        let batch_forwarder = if max_batch_size > 1 {
+            Some(std::sync::Arc::new(BatchForwarder::new(
+                model_arc.clone(),
+                kv_cache_store,
+                max_batch_size,
+            )))
+        } else {
+            None
+        };
+        Self {
+            model: model_arc,
+            last_used: std::sync::atomic::AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            estimated_vram_mb,
+            batch_forwarder,
+        }
+    }
+
+    /// Touch this entry to update its last-used time.
+    pub fn touch(&self) {
+        self.last_used.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Get the last-used timestamp in seconds since epoch.
+    pub fn last_used_secs(&self) -> u64 {
+        self.last_used
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A single item in a batched forward pass.
+pub struct BatchItem<'a> {
+    /// Input tensor for this request.
+    pub input: &'a Tensor,
+    /// Sequence position for RoPE and KV-cache.
+    pub index_pos: usize,
+    /// Request ID for per-request KV-cache isolation.
+    pub request_id: &'a str,
+}
+
+/// Evict least-recently-used split models from the cache until total estimated
+/// VRAM usage is under `budget_mb`. Models that have active requests (present
+/// in `active_pipelines`) are never evicted.
+///
+/// Returns the number of models evicted.
+pub fn evict_split_models_lru(
+    split_models: &dashmap::DashMap<SplitModelKey, SplitModelEntry>,
+    active_pipelines: &dashmap::DashMap<uuid::Uuid, crate::types::PipelineAssignment>,
+    budget_mb: u64,
+    needed_mb: u64,
+) -> usize {
+    let mut total_mb: u64 = split_models
+        .iter()
+        .map(|e| e.value().estimated_vram_mb)
+        .sum();
+
+    if total_mb + needed_mb <= budget_mb {
+        return 0;
+    }
+
+    // Collect all active model_ids from active pipelines to protect them
+    let active_model_ids: std::collections::HashSet<crate::types::ModelId> = {
+        let mut ids = std::collections::HashSet::new();
+        for entry in active_pipelines.iter() {
+            for seg in &entry.value().segments {
+                ids.insert(seg.shard_id.model_id.clone());
+            }
+        }
+        ids
+    };
+
+    // Collect eviction candidates sorted by last_used (ascending = LRU first)
+    let mut candidates: Vec<(SplitModelKey, u64, u64)> = split_models
+        .iter()
+        .filter(|e| !active_model_ids.contains(&e.key().0))
+        .map(|e| {
+            let key = e.key().clone();
+            let last_used = e.value().last_used_secs();
+            let vram = e.value().estimated_vram_mb;
+            (key, last_used, vram)
+        })
+        .collect();
+
+    candidates.sort_by_key(|(_key, last_used, _vram)| *last_used);
+
+    let mut evicted = 0;
+    for (key, _last_used, vram) in candidates {
+        if total_mb + needed_mb <= budget_mb {
+            break;
+        }
+        if split_models.remove(&key).is_some() {
+            tracing::info!(
+                model = %key.0,
+                layers = format!("{}-{}", key.1, key.2),
+                vram_mb = vram,
+                "Evicted LRU split model to free VRAM"
+            );
+            total_mb = total_mb.saturating_sub(vram);
+            evicted += 1;
+        }
+    }
+
+    evicted
+}
+
+// ── Batch forwarder ──
+
+/// A pending forward request waiting to be batched.
+struct PendingForward {
+    input: Tensor,
+    index_pos: usize,
+    request_id: String,
+    result_tx: tokio::sync::oneshot::Sender<Result<Tensor, SwarmError>>,
+}
+
+/// Collects concurrent forward requests for the same model and processes them
+/// as a single batched forward pass.  Each `BatchForwarder` is tied to one
+/// `SplitModelEntry` (i.e. one loaded model segment).
+///
+/// Callers submit work via `submit()` which returns a oneshot receiver.
+/// A background drain loop (or the first waiter) acquires the model lock,
+/// collects all pending items, and calls `forward_batch`.
+pub struct BatchForwarder {
+    queue: tokio::sync::Mutex<Vec<PendingForward>>,
+    notify: tokio::sync::Notify,
+    model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
+    kv_cache_store: std::sync::Arc<KvCacheStore>,
+    /// Maximum batch size (from config). 1 = no batching.
+    max_batch_size: usize,
+}
+
+impl BatchForwarder {
+    /// Create a new batch forwarder for a split model.
+    pub fn new(
+        model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
+        kv_cache_store: std::sync::Arc<KvCacheStore>,
+        max_batch_size: usize,
+    ) -> Self {
+        Self {
+            queue: tokio::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            model,
+            kv_cache_store,
+            max_batch_size: max_batch_size.max(1),
+        }
+    }
+
+    /// Submit a forward request and wait for the result.
+    ///
+    /// The request will be batched with other concurrent requests for the same
+    /// model.  Returns the output tensor for this request.
+    pub async fn submit(
+        &self,
+        input: Tensor,
+        index_pos: usize,
+        request_id: String,
+    ) -> Result<Tensor, SwarmError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut q = self.queue.lock().await;
+            q.push(PendingForward {
+                input,
+                index_pos,
+                request_id,
+                result_tx: tx,
+            });
+        }
+        self.notify.notify_one();
+
+        // Try to become the batch processor.  If we can acquire the model lock,
+        // drain the queue and process the batch.  If another task already holds
+        // the lock (processing a previous batch), we just wait on our oneshot.
+        if let Ok(mut model_guard) = self.model.try_lock() {
+            self.drain_and_process(&mut model_guard).await;
+        }
+
+        rx.await
+            .map_err(|_| SwarmError::Internal("Batch forwarder dropped".into()))?
+    }
+
+    /// Drain the pending queue and run a batched forward pass.
+    async fn drain_and_process(&self, model: &mut SplitModel) {
+        let pending: Vec<PendingForward> = {
+            let mut q = self.queue.lock().await;
+            if q.is_empty() {
+                return;
+            }
+            let take = q.len().min(self.max_batch_size);
+            q.drain(..take).collect()
+        };
+
+        if pending.is_empty() {
+            return;
+        }
+
+        let items: Vec<BatchItem<'_>> = pending
+            .iter()
+            .map(|p| BatchItem {
+                input: &p.input,
+                index_pos: p.index_pos,
+                request_id: &p.request_id,
+            })
+            .collect();
+
+        let results = model.forward_batch(&items, &self.kv_cache_store);
+
+        match results {
+            Ok(outputs) => {
+                for (pending_item, output) in pending.into_iter().zip(outputs) {
+                    let _ = pending_item.result_tx.send(Ok(output));
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                for pending_item in pending {
+                    let _ = pending_item
+                        .result_tx
+                        .send(Err(SwarmError::Internal(msg.clone())));
+                }
+            }
+        }
+    }
+}
+
 // ── BPE Tokenizer from GGUF merges ──
 
 /// BPE tokenizer built from GGUF metadata.
@@ -1877,6 +2151,179 @@ impl SplitModel {
         }
     }
 
+    /// Run a batched forward pass for multiple decode-step requests (seq_len=1 each).
+    ///
+    /// Stacks inputs along the batch dimension so that MLP/norm computations
+    /// benefit from GPU parallelism.  Attention is still per-request because
+    /// each request has its own `index_pos` and KV-cache.
+    ///
+    /// Returns one output tensor per request in the same order as `items`.
+    /// Falls back to sequential `forward()` if any item has seq_len > 1.
+    pub fn forward_batch(
+        &mut self,
+        items: &[BatchItem<'_>],
+        kv_cache_store: &KvCacheStore,
+    ) -> Result<Vec<Tensor>, SwarmError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fallback: if only 1 item or any item is a prefill (seq_len > 1), run sequentially
+        if items.len() == 1 {
+            let item = &items[0];
+            let out = self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?;
+            return Ok(vec![out]);
+        }
+
+        let is_first = self.tok_embeddings.is_some();
+        let is_last = self.output.is_some();
+
+        // Convert each input to its hidden state (apply embedding if first segment)
+        let mut per_request: Vec<Tensor> = Vec::with_capacity(items.len());
+        for item in items {
+            let input = item
+                .input
+                .to_device(&self.device)
+                .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
+            let hidden = if is_first {
+                self.tok_embeddings
+                    .as_ref()
+                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
+                    .forward(&input)
+                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?
+            } else {
+                input
+            };
+            per_request.push(hidden);
+        }
+
+        // Check if all items have seq_len=1 (decode mode) — only then can we batch
+        let all_decode = per_request.iter().all(|t| {
+            t.dim(1).unwrap_or(0) == 1
+        });
+
+        if !all_decode {
+            // Mixed or prefill batch: fall back to sequential processing
+            let mut results = Vec::with_capacity(items.len());
+            for item in items {
+                results.push(self.forward(item.input, item.index_pos, kv_cache_store, item.request_id)?);
+            }
+            return Ok(results);
+        }
+
+        let batch_size = items.len();
+        let model_key = format!("{}-{}-{}", self.layer_start, self.layer_end, self.total_layers);
+        let num_layers = self.layers.len();
+
+        // Extract all per-request KV-caches up front (drop DashMap guards immediately)
+        let mut all_kv_caches: Vec<Vec<Option<(Tensor, Tensor)>>> = items
+            .iter()
+            .map(|item| {
+                let mut entry = kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
+                entry.last_accessed = std::time::Instant::now();
+                entry.layers.clone()
+            })
+            .collect();
+
+        // Stack all hidden states into a single batch tensor: [batch, 1, hidden_dim]
+        let batch_refs: Vec<&Tensor> = per_request.iter().collect();
+        let mut batched = Tensor::cat(&batch_refs, 0)
+            .map_err(|e| SwarmError::Internal(format!("Batch stack: {e}")))?;
+        // Shape is now [batch_size, 1, hidden_dim]
+
+        // Process through layers
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let residual = batched.clone();
+
+            // Batched attention_norm (position-independent)
+            let normed = layer
+                .attention_norm
+                .forward(&batched)
+                .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+
+            // Attention: must be per-request due to different index_pos and KV-caches
+            let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+            for (req_idx, item) in items.iter().enumerate() {
+                // Extract this request's slice: [1, 1, hidden_dim]
+                let x_i = normed
+                    .narrow(0, req_idx, 1)
+                    .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                let attn_out = layer
+                    .forward_attn(
+                        &x_i,
+                        None, // seq_len=1 → no mask needed
+                        item.index_pos,
+                        &mut all_kv_caches[req_idx][layer_idx],
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
+                attn_outputs.push(attn_out);
+            }
+
+            // Re-stack attention outputs: [batch, 1, hidden_dim]
+            let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
+            let attn_batched = Tensor::cat(&attn_refs, 0)
+                .map_err(|e| SwarmError::Internal(format!("attn restack: {e}")))?;
+
+            // Batched residual add
+            let x = (&attn_batched + &residual)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+            // Batched FFN norm + MLP (these are position-independent)
+            let residual2 = x.clone();
+            let x = layer
+                .ffn_norm
+                .forward(&x)
+                .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+            let x = layer
+                .mlp
+                .forward(&x)
+                .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
+            batched = (&x + &residual2)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        }
+
+        // Write updated KV-caches back
+        for (req_idx, item) in items.iter().enumerate() {
+            let mut entry = kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
+            entry.layers = all_kv_caches[req_idx].clone();
+            entry.last_accessed = std::time::Instant::now();
+        }
+
+        // Split batch back into per-request outputs
+        let mut results = Vec::with_capacity(batch_size);
+        for req_idx in 0..batch_size {
+            let per_req = batched
+                .narrow(0, req_idx, 1)
+                .map_err(|e| SwarmError::Internal(format!("split: {e}")))?;
+
+            if is_last {
+                let norm = self
+                    .norm
+                    .as_ref()
+                    .ok_or_else(|| SwarmError::Internal("Missing final norm".into()))?;
+                let output = self
+                    .output
+                    .as_ref()
+                    .ok_or_else(|| SwarmError::Internal("Missing output head".into()))?;
+                let x = norm
+                    .forward(&per_req)
+                    .map_err(|e| SwarmError::Internal(format!("final_norm: {e}")))?;
+                // seq_len=1, so i((.., 0, ..)) selects the single token
+                let x = x
+                    .i((.., 0, ..))
+                    .map_err(|e| SwarmError::Internal(format!("last_token: {e}")))?;
+                let logits = output
+                    .forward(&x)
+                    .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
+                results.push(logits);
+            } else {
+                results.push(per_req);
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Return a reference to the loaded vocabulary, if available.
     pub fn vocab(&self) -> Option<&Vec<String>> {
         self.vocabulary.as_ref()
@@ -1905,6 +2352,41 @@ impl SplitModel {
     /// Return the EOS token string from GGUF metadata.
     pub fn eos_token_str(&self) -> &str {
         &self.eos_token
+    }
+
+    /// Estimate GPU memory usage in MB for this model segment.
+    ///
+    /// Uses a rough heuristic: for quantized models (Q4/Q5/Q6), each parameter
+    /// uses ~0.5-0.75 bytes. We estimate based on `num_layers * hidden_dim^2 * 4`
+    /// (4 weight matrices per layer: Q, K, V, O + MLP) with a quantization factor.
+    pub fn estimate_vram_mb(&self) -> u64 {
+        let num_layers = self.layers.len() as u64;
+        let hidden = self.hidden_dim as u64;
+
+        // Each layer has roughly:
+        //   4 attention matrices (Q, K, V, O): ~4 * hidden^2 params
+        //   3 MLP matrices (gate, up, down): gate + up = 2 * hidden * 4*hidden, down = 4*hidden * hidden
+        //   So MLP ≈ 12 * hidden^2 params
+        //   Total per layer ≈ 16 * hidden^2 params
+        //   Quantized at ~0.5 bytes per param (Q4)
+        let params_per_layer = 16 * hidden * hidden;
+        let bytes_per_param_quantized: f64 = 0.5;
+        let layer_bytes = (params_per_layer as f64 * bytes_per_param_quantized) as u64;
+        let mut total_bytes = num_layers * layer_bytes;
+
+        // Add embedding table if loaded (~vocab_size * hidden * 2 bytes for f16)
+        if self.tok_embeddings.is_some() {
+            let vocab_size = self.vocabulary.as_ref().map(|v| v.len()).unwrap_or(32000) as u64;
+            total_bytes += vocab_size * hidden * 2;
+        }
+
+        // Add output projection if loaded
+        if self.output.is_some() {
+            let vocab_size = self.vocabulary.as_ref().map(|v| v.len()).unwrap_or(32000) as u64;
+            total_bytes += vocab_size * hidden * 2;
+        }
+
+        total_bytes / (1024 * 1024) // Convert to MB
     }
 }
 
@@ -2546,5 +3028,366 @@ mod tests {
         let cleaned = store.cleanup_expired();
         assert_eq!(cleaned, 1);
         assert_eq!(store.active_entries(), 1);
+    }
+
+    // ── LRU eviction tests ──
+
+    fn make_dummy_entry(vram_mb: u64) -> SplitModelEntry {
+        // Construct a minimal valid SplitModel for eviction tests.
+        // We never call forward() on it — only use it for LRU tracking.
+        let dummy_model = SplitModel {
+            tok_embeddings: None,
+            layers: Vec::new(),
+            norm: None,
+            output: None,
+            masks: HashMap::new(),
+            layer_start: 0,
+            layer_end: 0,
+            total_layers: 0,
+            hidden_dim: 0,
+            device: candle_core::Device::Cpu,
+            vocabulary: None,
+            tokenizer: None,
+            eos_tokens: Vec::new(),
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        };
+        SplitModelEntry {
+            model: std::sync::Arc::new(tokio::sync::Mutex::new(dummy_model)),
+            last_used: std::sync::atomic::AtomicU64::new(0),
+            estimated_vram_mb: vram_mb,
+            batch_forwarder: None,
+        }
+    }
+
+    #[test]
+    fn lru_eviction_respects_budget() {
+        use crate::types::*;
+
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
+            dashmap::DashMap::new();
+
+        // Add two models: one old, one newer
+        let key_a = (ModelId("model-a".into()), 0, 10);
+        let mut entry_a = make_dummy_entry(500);
+        entry_a.last_used = std::sync::atomic::AtomicU64::new(100); // older
+        split_models.insert(key_a.clone(), entry_a);
+
+        let key_b = (ModelId("model-b".into()), 0, 10);
+        let mut entry_b = make_dummy_entry(500);
+        entry_b.last_used = std::sync::atomic::AtomicU64::new(200); // newer
+        split_models.insert(key_b.clone(), entry_b);
+
+        // Budget is 1200MB, we need 400MB more → total 1000 + 400 = 1400 > 1200
+        // Must evict 1 model (oldest) to bring it under: 500 + 400 = 900 ≤ 1200
+        let evicted = evict_split_models_lru(&split_models, &active_pipelines, 1200, 400);
+        assert_eq!(evicted, 1);
+        assert_eq!(split_models.len(), 1);
+        // The older model (model-a, last_used=100) should have been evicted
+        assert!(!split_models.contains_key(&key_a));
+        assert!(split_models.contains_key(&key_b));
+    }
+
+    #[test]
+    fn lru_eviction_no_eviction_under_budget() {
+        use crate::types::*;
+
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
+            dashmap::DashMap::new();
+
+        let key = (ModelId("model".into()), 0, 10);
+        let entry = make_dummy_entry(200);
+        split_models.insert(key, entry);
+
+        // Budget is 1000MB, need 100MB → no eviction needed
+        let evicted = evict_split_models_lru(&split_models, &active_pipelines, 1000, 100);
+        assert_eq!(evicted, 0);
+        assert_eq!(split_models.len(), 1);
+    }
+
+    #[test]
+    fn lru_eviction_protects_active_models() {
+        use crate::types::*;
+
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
+            dashmap::DashMap::new();
+
+        // Add two models
+        let key_a = (ModelId("active-model".into()), 0, 10);
+        let mut entry_a = make_dummy_entry(500);
+        entry_a.last_used = std::sync::atomic::AtomicU64::new(100); // oldest
+        split_models.insert(key_a.clone(), entry_a);
+
+        let key_b = (ModelId("idle-model".into()), 0, 10);
+        let mut entry_b = make_dummy_entry(500);
+        entry_b.last_used = std::sync::atomic::AtomicU64::new(200);
+        split_models.insert(key_b.clone(), entry_b);
+
+        // Mark model-a as having an active pipeline
+        let pipeline = PipelineAssignment {
+            request_id: uuid::Uuid::new_v4(),
+            segments: vec![PipelineSegment {
+                node_id: NodeId([1u8; 32]),
+                shard_id: ShardId {
+                    model_id: ModelId("active-model".into()),
+                    index: 0,
+                },
+                layer_range: (0, 10),
+            }],
+            standbys: vec![],
+        };
+        active_pipelines.insert(uuid::Uuid::new_v4(), pipeline);
+
+        // Budget is 800MB, need 400MB → should evict idle-model (not active one)
+        let evicted = evict_split_models_lru(&split_models, &active_pipelines, 800, 400);
+        assert_eq!(evicted, 1);
+        assert!(split_models.contains_key(&key_a)); // Protected by active pipeline
+        assert!(!split_models.contains_key(&key_b)); // Evicted
+    }
+
+    #[test]
+    fn lru_eviction_multiple_models() {
+        use crate::types::*;
+
+        let split_models: dashmap::DashMap<SplitModelKey, SplitModelEntry> = dashmap::DashMap::new();
+        let active_pipelines: dashmap::DashMap<uuid::Uuid, PipelineAssignment> =
+            dashmap::DashMap::new();
+
+        // Add 3 models of 400MB each (total 1200MB)
+        for i in 0..3 {
+            let key = (ModelId(format!("model-{i}")), 0, 10);
+            let mut entry = make_dummy_entry(400);
+            entry.last_used = std::sync::atomic::AtomicU64::new(i as u64 * 100);
+            split_models.insert(key, entry);
+        }
+
+        // Budget 800MB, need 200MB → need to free 600MB → evict 2 oldest
+        let evicted = evict_split_models_lru(&split_models, &active_pipelines, 800, 200);
+        assert_eq!(evicted, 2);
+        assert_eq!(split_models.len(), 1);
+        // Only model-2 (last_used=200, newest) should remain
+        assert!(split_models.contains_key(&(ModelId("model-2".into()), 0, 10)));
+    }
+
+    // ── Batch forward tests ──
+
+    /// Create a minimal SplitModel with real layers for testing forward/forward_batch.
+    fn make_test_split_model(num_layers: usize, hidden_dim: usize) -> SplitModel {
+        // Build a minimal model with random weights for testing.
+        // Uses CPU device and identity-like weight matrices.
+        let device = candle_core::Device::Cpu;
+        let head_dim = 64;
+        let n_head = hidden_dim / head_dim;
+        let n_kv_head = n_head; // no GQA in test model
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            // Create a random weight tensor and quantize it
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+
+        let max_seq_len = 128;
+        let rope_dim = head_dim;
+        let freq_base = 10000.0f32;
+        let theta: Vec<f32> = (0..rope_dim / 2)
+            .map(|i| 1.0 / freq_base.powf(i as f32 * 2.0 / rope_dim as f32))
+            .collect();
+        let idx: Vec<f32> = (0..max_seq_len).map(|i| i as f32).collect();
+        let theta_t = Tensor::from_vec(theta.clone(), (1, rope_dim / 2), &device).unwrap();
+        let idx_t = Tensor::from_vec(idx.clone(), (max_seq_len, 1), &device).unwrap();
+        let freqs = idx_t.matmul(&theta_t).unwrap();
+        let cos = freqs.cos().unwrap();
+        let sin = freqs.sin().unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let mut layers = Vec::new();
+        for _ in 0..num_layers {
+            let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
+            let make_rms_norm = |w: &Tensor| {
+                let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+                RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            };
+            layers.push(LayerWeights {
+                attention_wq: make_qmatmul(hidden_dim, hidden_dim),
+                attention_wk: make_qmatmul(hidden_dim, hidden_dim),
+                attention_wv: make_qmatmul(hidden_dim, hidden_dim),
+                attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+                attention_bq: None,
+                attention_bk: None,
+                attention_bv: None,
+                attention_norm: make_rms_norm(&norm_w),
+                mlp: Mlp {
+                    ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+                    ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
+                    ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                },
+                ffn_norm: make_rms_norm(&norm_w),
+                n_head,
+                n_kv_head,
+                head_dim,
+                cos: cos.clone(),
+                sin: sin.clone(),
+                neg_inf: neg_inf.clone(),
+                use_rope_contiguous: true,
+            });
+        }
+
+        SplitModel {
+            tok_embeddings: None,
+            layers,
+            norm: None,
+            output: None,
+            masks: HashMap::new(),
+            layer_start: 0,
+            layer_end: num_layers,
+            total_layers: num_layers + 2, // Not last segment
+            hidden_dim,
+            device,
+            vocabulary: None,
+            tokenizer: None,
+            eos_tokens: vec![2],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+        }
+    }
+
+    #[test]
+    fn forward_batch_matches_sequential() {
+        let hidden_dim = 128;
+        let num_layers = 2;
+        let mut model = make_test_split_model(num_layers, hidden_dim);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        // Create two different input tensors (simulating decode step, seq_len=1)
+        let input_a = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+        let input_b = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+        let index_pos = 5;
+
+        // Run sequentially
+        let out_a = model
+            .forward(&input_a, index_pos, &kv_store, "seq-a")
+            .unwrap();
+
+        // Clear KV for a fresh comparison
+        kv_store.clear_request(
+            &format!("{}-{}-{}", model.layer_start, model.layer_end, model.total_layers),
+            "seq-a",
+        );
+
+        let out_b = model
+            .forward(&input_b, index_pos, &kv_store, "seq-b")
+            .unwrap();
+        kv_store.clear_request(
+            &format!("{}-{}-{}", model.layer_start, model.layer_end, model.total_layers),
+            "seq-b",
+        );
+
+        // Run batched
+        let items = vec![
+            BatchItem {
+                input: &input_a,
+                index_pos,
+                request_id: "batch-a",
+            },
+            BatchItem {
+                input: &input_b,
+                index_pos,
+                request_id: "batch-b",
+            },
+        ];
+        let batch_out = model.forward_batch(&items, &kv_store).unwrap();
+
+        // Compare shapes
+        assert_eq!(out_a.shape(), batch_out[0].shape());
+        assert_eq!(out_b.shape(), batch_out[1].shape());
+
+        // Compare values (should be close — same model, same inputs, same index_pos)
+        let diff_a = (&out_a - &batch_out[0]).unwrap().abs().unwrap();
+        let diff_b = (&out_b - &batch_out[1]).unwrap().abs().unwrap();
+        let flat_a = diff_a.flatten_all().unwrap();
+        let flat_b = diff_b.flatten_all().unwrap();
+        let max_diff_a: f32 = flat_a.max(0).unwrap().to_vec0().unwrap();
+        let max_diff_b: f32 = flat_b.max(0).unwrap().to_vec0().unwrap();
+
+        // Allow small numerical differences from batched vs sequential path
+        assert!(
+            max_diff_a < 1e-4,
+            "Batch output A differs from sequential: max_diff={max_diff_a}"
+        );
+        assert!(
+            max_diff_b < 1e-4,
+            "Batch output B differs from sequential: max_diff={max_diff_b}"
+        );
+    }
+
+    #[test]
+    fn forward_batch_single_item_matches_forward() {
+        let hidden_dim = 128;
+        let mut model = make_test_split_model(1, hidden_dim);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let input = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+        let index_pos = 0;
+
+        // Single-item batch should use forward() path
+        let items = vec![BatchItem {
+            input: &input,
+            index_pos,
+            request_id: "single",
+        }];
+        let batch_out = model.forward_batch(&items, &kv_store).unwrap();
+        assert_eq!(batch_out.len(), 1);
+
+        // Shape should be [1, 1, hidden_dim] for intermediate segment
+        assert_eq!(batch_out[0].dims(), &[1, 1, hidden_dim]);
+    }
+
+    #[test]
+    fn forward_batch_empty_returns_empty() {
+        let mut model = make_test_split_model(1, 128);
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let items: Vec<BatchItem<'_>> = vec![];
+        let out = model.forward_batch(&items, &kv_store).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batch_forwarder_collects_concurrent_requests() {
+        let hidden_dim = 128;
+        let model = make_test_split_model(1, hidden_dim);
+        let kv_store = std::sync::Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
+        let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
+        let forwarder = std::sync::Arc::new(BatchForwarder::new(
+            model_arc,
+            kv_store,
+            4, // max batch size
+        ));
+
+        // Spawn 3 concurrent forward requests
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let forwarder = forwarder.clone();
+            let input = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+            handles.push(tokio::spawn(async move {
+                forwarder
+                    .submit(input, 0, format!("req-{i}"))
+                    .await
+            }));
+        }
+
+        // All should complete successfully
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result.is_ok(), "Batch forward failed: {:?}", result.err());
+            let output = result.unwrap();
+            assert_eq!(output.dims()[2], hidden_dim);
+        }
     }
 }

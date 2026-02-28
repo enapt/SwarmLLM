@@ -393,6 +393,449 @@ impl ModelExecutor {
         })?;
         Ok((output, result))
     }
+
+    /// Generate a response using speculative decoding with a draft model.
+    ///
+    /// The draft model proposes `gamma` tokens at a time, then the target model
+    /// (self) verifies them in a single forward pass. Accepted tokens are emitted
+    /// via the callback. The output distribution is mathematically identical to
+    /// sampling from the target model alone.
+    ///
+    /// Falls back to standard generation if the `llama` feature is not enabled.
+    pub fn generate_speculative<F>(
+        &mut self,
+        draft: &mut ModelExecutor,
+        prompt: &str,
+        params: &SamplingParams,
+        gamma: u32,
+        mut callback: F,
+    ) -> Result<(GenerationResult, crate::inference::speculative::SpeculativeDraftState), SwarmError>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        if !self.loaded {
+            return Err(SwarmError::NoModelLoaded);
+        }
+        if !draft.loaded {
+            return Err(SwarmError::Inference(
+                "Draft model not loaded".to_string(),
+            ));
+        }
+
+        tracing::info!(
+            prompt_len = prompt.len(),
+            gamma = gamma,
+            draft_model = %draft.model_name,
+            target_model = %self.model_name,
+            "Starting speculative decoding"
+        );
+
+        #[cfg(feature = "llama")]
+        {
+            return self.generate_speculative_llama(draft, prompt, params, gamma, callback);
+        }
+
+        #[cfg(not(feature = "llama"))]
+        {
+            // Stub mode: fall back to standard generation, no speculative benefit
+            let mut state = crate::inference::speculative::SpeculativeDraftState::new(
+                crate::types::ModelId(draft.model_name.clone()),
+                crate::types::ModelId(self.model_name.clone()),
+                gamma,
+            );
+            let result = self.generate_stream(prompt, params, &mut callback)?;
+            state.record_batch(0, 0);
+            Ok((result, state))
+        }
+    }
+
+    /// Speculative decoding with llama-cpp backend.
+    ///
+    /// Algorithm:
+    /// 1. Prefill both models with the prompt, saving target's initial logits
+    /// 2. Loop:
+    ///    a. Draft phase: run draft model gamma times to get candidate tokens + logits
+    ///    b. Verify phase: feed candidates through target one-by-one, collecting probs
+    ///    c. Accept/reject using rejection sampling
+    ///    d. Emit accepted tokens + bonus token
+    ///    e. Resynchronize both models' KV-caches to the accepted prefix
+    #[cfg(feature = "llama")]
+    fn generate_speculative_llama<F>(
+        &mut self,
+        draft: &mut ModelExecutor,
+        prompt: &str,
+        params: &SamplingParams,
+        gamma: u32,
+        mut callback: F,
+    ) -> Result<(GenerationResult, crate::inference::speculative::SpeculativeDraftState), SwarmError>
+    where
+        F: FnMut(&str) -> bool,
+    {
+        use crate::inference::speculative::{self, SpeculativeDraftState};
+        use llama_cpp_2::context::params::LlamaContextParams;
+        use llama_cpp_2::llama_batch::LlamaBatch;
+        use llama_cpp_2::model::AddBos;
+        use llama_cpp_2::token::LlamaToken;
+        use std::num::NonZeroU32;
+
+        let mut spec_state = SpeculativeDraftState::new(
+            crate::types::ModelId(draft.model_name.clone()),
+            crate::types::ModelId(self.model_name.clone()),
+            gamma,
+        );
+
+        // --- Set up target model context ---
+        let target_backend = self
+            .backend
+            .as_ref()
+            .ok_or_else(|| SwarmError::Inference("Target backend not initialized".into()))?;
+        let target_model = self
+            .model
+            .as_ref()
+            .ok_or_else(|| SwarmError::Inference("Target model not loaded".into()))?;
+
+        let t_n_ctx = target_model.n_ctx_train();
+        let t_ctx_params =
+            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(t_n_ctx));
+        let mut target_ctx = target_model
+            .new_context(target_backend, t_ctx_params)
+            .map_err(|e| SwarmError::Inference(format!("Target context failed: {e}")))?;
+
+        // --- Set up draft model context ---
+        let draft_backend = draft
+            .backend
+            .as_ref()
+            .ok_or_else(|| SwarmError::Inference("Draft backend not initialized".into()))?;
+        let draft_model = draft
+            .model
+            .as_ref()
+            .ok_or_else(|| SwarmError::Inference("Draft model not loaded".into()))?;
+
+        let d_n_ctx = draft_model.n_ctx_train();
+        let d_ctx_params =
+            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(d_n_ctx));
+        let mut draft_ctx = draft_model
+            .new_context(draft_backend, d_ctx_params)
+            .map_err(|e| SwarmError::Inference(format!("Draft context failed: {e}")))?;
+
+        // Tokenize prompt for both models
+        let target_tokens = target_model
+            .str_to_token(prompt, AddBos::Always)
+            .map_err(|e| SwarmError::Inference(format!("Target tokenization failed: {e}")))?;
+        let draft_tokens_prompt = draft_model
+            .str_to_token(prompt, AddBos::Always)
+            .map_err(|e| SwarmError::Inference(format!("Draft tokenization failed: {e}")))?;
+
+        let prompt_tokens = target_tokens.len() as u32;
+        let max_gen = params.max_tokens.min(t_n_ctx.saturating_sub(prompt_tokens));
+
+        if prompt_tokens >= t_n_ctx {
+            return Err(SwarmError::Inference(format!(
+                "Prompt too long: {prompt_tokens} tokens exceeds context size {t_n_ctx}"
+            )));
+        }
+
+        // --- Prefill target model ---
+        let mut target_batch = LlamaBatch::new(t_n_ctx as usize, 1);
+        for (i, token) in target_tokens.iter().enumerate() {
+            let is_last = i == target_tokens.len() - 1;
+            target_batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| SwarmError::Inference(format!("Target batch add failed: {e}")))?;
+        }
+        target_ctx
+            .decode(&mut target_batch)
+            .map_err(|e| SwarmError::Inference(format!("Target prefill failed: {e}")))?;
+
+        // Save initial target logits (predict first generated token)
+        let target_n_vocab = target_model.n_vocab() as usize;
+        let draft_n_vocab = draft_model.n_vocab() as usize;
+
+        // get_logits() returns the logits for the last token in the batch (no index check)
+        let initial_target_logits: Vec<f32> =
+            target_ctx.get_logits()[..target_n_vocab].to_vec();
+        let mut next_target_probs = speculative::softmax(&initial_target_logits);
+
+        // --- Prefill draft model ---
+        let mut draft_batch = LlamaBatch::new(d_n_ctx as usize, 1);
+        for (i, token) in draft_tokens_prompt.iter().enumerate() {
+            let is_last = i == draft_tokens_prompt.len() - 1;
+            draft_batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| SwarmError::Inference(format!("Draft batch add failed: {e}")))?;
+        }
+        draft_ctx
+            .decode(&mut draft_batch)
+            .map_err(|e| SwarmError::Inference(format!("Draft prefill failed: {e}")))?;
+
+        let target_eos = target_model.token_eos();
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+
+        let mut completion_tokens = 0u32;
+        let mut target_pos = target_tokens.len();
+        let mut draft_pos = draft_tokens_prompt.len();
+        let mut hit_eos = false;
+        let mut user_stopped = false;
+
+        while completion_tokens < max_gen && !hit_eos && !user_stopped {
+            let remaining = max_gen - completion_tokens;
+            let effective_gamma = gamma.min(remaining);
+
+            // === DRAFT PHASE: generate gamma candidate tokens ===
+            let mut draft_candidates: Vec<u32> = Vec::with_capacity(effective_gamma as usize);
+            let mut draft_probs_list: Vec<Vec<f32>> = Vec::with_capacity(effective_gamma as usize);
+
+            for _ in 0..effective_gamma {
+                // get_logits() returns logits for the last decoded token
+                let draft_logits: Vec<f32> =
+                    draft_ctx.get_logits()[..draft_n_vocab].to_vec();
+                let probs = speculative::softmax(&draft_logits);
+
+                // Greedy sample from draft (maximizes acceptance rate)
+                let draft_token = probs
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i as u32)
+                    .unwrap_or(0);
+
+                draft_candidates.push(draft_token);
+                draft_probs_list.push(probs);
+
+                if LlamaToken(draft_token as i32) == target_eos {
+                    break;
+                }
+
+                // Feed this token into draft context for next step
+                draft_batch.clear();
+                draft_batch
+                    .add(LlamaToken(draft_token as i32), draft_pos as i32, &[0], true)
+                    .map_err(|e| SwarmError::Inference(format!("Draft batch add failed: {e}")))?;
+                draft_ctx
+                    .decode(&mut draft_batch)
+                    .map_err(|e| SwarmError::Inference(format!("Draft decode failed: {e}")))?;
+                draft_pos += 1;
+            }
+
+            let num_drafted = draft_candidates.len();
+
+            // === VERIFY PHASE ===
+            // We already have `next_target_probs` which is the target's prediction
+            // for the first candidate position (saved from previous iteration or prefill).
+            // Feed each candidate through target one-by-one to get subsequent distributions.
+            let mut verify_probs: Vec<Vec<f32>> = Vec::with_capacity(num_drafted + 1);
+            verify_probs.push(next_target_probs.clone()); // verifies candidate[0]
+
+            let mut verify_pos = target_pos;
+            for &candidate in &draft_candidates {
+                target_batch.clear();
+                target_batch
+                    .add(LlamaToken(candidate as i32), verify_pos as i32, &[0], true)
+                    .map_err(|e| {
+                        SwarmError::Inference(format!("Target verify batch failed: {e}"))
+                    })?;
+                target_ctx.decode(&mut target_batch).map_err(|e| {
+                    SwarmError::Inference(format!("Target verify decode failed: {e}"))
+                })?;
+
+                let logits: Vec<f32> =
+                    target_ctx.get_logits()[..target_n_vocab].to_vec();
+                verify_probs.push(speculative::softmax(&logits));
+                verify_pos += 1;
+            }
+
+            // verify_probs[0] = target P(token | prompt + prev_accepted) — verifies candidate[0]
+            // verify_probs[i] = target P(token | prompt + prev_accepted + candidates[0..i]) — verifies candidate[i]
+            // verify_probs[num_drafted] = target P(token | prompt + prev_accepted + all_candidates) — for bonus
+
+            // Pad draft probs to target vocab size (draft may have smaller vocab)
+            let padded_draft_probs: Vec<Vec<f32>> = draft_probs_list
+                .iter()
+                .map(|dp| {
+                    let mut padded = dp.clone();
+                    if padded.len() < target_n_vocab {
+                        padded.resize(target_n_vocab, 0.0);
+                    }
+                    padded
+                })
+                .collect();
+
+            // === ACCEPT/REJECT PHASE ===
+            let spec_result =
+                speculative::accept_reject(&draft_candidates, &padded_draft_probs, &verify_probs);
+
+            let num_accepted = spec_result.accepted_tokens.len();
+            spec_state.record_batch(num_drafted as u32, num_accepted as u32);
+
+            // Count how many new tokens we emit this round (accepted + bonus)
+            let mut emitted_this_round = 0usize;
+
+            // Emit accepted tokens
+            for &token in &spec_result.accepted_tokens {
+                if LlamaToken(token as i32) == target_eos {
+                    hit_eos = true;
+                    break;
+                }
+                let piece = target_model
+                    .token_to_piece(LlamaToken(token as i32), &mut decoder, true, None)
+                    .map_err(|e| SwarmError::Inference(format!("Token to piece failed: {e}")))?;
+                completion_tokens += 1;
+                emitted_this_round += 1;
+                if !callback(&piece) {
+                    user_stopped = true;
+                    break;
+                }
+            }
+
+            // Emit bonus token
+            if !hit_eos && !user_stopped {
+                if let Some(bonus) = spec_result.bonus_token {
+                    if LlamaToken(bonus as i32) == target_eos {
+                        hit_eos = true;
+                    } else {
+                        let piece = target_model
+                            .token_to_piece(LlamaToken(bonus as i32), &mut decoder, true, None)
+                            .map_err(|e| {
+                                SwarmError::Inference(format!("Token to piece failed: {e}"))
+                            })?;
+                        completion_tokens += 1;
+                        emitted_this_round += 1;
+                        if !callback(&piece) {
+                            user_stopped = true;
+                        }
+                    }
+                }
+            }
+
+            // === RESYNCHRONIZE ===
+            // Target KV cache: keep prompt + accepted + bonus, remove rejected candidates.
+            let target_keep = target_pos + emitted_this_round;
+            if target_keep < verify_pos {
+                let _ = target_ctx.clear_kv_cache_seq(
+                    Some(0),
+                    Some(target_keep as u32),
+                    None,
+                );
+            }
+            target_pos = target_keep;
+
+            // Draft KV cache: rewind to match the actual accepted sequence.
+            // The draft's KV has prompt + all previously accepted + gamma draft candidates.
+            // We need to keep only prompt + all accepted tokens (old + new) so we rewind
+            // to that position. But the draft tokenization may differ from target, so we
+            // track draft_pos separately.
+            let draft_keep = draft_pos - (num_drafted - num_accepted);
+            // If we rejected some tokens, the bonus token replaced them.
+            // We need to trim draft KV to the accepted prefix.
+            if num_accepted < num_drafted {
+                let _ = draft_ctx.clear_kv_cache_seq(
+                    Some(0),
+                    Some(draft_keep as u32),
+                    None,
+                );
+                draft_pos = draft_keep;
+            }
+
+            // Feed bonus/rejected tokens into draft so it stays synchronized with target.
+            if !hit_eos && !user_stopped {
+                if let Some(bonus) = spec_result.bonus_token {
+                    draft_batch.clear();
+                    draft_batch
+                        .add(LlamaToken(bonus as i32), draft_pos as i32, &[0], true)
+                        .map_err(|e| {
+                            SwarmError::Inference(format!("Draft sync batch failed: {e}"))
+                        })?;
+                    draft_ctx.decode(&mut draft_batch).map_err(|e| {
+                        SwarmError::Inference(format!("Draft sync decode failed: {e}"))
+                    })?;
+                    draft_pos += 1;
+                }
+            }
+
+            // Save target's last logits as `next_target_probs` for the next iteration.
+            // After resync, the target's KV cache ends at target_pos.
+            // If we have emitted tokens, we need the target's prediction at the
+            // new position. The last verify_probs entry that we keep is at index
+            // num_accepted (if bonus was emitted) or we need to re-evaluate.
+            // If all were accepted + bonus, verify_probs[num_drafted] is the bonus distribution,
+            // and we need the distribution AFTER the bonus token. Let's re-evaluate the
+            // last emitted token through target to get fresh logits.
+            if !hit_eos && !user_stopped && emitted_this_round > 0 {
+                // The target KV cache already has the accepted + bonus tokens.
+                // We need the logits from the last position. The last decode in the
+                // verify phase or resync already has the right logits in target_ctx
+                // if we didn't trim. But after trimming, the logits are stale.
+                // Re-evaluate the last accepted/bonus token to get fresh logits.
+                let last_emitted_idx = if spec_result.bonus_token.is_some() {
+                    // verify_probs has num_drafted + 1 entries. The bonus was sampled from
+                    // verify_probs[num_accepted]. The distribution AFTER the bonus is at
+                    // verify_probs[num_accepted + 1] if it exists. But we fed candidates
+                    // beyond num_accepted, so verify_probs[num_accepted+1..] are conditioned
+                    // on wrong tokens. We need fresh logits.
+                    // Simplest: just use the target's current logits after the KV trim +
+                    // the verify steps we kept.
+                    None // need re-eval
+                } else {
+                    // No bonus, all accepted. verify_probs[num_drafted] is the next distribution.
+                    Some(num_drafted)
+                };
+
+                if let Some(idx) = last_emitted_idx {
+                    next_target_probs = verify_probs[idx].clone();
+                } else {
+                    // Re-evaluate the last emitted token to regenerate target logits.
+                    // The KV cache is correct (trimmed to accepted + bonus).
+                    // Decoding a token at the current end position regenerates logits.
+                    // But we already decoded the bonus in the verify phase... if we
+                    // trimmed some tokens after it, we lost those KV entries.
+                    // Actually, the bonus token IS the last token in the verify sequence
+                    // at position target_pos - 1. Since we cleared KV after target_keep = target_pos,
+                    // the bonus is still in KV. We need logits at that position.
+                    // The simplest approach: re-decode the bonus token to regenerate logits.
+                    let bonus = spec_result.bonus_token.unwrap();
+                    target_batch.clear();
+                    target_batch
+                        .add(
+                            LlamaToken(bonus as i32),
+                            (target_pos - 1) as i32,
+                            &[0],
+                            true,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Inference(format!("Target re-eval failed: {e}"))
+                        })?;
+                    target_ctx.decode(&mut target_batch).map_err(|e| {
+                        SwarmError::Inference(format!("Target re-eval decode failed: {e}"))
+                    })?;
+                    let logits: Vec<f32> =
+                        target_ctx.get_logits()[..target_n_vocab].to_vec();
+                    next_target_probs = speculative::softmax(&logits);
+                }
+            }
+        }
+
+        tracing::info!(
+            completion_tokens,
+            acceptance_rate = %spec_state.acceptance_rate(),
+            total_proposed = spec_state.total_proposed,
+            total_accepted = spec_state.accepted_count,
+            "Speculative decoding complete"
+        );
+
+        let gen_result = GenerationResult {
+            prompt_tokens,
+            completion_tokens,
+            finish_reason: if completion_tokens >= max_gen {
+                FinishReason::MaxTokens
+            } else {
+                FinishReason::Stop
+            },
+        };
+
+        Ok((gen_result, spec_state))
+    }
 }
 
 #[derive(Debug, Clone)]

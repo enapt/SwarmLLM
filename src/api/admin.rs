@@ -198,6 +198,47 @@ pub async fn update_config(
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
+/// POST /api/admin/config/reload — Hot-reload operational parameters from config file.
+///
+/// Re-reads the config.toml and applies hot-reloadable parameters
+/// (max_concurrent_requests, auto_manage interval, max_batch_size, max_peers,
+/// session_timeout_secs) without requiring a daemon restart.
+pub async fn reload_config(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config_path = state.config.node.data_dir.join("config.toml");
+    tracing::info!(
+        path = %config_path.display(),
+        "Config reload requested via API"
+    );
+
+    let params = crate::config::reload_operational_params(&config_path)
+        .map_err(ApiError)?;
+
+    let old = crate::config::OperationalParams::from_config(&state.config);
+    let changed = params != old;
+
+    state.shared_state.apply_config_reload(params.clone());
+
+    if changed {
+        tracing::info!(?params, "Config reloaded with changes via API");
+    } else {
+        tracing::info!("Config reloaded via API — no changes detected");
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "changed": changed,
+        "params": {
+            "max_concurrent_requests": params.max_concurrent_requests,
+            "auto_manage_interval_minutes": params.auto_manage_interval_minutes,
+            "max_batch_size": params.max_batch_size,
+            "max_peers": params.max_peers,
+            "session_timeout_secs": params.session_timeout_secs,
+        }
+    })))
+}
+
 /// GET /api/admin/models — List known models and their status.
 ///
 /// Returns all models: locally loaded, from the P2P registry, and discovered

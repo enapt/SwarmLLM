@@ -531,6 +531,8 @@ mod tests {
                 trust_score: 0.8,
                 peer_id_bytes: None,
                 active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
             },
         );
         state.peer_registry.insert(
@@ -544,6 +546,8 @@ mod tests {
                 trust_score: 0.9,
                 peer_id_bytes: None,
                 active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
             },
         );
 
@@ -709,6 +713,8 @@ mod tests {
                 trust_score: 0.8,
                 peer_id_bytes: None,
                 active_request_count: 10, // high load
+                first_seen: 0,
+                verified_transaction_count: 0,
             },
         );
         state.peer_registry.insert(
@@ -722,6 +728,8 @@ mod tests {
                 trust_score: 0.8,
                 peer_id_bytes: None,
                 active_request_count: 1, // low load
+                first_seen: 0,
+                verified_transaction_count: 0,
             },
         );
 

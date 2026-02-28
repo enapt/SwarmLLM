@@ -48,6 +48,11 @@ pub struct SessionManager {
     sessions: DashMap<NodeId, CachedSession>,
     /// Monotonic session epoch counter to prevent key reuse across re-established sessions.
     session_epoch: AtomicU64,
+    /// Pending ephemeral secrets for in-progress key exchanges (initiator side).
+    /// Removed and consumed when the peer responds with their ephemeral key.
+    pending_ephemeral: DashMap<NodeId, EphemeralSecret>,
+    /// Our ephemeral public keys for pending exchanges (used in key derivation).
+    pending_ephemeral_pub: DashMap<NodeId, [u8; 32]>,
 }
 
 impl SessionManager {
@@ -60,6 +65,8 @@ impl SessionManager {
             local_public: public,
             sessions: DashMap::new(),
             session_epoch: AtomicU64::new(0),
+            pending_ephemeral: DashMap::new(),
+            pending_ephemeral_pub: DashMap::new(),
         }
     }
 
@@ -83,6 +90,102 @@ impl SessionManager {
         self.sessions
             .insert(peer.clone(), CachedSession::new(cipher_key));
         tracing::debug!(peer = %peer, epoch, "Established encryption session");
+    }
+
+    /// Initiate an ephemeral ECDH key exchange for forward secrecy.
+    ///
+    /// Generates a fresh ephemeral X25519 keypair and returns the public key
+    /// to be sent to the peer. The ephemeral secret is stored temporarily
+    /// until the peer responds with their ephemeral public key.
+    ///
+    /// Call `complete_ephemeral_session` when the peer's response arrives.
+    pub fn initiate_ephemeral_exchange(&self, peer: &NodeId) -> [u8; 32] {
+        let ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let ephemeral_public = PublicKey::from(&ephemeral_secret);
+        let pub_bytes = *ephemeral_public.as_bytes();
+
+        // Store the ephemeral secret and public key temporarily, keyed by peer
+        self.pending_ephemeral_pub.insert(peer.clone(), pub_bytes);
+        self.pending_ephemeral.insert(peer.clone(), ephemeral_secret);
+
+        tracing::debug!(peer = %peer, "Initiated ephemeral ECDH exchange");
+        pub_bytes
+    }
+
+    /// Complete an ephemeral ECDH exchange as the initiator.
+    ///
+    /// Called when the peer responds with their ephemeral public key.
+    /// Derives the session key from the ephemeral DH and installs the session.
+    /// The ephemeral secret is consumed (dropped/zeroized) after derivation.
+    pub fn complete_ephemeral_session(
+        &self,
+        peer: &NodeId,
+        peer_ephemeral_pub_bytes: &[u8; 32],
+    ) -> bool {
+        let ephemeral_secret = match self.pending_ephemeral.remove(peer) {
+            Some((_, secret)) => secret,
+            None => {
+                tracing::warn!(peer = %peer, "No pending ephemeral exchange to complete");
+                return false;
+            }
+        };
+
+        let peer_ephemeral_pub = PublicKey::from(*peer_ephemeral_pub_bytes);
+        let shared_secret = ephemeral_secret.diffie_hellman(&peer_ephemeral_pub);
+        // ephemeral_secret is consumed by diffie_hellman — dropped here
+
+        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
+        let our_ephemeral_pub = PublicKey::from(
+            self.pending_ephemeral_pub
+                .remove(peer)
+                .map(|(_, b)| b)
+                .unwrap_or(*self.local_public.as_bytes()),
+        );
+        let cipher_key = derive_cipher_key_with_epoch(
+            shared_secret.as_bytes(),
+            &our_ephemeral_pub,
+            &peer_ephemeral_pub,
+            epoch,
+        );
+
+        self.sessions
+            .insert(peer.clone(), CachedSession::new(cipher_key));
+        tracing::debug!(peer = %peer, epoch, "Established ephemeral forward-secret session");
+        true
+    }
+
+    /// Handle an incoming ephemeral key exchange request (responder side).
+    ///
+    /// Generates a fresh ephemeral keypair, computes the shared secret with
+    /// the initiator's ephemeral public key, installs the session, and
+    /// returns our ephemeral public key for the response message.
+    /// The ephemeral secret is consumed (dropped/zeroized) after derivation.
+    pub fn accept_ephemeral_exchange(
+        &self,
+        peer: &NodeId,
+        peer_ephemeral_pub_bytes: &[u8; 32],
+    ) -> [u8; 32] {
+        let our_ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
+        let our_ephemeral_public = PublicKey::from(&our_ephemeral_secret);
+        let our_pub_bytes = *our_ephemeral_public.as_bytes();
+
+        let peer_ephemeral_pub = PublicKey::from(*peer_ephemeral_pub_bytes);
+        let shared_secret = our_ephemeral_secret.diffie_hellman(&peer_ephemeral_pub);
+        // our_ephemeral_secret is consumed — dropped here
+
+        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
+        let cipher_key = derive_cipher_key_with_epoch(
+            shared_secret.as_bytes(),
+            &our_ephemeral_public,
+            &peer_ephemeral_pub,
+            epoch,
+        );
+
+        self.sessions
+            .insert(peer.clone(), CachedSession::new(cipher_key));
+        tracing::debug!(peer = %peer, epoch, "Accepted ephemeral forward-secret session (responder)");
+
+        our_pub_bytes
     }
 
     /// Check if a session exists for the given peer.
@@ -420,5 +523,118 @@ mod tests {
         let secret = ed25519_to_x25519_secret(&id.signing_key_bytes());
         let expected = PublicKey::from(&secret);
         assert_eq!(x25519_pub.unwrap().as_bytes(), expected.as_bytes());
+    }
+
+    // ---- Ephemeral forward secrecy tests ----
+
+    #[test]
+    fn ephemeral_exchange_seal_open_roundtrip() {
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+        let sm_a = SessionManager::from_ed25519_key(&id_a.signing_key_bytes());
+        let sm_b = SessionManager::from_ed25519_key(&id_b.signing_key_bytes());
+        let node_a = id_a.node_id().clone();
+        let node_b = id_b.node_id().clone();
+
+        // A initiates ephemeral exchange
+        let a_eph_pub = sm_a.initiate_ephemeral_exchange(&node_b);
+
+        // B accepts (responder side): gets A's ephemeral pub, generates its own
+        let b_eph_pub = sm_b.accept_ephemeral_exchange(&node_a, &a_eph_pub);
+
+        // A completes: uses B's ephemeral pub response
+        assert!(sm_a.complete_ephemeral_session(&node_b, &b_eph_pub));
+
+        // Now both should have forward-secret sessions
+        let plaintext = b"forward secret message";
+        let aad = b"test-aad";
+
+        let sealed = sm_a.seal(&node_b, plaintext, aad).unwrap();
+        let opened = sm_b.open(&node_a, &sealed, aad).unwrap();
+        assert_eq!(opened, plaintext);
+
+        // And reverse direction
+        let sealed_b = sm_b.seal(&node_a, b"reply", aad).unwrap();
+        let opened_b = sm_a.open(&node_b, &sealed_b, aad).unwrap();
+        assert_eq!(opened_b, b"reply");
+    }
+
+    #[test]
+    fn different_sessions_get_different_keys() {
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+        let sm_a = SessionManager::from_ed25519_key(&id_a.signing_key_bytes());
+        let sm_b = SessionManager::from_ed25519_key(&id_b.signing_key_bytes());
+        let node_a = id_a.node_id().clone();
+        let node_b = id_b.node_id().clone();
+
+        // First ephemeral session
+        let a_eph1 = sm_a.initiate_ephemeral_exchange(&node_b);
+        let b_eph1 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph1);
+        sm_a.complete_ephemeral_session(&node_b, &b_eph1);
+
+        let sealed1 = sm_a.seal(&node_b, b"msg1", b"").unwrap();
+
+        // Second ephemeral session (re-key)
+        let a_eph2 = sm_a.initiate_ephemeral_exchange(&node_b);
+        let b_eph2 = sm_b.accept_ephemeral_exchange(&node_a, &a_eph2);
+        sm_a.complete_ephemeral_session(&node_b, &b_eph2);
+
+        let sealed2 = sm_a.seal(&node_b, b"msg1", b"").unwrap();
+
+        // Ephemeral keys should be different each time
+        assert_ne!(a_eph1, a_eph2);
+        assert_ne!(b_eph1, b_eph2);
+
+        // Even with the same plaintext, sealed data should differ
+        // (different keys + different nonces = different ciphertext)
+        assert_ne!(sealed1, sealed2);
+    }
+
+    #[test]
+    fn complete_without_initiation_fails() {
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+        let sm_a = SessionManager::from_ed25519_key(&id_a.signing_key_bytes());
+        let node_b = id_b.node_id().clone();
+
+        // Try to complete without initiating
+        let fake_pub = [42u8; 32];
+        assert!(!sm_a.complete_ephemeral_session(&node_b, &fake_pub));
+    }
+
+    #[test]
+    fn static_session_still_works_as_fallback() {
+        // Verify the existing static-key session path still works
+        // (backward compatibility when peers don't support ephemeral)
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+
+        let plaintext = b"static key message";
+        let aad = b"aad";
+
+        let sealed = sm_a.seal(&node_b, plaintext, aad).unwrap();
+        let opened = sm_b.open(&node_a, &sealed, aad).unwrap();
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn ephemeral_sessions_independent_of_static_keys() {
+        // Two nodes with identical static keys should get different
+        // ephemeral session keys
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+        let sm_a = SessionManager::from_ed25519_key(&id_a.signing_key_bytes());
+        let sm_b = SessionManager::from_ed25519_key(&id_b.signing_key_bytes());
+        let node_a = id_a.node_id().clone();
+        let node_b = id_b.node_id().clone();
+
+        // Ephemeral exchange
+        let a_eph = sm_a.initiate_ephemeral_exchange(&node_b);
+        let b_eph = sm_b.accept_ephemeral_exchange(&node_a, &a_eph);
+        sm_a.complete_ephemeral_session(&node_b, &b_eph);
+
+        // The ephemeral public keys should not equal the static public keys
+        assert_ne!(&a_eph, sm_a.local_public_key().as_bytes());
+        assert_ne!(&b_eph, sm_b.local_public_key().as_bytes());
     }
 }

@@ -55,6 +55,9 @@ pub struct InferenceOutput {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub finish_reason: String,
+    /// The session ID for multi-turn KV-cache reuse. Echoed back from the
+    /// request or auto-generated if the router created one.
+    pub session_id: Option<String>,
 }
 
 /// Sender for incremental streaming tokens from distributed inference.
@@ -411,8 +414,56 @@ impl InferenceRouter {
         }
     }
 
-    /// Dispatch a single request (non-batched path, identical to previous behavior).
+    /// Dispatch a single request (non-batched path).
+    ///
+    /// If the request has a `session_id`, checks whether the KV-cache from
+    /// a previous turn can be reused (multi-turn prefix matching). On a cache
+    /// hit, the tensor-level KV-cache is preserved and `start_pos` is set
+    /// to skip redundant prefill.
     fn dispatch_single(&mut self, queued: QueuedRequest) {
+        // Check for multi-turn KV-cache reuse
+        let cache_start_pos = if let Some(ref session_id) = queued.request.session_id {
+            // Collect active peer IDs for pipeline validation
+            let active_peers: Vec<crate::types::NodeId> = self
+                .shared_state
+                .peer_registry
+                .iter()
+                .map(|e| e.key().clone())
+                .collect();
+
+            // Build the prompt to check prefix matching
+            let prompt = {
+                // Use a quick ChatML fallback for prefix comparison — the
+                // actual template doesn't matter as long as we're consistent.
+                crate::inference::chat_template::chatml_fallback(&queued.request.messages)
+            };
+
+            match self
+                .kv_cache
+                .check_multi_turn_reuse(session_id, &prompt, &active_peers)
+            {
+                crate::inference::kv_cache::CacheReuse::Hit { start_pos } => {
+                    tracing::info!(
+                        session_id,
+                        start_pos,
+                        request_id = %queued.request.id,
+                        "Multi-turn KV-cache hit"
+                    );
+                    Some(start_pos)
+                }
+                crate::inference::kv_cache::CacheReuse::Miss => {
+                    tracing::debug!(
+                        session_id,
+                        request_id = %queued.request.id,
+                        "Multi-turn KV-cache miss"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Register KV-cache session for this request
         self.kv_cache.register_session(
             queued.request.id,
@@ -421,7 +472,7 @@ impl InferenceRouter {
                 segments: vec![],
                 standbys: vec![],
             },
-            0,
+            cache_start_pos.unwrap_or(0),
         );
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
@@ -522,11 +573,18 @@ async fn finalize_request(
     }
 
     // Clean up per-request KV-cache entries now that the request is done.
-    // The kv_cache_store is keyed by (model_key, request_id), and we don't know
-    // the exact model_key here, so we use the cleanup method which removes by
-    // iterating. For efficiency, the store supports direct removal by request_id.
-    let req_id_str = request.id.to_string();
-    shared_state.kv_cache_store.cleanup_request_id(&req_id_str);
+    // EXCEPT when the request has a session_id — those entries persist for
+    // multi-turn reuse. They'll be cleaned up by the TTL-based expiry instead.
+    if request.session_id.is_none() {
+        let req_id_str = request.id.to_string();
+        shared_state.kv_cache_store.cleanup_request_id(&req_id_str);
+    } else {
+        tracing::debug!(
+            request_id = %request.id,
+            session_id = ?request.session_id,
+            "Preserving KV-cache for multi-turn session"
+        );
+    }
 }
 
 /// Execute a batch of requests that target the same model.
@@ -607,6 +665,7 @@ async fn execute_local_batch(
                     prompt_tokens: gen_result.prompt_tokens,
                     completion_tokens: gen_result.completion_tokens,
                     finish_reason: gen_result.finish_reason.as_str().to_string(),
+                    session_id: request.session_id.clone(),
                 }),
                 Err(e) => Err(e),
             }
@@ -716,6 +775,7 @@ async fn execute_request(
             prompt_tokens: gen_result.prompt_tokens,
             completion_tokens: gen_result.completion_tokens,
             finish_reason: gen_result.finish_reason.as_str().to_string(),
+            session_id: request.session_id.clone(),
         });
     }
 
@@ -778,6 +838,7 @@ mod tests {
             requester: crate::types::NodeId([0u8; 32]),
             priority,
             created_at: chrono::Utc::now(),
+            session_id: None,
         }
     }
 
@@ -794,6 +855,7 @@ mod tests {
             requester: crate::types::NodeId([0u8; 32]),
             priority,
             created_at: chrono::Utc::now(),
+            session_id: None,
         }
     }
 

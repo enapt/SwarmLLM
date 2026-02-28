@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
+use std::time::SystemTime;
 
 /// A GGUF model file discovered on HuggingFace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -347,10 +348,85 @@ pub async fn download_gguf_header(
     Ok(dest_path)
 }
 
+/// Parse the `Retry-After` header value.
+///
+/// Supports two formats per RFC 7231:
+/// - Delta-seconds: e.g. "120" → 120 seconds
+/// - HTTP-date: e.g. "Fri, 28 Feb 2026 04:00:00 GMT" → seconds until that time
+///
+/// Returns `None` if the header cannot be parsed in either format.
+pub fn parse_retry_after(value: &str) -> Option<u64> {
+    // Try delta-seconds first (most common for APIs)
+    if let Ok(secs) = value.trim().parse::<u64>() {
+        return Some(secs);
+    }
+
+    // Try HTTP-date format: "Day, DD Mon YYYY HH:MM:SS GMT"
+    parse_http_date(value.trim()).and_then(|target| {
+        let now = SystemTime::now();
+        target.duration_since(now).ok().map(|d| d.as_secs().max(1))
+    })
+}
+
+/// Parse an HTTP-date string into a SystemTime.
+///
+/// Supports the preferred format: "Day, DD Mon YYYY HH:MM:SS GMT"
+fn parse_http_date(s: &str) -> Option<SystemTime> {
+    // Format: "Fri, 28 Feb 2026 04:00:00 GMT"
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.len() != 6 || parts[5] != "GMT" {
+        return None;
+    }
+
+    let day: i64 = parts[1].trim_end_matches(',').parse().ok()?;
+    let month: i64 = match parts[2] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts[3].parse().ok()?;
+    let time_parts: Vec<&str> = parts[4].split(':').collect();
+    if time_parts.len() != 3 {
+        return None;
+    }
+    let hour: i64 = time_parts[0].parse().ok()?;
+    let min: i64 = time_parts[1].parse().ok()?;
+    let sec: i64 = time_parts[2].parse().ok()?;
+
+    // Convert to Unix timestamp using Rata Die algorithm
+    let y = if month <= 2 { year - 1 } else { year };
+    let m = if month <= 2 { month + 9 } else { month - 3 };
+    let days = 365 * y + y / 4 - y / 100 + y / 400 + (m * 306 + 5) / 10 + (day - 1)
+        - 719468; // Unix epoch offset
+    let timestamp = days * 86400 + hour * 3600 + min * 60 + sec;
+    if timestamp < 0 {
+        return None;
+    }
+
+    Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64))
+}
+
 /// Download a specific shard (byte range) of a remote GGUF file from HuggingFace.
 ///
 /// Each shard is a slice of the GGUF file. The byte range is computed from the
 /// shard index and the shard size stored in `GgufFileInfo`.
+///
+/// Supports resuming from partial `.tmp` files. If a `.tmp` file exists from a
+/// previous interrupted download, it will attempt to resume from the last byte
+/// using HTTP `Range` headers, falling back to a full re-download if the server
+/// doesn't support Range requests.
+///
+/// Connection errors during streaming are retried up to 3 times with backoff.
 pub async fn download_shard(
     repo_id: &str,
     filename: &str,
@@ -373,92 +449,199 @@ pub async fn download_shard(
     let range_end = ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
     let expected_size = range_end - range_start + 1;
 
-    // Retry with exponential backoff for 429/503
-    let mut resp = None;
-    let retry_delays = [5u64, 30, 120];
-    for attempt in 0..=3u32 {
-        let result = client
-            .get(&url)
-            .header("User-Agent", "SwarmLLM/0.1")
-            .header("Range", format!("bytes={range_start}-{range_end}"))
-            .send()
-            .await;
-
-        match result {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                if status == 429 || status == 503 {
-                    if attempt < 3 {
-                        let retry_after = r
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(retry_delays[attempt as usize]);
-                        tracing::warn!(
-                            status,
-                            retry_after_secs = retry_after,
-                            attempt = attempt + 1,
-                            "HF rate limited, retrying"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-                        continue;
-                    }
-                    return Err(format!("Shard download returned {} after retries", status));
-                }
-                resp = Some(r);
-                break;
-            }
-            Err(e) => {
-                if attempt < 3 {
-                    tracing::warn!(error = %e, attempt = attempt + 1, "Shard download request failed, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(retry_delays[attempt as usize])).await;
-                    continue;
-                }
-                return Err(format!("Shard download failed after retries: {e}"));
-            }
-        }
-    }
-    let resp = resp.ok_or("Shard download failed: no response")?;
-
-    if resp.status().as_u16() != 206 && !resp.status().is_success() {
-        return Err(format!("Shard download returned {}", resp.status()));
-    }
-
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
     let dest_path = dest_dir.join(format!("shard_{shard_index:03}.bin"));
-    let mut file = tokio::fs::File::create(&dest_path)
-        .await
-        .map_err(|e| format!("Failed to create shard file: {e}"))?;
+    let tmp_path = dest_dir.join(format!("shard_{shard_index:03}.bin.tmp"));
 
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
+    // Check for partial download to resume from
+    let existing_bytes = if tmp_path.exists() {
+        let meta = std::fs::metadata(&tmp_path)
+            .map_err(|e| format!("Failed to read tmp file metadata: {e}"))?;
+        let len = meta.len();
+        if len >= expected_size {
+            // tmp file is already complete (or larger) — start fresh to be safe
+            tracing::info!(shard = shard_index, "Tmp file already >= expected size, re-downloading");
+            0
+        } else {
+            tracing::info!(
+                shard = shard_index,
+                existing_bytes = len,
+                expected_size,
+                "Found partial download, will attempt resume"
+            );
+            len
+        }
+    } else {
+        0
+    };
 
-    let mut downloaded: u64 = 0;
-    let mut stream = resp.bytes_stream();
+    // Connection-level retry: wraps the entire request+stream cycle
+    let stream_retry_delays = [2u64, 5, 10];
+    let mut total_downloaded: u64 = existing_bytes;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Shard chunk error: {e}"))?;
-        file.write_all(&chunk)
+    for stream_attempt in 0..=3u32 {
+        // Calculate the actual range start accounting for already-downloaded bytes
+        let actual_range_start = range_start + total_downloaded;
+        if total_downloaded >= expected_size {
+            break; // Already have all bytes
+        }
+
+        // HTTP-level retry for 429/503
+        let mut resp = None;
+        let http_retry_delays = [5u64, 30, 120];
+        for attempt in 0..=3u32 {
+            let result = client
+                .get(&url)
+                .header("User-Agent", "SwarmLLM/0.1")
+                .header("Range", format!("bytes={actual_range_start}-{range_end}"))
+                .send()
+                .await;
+
+            match result {
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    if status == 429 || status == 503 {
+                        if attempt < 3 {
+                            let retry_secs = r
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(parse_retry_after)
+                                .unwrap_or(http_retry_delays[attempt as usize]);
+                            // Cap retry delay to 10 minutes to avoid indefinite waits
+                            let retry_secs = retry_secs.min(600);
+                            tracing::warn!(
+                                status,
+                                retry_after_secs = retry_secs,
+                                attempt = attempt + 1,
+                                "HF rate limited, retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(retry_secs)).await;
+                            continue;
+                        }
+                        return Err(format!("Shard download returned {} after retries", status));
+                    }
+
+                    // If server returned 200 instead of 206, it doesn't support Range resume.
+                    // We need to re-download from scratch.
+                    if status == 200 && total_downloaded > 0 {
+                        tracing::warn!(
+                            shard = shard_index,
+                            "Server returned 200 instead of 206 — Range not supported, restarting download"
+                        );
+                        total_downloaded = 0;
+                        // Delete the tmp file since we're starting over
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+
+                    resp = Some(r);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 3 {
+                        tracing::warn!(error = %e, attempt = attempt + 1, "Shard download request failed, retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            http_retry_delays[attempt as usize],
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(format!("Shard download failed after retries: {e}"));
+                }
+            }
+        }
+        let resp = resp.ok_or("Shard download failed: no response")?;
+
+        if resp.status().as_u16() != 206 && !resp.status().is_success() {
+            return Err(format!("Shard download returned {}", resp.status()));
+        }
+
+        // Open file in append mode if resuming, create mode if starting fresh
+        use tokio::io::AsyncWriteExt;
+        let mut file = if total_downloaded > 0 {
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&tmp_path)
+                .await
+                .map_err(|e| format!("Failed to open tmp file for append: {e}"))?
+        } else {
+            tokio::fs::File::create(&tmp_path)
+                .await
+                .map_err(|e| format!("Failed to create tmp file: {e}"))?
+        };
+
+        use futures::StreamExt;
+        let mut stream = resp.bytes_stream();
+        let mut stream_error = false;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(data) => {
+                    file.write_all(&data)
+                        .await
+                        .map_err(|e| format!("Shard write error: {e}"))?;
+                    total_downloaded += data.len() as u64;
+
+                    if let Some(ref tx) = progress_tx {
+                        let _ = tx.try_send(DownloadProgress {
+                            downloaded_bytes: total_downloaded,
+                            total_bytes: expected_size,
+                        });
+                    }
+                }
+                Err(e) => {
+                    // Connection error during streaming — retry
+                    tracing::warn!(
+                        error = %e,
+                        shard = shard_index,
+                        downloaded = total_downloaded,
+                        stream_attempt = stream_attempt + 1,
+                        "Stream error during shard download"
+                    );
+                    stream_error = true;
+                    break;
+                }
+            }
+        }
+
+        file.flush()
             .await
-            .map_err(|e| format!("Shard write error: {e}"))?;
-        downloaded += chunk.len() as u64;
+            .map_err(|e| format!("Shard flush error: {e}"))?;
 
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.try_send(DownloadProgress {
-                downloaded_bytes: downloaded,
-                total_bytes: expected_size,
-            });
+        if !stream_error {
+            // Stream completed successfully
+            break;
+        }
+
+        // Stream was interrupted — retry with resume
+        if stream_attempt < 3 {
+            let delay = stream_retry_delays[stream_attempt as usize];
+            tracing::info!(
+                shard = shard_index,
+                delay_secs = delay,
+                downloaded = total_downloaded,
+                "Retrying shard download from byte {}",
+                total_downloaded
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        } else {
+            return Err(format!(
+                "Shard {} download failed after {} stream retries (got {}/{} bytes)",
+                shard_index,
+                stream_attempt,
+                total_downloaded,
+                expected_size
+            ));
         }
     }
 
-    file.flush()
-        .await
-        .map_err(|e| format!("Shard flush error: {e}"))?;
+    // Rename .tmp → .bin atomically
+    std::fs::rename(&tmp_path, &dest_path)
+        .map_err(|e| format!("Failed to rename tmp to final shard file: {e}"))?;
 
     tracing::info!(
         shard = shard_index,
-        size = downloaded,
+        size = total_downloaded,
         path = %dest_path.display(),
         "Downloaded shard from HuggingFace"
     );
@@ -650,5 +833,154 @@ mod tests {
         assert_eq!(parsed.total_size, 4_000_000_000);
         assert_eq!(parsed.header_size, 5_954_048);
         assert_eq!(parsed.shard_count, 8);
+    }
+
+    #[test]
+    fn parse_retry_after_delta_seconds() {
+        assert_eq!(parse_retry_after("120"), Some(120));
+        assert_eq!(parse_retry_after("0"), Some(0));
+        assert_eq!(parse_retry_after("1"), Some(1));
+        assert_eq!(parse_retry_after(" 60 "), Some(60));
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        // Use a date far in the future to ensure it's always > now
+        let result = parse_retry_after("Fri, 01 Jan 2100 00:00:00 GMT");
+        assert!(result.is_some());
+        let secs = result.unwrap();
+        // Should be many years in the future
+        assert!(secs > 365 * 24 * 3600);
+    }
+
+    #[test]
+    fn parse_retry_after_http_date_past_returns_small() {
+        // A date in the past should return at least 1 second (clamped)
+        // or None since duration_since would fail
+        let result = parse_retry_after("Mon, 01 Jan 2001 00:00:00 GMT");
+        // Past date: duration_since(now) fails, returns None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_retry_after_invalid() {
+        assert_eq!(parse_retry_after("not-a-number"), None);
+        assert_eq!(parse_retry_after(""), None);
+        assert_eq!(parse_retry_after("abc def"), None);
+    }
+
+    #[test]
+    fn parse_retry_after_all_months() {
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        for month in months {
+            let date = format!("Mon, 15 {} 2100 12:00:00 GMT", month);
+            let result = parse_retry_after(&date);
+            assert!(result.is_some(), "Failed to parse month: {}", month);
+        }
+    }
+
+    #[test]
+    fn resume_byte_offset_calculation() {
+        // Simulate: shard 3 of a 4GB file with 512MB shards
+        let shard_index: u32 = 3;
+        let shard_size: u64 = 512 * 1024 * 1024;
+        let total_file_size: u64 = 4_000_000_000;
+
+        let range_start = (shard_index as u64) * shard_size;
+        let range_end =
+            ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let expected_size = range_end - range_start + 1;
+
+        assert_eq!(range_start, 1_610_612_736); // 3 * 512MB
+        assert_eq!(expected_size, shard_size); // Full 512MB shard
+
+        // If we've downloaded 100MB already, the resume range starts at range_start + 100MB
+        let existing_bytes: u64 = 100 * 1024 * 1024;
+        let resume_start = range_start + existing_bytes;
+        assert_eq!(resume_start, range_start + existing_bytes);
+
+        // The Range header should be: bytes={resume_start}-{range_end}
+        let range_header = format!("bytes={resume_start}-{range_end}");
+        assert!(range_header.starts_with("bytes="));
+        assert!(range_header.contains('-'));
+    }
+
+    #[test]
+    fn resume_byte_offset_last_shard() {
+        // Last shard may be smaller than shard_size
+        let total_file_size: u64 = 4_683_074_048; // Qwen2.5 size
+        let shard_size: u64 = 512 * 1024 * 1024;
+        let shard_count = total_file_size.div_ceil(shard_size) as u32;
+        let last_shard = shard_count - 1; // shard 8
+
+        let range_start = (last_shard as u64) * shard_size;
+        let range_end =
+            ((last_shard as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let expected_size = range_end - range_start + 1;
+
+        // Last shard should be smaller than shard_size
+        assert!(expected_size < shard_size);
+        assert_eq!(expected_size, total_file_size - range_start);
+
+        // Resume from halfway
+        let existing = expected_size / 2;
+        let resume_start = range_start + existing;
+        assert!(resume_start < total_file_size);
+        assert_eq!(total_file_size - resume_start, expected_size - existing);
+    }
+
+    #[test]
+    fn range_header_construction_from_partial() {
+        // Verify that range header is correctly constructed when resuming
+        let shard_index: u32 = 0;
+        let shard_size: u64 = 512 * 1024 * 1024;
+        let total_file_size: u64 = 1_000_000_000;
+
+        let range_start = (shard_index as u64) * shard_size;
+        let range_end =
+            ((shard_index as u64 + 1) * shard_size - 1).min(total_file_size - 1);
+        let expected_size = range_end - range_start + 1;
+
+        // No existing bytes — full range
+        let header_full = format!("bytes={}-{}", range_start, range_end);
+        assert_eq!(header_full, "bytes=0-536870911");
+
+        // With 200MB already downloaded — resume range
+        let existing: u64 = 200 * 1024 * 1024;
+        let actual_start = range_start + existing;
+        let header_resume = format!("bytes={}-{}", actual_start, range_end);
+        assert_eq!(
+            header_resume,
+            format!("bytes={}-{}", existing, shard_size - 1)
+        );
+
+        // Remaining bytes should be expected_size - existing
+        assert_eq!(range_end - actual_start + 1, expected_size - existing);
+    }
+
+    #[test]
+    fn parse_http_date_basic() {
+        let dt = parse_http_date("Fri, 28 Feb 2026 04:00:00 GMT");
+        assert!(dt.is_some());
+        // Verify it's a reasonable timestamp (after 2025)
+        let since_epoch = dt
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // 2026-02-28 should be ~1772 million seconds since epoch
+        assert!(since_epoch > 1_770_000_000);
+        assert!(since_epoch < 1_780_000_000);
+    }
+
+    #[test]
+    fn parse_http_date_invalid() {
+        assert!(parse_http_date("not a date").is_none());
+        assert!(parse_http_date("").is_none());
+        assert!(parse_http_date("Fri, 28 Xxx 2026 04:00:00 GMT").is_none());
+        // Wrong timezone
+        assert!(parse_http_date("Fri, 28 Feb 2026 04:00:00 EST").is_none());
     }
 }

@@ -129,6 +129,30 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     // Open database
     let db = Database::open(&config.node.data_dir)?;
 
+    // Persist or restore shard range: CLI flag takes priority, else load from DB
+    if let Some((s, e)) = config.inference.shard_range {
+        // CLI provided --shards: persist to DB for future runs
+        if let Err(err) = db.save_shard_range(s, e) {
+            tracing::warn!(error = %err, "Failed to persist shard range to database");
+        }
+    } else {
+        // No --shards flag: try restoring from DB
+        match db.load_shard_range() {
+            Ok(Some((s, e))) => {
+                config.inference.shard_range = Some((s, e));
+                tracing::info!(
+                    shard_start = s,
+                    shard_end = e,
+                    "Restored shard range from previous session"
+                );
+            }
+            Ok(None) => {} // No persisted range, normal operation
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to load shard range from database");
+            }
+        }
+    }
+
     // Build and run daemon (spawns network, health, API tasks)
     let daemon = Daemon::new(config, identity, db);
     daemon.run().await

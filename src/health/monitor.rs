@@ -67,6 +67,8 @@ impl HealthMonitor {
                     self.cleanup_model_vote_tallies();
                     // Cleanup expired anti-gaming rate limit entries
                     self.shared_state.anti_gaming.lock().await.cleanup();
+                    // Decay trust scores toward default (0.5) on each health ping cycle
+                    self.shared_state.trust_manager.decay_all(&self.shared_state.peer_registry);
                 }
             }
         }

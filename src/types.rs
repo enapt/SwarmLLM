@@ -166,6 +166,12 @@ pub struct InferenceRequest {
     pub requester: NodeId,
     pub priority: PriorityTier,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Optional session ID for multi-turn KV-cache reuse.
+    /// When provided, the router attempts to reuse cached KV state from a
+    /// previous turn that shares the same prompt prefix, skipping redundant
+    /// prefill and setting `start_pos` to the cached token count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -334,6 +340,9 @@ pub enum SwarmMessage {
         x25519_public: [u8; 32],
         signature: Vec<u8>,
     },
+
+    // Forward secrecy — ephemeral ECDH key exchange
+    EphemeralKeyExchange(EphemeralKeyExchange),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -451,12 +460,34 @@ pub struct InferenceError {
     pub recoverable: bool,
 }
 
+/// Ephemeral ECDH key exchange message for forward secrecy.
+///
+/// When a node wants to establish a forward-secret session, it sends this message
+/// containing an ephemeral X25519 public key. The recipient generates its own
+/// ephemeral key, derives the session key from the DH, and replies with its
+/// ephemeral public key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EphemeralKeyExchange {
+    /// Unique session identifier.
+    pub session_id: uuid::Uuid,
+    /// The sender's node identity.
+    pub node_id: NodeId,
+    /// Ephemeral X25519 public key (generated fresh for this session).
+    pub ephemeral_pubkey: [u8; 32],
+    /// Whether this is an initiation (true) or a response (false).
+    pub is_initiator: bool,
+}
+
 /// Bucketed credit balance gossip for network-wide percentile estimation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreditGossip {
     pub node_id: NodeId,
     pub balance_bucket: i64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Ed25519 signature over (node_id || balance_bucket || timestamp_secs).
+    /// Empty for legacy unsigned gossip from older nodes.
+    #[serde(default)]
+    pub signature: Vec<u8>,
 }
 
 /// Nickname announcement gossiped across the network.
@@ -543,6 +574,14 @@ pub struct PeerInfo {
     /// Active inference request count reported by this peer's last health ping/pong.
     #[serde(default)]
     pub active_request_count: u32,
+    /// When this peer was first discovered (Unix timestamp).
+    /// Used for leaderboard eligibility: peers must be at least `min_lifetime_days` old.
+    #[serde(default)]
+    pub first_seen: u64,
+    /// Number of verified dual-signed credit transactions from this peer.
+    /// Used for leaderboard eligibility: peers need `min_verified_transactions`.
+    #[serde(default)]
+    pub verified_transaction_count: u32,
 }
 
 // ---- Node Stats ----

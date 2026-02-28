@@ -62,6 +62,10 @@ var SwarmLLM = (function() {
       btn.innerHTML = sidebar.classList.contains('collapsed') ? '&#9654;' : '&#9664;';
     },
 
+    toggleMobileSidebar: function() {
+      document.body.classList.toggle('sidebar-open');
+    },
+
     openSettings: function() {
       document.getElementById('settings-modal').classList.remove('hidden');
       settings.load();

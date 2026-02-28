@@ -33,6 +33,12 @@ pub struct ChatCompletionRequest {
     pub frequency_penalty: f32,
     #[serde(default)]
     pub presence_penalty: f32,
+    /// Optional session ID for multi-turn KV-cache reuse.
+    /// When provided, the backend attempts to reuse cached KV state from
+    /// a previous turn sharing the same prompt prefix, skipping redundant prefill.
+    /// The response echoes the session_id back (or returns a newly generated one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +90,11 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: Usage,
+    /// Session ID for multi-turn KV-cache reuse. Echoed from the request
+    /// or auto-generated. Clients should pass this back in subsequent
+    /// requests to reuse cached KV state and skip redundant prefill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,6 +502,7 @@ async fn router_inference(
         requester: NodeId([0u8; 32]), // Local API request
         priority: PriorityTier::Silver,
         created_at: chrono::Utc::now(),
+        session_id: req.session_id.clone(),
     };
 
     router_tx
@@ -529,6 +541,7 @@ async fn router_inference(
             completion_tokens: output.completion_tokens,
             total_tokens: output.prompt_tokens + output.completion_tokens,
         },
+        session_id: output.session_id,
     };
 
     Ok(Json(response).into_response())
@@ -558,6 +571,7 @@ async fn router_inference_stream(
         requester: NodeId([0u8; 32]),
         priority: PriorityTier::Silver,
         created_at: chrono::Utc::now(),
+        session_id: req.session_id.clone(),
     };
 
     router_tx
@@ -727,6 +741,7 @@ async fn non_stream_response(
             completion_tokens: result.completion_tokens,
             total_tokens: result.prompt_tokens + result.completion_tokens,
         },
+        session_id: None, // Direct executor path doesn't use multi-turn sessions
     };
 
     Ok(Json(response))

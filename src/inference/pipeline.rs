@@ -107,14 +107,52 @@ impl PipelineExecutor {
     }
 
     /// Execute entirely on the local node (we have all layers).
+    ///
+    /// If speculative decoding is enabled and a draft model is loaded,
+    /// uses the draft-verify-accept loop for higher throughput.
     async fn execute_local(&self) -> Result<InferenceOutput, SwarmError> {
-        let mut executor = self.shared_state.executor.lock().await;
+        let prompt = self.build_prompt().await;
 
+        // Check if speculative decoding is available
+        if self.shared_state.config.inference.speculative_decoding {
+            let mut draft = self.shared_state.draft_executor.lock().await;
+            if draft.is_loaded() {
+                let gamma = self.shared_state.config.inference.speculative_gamma;
+                let mut executor = self.shared_state.executor.lock().await;
+                if !executor.is_loaded() {
+                    return Err(SwarmError::NoModelLoaded);
+                }
+                let mut content = String::new();
+                let (gen_result, spec_state) = executor.generate_speculative(
+                    &mut draft,
+                    &prompt,
+                    &self.request.sampling_params,
+                    gamma,
+                    |token| {
+                        content.push_str(token);
+                        true
+                    },
+                )?;
+                tracing::info!(
+                    acceptance_rate = %spec_state.acceptance_rate(),
+                    "Speculative decoding acceptance rate"
+                );
+                return Ok(InferenceOutput {
+                    request_id: self.request.id,
+                    content,
+                    prompt_tokens: gen_result.prompt_tokens,
+                    completion_tokens: gen_result.completion_tokens,
+                    finish_reason: gen_result.finish_reason.as_str().to_string(),
+                    session_id: self.request.session_id.clone(),
+                });
+            }
+        }
+
+        // Standard (non-speculative) local inference
+        let mut executor = self.shared_state.executor.lock().await;
         if !executor.is_loaded() {
             return Err(SwarmError::NoModelLoaded);
         }
-
-        let prompt = self.build_prompt().await;
         let (content, gen_result) = executor.generate(&prompt, &self.request.sampling_params)?;
 
         Ok(InferenceOutput {
@@ -123,6 +161,7 @@ impl PipelineExecutor {
             prompt_tokens: gen_result.prompt_tokens,
             completion_tokens: gen_result.completion_tokens,
             finish_reason: gen_result.finish_reason.as_str().to_string(),
+            session_id: self.request.session_id.clone(),
         })
     }
 
@@ -268,19 +307,21 @@ impl PipelineExecutor {
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
             completion_tokens: generated_tokens.len() as u32,
             finish_reason,
+            session_id: self.request.session_id.clone(),
         })
     }
 
     /// Compute prompt token count using BPE tokenizer if available, else byte-level count.
     async fn compute_prompt_token_count(&self, prompt: &str) -> usize {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_ref_opt = self
+        let model_arc = self
             .shared_state
             .split_models
             .iter()
-            .find(|e| e.key().0 == *model_id);
-        if let Some(model_ref) = model_ref_opt {
-            let model = model_ref.lock().await;
+            .find(|e| e.key().0 == *model_id)
+            .map(|e| e.value().model.clone());
+        if let Some(model_arc) = model_arc {
+            let model = model_arc.lock().await;
             if let Some(tokenizer) = model.tokenizer() {
                 return tokenizer.encode(prompt).len();
             }
@@ -292,13 +333,14 @@ impl PipelineExecutor {
     /// Decode token IDs to text using the GGUF vocabulary from the split model.
     async fn decode_tokens(&self, token_ids: &[u32]) -> String {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_ref_opt = self
+        let model_arc = self
             .shared_state
             .split_models
             .iter()
-            .find(|e| e.key().0 == *model_id);
-        if let Some(model_ref) = model_ref_opt {
-            let model = model_ref.lock().await;
+            .find(|e| e.key().0 == *model_id)
+            .map(|e| e.value().model.clone());
+        if let Some(model_arc) = model_arc {
+            let model = model_arc.lock().await;
             if let Some(vocab) = model.vocab() {
                 // If we have a BPE tokenizer, use its byte decoder for proper decoding
                 if let Some(tokenizer) = model.tokenizer() {
@@ -332,13 +374,14 @@ impl PipelineExecutor {
     /// Get EOS token IDs from the loaded split model, falling back to [2].
     async fn get_eos_tokens(&self) -> Vec<u32> {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_ref_opt = self
+        let model_arc = self
             .shared_state
             .split_models
             .iter()
-            .find(|e| e.key().0 == *model_id);
-        if let Some(model_ref) = model_ref_opt {
-            let model = model_ref.lock().await;
+            .find(|e| e.key().0 == *model_id)
+            .map(|e| e.value().model.clone());
+        if let Some(model_arc) = model_arc {
+            let model = model_arc.lock().await;
             return model.eos_tokens().to_vec();
         }
         vec![2]
@@ -544,22 +587,122 @@ impl PipelineExecutor {
             };
 
             let split_model = load_result?;
+            // VRAM-aware eviction before inserting new model
+            let max_batch = self.shared_state.config.inference.max_batch_size as usize;
+            let new_entry = if max_batch > 1 {
+                crate::inference::split::SplitModelEntry::new_with_batching(
+                    split_model,
+                    self.shared_state.kv_cache_store.clone(),
+                    max_batch,
+                )
+            } else {
+                crate::inference::split::SplitModelEntry::new(split_model)
+            };
+            if let Some(budget_mb) = self.shared_state.config.inference.max_split_model_memory_mb {
+                crate::inference::split::evict_split_models_lru(
+                    &self.shared_state.split_models,
+                    &self.shared_state.active_pipelines,
+                    budget_mb,
+                    new_entry.estimated_vram_mb,
+                );
+            }
             // Re-check before inserting to handle concurrent loaders
             self.shared_state.split_models
                 .entry(split_key.clone())
-                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(split_model)));
+                .or_insert(new_entry);
         }
 
-        let split_model_ref = self
-            .shared_state
-            .split_models
-            .get(&split_key)
-            .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
+        // Get model entry and extract what we need
+        let (split_model_ref, batch_forwarder) = {
+            let entry = self
+                .shared_state
+                .split_models
+                .get(&split_key)
+                .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
+            entry.value().touch();
+            (entry.value().model.clone(), entry.value().batch_forwarder.clone())
+        };
 
+        let request_id_str = self.request.id.to_string();
+
+        // Try batch path for decode steps (seq_num > 0) when batching is enabled
+        // and this is NOT the first segment (which needs tokenization under the model lock).
+        let use_batch = batch_forwarder.is_some()
+            && sequence_num > 0;
+
+        if use_batch {
+            let forwarder = batch_forwarder.unwrap();
+
+            // Build input tensor without holding the model lock
+            let input_tensor = if activation_bytes.len() == 8 {
+                // First segment, decode step: single token ID as i64 LE
+                let token_id = i64::from_le_bytes(activation_bytes[..8].try_into().unwrap());
+                candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+            } else {
+                // Non-first segment or hidden states
+                split::bytes_to_tensor(activation_bytes)?
+            };
+
+            // Submit to batch forwarder — will be grouped with other concurrent requests
+            let output = forwarder.submit(input_tensor, index_pos, request_id_str.clone()).await?;
+
+            // Track credits
+            {
+                let layers_processed = (layer_end - layer_start) as i64;
+                if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                    stats.forwards_served += 1;
+                }
+                let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+                if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                    &self.shared_state.credit_balance,
+                    &self.shared_state.db,
+                    earned,
+                    false,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Failed to persist layer-forward credit earn");
+                }
+            }
+
+            // Post-process: need model lock for EOS tokens and sampling
+            let split_model = split_model_ref.lock().await;
+            let is_last = split_model.layer_end >= split_model.total_layers;
+
+            if is_last {
+                let token_id = split::sample_token(
+                    &output,
+                    self.request.sampling_params.temperature,
+                    self.request.sampling_params.top_p,
+                )?;
+                let eos_tokens = split_model.eos_tokens();
+                let finish = if eos_tokens.contains(&token_id) {
+                    Some(NetworkFinishReason::Stop)
+                } else {
+                    None
+                };
+                return Ok(LayerResult {
+                    request_id: self.request.id,
+                    token_ids: vec![token_id],
+                    finish_reason: finish,
+                    activations: vec![],
+                });
+            } else {
+                let activation_bytes = split::tensor_to_bytes(&output)?;
+                return Ok(LayerResult {
+                    request_id: self.request.id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: activation_bytes,
+                });
+            }
+        }
+
+        // Sequential path: prefill or batching disabled
         let mut split_model = split_model_ref.lock().await;
 
         // Clear per-request KV-cache at the start of a new request (prefill).
-        let request_id_str = self.request.id.to_string();
         if sequence_num == 0 {
             let model_key = format!(
                 "{}-{}-{}",
@@ -894,6 +1037,7 @@ mod tests {
             requester: state.identity.node_id().clone(),
             priority: PriorityTier::Silver,
             created_at: chrono::Utc::now(),
+            session_id: None,
         }
     }
 

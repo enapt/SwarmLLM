@@ -525,6 +525,17 @@ impl NetworkManager {
                     }
                 }
 
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                // Preserve first_seen from existing entry or use current time
+                let first_seen = self
+                    .shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .map(|p| p.first_seen)
+                    .unwrap_or(now_ts);
                 let peer_info = PeerInfo {
                     node_id: node_id.clone(),
                     addresses: info.listen_addrs.iter().map(|a| a.to_string()).collect(),
@@ -534,6 +545,8 @@ impl NetworkManager {
                     trust_score: 0.5,
                     peer_id_bytes: Some(peer_id.to_bytes()),
                     active_request_count: 0,
+                    first_seen,
+                    verified_transaction_count: 0,
                 };
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());

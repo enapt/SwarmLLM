@@ -3,6 +3,45 @@ use std::path::{Path, PathBuf};
 
 use crate::error::SwarmError;
 
+/// Hot-reloadable operational parameters that can be changed without restart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperationalParams {
+    pub max_concurrent_requests: u32,
+    pub auto_manage_interval_minutes: u32,
+    pub max_batch_size: u32,
+    pub max_peers: u32,
+    pub session_timeout_secs: u64,
+}
+
+impl OperationalParams {
+    /// Extract operational params from a full Config.
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            max_concurrent_requests: config.inference.max_concurrent_requests,
+            auto_manage_interval_minutes: config.auto_manage.interval_minutes,
+            max_batch_size: config.inference.max_batch_size,
+            max_peers: config.network.max_peers,
+            session_timeout_secs: config.inference.session_timeout_seconds,
+        }
+    }
+}
+
+/// Reload only operational (hot-reloadable) parameters from the config file.
+/// Returns the new params or an error if the file cannot be read/parsed.
+pub fn reload_operational_params(config_path: &Path) -> Result<OperationalParams, SwarmError> {
+    if !config_path.exists() {
+        return Err(SwarmError::Config(format!(
+            "Config file not found: {}",
+            config_path.display()
+        )));
+    }
+    let contents = std::fs::read_to_string(config_path).map_err(SwarmError::Io)?;
+    let config: Config = toml::from_str(&contents).map_err(|e| {
+        SwarmError::Config(format!("Failed to parse {}: {e}", config_path.display()))
+    })?;
+    Ok(OperationalParams::from_config(&config))
+}
+
 /// Top-level configuration for the SwarmLLM daemon.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -132,6 +171,14 @@ pub struct InferenceConfig {
     /// Number of draft tokens to propose per verification step (default: 4).
     #[serde(default = "default_speculative_gamma")]
     pub speculative_gamma: u32,
+    /// Path to a smaller draft model for speculative decoding.
+    /// Must be a GGUF file. The draft model should be much smaller than the
+    /// main model (ideally <1/10th parameters) and share the same vocabulary.
+    #[serde(default)]
+    pub draft_model_path: Option<PathBuf>,
+    /// GPU layers to offload for the draft model (default: same as main model).
+    #[serde(default)]
+    pub draft_gpu_layers: Option<u32>,
     /// Optional shard range for split inference (e.g. "0-4").
     /// When set, the node only claims these shard indices instead of all shards.
     #[serde(default)]
@@ -143,6 +190,10 @@ pub struct InferenceConfig {
     /// How long (ms) to wait for additional requests before dispatching a partial batch.
     #[serde(default = "default_batch_timeout_ms")]
     pub batch_timeout_ms: u64,
+    /// Maximum GPU memory (MB) for cached split models. When exceeded, the
+    /// least-recently-used models are evicted. Default: None (unlimited).
+    #[serde(default)]
+    pub max_split_model_memory_mb: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -520,9 +571,12 @@ impl Default for InferenceConfig {
             kv_cache_ttl_secs: default_kv_cache_ttl(),
             speculative_decoding: false,
             speculative_gamma: default_speculative_gamma(),
+            draft_model_path: None,
+            draft_gpu_layers: None,
             shard_range: None,
             max_batch_size: default_max_batch_size(),
             batch_timeout_ms: default_batch_timeout_ms(),
+            max_split_model_memory_mb: None,
         }
     }
 }
@@ -827,5 +881,72 @@ auto_relay = false
     fn max_concurrent_downloads_defaults_to_3() {
         let config = Config::default();
         assert_eq!(config.auto_manage.max_concurrent_downloads, 3);
+    }
+
+    #[test]
+    fn operational_params_from_config() {
+        let config = Config::default();
+        let params = OperationalParams::from_config(&config);
+        assert_eq!(params.max_concurrent_requests, 10);
+        assert_eq!(params.auto_manage_interval_minutes, 5);
+        assert_eq!(params.max_batch_size, 1);
+        assert_eq!(params.max_peers, 200);
+        assert_eq!(params.session_timeout_secs, 600);
+    }
+
+    #[test]
+    fn operational_params_equality() {
+        let config = Config::default();
+        let p1 = OperationalParams::from_config(&config);
+        let p2 = OperationalParams::from_config(&config);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn reload_operational_params_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let toml_str = r#"
+[inference]
+max_concurrent_requests = 20
+max_batch_size = 4
+session_timeout_seconds = 300
+
+[auto_manage]
+interval_minutes = 10
+
+[network]
+max_peers = 100
+"#;
+        std::fs::write(&config_path, toml_str).unwrap();
+        let params = reload_operational_params(&config_path).unwrap();
+        assert_eq!(params.max_concurrent_requests, 20);
+        assert_eq!(params.max_batch_size, 4);
+        assert_eq!(params.session_timeout_secs, 300);
+        assert_eq!(params.auto_manage_interval_minutes, 10);
+        assert_eq!(params.max_peers, 100);
+    }
+
+    #[test]
+    fn reload_operational_params_missing_file() {
+        let result = reload_operational_params(Path::new("/nonexistent/config.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reload_operational_params_partial_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        // Only override one field — rest should use defaults
+        let toml_str = r#"
+[inference]
+max_concurrent_requests = 42
+"#;
+        std::fs::write(&config_path, toml_str).unwrap();
+        let params = reload_operational_params(&config_path).unwrap();
+        assert_eq!(params.max_concurrent_requests, 42);
+        // Defaults for others
+        assert_eq!(params.max_batch_size, 1);
+        assert_eq!(params.max_peers, 200);
     }
 }

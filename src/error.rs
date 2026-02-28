@@ -40,6 +40,8 @@ pub enum SwarmError {
     InsufficientCredits { balance: i64, required: i64 },
     #[error("Invalid transaction signature")]
     InvalidSignature,
+    #[error("Credit error: {0}")]
+    CreditError(String),
 
     // Encryption
     #[error("Encryption error: {0}")]

@@ -47,6 +47,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/config",
             get(admin::get_config).put(admin::update_config),
         )
+        .route("/api/admin/config/reload", post(admin::reload_config))
         .route("/api/admin/models", get(admin::list_models))
         .route("/api/admin/models/:id/add", post(admin::add_model_interest))
         .route(

@@ -2,7 +2,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::error::SwarmError;
 use crate::identity::Identity;
-use crate::pool::types::{PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolRemoval};
+use crate::pool::types::{
+    BlindSignature, BlindedToken, BlindingFactor, PoolAcceptance, PoolCreditForward, PoolId,
+    PoolInvitation, PoolRemoval, UnblindedToken,
+};
 use crate::types::NodeId;
 
 // Domain-separated BLAKE3 prefixes per the plan.
@@ -10,6 +13,7 @@ const PREFIX_INVITATION: &[u8] = b"pool_invitation_v1";
 const PREFIX_ACCEPTANCE: &[u8] = b"pool_acceptance_v1";
 const PREFIX_REMOVAL: &[u8] = b"pool_removal_v1";
 const PREFIX_CREDIT_FORWARD: &[u8] = b"pool_credit_forward_v1";
+const PREFIX_BLIND_INVITE: &[u8] = b"pool_blind_invite_v1";
 
 /// Create a pool invitation signed by the pool owner.
 pub fn create_invitation(
@@ -150,6 +154,90 @@ pub fn cosign_credit_forward(
     // Owner co-signs
     forward.owner_signature = identity.sign(&payload);
     Ok(())
+}
+
+// ---- Privacy-preserving blind invitations ----
+
+/// Step 1: Invitee generates a blinding factor and computes a blinded token.
+/// The blinded token is sent to the pool creator without revealing the invitee's identity.
+pub fn blind_invite(
+    pool_id: &PoolId,
+    ttl_hours: u32,
+) -> (uuid::Uuid, BlindingFactor, BlindedToken) {
+    let invitation_id = uuid::Uuid::new_v4();
+    let blinding_factor = BlindingFactor(rand::random::<[u8; 32]>());
+    let commitment = compute_blind_commitment(&invitation_id, &blinding_factor);
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(ttl_hours as i64);
+
+    let token = BlindedToken {
+        commitment,
+        pool_id: pool_id.clone(),
+        expires_at,
+    };
+
+    (invitation_id, blinding_factor, token)
+}
+
+/// Step 2: Pool creator signs the blinded token without seeing the real invitation identity.
+/// The signature covers (commitment, pool_id) — expiry is enforced as policy, not signed.
+pub fn sign_blinded(
+    identity: &Identity,
+    blinded_token: &BlindedToken,
+) -> BlindSignature {
+    let payload = blind_token_payload_no_expiry(&blinded_token.commitment, &blinded_token.pool_id);
+    let signature = identity.sign(&payload);
+
+    BlindSignature {
+        signature,
+        commitment: blinded_token.commitment,
+        pool_id: blinded_token.pool_id.clone(),
+    }
+}
+
+/// Step 3: Invitee removes the blinding to produce a valid signed membership token.
+pub fn unblind_token(
+    invitation_id: uuid::Uuid,
+    blinding_factor: BlindingFactor,
+    blind_signature: BlindSignature,
+) -> UnblindedToken {
+    UnblindedToken {
+        invitation_id,
+        blinding_factor,
+        signature: blind_signature.signature,
+        pool_id: blind_signature.pool_id,
+    }
+}
+
+/// Step 4: Anyone can verify that the unblinded token was signed by the pool creator.
+/// Verifier recomputes the commitment from (invitation_id, blinding_factor), then checks
+/// that the signature over (commitment, pool_id) is valid.
+pub fn verify_membership(
+    token: &UnblindedToken,
+    owner_key: &VerifyingKey,
+) -> Result<(), SwarmError> {
+    let commitment = compute_blind_commitment(&token.invitation_id, &token.blinding_factor);
+    let payload = blind_token_payload_no_expiry(&commitment, &token.pool_id);
+    verify_sig(&token.signature, &payload, owner_key)
+}
+
+/// Compute the blind commitment: H(PREFIX || invitation_id || blinding_factor)
+fn compute_blind_commitment(invitation_id: &uuid::Uuid, blinding_factor: &BlindingFactor) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PREFIX_BLIND_INVITE);
+    hasher.update(invitation_id.as_bytes());
+    hasher.update(&blinding_factor.0);
+    *hasher.finalize().as_bytes()
+}
+
+fn blind_token_payload_no_expiry(
+    commitment: &[u8; 32],
+    pool_id: &PoolId,
+) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PREFIX_BLIND_INVITE);
+    hasher.update(commitment);
+    hasher.update(&pool_id.0);
+    hasher.finalize().as_bytes().to_vec()
 }
 
 // ---- Payload builders ----
@@ -295,6 +383,66 @@ mod tests {
 
         // Owner tries to co-sign but uses wrong member key
         assert!(cosign_credit_forward(&owner, &mut forward, &imposter.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn blind_invite_full_flow() {
+        let owner = Identity::generate();
+        let pool_id = owner.node_id().clone();
+
+        // Step 1: Invitee generates blinded token (no identity revealed)
+        let (invitation_id, blinding_factor, blinded_token) = blind_invite(&pool_id, 24);
+
+        // Step 2: Pool creator signs without seeing who the invitee is
+        let blind_sig = sign_blinded(&owner, &blinded_token);
+
+        // Step 3: Invitee unblinds to get a valid membership token
+        let membership_token = unblind_token(invitation_id, blinding_factor, blind_sig);
+
+        // Step 4: Anyone can verify the token was signed by the pool creator
+        assert!(verify_membership(&membership_token, &owner.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn blind_invite_rejects_wrong_owner() {
+        let owner = Identity::generate();
+        let imposter = Identity::generate();
+        let pool_id = owner.node_id().clone();
+
+        let (invitation_id, blinding_factor, blinded_token) = blind_invite(&pool_id, 24);
+        let blind_sig = sign_blinded(&owner, &blinded_token);
+        let membership_token = unblind_token(invitation_id, blinding_factor, blind_sig);
+
+        // Verification with wrong key should fail
+        assert!(verify_membership(&membership_token, &imposter.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn blind_invite_different_factors_produce_different_tokens() {
+        let owner = Identity::generate();
+        let pool_id = owner.node_id().clone();
+
+        let (_, _, token1) = blind_invite(&pool_id, 24);
+        let (_, _, token2) = blind_invite(&pool_id, 24);
+
+        // Two blind invites should have different commitments
+        assert_ne!(token1.commitment, token2.commitment);
+    }
+
+    #[test]
+    fn blind_invite_tampered_factor_fails() {
+        let owner = Identity::generate();
+        let pool_id = owner.node_id().clone();
+
+        let (invitation_id, _blinding_factor, blinded_token) = blind_invite(&pool_id, 24);
+        let blind_sig = sign_blinded(&owner, &blinded_token);
+
+        // Unblind with a different blinding factor — verification should fail
+        // because the recomputed commitment won't match
+        let wrong_factor = super::BlindingFactor(rand::random::<[u8; 32]>());
+        let bad_token = unblind_token(invitation_id, wrong_factor, blind_sig);
+
+        assert!(verify_membership(&bad_token, &owner.verifying_key()).is_err());
     }
 
     #[test]
