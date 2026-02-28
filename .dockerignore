@@ -1,0 +1,33 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+
+# Documentation (keep INSTALL.md if present)
+docs/
+*.md
+!INSTALL.md
+
+# CI/CD
+.github/
+
+# Testing
+tests/
+
+# Development tools
+.claude/
+.env
+.env.*
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Sound/media assets (not needed in container)
+*.wav
+*.png
+*.xml

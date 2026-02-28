@@ -1,0 +1,17 @@
+SwarmLLM — Quick Start
+======================
+
+1. Extract this archive to any folder.
+
+2. Run the daemon:
+     Linux / macOS:   ./swarmllm run
+     Windows:         swarmllm.exe run
+
+3. Open your browser to:
+     http://localhost:8800
+
+That's it! The setup wizard will guide you through the rest.
+
+---
+Configuration: Edit config/default.toml to change settings (port, GPU, etc.)
+More info:     https://github.com/enapt/SwarmLLM

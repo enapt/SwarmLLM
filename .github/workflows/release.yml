@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: swarmllm
+            archive: swarmllm-linux-x86_64.tar.gz
+            features: ""
+          - name: Linux x86_64 CUDA
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: swarmllm
+            archive: swarmllm-linux-x86_64-cuda.tar.gz
+            features: "--features candle-cuda"
+            cuda: true
+          - name: macOS aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            binary: swarmllm
+            archive: swarmllm-macos-aarch64.tar.gz
+            features: ""
+          - name: macOS x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+            binary: swarmllm
+            archive: swarmllm-macos-x86_64.tar.gz
+            features: ""
+          - name: Windows x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: swarmllm.exe
+            archive: swarmllm-windows-x86_64.zip
+            features: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.features }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler capnproto libclang-dev
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf capnp
+
+      - name: Install system dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc capnproto -y
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.4.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Package archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/${{ matrix.binary }} staging/
+          cp config/default.toml staging/
+          cp INSTALL.txt staging/
+          [ -f LICENSE ] && cp LICENSE staging/ || true
+          cd staging
+          tar czf ../${{ matrix.archive }} .
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" staging/
+          Copy-Item "config/default.toml" staging/
+          Copy-Item "INSTALL.txt" staging/
+          if (Test-Path LICENSE) { Copy-Item LICENSE staging/ }
+          Compress-Archive -Path staging/* -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Determine pre-release
+        id: prerelease
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if echo "$TAG" | grep -qiE '(alpha|beta|rc)'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}

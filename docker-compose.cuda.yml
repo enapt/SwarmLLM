@@ -1,0 +1,51 @@
+# ============================================================================
+# SwarmLLM — CUDA GPU Override for Docker Compose
+# ============================================================================
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.cuda.yml up
+#
+# Requires:
+#   - NVIDIA Container Toolkit (nvidia-docker2)
+#   - docker-compose v2.x or docker compose plugin
+#
+# This override file:
+#   1. Switches to the CUDA Dockerfile
+#   2. Adds NVIDIA GPU access to all nodes
+# ============================================================================
+
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
