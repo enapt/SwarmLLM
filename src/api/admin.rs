@@ -1358,6 +1358,12 @@ pub async fn hf_download_shards(
                     if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
                         entry.downloaded_shards += 1;
                         entry.log.push(format!("Shard {} downloaded", shard_idx));
+                        // Mark this shard's progress as complete so check_and_load_model
+                        // won't skip it as "still downloading"
+                        if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
+                            sp.state = crate::model::acquisition::ShardState::Complete;
+                            sp.downloaded_bytes = sp.total_bytes;
+                        }
                     }
 
                     // Register this shard locally so the node knows it has it

@@ -90,13 +90,22 @@ impl PipelineExecutor {
         }
 
         // Check if this is a single-node pipeline on the local node
+        // AND we have the llama-cpp executor loaded (full GGUF path).
+        // If the model was loaded from shards (auto-manage), the executor
+        // won't be loaded — fall through to execute_distributed which uses
+        // the split model via process_local_segment.
         if num_segments == 1
             && self.assignment.segments[0].node_id == *self.shared_state.identity.node_id()
         {
-            return self.execute_local().await;
+            let executor = self.shared_state.executor.lock().await;
+            if executor.is_loaded() {
+                drop(executor);
+                return self.execute_local().await;
+            }
+            // Executor not loaded — use the split model path below
         }
 
-        // Distributed execution path
+        // Distributed execution path (also handles single-node split-model execution)
         self.execute_distributed(token_tx).await
     }
 

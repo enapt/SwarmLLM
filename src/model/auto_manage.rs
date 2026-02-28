@@ -1015,18 +1015,61 @@ pub async fn check_and_load_model(
         let is_first = layer_start == 0 && has_shard_0;
         let is_last = layer_end >= manifest.num_layers as usize && has_last_shard;
 
-        let params = crate::daemon::ShardLoadParams {
-            model_dir: &model_dir,
-            shard_store: &shard_store,
-            model_id,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            shard_size_bytes: shared.config.model.shard_size_bytes(),
+        // Try loading: model.gguf → source_path → shard files
+        let gguf_path = model_dir.join("model.gguf");
+        let source_path_file = model_dir.join("source_path");
+
+        let load_result = if gguf_path.exists() {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{layer_start}..{layer_end})"),
+                "Loading split model from reconstructed GGUF"
+            );
+            crate::inference::split::SplitModel::load_from_gguf(
+                &gguf_path, layer_start, layer_end, is_first, is_last,
+            )
+        } else if source_path_file.exists() {
+            match std::fs::read_to_string(&source_path_file) {
+                Ok(p) => {
+                    let p = std::path::PathBuf::from(p.trim());
+                    if p.exists() {
+                        tracing::info!(
+                            model = %model_id,
+                            layers = format!("[{layer_start}..{layer_end})"),
+                            "Loading split model from source GGUF"
+                        );
+                        crate::inference::split::SplitModel::load_from_gguf(
+                            &p, layer_start, layer_end, is_first, is_last,
+                        )
+                    } else {
+                        crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
+                            model_dir: &model_dir,
+                            shard_store: &shard_store,
+                            model_id,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
+                            shard_size_bytes: shared.config.model.shard_size_bytes(),
+                        })
+                    }
+                }
+                Err(e) => Err(crate::error::SwarmError::Io(e)),
+            }
+        } else {
+            crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
+                model_dir: &model_dir,
+                shard_store: &shard_store,
+                model_id,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                shard_size_bytes: shared.config.model.shard_size_bytes(),
+            })
         };
 
-        match crate::daemon::try_load_from_shards(&params) {
+        match load_result {
             Ok(split_model) => {
                 let eos_tokens = split_model.eos_tokens().to_vec();
                 let chat_template = split_model.chat_template().map(|s| s.to_string());

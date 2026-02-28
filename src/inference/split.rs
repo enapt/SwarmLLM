@@ -21,8 +21,8 @@ const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
 // ── BPE Tokenizer from GGUF merges ──
 
-/// GPT-2/Qwen2 BPE tokenizer built from GGUF metadata.
-/// Implements proper pre-tokenization, byte-level encoding, and BPE merging.
+/// BPE tokenizer built from GGUF metadata.
+/// Supports both GPT-2/Qwen2 byte-level BPE and SentencePiece BPE (LLaMA).
 pub struct BpeTokenizer {
     /// token string → token ID
     token_to_id: HashMap<String, u32>,
@@ -36,12 +36,20 @@ pub struct BpeTokenizer {
     pre_tok_re: fancy_regex::Regex,
     /// Special tokens sorted by length descending (for matching)
     special_tokens: Vec<(String, u32)>,
+    /// Whether this is a SentencePiece tokenizer (uses ▁ for spaces, no byte encoding)
+    is_sentencepiece: bool,
 }
 
 impl BpeTokenizer {
     /// Build a BPE tokenizer from GGUF vocabulary tokens, merge rules,
-    /// and pre-tokenizer type.
-    fn from_gguf(tokens: &[String], merges_raw: &[String], pre_type: &str) -> Self {
+    /// pre-tokenizer type, and tokenizer model type.
+    fn from_gguf(
+        tokens: &[String],
+        merges_raw: &[String],
+        pre_type: &str,
+        tokenizer_model: &str,
+    ) -> Self {
+        let is_sentencepiece = tokenizer_model == "llama";
         let mut token_to_id = HashMap::with_capacity(tokens.len());
         for (i, tok) in tokens.iter().enumerate() {
             token_to_id.insert(tok.clone(), i as u32);
@@ -76,10 +84,16 @@ impl BpeTokenizer {
         let pre_tok_re = fancy_regex::Regex::new(pattern)
             .unwrap_or_else(|_| fancy_regex::Regex::new(r"[^\s]+|\s+").unwrap());
 
-        // Collect special tokens (e.g., <|im_start|>, <|im_end|>)
+        // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>)
         let mut special_tokens: Vec<(String, u32)> = token_to_id
             .iter()
-            .filter(|(t, _)| t.starts_with("<|") && t.ends_with("|>"))
+            .filter(|(t, _)| {
+                (t.starts_with("<|") && t.ends_with("|>"))
+                    || *t == "<s>"
+                    || *t == "</s>"
+                    || *t == "<unk>"
+                    || *t == "<pad>"
+            })
             .map(|(t, &id)| (t.clone(), id))
             .collect();
         // Sort by length descending for longest-match-first
@@ -92,6 +106,7 @@ impl BpeTokenizer {
             byte_decoder,
             pre_tok_re,
             special_tokens,
+            is_sentencepiece,
         }
     }
 
@@ -110,10 +125,14 @@ impl BpeTokenizer {
                 if let Some(&id) = self.token_to_id.get(segment.as_str()) {
                     all_ids.push(id as i64);
                 }
+            } else if self.is_sentencepiece {
+                // SentencePiece: replace spaces with ▁, then BPE encode
+                // SentencePiece convention: leading space becomes ▁
+                let normalized = format!("\u{2581}{}", segment.replace(' ', "\u{2581}"));
+                all_ids.extend(self.bpe_encode_word(&normalized));
             } else {
-                // 2. Pre-tokenize regular text
+                // GPT-2: pre-tokenize with regex, then BPE encode each piece
                 let pre_tokens = self.pre_tokenize(segment);
-                // 3. BPE encode each pre-token
                 for pre_tok in &pre_tokens {
                     all_ids.extend(self.bpe_encode_word(pre_tok));
                 }
@@ -178,13 +197,18 @@ impl BpeTokenizer {
     }
 
     /// BPE encode a single pre-token word.
-    /// Converts bytes → GPT-2 unicode chars, then applies BPE merges.
+    /// For GPT-2: converts bytes → GPT-2 unicode chars, then applies BPE merges.
+    /// For SentencePiece: uses raw unicode chars directly with ▁ for leading spaces.
     fn bpe_encode_word(&self, word: &str) -> Vec<i64> {
-        // Convert each byte to its GPT-2 unicode character
-        let chars: Vec<String> = word
-            .bytes()
-            .map(|b| self.byte_encoder[b as usize].to_string())
-            .collect();
+        let chars: Vec<String> = if self.is_sentencepiece {
+            // SentencePiece: each character is used as-is (▁ already inserted by pre_tokenize)
+            word.chars().map(|c| c.to_string()).collect()
+        } else {
+            // GPT-2: convert each byte to its GPT-2 unicode character
+            word.bytes()
+                .map(|b| self.byte_encoder[b as usize].to_string())
+                .collect()
+        };
 
         if chars.is_empty() {
             return vec![];
@@ -234,12 +258,29 @@ impl BpeTokenizer {
     }
 
     /// Decode a BPE token string back to UTF-8 bytes.
-    /// Reverses the GPT-2 unicode byte encoding.
+    /// For GPT-2: reverses the GPT-2 unicode byte encoding.
+    /// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
-        token_str
-            .chars()
-            .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
-            .collect()
+        if self.is_sentencepiece {
+            // Handle byte fallback tokens like <0x0A> (newline)
+            if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
+                if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+                    return vec![byte];
+                }
+            }
+            // Special tokens like <s>, </s>, <unk> → empty (don't emit)
+            if token_str.starts_with('<') && token_str.ends_with('>') {
+                return vec![];
+            }
+            // SentencePiece: ▁ (U+2581) → space, everything else is raw UTF-8
+            token_str.replace('\u{2581}', " ").into_bytes()
+        } else {
+            // GPT-2: reverse byte encoding
+            token_str
+                .chars()
+                .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
+                .collect()
+        }
     }
 }
 
@@ -1113,13 +1154,19 @@ impl SplitModel {
                 .get("tokenizer.ggml.pre")
                 .and_then(|v| v.to_string().ok().cloned())
                 .unwrap_or_else(|| "gpt2".to_string());
+            let tokenizer_model = ct
+                .metadata
+                .get("tokenizer.ggml.model")
+                .and_then(|v| v.to_string().ok().cloned())
+                .unwrap_or_else(|| "gpt2".to_string());
             if !merges_raw.is_empty() {
                 tracing::info!(
                     merges = merges_raw.len(),
                     pre_type = %pre_type,
+                    tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF"
                 );
-                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type))
+                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type, &tokenizer_model))
             } else {
                 None
             }
@@ -1508,13 +1555,19 @@ impl SplitModel {
                 .get("tokenizer.ggml.pre")
                 .and_then(|v| v.to_string().ok().cloned())
                 .unwrap_or_else(|| "gpt2".to_string());
+            let tokenizer_model = ct
+                .metadata
+                .get("tokenizer.ggml.model")
+                .and_then(|v| v.to_string().ok().cloned())
+                .unwrap_or_else(|| "gpt2".to_string());
             if !merges_raw.is_empty() {
                 tracing::info!(
                     merges = merges_raw.len(),
                     pre_type = %pre_type,
+                    tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF header"
                 );
-                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type))
+                Some(BpeTokenizer::from_gguf(vocab, &merges_raw, &pre_type, &tokenizer_model))
             } else {
                 None
             }

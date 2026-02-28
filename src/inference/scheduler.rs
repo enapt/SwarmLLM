@@ -299,9 +299,14 @@ impl PipelineScheduler {
                 }
             }
 
-            let best = options
-                .into_iter()
-                .max_by_key(|(_c, r)| r.1 - current_layer);
+            // Pick the candidate that covers the most layers. When tied, prefer
+            // the local node to avoid unnecessary network round-trips.
+            let local_node_id = self.shared_state.identity.node_id();
+            let best = options.into_iter().max_by_key(|(c, r)| {
+                let coverage = r.1 - current_layer;
+                let is_local = if c.node_id == *local_node_id { 1u32 } else { 0u32 };
+                (coverage, is_local)
+            });
 
             match best {
                 Some((candidate, range)) => {
