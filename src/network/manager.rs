@@ -732,11 +732,13 @@ impl NetworkManager {
                 match *msg {
                     SwarmMessage::PeerExchangeRequest => {
                         tracing::debug!(%peer, "Handling PEX request");
-                        // Respond with up to 20 known peer addresses
+                        // Respond with up to 20 known peer addresses (filter out self)
+                        let local_node_id = self.shared_state.identity.node_id();
                         let peers: Vec<String> = self
                             .shared_state
                             .peer_registry
                             .iter()
+                            .filter(|entry| entry.key() != local_node_id)
                             .flat_map(|entry| entry.addresses.clone())
                             .take(20)
                             .collect();
@@ -840,17 +842,17 @@ impl NetworkManager {
                     total_size = data.total_size,
                     "Received shard data chunk"
                 );
-                // Route to AcquisitionManager if we have a pending request
-                if let Some(ref acq_tx) = self.acquisition_tx {
-                    // NET-C1: Look up by OutboundRequestId for correct correlation
-                    if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
-                        let offset = self
-                            .shard_download_progress
-                            .get(&shard_id)
-                            .copied()
-                            .unwrap_or(0);
-                        let chunk_len = data.data.len() as u64;
+                // Route to AcquisitionManager — always clean up tracking state
+                // NET-C1: Look up by OutboundRequestId for correct correlation
+                if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
+                    let offset = self
+                        .shard_download_progress
+                        .get(&shard_id)
+                        .copied()
+                        .unwrap_or(0);
+                    let chunk_len = data.data.len() as u64;
 
+                    if let Some(ref acq_tx) = self.acquisition_tx {
                         if let Err(e) = acq_tx
                             .send(AcquisitionCommand::ShardDataReceived {
                                 shard_id: shard_id.clone(),
@@ -862,42 +864,42 @@ impl NetworkManager {
                         {
                             tracing::warn!(error = %e, "Failed to forward shard data to acquisition");
                         }
+                    }
 
-                        // Update progress tracking
-                        let new_offset = offset + chunk_len;
-                        if new_offset < data.total_size {
-                            // More chunks needed — re-register and request next chunk
-                            self.shard_download_progress
-                                .insert(shard_id.clone(), new_offset);
+                    // Update progress tracking
+                    let new_offset = offset + chunk_len;
+                    if new_offset < data.total_size {
+                        // More chunks needed — re-register and request next chunk
+                        self.shard_download_progress
+                            .insert(shard_id.clone(), new_offset);
 
-                            let next_req = crate::types::ShardRequest {
-                                shard_id: shard_id.clone(),
-                                chunk_offset: new_offset,
-                                chunk_size: 32 * 1024 * 1024, // 32MB chunks
-                            };
-                            let req = SwarmRequest::ShardTransfer(next_req);
-                            let new_req_id = self
-                                .swarm
-                                .behaviour_mut()
-                                .request_response
-                                .send_request(&peer, req);
-                            self.pending_shard_requests
-                                .insert(new_req_id, (peer, shard_id));
-                        } else {
-                            // Download complete for this shard
-                            self.shard_download_progress.remove(&shard_id);
-                            tracing::info!(
-                                model = %shard_id.model_id,
-                                index = shard_id.index,
-                                "Shard download complete"
-                            );
-                        }
+                        let next_req = crate::types::ShardRequest {
+                            shard_id: shard_id.clone(),
+                            chunk_offset: new_offset,
+                            chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                        };
+                        let req = SwarmRequest::ShardTransfer(next_req);
+                        let new_req_id = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&peer, req);
+                        self.pending_shard_requests
+                            .insert(new_req_id, (peer, shard_id));
                     } else {
-                        tracing::warn!(
-                            %peer,
-                            "Received shard data but no pending request found"
+                        // Download complete for this shard
+                        self.shard_download_progress.remove(&shard_id);
+                        tracing::info!(
+                            model = %shard_id.model_id,
+                            index = shard_id.index,
+                            "Shard download complete"
                         );
                     }
+                } else {
+                    tracing::warn!(
+                        %peer,
+                        "Received shard data but no pending request found"
+                    );
                 }
             }
             SwarmResponse::Ack => {
@@ -971,9 +973,13 @@ impl NetworkManager {
                 {
                     Ok(_) => tracing::debug!(topic, "Published message to GossipSub"),
                     Err(e) => {
-                        // NET-I4: Buffer messages that fail at startup (no peers)
-                        tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
-                        self.buffered_gossip.push((topic.to_string(), publish_data));
+                        // NET-I4: Buffer messages that fail at startup (no peers), capped to prevent memory leak
+                        if self.buffered_gossip.len() < 64 {
+                            tracing::debug!(topic, error = %e, "Failed to publish to GossipSub, buffering");
+                            self.buffered_gossip.push((topic.to_string(), publish_data));
+                        } else {
+                            tracing::warn!(topic, "Gossip buffer full (64), dropping message");
+                        }
                     }
                 }
             }
@@ -1353,9 +1359,14 @@ impl NetworkManager {
     }
 
     /// Handle PEX response — dial unknown peers from the exchanged address list.
+    /// Limits to 5 dials per response to prevent connection storms.
     fn handle_pex_response(&mut self, peer_addrs: &[String]) {
+        const MAX_PEX_DIALS: usize = 5;
         let mut dialed = 0;
         for addr_str in peer_addrs {
+            if dialed >= MAX_PEX_DIALS {
+                break;
+            }
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
                 // Extract peer ID to check if already connected
                 let maybe_peer_id = addr.iter().find_map(|proto| {

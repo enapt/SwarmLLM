@@ -516,8 +516,9 @@ impl PipelineExecutor {
         );
 
         // Ensure the split model is loaded for this model's layer range.
-        // Use entry API to prevent TOCTOU race where two requests could both
-        // see the key missing and double-load the model into VRAM.
+        // Note: concurrent requests may both enter this block and double-load;
+        // the entry().or_insert() at the end ensures only one survives in the map.
+        // This is acceptable since the discarded model is freed immediately.
         let split_key = (model_id.clone(), layer_start, layer_end);
         if !self.shared_state.split_models.contains_key(&split_key) {
             let shard_store =

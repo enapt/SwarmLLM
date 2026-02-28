@@ -66,8 +66,7 @@ impl CreditLedger {
 
         if let Some(restored_balance) = restored {
             if restored_balance.node_id == node_id {
-                // Use try_write to avoid blocking if somehow locked;
-                // fall back to best-effort if lock not available immediately.
+                // Use try_write — should always succeed at startup before concurrent access.
                 if let Ok(mut bal) = balance.try_write() {
                     tracing::info!(
                         balance = restored_balance.balance,
@@ -75,6 +74,8 @@ impl CreditLedger {
                         "Restored credit balance from database"
                     );
                     *bal = restored_balance;
+                } else {
+                    tracing::error!("CRITICAL: Failed to restore credit balance — lock unavailable at startup. Balance may be zero.");
                 }
             }
         }

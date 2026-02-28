@@ -890,6 +890,10 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
         for entry in std::fs::read_dir(path)? {
             let entry = entry?;
             let ft = entry.file_type()?;
+            // Skip symlinks to avoid cycles and traversal attacks
+            if ft.is_symlink() {
+                continue;
+            }
             if ft.is_file() {
                 total += entry.metadata()?.len();
             } else if ft.is_dir() {

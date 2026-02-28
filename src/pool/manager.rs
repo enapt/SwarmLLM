@@ -48,10 +48,10 @@ impl PoolManager {
     }
 
     /// Restore pool state from sled on startup.
-    fn restore_state(&mut self) {
+    async fn restore_state(&mut self) {
         let db = &self.shared_state.db;
 
-        // Restore pool state
+        // Restore pool state — await directly to avoid TOCTOU race with first commands
         if let Ok(Some(state)) = db.get_json::<PoolState>(TREE_POOL_STATE, KEY_MY_POOL) {
             tracing::info!(
                 pool_id = %state.pool_id,
@@ -59,11 +59,8 @@ impl PoolManager {
                 "Restored pool state from database"
             );
             let pool_id = state.pool_id.clone();
-            let shared = self.shared_state.clone();
-            tokio::spawn(async move {
-                *shared.pool_state.write().await = Some(state.clone());
-                shared.pool_registry.insert(pool_id, state);
-            });
+            *self.shared_state.pool_state.write().await = Some(state.clone());
+            self.shared_state.pool_registry.insert(pool_id, state);
         }
 
         // Restore pending invitations
@@ -85,7 +82,7 @@ impl PoolManager {
 
     /// Run the pool manager event loop.
     pub async fn run(mut self) -> Result<(), SwarmError> {
-        self.restore_state();
+        self.restore_state().await;
 
         let gossip_secs = self.shared_state.config.pool.gossip_interval_secs;
         let mut gossip_interval =
@@ -515,6 +512,21 @@ impl PoolManager {
         {
             tracing::warn!(from = %forward.from_node_id, error = %e, "Failed to cosign credit forward");
             return;
+        }
+
+        // Verify sender is an actual pool member before crediting owner
+        {
+            let state = self.shared_state.pool_state.read().await;
+            if let Some(ref ps) = *state {
+                let is_member = ps.members.iter().any(|m| m.node_id == forward.from_node_id);
+                if !is_member {
+                    tracing::warn!(from = %forward.from_node_id, "Credit forward from non-member rejected");
+                    return;
+                }
+            } else {
+                tracing::warn!("Credit forward received but no pool state — rejecting");
+                return;
+            }
         }
 
         // Store in audit log

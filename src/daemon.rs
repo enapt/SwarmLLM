@@ -125,7 +125,7 @@ pub struct SharedState {
     pub inference_requests_total: AtomicU64,
     /// Inference latency samples in seconds (for Prometheus histogram).
     /// Capped at 1000 samples (ring-buffer behavior) to bound memory.
-    pub inference_latency_samples: std::sync::RwLock<Vec<f64>>,
+    pub inference_latency_samples: std::sync::RwLock<std::collections::VecDeque<f64>>,
     /// Readiness flag — set to true after all subsystem tasks are spawned.
     pub is_ready: AtomicBool,
     /// Watch channel for hot-reloaded operational config parameters.
@@ -253,7 +253,7 @@ impl SharedState {
             peer_shard_downloads: DashMap::new(),
             download_cancel_flags: DashMap::new(),
             inference_requests_total: AtomicU64::new(0),
-            inference_latency_samples: std::sync::RwLock::new(Vec::new()),
+            inference_latency_samples: std::sync::RwLock::new(std::collections::VecDeque::new()),
             is_ready: AtomicBool::new(false),
             config_watch_tx,
             trust_manager,

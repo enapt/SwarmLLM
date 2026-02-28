@@ -101,11 +101,11 @@ pub fn announce_capability(
     let key = RecordKey::new(&format!("/swarm/node/{node_id}"));
     let value = serde_json::to_vec(capability).map_err(|e| SwarmError::Network(e.to_string()))?;
 
-    // NET-I6: Set 1-hour TTL on DHT records
+    // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
     let record = kad::Record {
         key,
         value,
-        publisher: None,
+        publisher: Some(*swarm.local_peer_id()),
         expires: Some(Instant::now() + Duration::from_secs(3600)),
     };
 
@@ -144,11 +144,11 @@ pub fn announce_shards(
         let value = serde_json::to_vec(&(node_id, indices))
             .map_err(|e| SwarmError::Network(e.to_string()))?;
 
-        // NET-I6: Set 1-hour TTL on DHT records
+        // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
         let record = kad::Record {
             key,
             value,
-            publisher: None,
+            publisher: Some(*swarm.local_peer_id()),
             expires: Some(Instant::now() + Duration::from_secs(3600)),
         };
 

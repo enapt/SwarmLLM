@@ -114,6 +114,11 @@ impl AntiGaming {
             timestamps.retain(|t| *t > cutoff);
             !timestamps.is_empty()
         });
+        // Prune subnet_counts for nodes no longer in rate_limits to prevent unbounded growth
+        self.subnet_counts.retain(|_, nodes| {
+            nodes.retain(|n| self.rate_limits.contains_key(n));
+            !nodes.is_empty()
+        });
     }
 
     /// Report a spot-check failure — peer claimed work they didn't do.

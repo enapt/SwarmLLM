@@ -165,6 +165,15 @@ pub async fn chat_completions(
     headers: axum::http::HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Validate session_id length to prevent memory abuse
+    if let Some(ref sid) = req.session_id {
+        if sid.len() > 256 {
+            return Err(ApiError(crate::error::SwarmError::Config(
+                "session_id too long (max 256 chars)".into(),
+            )));
+        }
+    }
+
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
 

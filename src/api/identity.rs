@@ -138,15 +138,19 @@ pub async fn leaderboard(
     // Gather all known peers with their credit info
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Add self (always eligible)
+    // Add self (always eligible) — clone values and drop lock before peer iteration
     let self_id = state.shared_state.identity.node_id();
-    let self_credit = state.shared_state.credit_balance.read().await;
+    let (self_balance, self_tier) = {
+        let self_credit = state.shared_state.credit_balance.read().await;
+        let balance = self_credit.balance;
+        let tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
+        (balance, tier)
+    };
     let self_name = display_name(self_id, &state.shared_state.nickname_registry);
-    let self_tier = crate::credit::priority::PriorityCalculator::tier_name(self_credit.balance);
     entries.push(serde_json::json!({
         "node_id": format!("{self_id}"),
         "display_name": self_name,
-        "credits": self_credit.balance,
+        "credits": self_balance,
         "tier": self_tier,
         "trust_score": 1.0,
         "eligible": true,

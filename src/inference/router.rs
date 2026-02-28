@@ -500,9 +500,9 @@ impl InferenceRouter {
                 let latency_secs = request_start.elapsed().as_secs_f64();
                 if let Ok(mut samples) = shared_state.inference_latency_samples.write() {
                     if samples.len() >= 1000 {
-                        samples.remove(0);
+                        samples.pop_front();
                     }
-                    samples.push(latency_secs);
+                    samples.push_back(latency_secs);
                 }
             }
 
@@ -805,6 +805,39 @@ async fn execute_request(
                 None => chat_template::chatml_fallback(&request.messages),
             }
         };
+
+        // Use streaming generation if token_tx is present
+        if let Some(ref tx) = token_tx {
+            let tx_clone = tx.clone();
+            let mut accumulated = String::new();
+            let gen_result = executor.generate_stream(
+                &prompt,
+                &request.sampling_params,
+                |token: &str| -> bool {
+                    accumulated.push_str(token);
+                    let event = StreamingTokenEvent {
+                        text: token.to_string(),
+                        finish_reason: None,
+                    };
+                    tx_clone.try_send(event).is_ok()
+                },
+            )?;
+            // Send final done event
+            let done_event = StreamingTokenEvent {
+                text: String::new(),
+                finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
+            };
+            let _ = tx.try_send(done_event);
+            return Ok(InferenceOutput {
+                request_id: request.id,
+                content: accumulated,
+                prompt_tokens: gen_result.prompt_tokens,
+                completion_tokens: gen_result.completion_tokens,
+                finish_reason: gen_result.finish_reason.as_str().to_string(),
+                session_id: request.session_id.clone(),
+            });
+        }
+
         let (content, gen_result) = executor.generate(&prompt, &request.sampling_params)?;
 
         return Ok(InferenceOutput {

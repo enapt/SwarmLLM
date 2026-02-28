@@ -535,10 +535,15 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         }
     };
 
-    // Read activations if present
+    // Read activations if present (capped at 128MB to prevent abuse)
     let activations = if pos + 4 <= data.len() {
         let act_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
+        if act_len > 128 * 1024 * 1024 {
+            return Err(SwarmError::Network(format!(
+                "Activation data too large: {act_len} bytes"
+            )));
+        }
         if act_len > 0 && pos + act_len <= data.len() {
             data[pos..pos + act_len].to_vec()
         } else {

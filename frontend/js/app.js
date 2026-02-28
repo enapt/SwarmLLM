@@ -28,6 +28,16 @@ var SwarmLLM = (function() {
     return div.innerHTML;
   }
 
+  // Authenticated fetch — adds Bearer token to all requests that need auth
+  function authFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = opts.headers || {};
+    if (settings._apiKeyFull && !opts.headers['Authorization']) {
+      opts.headers['Authorization'] = 'Bearer ' + settings._apiKeyFull;
+    }
+    return fetch(url, opts);
+  }
+
   // ========================================================================
   // UI Module — tab switching, sidebar, modals
   // ========================================================================
@@ -225,7 +235,7 @@ var SwarmLLM = (function() {
       var fullContent = '';
 
       try {
-        var resp = await fetch('/v1/chat/completions', {
+        var resp = await authFetch('/v1/chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -958,7 +968,7 @@ var SwarmLLM = (function() {
 
         if (mode === 'full') {
           // Full model download (single GGUF file) — user explicitly chose this
-          var resp = await fetch('/api/admin/hf/download', {
+          var resp = await authFetch('/api/admin/hf/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ repo_id: repoId, filename: filename }),
@@ -984,7 +994,7 @@ var SwarmLLM = (function() {
           var shardIndices = [];
           for (var i = 0; i < probeData.shard_count; i++) shardIndices.push(i);
 
-          var resp = await fetch('/api/admin/hf/download-shards', {
+          var resp = await authFetch('/api/admin/hf/download-shards', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ repo_id: repoId, filename: filename, shards: shardIndices }),
@@ -1153,7 +1163,7 @@ var SwarmLLM = (function() {
       };
 
       try {
-        var resp = await fetch('/api/admin/config', {
+        var resp = await authFetch('/api/admin/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(config),
@@ -1303,7 +1313,7 @@ var SwarmLLM = (function() {
       var level = levels[parseInt(document.getElementById('contribution-slider').value, 10)];
       var autoManage = document.getElementById('setup-auto-manage').checked;
       try {
-        await fetch('/api/admin/config', {
+        await authFetch('/api/admin/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1315,7 +1325,7 @@ var SwarmLLM = (function() {
       localStorage.setItem(SETUP_DONE_KEY, 'true');
       // Also persist to server so other clients / restarts see setup as done
       try {
-        await fetch('/api/admin/config', {
+        await authFetch('/api/admin/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ setup_done: true }),
@@ -1335,7 +1345,7 @@ var SwarmLLM = (function() {
     var banner = document.getElementById('ws-banner');
     if (!banner) return;
     if (wsBannerTimer) { clearTimeout(wsBannerTimer); wsBannerTimer = null; }
-    banner.innerHTML = '<div class="ws-banner-' + type + '">' + text + '</div>';
+    banner.innerHTML = '<div class="ws-banner-' + escapeHtml(type) + '">' + escapeHtml(text) + '</div>';
     banner.classList.add('show');
   }
 
@@ -1442,7 +1452,7 @@ var SwarmLLM = (function() {
 
   async function requestModel(modelId) {
     try {
-      var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
+      var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
       var data = await resp.json();
       if (data.status === 'acquiring') {
         activeAcquisitions[modelId] = { started: Date.now() };
@@ -1486,7 +1496,7 @@ var SwarmLLM = (function() {
     try {
       // NOTE: Backend endpoint POST /api/admin/downloads/{model_id}/cancel
       // does not exist yet — backend work needed to implement cancellation.
-      var resp = await fetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
+      var resp = await authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
       if (resp.ok) {
         ui.showBanner('success', 'Download cancelled');
         // Remove progress UI from the card
@@ -1516,7 +1526,7 @@ var SwarmLLM = (function() {
     try {
       // NOTE: Backend endpoint DELETE /api/admin/models/{model_id}
       // does not exist yet — backend work needed to implement model removal.
-      var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
+      var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
       if (resp.ok) {
         ui.showBanner('success', 'Model removed: ' + modelId);
         // Remove the card from UI
@@ -1538,7 +1548,7 @@ var SwarmLLM = (function() {
   async function shutdown() {
     if (!confirm('Shut down SwarmLLM node?')) return;
     try {
-      await fetch('/api/admin/shutdown', { method: 'POST' });
+      await authFetch('/api/admin/shutdown', { method: 'POST' });
       document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">SwarmLLM has been shut down.</div>';
     } catch (e) {
       ui.showBanner('error', 'Shutdown failed: ' + e.message);
@@ -1674,13 +1684,13 @@ var SwarmLLM = (function() {
       if (!nickname) {
         // Delete nickname (go anonymous)
         try {
-          await fetch('/api/identity/nickname', { method: 'DELETE' });
+          await authFetch('/api/identity/nickname', { method: 'DELETE' });
         } catch (e) { /* ignore */ }
         return;
       }
 
       try {
-        var resp = await fetch('/api/identity/nickname', {
+        var resp = await authFetch('/api/identity/nickname', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

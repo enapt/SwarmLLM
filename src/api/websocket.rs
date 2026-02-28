@@ -42,8 +42,8 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                 }
                 _ = ping_interval.tick() => {
                     tick_count += 1;
-                    // Skip the first tick (fires immediately)
-                    if tick_count <= 1 {
+                    // Skip only the first tick (fires immediately)
+                    if tick_count == 1 {
                         continue;
                     }
                     // Check if last pong was within 10s of the last ping

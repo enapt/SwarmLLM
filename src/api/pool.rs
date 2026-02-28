@@ -34,6 +34,13 @@ pub async fn pool_create(
     State(state): State<AppState>,
     Json(body): Json<PoolCreateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate pool name length
+    if body.name.trim().is_empty() || body.name.len() > 64 {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Pool name must be 1-64 characters".into(),
+        )));
+    }
+
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     send_pool_command(

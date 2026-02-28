@@ -3,9 +3,10 @@ use crate::types::SamplingParams;
 /// Apply temperature scaling to logits.
 ///
 /// Higher temperature = more random, lower = more deterministic.
-/// Temperature of 0 is treated as greedy (argmax).
+/// Callers must handle temperature == 0 (greedy/argmax) before calling this.
+/// Temperature == 1.0 is a no-op (dividing by 1 changes nothing).
 pub fn apply_temperature(logits: &mut [f32], temperature: f32) {
-    if temperature <= 0.0 || temperature == 1.0 {
+    if temperature == 1.0 {
         return;
     }
     for logit in logits.iter_mut() {

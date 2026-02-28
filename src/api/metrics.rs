@@ -135,21 +135,24 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     const BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     let name = "swarmllm_inference_latency_seconds";
 
-    let samples = shared
-        .inference_latency_samples
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    let count = samples.len() as f64;
-    let sum: f64 = samples.iter().sum();
+    let samples_guard = match shared.inference_latency_samples.read() {
+        Ok(g) => g,
+        Err(_) => {
+            tracing::warn!("inference_latency_samples lock poisoned — skipping histogram");
+            return;
+        }
+    };
+    let count = samples_guard.len() as f64;
+    let sum: f64 = samples_guard.iter().sum();
 
     let _ = writeln!(buf, "# HELP {name} Inference request latency in seconds");
     let _ = writeln!(buf, "# TYPE {name} histogram");
 
     for &bound in BUCKETS {
-        let bucket_count = samples.iter().filter(|&&s| s <= bound).count();
+        let bucket_count = samples_guard.iter().filter(|&&s| s <= bound).count();
         let _ = writeln!(buf, "{name}_bucket{{le=\"{bound}\"}} {bucket_count}");
     }
-    let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {}", samples.len());
+    let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {}", samples_guard.len());
     let _ = writeln!(buf, "{name}_sum {sum}");
     let _ = writeln!(buf, "{name}_count {count}");
 }

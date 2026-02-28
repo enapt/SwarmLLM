@@ -62,7 +62,7 @@ pub fn can_submit_request(_tier: PriorityTier) -> bool {
 pub fn max_concurrent_for_tier(tier: PriorityTier, base_max: usize) -> usize {
     match tier {
         PriorityTier::Bronze => (base_max / 4).max(1),
-        PriorityTier::Silver => base_max / 2,
+        PriorityTier::Silver => (base_max / 2).max(1),
         PriorityTier::Gold => base_max,
         PriorityTier::Platinum => base_max * 2,
     }

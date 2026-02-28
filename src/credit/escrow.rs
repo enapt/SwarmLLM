@@ -82,6 +82,11 @@ impl EscrowManager {
         from_node: &NodeId,
         balance: &Arc<RwLock<CreditBalance>>,
     ) -> Result<uuid::Uuid, SwarmError> {
+        if amount <= 0 {
+            return Err(SwarmError::CreditError(format!(
+                "Escrow amount must be positive, got {amount}"
+            )));
+        }
         // Deduct from requester balance
         {
             let mut bal = balance.write().await;
@@ -195,11 +200,10 @@ impl EscrowManager {
 
         drop(entry);
 
-        // Return credits to requester
+        // Return credits to requester (lifetime_spent is monotonic — not decremented)
         {
             let mut bal = balance.write().await;
             bal.balance = bal.balance.saturating_add(amount);
-            bal.lifetime_spent = bal.lifetime_spent.saturating_sub(amount as u64);
             bal.last_updated = chrono::Utc::now();
         }
 
@@ -248,11 +252,10 @@ impl EscrowManager {
                 let _ = self.db.put_json(TREE_ESCROW, &id.to_string(), &*entry);
                 drop(entry);
 
-                // Refund the expired amount
+                // Refund the expired amount (lifetime_spent is monotonic — not decremented)
                 {
                     let mut bal = balance.write().await;
                     bal.balance = bal.balance.saturating_add(amount);
-                    bal.lifetime_spent = bal.lifetime_spent.saturating_sub(amount as u64);
                     bal.last_updated = chrono::Utc::now();
                 }
 

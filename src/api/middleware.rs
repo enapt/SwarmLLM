@@ -121,6 +121,18 @@ pub async fn auth_middleware(State(state): State<AppState>, req: Request, next: 
         return next.run(req).await;
     }
 
+    // Exempt peer-forwarded requests (x-swarm-forwarded: true)
+    // These come from other SwarmLLM nodes forwarding inference requests.
+    if req
+        .headers()
+        .get("x-swarm-forwarded")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        return next.run(req).await;
+    }
+
     let expected_key = &state.shared_state.api_key;
 
     // Extract Bearer token from Authorization header
