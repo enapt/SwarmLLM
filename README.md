@@ -1,5 +1,7 @@
 # SwarmLLM
 
+[![CI](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml)
+
 Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware.
 
 **Like Ollama, but you don't need a beefy GPU — because the network IS your GPU.**
@@ -42,16 +44,23 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 ## Quick Start
 
-```bash
-# Download and run
-./swarmllm run
+**Download a binary** from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) for your platform, extract it, and run:
 
-# Browser opens to localhost:8800
-# Setup wizard auto-detects hardware
-# Start chatting in minutes
+```bash
+./swarmllm run
 ```
 
-Or use the API directly:
+Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
+
+See the full [Getting Started Guide](docs/guide/GETTING_STARTED.md) for platform-specific instructions.
+
+**Or use Docker:**
+
+```bash
+docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
+```
+
+**Or use the API directly:**
 
 ```bash
 # Get your API key from the dashboard or:
@@ -127,7 +136,23 @@ SwarmLLM targets decoder-only transformer architectures with GGUF quantization:
 
 Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
 
-## Building from Source
+## Installation
+
+### Pre-built Binaries (Recommended)
+
+Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) — available for Linux, macOS (Intel & Apple Silicon), and Windows. CUDA-accelerated Linux builds included.
+
+### Docker
+
+```bash
+# Single node
+docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
+
+# With NVIDIA GPU
+docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm:cuda
+```
+
+### Building from Source
 
 ```bash
 # Requirements: Rust 1.75+, cmake (for llama.cpp, optional)
@@ -214,6 +239,13 @@ SWARMLLM_LOGGING_LEVEL=debug
 | Inference | candle (split/distributed, CUDA), llama.cpp (single-node) |
 | Database | sled (embedded, schema-versioned) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
+
+## Documentation
+
+- **[Getting Started](docs/guide/GETTING_STARTED.md)** — Download, install, and start chatting in minutes
+- **[Configuration](docs/guide/CONFIGURATION.md)** — All config options, environment variables, CLI flags
+- **[Troubleshooting](docs/guide/TROUBLESHOOTING.md)** — Common issues and solutions
+- **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
 
 ## License
 
