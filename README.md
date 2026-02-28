@@ -20,28 +20,9 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 - **No central server** — fully peer-to-peer with no single point of failure
 - **No accounts or subscriptions** — just a cryptographic identity
+- **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
 - **BitTorrent-inspired incentives** — contribute compute, earn priority access
 - **OpenAI-compatible API** — drop-in replacement for any tool that speaks OpenAI
-
-## Features
-
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
-- **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
-- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection, transaction replay prevention, and credit escrow for large requests
-- **Zero-Config Discovery** — 5-layer discovery stack: mDNS (LAN auto-discovery), persistent peer cache (reconnect across restarts), shareable invite codes, peer exchange (PEX), and Kademlia DHT — no bootstrap config needed
-- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay on NAT detection), connection limits, and gossip replay protection
-- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via ephemeral ECDH), pipeline sealing, and authenticated sealed gossip
-- **Sybil Resistance** — Ed25519-signed balance reports with timestamp freshness, peer reputation scoring with trust decay, leaderboard spoofing protection
-- **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol and privacy-preserving blind signatures
-- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring
-- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
-- **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
-- **Multi-turn KV-cache** — Session-aware cache reuse skips redundant prefill across chat messages
-- **Built-in Web UI** — Admin dashboard, chat interface, model browser, shard visualization, first-run setup wizard, mobile-responsive layout
-- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
-- **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
-- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, config hot-reload via SIGHUP
 
 ## Quick Start
 
@@ -78,28 +59,82 @@ curl http://localhost:8800/v1/chat/completions \
   }'
 ```
 
+## Connecting to the Network
+
+SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
+
+| Layer | How it works | When it kicks in |
+|-------|-------------|------------------|
+| **mDNS** | Automatically discovers peers on the same LAN/Wi-Fi | Instantly on startup |
+| **Peer Cache** | Remembers peers from previous sessions (sled-backed, max 200) | On restart |
+| **Invite Codes** | Share a `swarm://...` code with a friend to connect directly | First time joining |
+| **Peer Exchange** | Connected peers share their known peer lists with you | On each new connection |
+| **Kademlia DHT** | Distributed hash table for network-wide peer routing | Continuously |
+
+**First launch on a LAN:** Two nodes on the same network find each other in seconds — zero config.
+
+**First launch alone:** The dashboard shows your invite code. Share it with a friend. Once you're connected to one peer, PEX and DHT discover the rest of the network automatically.
+
+**Returning user:** Cached peers reconnect in under a second. The invite code UI auto-hides once your node knows 20+ peers.
+
+> For private networks, set `gossip_network_id = "my-private-net"` in config to isolate your nodes from the public network.
+
+## Features
+
+### Inference
+- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
+- **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
+- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
+- **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
+- **Multi-turn KV-cache** — Session-aware cache reuse skips redundant prefill across chat messages
+
+### Networking & Security
+- **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
+- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay), connection limits, gossip replay protection
+- **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy), pipeline sealing, and authenticated sealed gossip
+- **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
+- **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy
+
+### Economy & Identity
+- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection, transaction replay prevention, and credit escrow for large requests
+- **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
+- **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring
+
+### Operations
+- **Built-in Web UI** — Admin dashboard, chat interface, model browser, shard visualization, first-run setup wizard, mobile-responsive layout
+- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
+- **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
+- **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API
+
 ## Architecture
 
 Single Rust binary, three simultaneous functions:
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
-| P2P Node | Peer discovery (mDNS + peer cache + invite codes + PEX + DHT), shard hosting, distributed inference, credits | libp2p / QUIC |
+| P2P Node | Peer discovery, shard hosting, distributed inference, credits | libp2p / QUIC |
 | LLM API Server | OpenAI-compatible inference endpoint | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
 Internally, the daemon runs 10 async Tokio tasks communicating via channels:
 
-- **NetworkManager** — libp2p swarm lifecycle, peer discovery, message routing
-- **InferenceRouter** — request queuing, pipeline assembly, execution
-- **MessageDispatcher** — routes inbound network messages to subsystems
-- **CreditLedger** — balance tracking, transaction signing, anti-gaming
-- **HealthMonitor** — periodic checks, rebalancing triggers, stale channel cleanup
-- **ShardRebalancer** — shard redistribution on node join/leave
-- **AcquisitionManager** — BLAKE3-verified model download from peers with retry/backoff
-- **ApiServer** — Axum HTTP server, WebSocket with ping/pong heartbeat
-- **PoolManager** — device pool management, credit forwarding, invitation protocol
-- **AutoShardManager** — VRAM-aware automatic shard acquisition from HuggingFace/peers
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                           daemon.rs                                   │
+│                                                                      │
+│  NetworkManager ──── InferenceRouter ──── CreditLedger               │
+│       │                    │                   │                      │
+│  MessageDispatcher    ApiServer          HealthMonitor                │
+│       │                    │                   │                      │
+│  PoolManager        AutoShardManager    ShardRebalancer               │
+│       │                    │                   │                      │
+│  AcquisitionManager ───────┴───────────────────┘                     │
+│                                                                      │
+│              All connected via mpsc channels                         │
+│              Shared state via Arc<SharedState> + DashMap              │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
 ## Node Tiers
 
@@ -196,7 +231,7 @@ Options:
 
 ## Configuration
 
-Config lives at `~/.swarmllm/config.toml`. All values can be overridden with environment variables using the `SWARMLLM_` prefix (invalid values log warnings instead of silently falling back):
+Config lives at `~/.swarmllm/config.toml`. All values can be overridden with environment variables using the `SWARMLLM_` prefix:
 
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000
@@ -204,19 +239,20 @@ SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000
 SWARMLLM_LOGGING_LEVEL=debug
 ```
 
-### Default Config Sections
+### Key Config Sections
 
 | Section | Key Settings |
 |---------|-------------|
 | `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
-| `[network]` | `bootstrap_peers`, `enable_relay`, `max_peers`, `enable_mdns`, `gossip_network_id` |
-| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_concurrent_requests` |
-| `[credit]` | Starting balance, earn/spend rates |
+| `[network]` | `bootstrap_peers`, `enable_mdns`, `gossip_network_id`, `enable_relay`, `max_peers` |
+| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
-| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `max_concurrent_downloads` |
+| `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads` |
 | `[logging]` | `level`, `format` (pretty/json) |
-| `[ui]` | `open_browser_on_start` |
+| `[ui]` | `open_browser_on_start`, `theme` |
+
+See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full reference.
 
 ## Platform Support
 
@@ -234,11 +270,11 @@ SWARMLLM_LOGGING_LEVEL=debug
 |-------|-----------|
 | Language | Rust (2021 edition) |
 | Async Runtime | Tokio |
-| Networking | libp2p 0.54 (QUIC transport) |
+| Networking | libp2p 0.54 (QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | Cap'n Proto (tensors), serde_json (API) |
 | HTTP Server | Axum 0.7 |
 | Inference | candle (split/distributed, CUDA), llama.cpp (single-node) |
-| Database | sled (embedded, schema-versioned) |
+| Database | sled (embedded) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 
 ## Documentation
