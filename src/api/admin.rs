@@ -194,9 +194,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         }
     }
 
-    // Helper: build per-shard detail for a manifest
+    // Helper: build per-shard detail for a manifest, including download state
     let build_shard_detail =
         |m: &crate::types::ModelManifest, state: &AppState| -> Vec<serde_json::Value> {
+            let acq = state.shared_state.acquisition_progress.get(&m.id);
             m.shards
                 .iter()
                 .map(|s| {
@@ -206,12 +207,57 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     };
                     let holders = state.shared_state.model_registry.shard_holders(&shard_id);
                     let local = holders.contains(&local_node_id);
-                    serde_json::json!({
+
+                    let mut shard_json = serde_json::json!({
                         "index": s.index,
                         "size_bytes": s.size_bytes,
                         "local": local,
                         "holders": holders.len(),
-                    })
+                    });
+
+                    // Attach per-shard download state if downloading
+                    if let Some(ref p) = acq {
+                        if let Some(sp) = p.shard_progress.get(&s.index) {
+                            if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                                let pct = if sp.total_bytes > 0 {
+                                    (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
+                                } else {
+                                    0
+                                };
+                                shard_json.as_object_mut().unwrap().insert(
+                                    "download".to_string(),
+                                    serde_json::json!({
+                                        "state": "Downloading",
+                                        "progress_pct": pct,
+                                        "downloaded_bytes": sp.downloaded_bytes,
+                                        "total_bytes": sp.total_bytes,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+
+                    // Attach peer download state
+                    if let Some(peer_dl) = state.shared_state.peer_shard_downloads.get(&shard_id) {
+                        let peers: Vec<serde_json::Value> = peer_dl
+                            .value()
+                            .iter()
+                            .map(|(nid, pct)| {
+                                serde_json::json!({
+                                    "node_id": format!("{}", nid),
+                                    "progress_pct": pct,
+                                })
+                            })
+                            .collect();
+                        if !peers.is_empty() {
+                            shard_json
+                                .as_object_mut()
+                                .unwrap()
+                                .insert("peer_downloads".to_string(), serde_json::json!(peers));
+                        }
+                    }
+
+                    shard_json
                 })
                 .collect()
         };

@@ -482,37 +482,47 @@ var SwarmLLM = (function() {
         var shardHtml = '';
         if (shardCount > 1 && shards.length > 0) {
           shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
-          var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
+          var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shards.forEach(function(s) {
             var cls = 'missing';
             var label = '' + s.index;
+            var dlPct = 0;
+
             if (s.local) { cls = 'local'; localCount++; }
             else if (s.holders > 0) { cls = 'peer'; peerCount++; }
             else { missingCount++; }
 
             // Check per-shard download state (only marks THIS specific shard)
             if (s.download && s.download.state === 'Downloading') {
+              dlPct = s.download.progress_pct || 0;
               cls = 'downloading'; dlCount++;
-              if (s.download.progress_pct > 0 && s.download.progress_pct < 100) {
-                label = s.download.progress_pct + '%';
-              }
+              if (missingCount > 0) missingCount--;
+              if (peerCount > 0 && !s.local) peerCount--;
+              label = dlPct + '%';
             }
             // Check if a peer is downloading this shard
             if (s.peer_downloads && s.peer_downloads.length > 0) {
               if (cls !== 'local' && cls !== 'downloading') {
-                cls = 'peer-downloading'; dlCount++;
-                label = 'P:' + s.peer_downloads[0].progress_pct + '%';
+                dlPct = s.peer_downloads[0].progress_pct || 0;
+                cls = 'peer-downloading'; peerDlCount++;
+                if (missingCount > 0) missingCount--;
+                if (peerCount > 0) peerCount--;
+                label = dlPct + '%';
               }
             }
 
             var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')';
-            if (cls === 'local') title += ' — Stored locally';
-            else if (cls === 'peer') title += ' — Available from ' + s.holders + ' peer(s)';
-            else if (cls === 'downloading') title += ' — Downloading' + (s.download ? ' (' + s.download.progress_pct + '%)' : '');
-            else if (cls === 'peer-downloading') title += ' — Peer downloading (' + s.peer_downloads[0].progress_pct + '%)';
-            else title += ' — Not available';
+            if (cls === 'local') title += ' \u2014 Stored locally';
+            else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer(s)';
+            else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
+            else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
+            else title += ' \u2014 Not available';
 
-            shardHtml += '<div class="shard-cell ' + cls + '" data-shard="' + safeId + '-' + s.index + '" title="' + title + '">' + label + '</div>';
+            var style = '';
+            if (cls === 'downloading' || cls === 'peer-downloading') {
+              style = ' style="--dl-pct:' + dlPct + '%"';
+            }
+            shardHtml += '<div class="shard-cell ' + cls + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" title="' + title + '">' + label + '</div>';
           });
           shardHtml += '</div>';
 
@@ -520,20 +530,27 @@ var SwarmLLM = (function() {
           var legendParts = [];
           if (localCount > 0) legendParts.push('<span class="leg-local">Local (' + localCount + ')</span>');
           if (peerCount > 0) legendParts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
-          if (dlCount > 0) legendParts.push('<span class="leg-dl">Downloading</span>');
+          if (dlCount > 0) legendParts.push('<span class="leg-dl">Downloading (' + dlCount + ')</span>');
+          if (peerDlCount > 0) legendParts.push('<span class="leg-peer-dl">Peer DL (' + peerDlCount + ')</span>');
+          if (queuedCount > 0) legendParts.push('<span class="leg-queued">Queued (' + queuedCount + ')</span>');
           if (missingCount > 0) legendParts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
           if (legendParts.length > 0) shardHtml += '<div class="shard-legend" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>';
         }
 
-        // Download progress bar
+        // Download progress bar — compute from per-shard data when available
         var progressHtml = '';
         if (isDownloading && m.acquisition_progress) {
           var ap = m.acquisition_progress;
-          var pct = ap.total_bytes > 0 ? Math.round((ap.downloaded_bytes / ap.total_bytes) * 100) : 0;
-          progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '">' +
+          var dlBytes = ap.downloaded_bytes || 0;
+          var totalBytes = ap.total_bytes || 0;
+          // Clamp to avoid > 100%
+          if (dlBytes > totalBytes && totalBytes > 0) dlBytes = totalBytes;
+          var pct = totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0;
+          var shardLabel = ap.downloaded_shards !== undefined ? ('Shard ' + ap.downloaded_shards + '/' + shardCount) : 'Downloading';
+          progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '" data-last-pct="' + pct + '">' +
             '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-            '<span class="text-muted">Downloading shard</span>' +
-            '<span class="mono dl-progress-text">' + formatBytes(ap.downloaded_bytes) + ' / ' + formatBytes(ap.total_bytes) + ' (' + pct + '%)</span>' +
+            '<span class="text-muted">' + shardLabel + '</span>' +
+            '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)</span>' +
             '</div>' +
             '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>' +
             '</div>';
@@ -577,7 +594,7 @@ var SwarmLLM = (function() {
 
           // Update per-shard cells
           var shardDetails = acq.shard_details || [];
-          var localCount = 0, peerCount = 0, dlCount = 0, missingCount = 0;
+          var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shardDetails.forEach(function(sd) {
             var cellId = safeId + '-' + sd.index;
             var cell = document.querySelector('[data-shard="' + cellId + '"]');
@@ -586,59 +603,82 @@ var SwarmLLM = (function() {
             var oldClass = cell.className.replace(/shard-cell\s*/, '').trim().split(/\s+/)[0] || 'missing';
             var newClass = 'missing';
             var label = '' + sd.index;
+            var dlPct = sd.progress_pct || 0;
 
             if (sd.state === 'complete') { newClass = 'local'; localCount++; }
             else if (sd.state === 'downloading' || sd.state === 'verifying') {
               newClass = 'downloading'; dlCount++;
-              if (sd.progress_pct > 0 && sd.progress_pct < 100) {
-                label = sd.progress_pct + '%';
-              }
+              label = dlPct + '%';
+            } else if (sd.state === 'pending') {
+              // Pending shards in an active acquisition are queued
+              newClass = 'queued'; queuedCount++;
+              label = '\u2022';
             } else if (sd.state === 'failed') { newClass = 'missing'; missingCount++; }
-            else if (sd.state === 'pending') { newClass = 'missing'; missingCount++; }
+            else { missingCount++; }
 
             // Only update DOM if something changed
             if (oldClass !== newClass || cell.textContent !== label) {
               cell.className = 'shard-cell ' + newClass;
               cell.textContent = label;
 
+              // Set gradient CSS variable for download progress
+              if (newClass === 'downloading' || newClass === 'peer-downloading') {
+                cell.style.setProperty('--dl-pct', dlPct + '%');
+              } else {
+                cell.style.removeProperty('--dl-pct');
+              }
+
               // Update title
               var title = 'Shard ' + sd.index;
-              if (newClass === 'local') title += ' — Complete';
-              else if (newClass === 'downloading') title += ' — Downloading (' + sd.progress_pct + '%)';
-              else if (sd.state === 'failed') title += ' — Failed';
-              else title += ' — Pending';
+              if (newClass === 'local') title += ' \u2014 Complete';
+              else if (newClass === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
+              else if (newClass === 'queued') title += ' \u2014 Queued for download';
+              else if (sd.state === 'failed') title += ' \u2014 Failed';
+              else title += ' \u2014 Not available';
               cell.setAttribute('title', title);
             }
           });
 
-          // Update progress bar
+          // Update progress bar — only allow forward progress to prevent jumping
           var progressEl = document.querySelector('[data-model-progress="' + safeId + '"]');
           if (progressEl && acq.total_bytes > 0) {
-            var pct = Math.round((acq.downloaded_bytes / acq.total_bytes) * 100);
-            var speed = acq.speed_bytes_per_sec || 0;
-            var textEl = progressEl.querySelector('.dl-progress-text');
-            if (textEl) {
-              textEl.textContent = formatBytes(acq.downloaded_bytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct + '%)' +
-                (speed > 0 ? ' - ' + formatSpeed(speed) : '');
-            }
-            var fillEl = progressEl.querySelector('.dl-fill');
-            if (fillEl) {
-              fillEl.style.width = pct + '%';
+            var dlBytes = Math.min(acq.downloaded_bytes || 0, acq.total_bytes);
+            var pct = Math.min(100, Math.round((dlBytes / acq.total_bytes) * 100));
+            var lastPct = parseInt(progressEl.getAttribute('data-last-pct') || '0', 10);
+            // Only update if progress moved forward (prevents jumping backward)
+            if (pct >= lastPct) {
+              progressEl.setAttribute('data-last-pct', '' + pct);
+              var speed = acq.speed_bytes_per_sec || 0;
+              var shardLabel = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || shardDetails.length)) : 'Downloading';
+              var textEl = progressEl.querySelector('.dl-progress-text');
+              if (textEl) {
+                textEl.textContent = formatBytes(dlBytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct + '%)' +
+                  (speed > 0 ? ' \u2014 ' + formatSpeed(speed) : '');
+              }
+              var labelEl = progressEl.querySelector('.text-muted');
+              if (labelEl) labelEl.textContent = shardLabel;
+              var fillEl = progressEl.querySelector('.dl-fill');
+              if (fillEl) {
+                fillEl.style.width = pct + '%';
+              }
             }
           } else if (!progressEl && acq.total_bytes > 0 && acq.downloaded_bytes > 0) {
             // Insert progress bar if card exists but has no progress bar yet
             var card = document.querySelector('[data-model-id="' + modelId + '"]');
             if (card && !card.querySelector('.dl-progress')) {
-              var pct2 = Math.round((acq.downloaded_bytes / acq.total_bytes) * 100);
+              var dlBytes2 = Math.min(acq.downloaded_bytes, acq.total_bytes);
+              var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
               var speed2 = acq.speed_bytes_per_sec || 0;
+              var shardLabel2 = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || '?')) : 'Downloading';
               var progDiv = document.createElement('div');
               progDiv.className = 'dl-progress';
               progDiv.setAttribute('data-model-progress', safeId);
+              progDiv.setAttribute('data-last-pct', '' + pct2);
               progDiv.innerHTML =
                 '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-                '<span class="text-muted">Downloading shard</span>' +
-                '<span class="mono dl-progress-text">' + formatBytes(acq.downloaded_bytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' +
-                (speed2 > 0 ? ' - ' + formatSpeed(speed2) : '') + '</span></div>' +
+                '<span class="text-muted">' + shardLabel2 + '</span>' +
+                '<span class="mono dl-progress-text">' + formatBytes(dlBytes2) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' +
+                (speed2 > 0 ? ' \u2014 ' + formatSpeed(speed2) : '') + '</span></div>' +
                 '<div class="dl-bar"><div class="dl-fill" style="width:' + pct2 + '%"></div></div>';
               card.appendChild(progDiv);
               // Also add downloading class to card
@@ -652,17 +692,13 @@ var SwarmLLM = (function() {
           // Update legend if present
           var legendEl = document.querySelector('[data-model-legend="' + safeId + '"]');
           if (legendEl && shardDetails.length > 0) {
-            var counts = { local: 0, peer: 0, dl: 0, missing: 0 };
-            shardDetails.forEach(function(sd) {
-              if (sd.state === 'complete') counts.local++;
-              else if (sd.state === 'downloading' || sd.state === 'verifying') counts.dl++;
-              else counts.missing++;
-            });
             var parts = [];
-            if (counts.local > 0) parts.push('<span class="leg-local">Local (' + counts.local + ')</span>');
-            if (counts.peer > 0) parts.push('<span class="leg-peer">Peer (' + counts.peer + ')</span>');
-            if (counts.dl > 0) parts.push('<span class="leg-dl">Downloading (' + counts.dl + ')</span>');
-            if (counts.missing > 0) parts.push('<span class="leg-missing">Pending (' + counts.missing + ')</span>');
+            if (localCount > 0) parts.push('<span class="leg-local">Local (' + localCount + ')</span>');
+            if (peerCount > 0) parts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
+            if (dlCount > 0) parts.push('<span class="leg-dl">Downloading (' + dlCount + ')</span>');
+            if (peerDlCount > 0) parts.push('<span class="leg-peer-dl">Peer DL (' + peerDlCount + ')</span>');
+            if (queuedCount > 0) parts.push('<span class="leg-queued">Queued (' + queuedCount + ')</span>');
+            if (missingCount > 0) parts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
             legendEl.innerHTML = parts.join('');
           }
         });
@@ -706,9 +742,11 @@ var SwarmLLM = (function() {
           var current = cell.className;
           if (current.indexOf('local') >= 0 || current.indexOf(' downloading') >= 0) return;
 
+          var pdPct = pd.progress_pct || 0;
           cell.className = 'shard-cell peer-downloading';
-          cell.textContent = 'P:' + pd.progress_pct + '%';
-          cell.setAttribute('title', 'Shard ' + pd.shard_index + ' — Peer ' + pd.node_id.substring(0, 8) + ' downloading (' + pd.progress_pct + '%)');
+          cell.style.setProperty('--dl-pct', pdPct + '%');
+          cell.textContent = pdPct + '%';
+          cell.setAttribute('title', 'Shard ' + pd.shard_index + ' \u2014 Peer ' + pd.node_id.substring(0, 8) + ' downloading (' + pdPct + '%)');
         });
       }
     },
