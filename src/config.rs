@@ -106,6 +106,9 @@ pub struct NetworkConfig {
     /// Maximum number of relay circuits this node will serve simultaneously.
     #[serde(default = "default_relay_max_circuits")]
     pub relay_max_circuits: usize,
+    /// Automatically activate relay listener when NAT is detected as Private.
+    #[serde(default = "default_true")]
+    pub auto_relay: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -281,6 +284,9 @@ pub struct AutoManageConfig {
     /// Override interval in seconds (for testing). Takes precedence over `interval_minutes`.
     #[serde(default)]
     pub interval_seconds: Option<u64>,
+    /// Maximum number of concurrent shard downloads (default 3).
+    #[serde(default = "default_max_concurrent_downloads")]
+    pub max_concurrent_downloads: usize,
 }
 
 impl Default for AutoManageConfig {
@@ -291,8 +297,13 @@ impl Default for AutoManageConfig {
             interval_minutes: default_auto_manage_interval(),
             max_shards: 0,
             interval_seconds: None,
+            max_concurrent_downloads: default_max_concurrent_downloads(),
         }
     }
+}
+
+fn default_max_concurrent_downloads() -> usize {
+    3
 }
 
 fn default_auto_manage_interval() -> u32 {
@@ -493,6 +504,7 @@ impl Default for NetworkConfig {
             max_peers: default_max_peers(),
             relay_max_circuit_duration_secs: default_relay_circuit_duration(),
             relay_max_circuits: default_relay_max_circuits(),
+            auto_relay: true,
         }
     }
 }
@@ -793,5 +805,27 @@ region = "US"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.identity.region.as_deref(), Some("US"));
+    }
+
+    #[test]
+    fn auto_relay_defaults_to_true() {
+        let config = Config::default();
+        assert!(config.network.auto_relay);
+    }
+
+    #[test]
+    fn parse_auto_relay_disabled() {
+        let toml_str = r#"
+[network]
+auto_relay = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.network.auto_relay);
+    }
+
+    #[test]
+    fn max_concurrent_downloads_defaults_to_3() {
+        let config = Config::default();
+        assert_eq!(config.auto_manage.max_concurrent_downloads, 3);
     }
 }

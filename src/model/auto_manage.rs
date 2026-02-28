@@ -73,6 +73,8 @@ pub struct AutoShardManager {
     shutdown_rx: watch::Receiver<bool>,
     /// Notify trigger — woken when new HF sources or manifests arrive from peers.
     notify: Arc<tokio::sync::Notify>,
+    /// Semaphore to limit concurrent shard downloads.
+    download_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// A candidate shard identified for auto-download.
@@ -94,11 +96,18 @@ impl AutoShardManager {
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         let notify = shared_state.auto_manage_notify.clone();
+        let max_concurrent = shared_state
+            .config
+            .auto_manage
+            .max_concurrent_downloads
+            .max(1);
+        let download_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         Self {
             shared_state,
             network_tx,
             shutdown_rx,
             notify,
+            download_semaphore,
         }
     }
 
@@ -476,7 +485,18 @@ impl AutoShardManager {
     ///
     /// Strategy: try peers first if any hold the shard, fall back to HuggingFace.
     /// After download, register the shard and check if the model is now complete.
+    /// Acquires a semaphore permit to limit concurrent downloads.
     async fn trigger_download(&self, candidate: &ShardCandidate) {
+        // Acquire semaphore permit to limit concurrent downloads.
+        // The permit is moved into the spawned task and dropped on completion.
+        let permit = match self.download_semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!("Download semaphore closed, skipping download");
+                return;
+            }
+        };
+
         tracing::info!(
             model = %candidate.model_id,
             shard = candidate.shard_index,
@@ -651,8 +671,11 @@ impl AutoShardManager {
 
             let net_tx = self.network_tx.clone();
 
-            // Spawn the download so we don't block the evaluation loop
+            // Spawn the download so we don't block the evaluation loop.
+            // The semaphore permit is moved into the task and dropped on completion,
+            // releasing the slot for the next download.
             tokio::spawn(async move {
+                let _permit = permit; // Hold permit for duration of download
                 let (ptx, mut prx) =
                     tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(32);
 
@@ -1197,7 +1220,38 @@ mod tests {
             interval_minutes: 60,
             max_shards: 0,
             interval_seconds: None,
+            max_concurrent_downloads: 3,
         };
         assert_eq!(config.max_shards, 0); // unlimited
+    }
+
+    #[test]
+    fn default_max_concurrent_downloads() {
+        let config = crate::config::AutoManageConfig::default();
+        assert_eq!(config.max_concurrent_downloads, 3);
+    }
+
+    #[tokio::test]
+    async fn semaphore_limits_concurrent_downloads() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(2));
+
+        // Acquire 2 permits — should succeed
+        let p1 = sem.clone().acquire_owned().await.unwrap();
+        let p2 = sem.clone().acquire_owned().await.unwrap();
+        assert_eq!(sem.available_permits(), 0);
+
+        // Third acquire would block, so use try_acquire
+        assert!(sem.try_acquire().is_err());
+
+        // Drop one permit — should free a slot
+        drop(p1);
+        assert_eq!(sem.available_permits(), 1);
+
+        let _p3 = sem.clone().acquire_owned().await.unwrap();
+        assert_eq!(sem.available_permits(), 0);
+
+        drop(p2);
+        drop(_p3);
+        assert_eq!(sem.available_permits(), 2);
     }
 }

@@ -558,13 +558,16 @@ impl PipelineExecutor {
 
         let mut split_model = split_model_ref.lock().await;
 
-        // Clear KV-cache at the start of a new request (prefill).
-        // NOTE: KV-cache lives inside LayerWeights (per-layer). The split_model Mutex
-        // serializes access, preventing concurrent request corruption. If concurrent
-        // request throughput becomes a bottleneck, migrate to per-request KV-cache storage
-        // using a HashMap<Uuid, Vec<(Tensor, Tensor)>> keyed by request_id.
+        // Clear per-request KV-cache at the start of a new request (prefill).
+        let request_id_str = self.request.id.to_string();
         if sequence_num == 0 {
-            split_model.clear_kv_cache();
+            let model_key = format!(
+                "{}-{}-{}",
+                split_model.layer_start, split_model.layer_end, split_model.total_layers
+            );
+            self.shared_state
+                .kv_cache_store
+                .clear_request(&model_key, &request_id_str);
         }
 
         let is_first = split_model.layer_start == 0;
@@ -602,8 +605,13 @@ impl PipelineExecutor {
             split::bytes_to_tensor(activation_bytes)?
         };
 
-        // Run the forward pass with correct position
-        let output = split_model.forward(&input_tensor, index_pos)?;
+        // Run the forward pass with per-request KV-cache isolation
+        let output = split_model.forward(
+            &input_tensor,
+            index_pos,
+            &self.shared_state.kv_cache_store,
+            &request_id_str,
+        )?;
 
         // Track local layer-forward participation and persist earned credits
         {

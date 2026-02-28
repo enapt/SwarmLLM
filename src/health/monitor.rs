@@ -80,7 +80,9 @@ impl HealthMonitor {
             .unwrap_or_default()
             .as_secs();
 
-        let msg = SwarmMessage::HealthPing { nonce, timestamp };
+        let active_request_count = self.shared_state.active_pipelines.len() as u32;
+        let node_id = Some(self.shared_state.identity.node_id().clone());
+        let msg = SwarmMessage::HealthPing { nonce, timestamp, node_id, active_request_count };
 
         if let Err(e) = self.network_tx.send(NetworkCommand::Broadcast(msg)).await {
             tracing::warn!(error = %e, "Failed to send health ping");

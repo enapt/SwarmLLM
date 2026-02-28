@@ -192,6 +192,11 @@ impl InferenceRouter {
                     if expired > 0 {
                         tracing::debug!(expired, "Cleaned up expired KV-cache sessions");
                     }
+                    // Also clean up per-request tensor KV-caches
+                    let tensor_expired = self.shared_state.kv_cache_store.cleanup_expired();
+                    if tensor_expired > 0 {
+                        tracing::debug!(tensor_expired, "Cleaned up expired per-request KV-caches");
+                    }
                 }
             }
         }
@@ -429,6 +434,7 @@ impl InferenceRouter {
         let token_tx = queued.token_tx;
 
         tokio::spawn(async move {
+            let request_start = std::time::Instant::now();
             let output = execute_request(
                 shared_state.clone(),
                 network_tx,
@@ -437,6 +443,17 @@ impl InferenceRouter {
                 token_tx,
             )
             .await;
+
+            // Record latency for Prometheus histogram
+            if output.is_ok() {
+                let latency_secs = request_start.elapsed().as_secs_f64();
+                if let Ok(mut samples) = shared_state.inference_latency_samples.write() {
+                    if samples.len() >= 1000 {
+                        samples.remove(0);
+                    }
+                    samples.push(latency_secs);
+                }
+            }
 
             finalize_request(&shared_state, &request, &output).await;
 
@@ -473,6 +490,10 @@ async fn finalize_request(
         if let Ok(mut stats) = shared_state.node_stats.try_write() {
             stats.requests_served += 1;
         }
+        // Update Prometheus metrics
+        shared_state
+            .inference_requests_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Credit operations:
         // - Per-layer earn credits are handled in process_local_segment
@@ -499,6 +520,13 @@ async fn finalize_request(
             );
         }
     }
+
+    // Clean up per-request KV-cache entries now that the request is done.
+    // The kv_cache_store is keyed by (model_key, request_id), and we don't know
+    // the exact model_key here, so we use the cleanup method which removes by
+    // iterating. For efficiency, the store supports direct removal by request_id.
+    let req_id_str = request.id.to_string();
+    shared_state.kv_cache_store.cleanup_request_id(&req_id_str);
 }
 
 /// Execute a batch of requests that target the same model.

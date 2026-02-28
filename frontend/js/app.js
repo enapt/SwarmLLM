@@ -568,16 +568,23 @@ var SwarmLLM = (function() {
         } else if (isReady) {
           actionHtml = '<button class="btn btn-sm btn-primary" onclick="SwarmLLM.selectModel(\'' + escapeHtml(m.id) + '\')">Use</button>';
         } else if (isDownloading) {
-          // downloading — no button
+          // Cancel download button
+          actionHtml = '<button class="shard-cancel-btn" onclick="SwarmLLM.cancelDownload(\'' + escapeHtml(m.id) + '\')" title="Cancel download">&times;</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
           actionHtml = '<button class="btn btn-sm" onclick="SwarmLLM.requestModel(\'' + escapeHtml(m.id) + '\')">Download Missing</button>';
+        }
+
+        // Remove model button (for models with local shards, not currently downloading)
+        var removeHtml = '';
+        if (hostedShards > 0 && !isDownloading) {
+          removeHtml = ' <button class="model-remove-btn" onclick="SwarmLLM.removeModel(\'' + escapeHtml(m.id) + '\')">Remove</button>';
         }
 
         var name = m.name || m.id;
         card.innerHTML =
           '<div class="model-header">' +
             '<span class="model-name">' + escapeHtml(name) + '</span>' +
-            '<span>' + statusHtml + (actionHtml ? ' ' + actionHtml : '') + '</span>' +
+            '<span>' + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + '</div>' +
           shardHtml + progressHtml;
@@ -1025,6 +1032,49 @@ var SwarmLLM = (function() {
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) settings.loadStorageInfo();
       } catch (e) {}
+      // Load API key
+      settings.loadApiKey();
+    },
+
+    _apiKeyFull: '',
+
+    loadApiKey: async function() {
+      var keyEl = document.getElementById('settings-api-key');
+      if (!keyEl) return;
+      try {
+        var resp = await fetch('/api/admin/api-key');
+        if (resp.ok) {
+          var data = await resp.json();
+          var key = data.api_key || '';
+          settings._apiKeyFull = key;
+          keyEl.value = key ? key.substring(0, 4) + '****' + key.substring(key.length - 4) : 'No API key';
+        } else {
+          keyEl.value = 'Unavailable';
+        }
+      } catch (e) {
+        keyEl.value = 'Error loading';
+      }
+    },
+
+    copyApiKey: async function() {
+      var btn = document.getElementById('btn-copy-api-key');
+      if (!settings._apiKeyFull) return;
+      try {
+        await navigator.clipboard.writeText(settings._apiKeyFull);
+        if (btn) {
+          btn.textContent = 'Copied!';
+          btn.style.color = 'var(--green)';
+          btn.style.borderColor = 'var(--green)';
+          setTimeout(function() {
+            btn.textContent = 'Copy';
+            btn.style.color = '';
+            btn.style.borderColor = '';
+          }, 2000);
+        }
+      } catch (e) {
+        if (btn) btn.textContent = 'Failed';
+        setTimeout(function() { if (btn) btn.textContent = 'Copy'; }, 2000);
+      }
     },
 
     loadStorageInfo: async function() {
@@ -1273,6 +1323,26 @@ var SwarmLLM = (function() {
   // ========================================================================
   // WebSocket — real-time updates
   // ========================================================================
+  var wsWasConnected = false;
+  var wsBannerTimer = null;
+
+  function showWsBanner(type, text) {
+    var banner = document.getElementById('ws-banner');
+    if (!banner) return;
+    if (wsBannerTimer) { clearTimeout(wsBannerTimer); wsBannerTimer = null; }
+    banner.innerHTML = '<div class="ws-banner-' + type + '">' + text + '</div>';
+    banner.classList.add('show');
+  }
+
+  function hideWsBanner(delay) {
+    var banner = document.getElementById('ws-banner');
+    if (!banner) return;
+    if (wsBannerTimer) clearTimeout(wsBannerTimer);
+    wsBannerTimer = setTimeout(function() {
+      banner.classList.remove('show');
+    }, delay || 0);
+  }
+
   function connectWebSocket() {
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
@@ -1282,6 +1352,11 @@ var SwarmLLM = (function() {
       // Pause REST polling while WebSocket is delivering live updates
       pollTimers.forEach(function(t) { clearInterval(t); });
       pollTimers = [];
+      if (wsWasConnected) {
+        showWsBanner('connected', 'Connected');
+        hideWsBanner(2000);
+      }
+      wsWasConnected = true;
     };
 
     ws.onmessage = function(event) {
@@ -1301,6 +1376,9 @@ var SwarmLLM = (function() {
 
     ws.onclose = function() {
       wsHealthy = false;
+      if (wsWasConnected) {
+        showWsBanner('disconnected', 'Connection lost \u2014 reconnecting...');
+      }
       // Resume REST polling as fallback while WebSocket is disconnected
       startPolling();
       setTimeout(connectWebSocket, 3000);
@@ -1319,22 +1397,42 @@ var SwarmLLM = (function() {
   // ========================================================================
   async function loadModels() {
     try {
+      // Fetch admin model list to check readiness status
+      var adminResp = await fetch('/api/admin/models');
+      var adminModels = adminResp.ok ? await adminResp.json() : [];
+
+      // Build set of ready model IDs (status: loaded, ready, or all shards available)
+      var readySet = {};
+      adminModels.forEach(function(m) {
+        var isReady = m.status === 'loaded' || m.status === 'ready' ||
+          (m.global_available === m.shard_count && m.shard_count > 0);
+        if (isReady) readySet[m.id] = true;
+      });
+
       var resp = await fetch('/v1/models');
       var data = await resp.json();
       var sel = document.getElementById('model-select');
       sel.innerHTML = '';
+
       if (data.data && data.data.length > 0) {
-        var savedModel = null;
-        try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
-        var found = savedModel && data.data.some(function(m) { return m.id === savedModel; });
-        currentModel = found ? savedModel : data.data[0].id;
-        data.data.forEach(function(m) {
-          var opt = document.createElement('option');
-          opt.value = m.id;
-          opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
-          sel.appendChild(opt);
-        });
-        sel.value = currentModel;
+        // Filter to only ready models for the chat selector
+        var readyModels = data.data.filter(function(m) { return readySet[m.id]; });
+
+        if (readyModels.length > 0) {
+          var savedModel = null;
+          try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
+          var found = savedModel && readyModels.some(function(m) { return m.id === savedModel; });
+          currentModel = found ? savedModel : readyModels[0].id;
+          readyModels.forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
+            sel.appendChild(opt);
+          });
+          sel.value = currentModel;
+        } else {
+          sel.innerHTML = '<option value="" disabled>No models ready</option>';
+        }
       } else {
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
@@ -1377,6 +1475,60 @@ var SwarmLLM = (function() {
     ui.showBanner('success', 'Model selected: ' + modelId);
     // Refresh model list from server
     loadModels();
+  }
+
+  // ========================================================================
+  // Cancel Download
+  // ========================================================================
+  async function cancelDownload(modelId) {
+    if (!confirm('Cancel download for ' + modelId + '?')) return;
+    try {
+      // NOTE: Backend endpoint POST /api/admin/downloads/{model_id}/cancel
+      // does not exist yet — backend work needed to implement cancellation.
+      var resp = await fetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
+      if (resp.ok) {
+        ui.showBanner('success', 'Download cancelled');
+        // Remove progress UI from the card
+        var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+        var card = document.querySelector('[data-model-id="' + modelId + '"]');
+        if (card) {
+          var progress = card.querySelector('.dl-progress');
+          if (progress) progress.remove();
+          card.classList.remove('downloading');
+        }
+        delete activeAcquisitions[modelId];
+        setTimeout(function() { dashboard.loadInitial(); }, 1000);
+      } else {
+        var errData = await resp.json().catch(function() { return {}; });
+        ui.showBanner('error', errData.error ? errData.error.message : 'Failed to cancel download');
+      }
+    } catch (e) {
+      ui.showBanner('error', 'Cancel failed: ' + e.message);
+    }
+  }
+
+  // ========================================================================
+  // Remove Model
+  // ========================================================================
+  async function removeModel(modelId) {
+    if (!confirm('Remove all local shards for ' + modelId + '? This cannot be undone.')) return;
+    try {
+      // NOTE: Backend endpoint DELETE /api/admin/models/{model_id}
+      // does not exist yet — backend work needed to implement model removal.
+      var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
+      if (resp.ok) {
+        ui.showBanner('success', 'Model removed: ' + modelId);
+        // Remove the card from UI
+        var card = document.querySelector('[data-model-id="' + modelId + '"]');
+        if (card) card.remove();
+        setTimeout(function() { dashboard.loadInitial(); }, 1000);
+      } else {
+        var errData = await resp.json().catch(function() { return {}; });
+        ui.showBanner('error', errData.error ? errData.error.message : 'Failed to remove model');
+      }
+    } catch (e) {
+      ui.showBanner('error', 'Remove failed: ' + e.message);
+    }
   }
 
   // ========================================================================
@@ -1478,6 +1630,20 @@ var SwarmLLM = (function() {
     if (!inputEl) return;
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+  }
+
+  function updateTokenCounter() {
+    var el = document.getElementById('token-counter');
+    if (!el) return;
+    var input = document.getElementById('chat-input');
+    if (!input) return;
+    var text = input.value;
+    if (!text) { el.textContent = ''; el.className = 'token-counter'; return; }
+    var tokens = Math.ceil(text.length / 4);
+    el.textContent = '~' + tokens + ' tokens';
+    if (tokens > 7000) { el.className = 'token-counter danger'; }
+    else if (tokens > 3000) { el.className = 'token-counter warn'; }
+    else { el.className = 'token-counter'; }
   }
 
   // ========================================================================
@@ -1828,7 +1994,10 @@ var SwarmLLM = (function() {
   // ========================================================================
   function init() {
     inputEl = document.getElementById('chat-input');
-    if (inputEl) inputEl.addEventListener('input', autoResizeInput);
+    if (inputEl) {
+      inputEl.addEventListener('input', autoResizeInput);
+      inputEl.addEventListener('input', updateTokenCounter);
+    }
 
     chat.loadSessions();
     chat.renderSessionList();
@@ -1864,6 +2033,8 @@ var SwarmLLM = (function() {
     networkMap: networkMap,
     requestModel: requestModel,
     selectModel: selectModel,
+    cancelDownload: cancelDownload,
+    removeModel: removeModel,
     shutdown: shutdown,
   };
 })();

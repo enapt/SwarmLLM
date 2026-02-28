@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::SwarmError;
@@ -5,6 +6,24 @@ use crate::error::SwarmError;
 /// Current database schema version. Increment when making breaking changes
 /// to the sled storage format.
 pub const DB_SCHEMA_VERSION: u32 = 1;
+
+/// Critical sled trees to check during integrity verification.
+const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];
+
+/// Per-tree integrity status.
+#[derive(Debug, Clone)]
+pub struct TreeStatus {
+    pub total_entries: usize,
+    pub valid_entries: usize,
+    pub corrupt_entries: usize,
+}
+
+/// Result of a full database integrity check.
+#[derive(Debug, Clone)]
+pub struct IntegrityReport {
+    pub trees: HashMap<String, TreeStatus>,
+    pub total_corrupt: usize,
+}
 
 /// Wrapper around sled embedded database.
 ///
@@ -118,10 +137,103 @@ impl Database {
         Ok(results)
     }
 
+    /// Remove a key from a named tree.
+    pub fn remove(&self, tree_name: &str, key: &str) -> Result<(), SwarmError> {
+        let tree = self.tree(tree_name)?;
+        tree.remove(key)?;
+        Ok(())
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), SwarmError> {
         self.inner.flush()?;
         Ok(())
+    }
+
+    /// Check integrity of critical sled trees.
+    ///
+    /// Scans manifests, credits, identity, and nicknames trees.
+    /// For each tree: opens it, iterates entries, attempts JSON deserialization.
+    /// Logs warnings for any corrupt entries (includes key, skips value).
+    pub fn check_integrity(&self) -> IntegrityReport {
+        let mut trees = HashMap::new();
+        let mut total_corrupt = 0;
+
+        for &tree_name in CRITICAL_TREES {
+            let tree = match self.tree(tree_name) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(tree = tree_name, error = %e, "Failed to open tree during integrity check");
+                    trees.insert(
+                        tree_name.to_string(),
+                        TreeStatus {
+                            total_entries: 0,
+                            valid_entries: 0,
+                            corrupt_entries: 0,
+                        },
+                    );
+                    continue;
+                }
+            };
+
+            let mut total = 0;
+            let mut valid = 0;
+            let mut corrupt = 0;
+
+            for entry in tree.iter() {
+                match entry {
+                    Ok((key, value)) => {
+                        total += 1;
+                        // Attempt JSON deserialization as generic Value
+                        if serde_json::from_slice::<serde_json::Value>(&value).is_ok() {
+                            valid += 1;
+                        } else {
+                            corrupt += 1;
+                            let key_str =
+                                std::str::from_utf8(&key).unwrap_or("<non-utf8>");
+                            tracing::warn!(
+                                tree = tree_name,
+                                key = key_str,
+                                "Corrupt entry detected during integrity check"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        total += 1;
+                        corrupt += 1;
+                        tracing::warn!(
+                            tree = tree_name,
+                            error = %e,
+                            "Failed to read entry during integrity check"
+                        );
+                    }
+                }
+            }
+
+            total_corrupt += corrupt;
+            trees.insert(
+                tree_name.to_string(),
+                TreeStatus {
+                    total_entries: total,
+                    valid_entries: valid,
+                    corrupt_entries: corrupt,
+                },
+            );
+        }
+
+        if total_corrupt > 0 {
+            tracing::warn!(
+                total_corrupt,
+                "Database integrity check found corrupt entries"
+            );
+        } else {
+            tracing::info!("Database integrity check passed");
+        }
+
+        IntegrityReport {
+            trees,
+            total_corrupt,
+        }
     }
 }
 
@@ -148,5 +260,55 @@ mod tests {
 
         let val: Option<serde_json::Value> = db.get_json("test_tree", "missing").unwrap();
         assert!(val.is_none());
+    }
+
+    #[test]
+    fn integrity_check_empty_trees() {
+        let db = Database::open_temp().unwrap();
+        let report = db.check_integrity();
+        assert_eq!(report.total_corrupt, 0);
+        for tree_name in CRITICAL_TREES {
+            let status = report.trees.get(*tree_name).unwrap();
+            assert_eq!(status.total_entries, 0);
+            assert_eq!(status.valid_entries, 0);
+            assert_eq!(status.corrupt_entries, 0);
+        }
+    }
+
+    #[test]
+    fn integrity_check_valid_entries() {
+        let db = Database::open_temp().unwrap();
+        db.put_json("manifests", "model1", &serde_json::json!({"name": "test"}))
+            .unwrap();
+        db.put_json("credits", "node1", &serde_json::json!({"balance": 100}))
+            .unwrap();
+
+        let report = db.check_integrity();
+        assert_eq!(report.total_corrupt, 0);
+
+        let manifests = report.trees.get("manifests").unwrap();
+        assert_eq!(manifests.total_entries, 1);
+        assert_eq!(manifests.valid_entries, 1);
+        assert_eq!(manifests.corrupt_entries, 0);
+    }
+
+    #[test]
+    fn integrity_check_detects_corrupt_entry() {
+        let db = Database::open_temp().unwrap();
+        // Insert a valid JSON entry
+        db.put_json("manifests", "good", &serde_json::json!({"ok": true}))
+            .unwrap();
+        // Insert raw invalid bytes directly into the tree
+        let tree = db.tree("manifests").unwrap();
+        tree.insert("corrupt_key", b"not valid json {{{" as &[u8])
+            .unwrap();
+
+        let report = db.check_integrity();
+        assert_eq!(report.total_corrupt, 1);
+
+        let manifests = report.trees.get("manifests").unwrap();
+        assert_eq!(manifests.total_entries, 2);
+        assert_eq!(manifests.valid_entries, 1);
+        assert_eq!(manifests.corrupt_entries, 1);
     }
 }

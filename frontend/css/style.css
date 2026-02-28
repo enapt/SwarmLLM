@@ -937,3 +937,95 @@ input[type="range"]::-webkit-slider-thumb {
   text-align: center;
   margin-top: 8px;
 }
+
+/* ---- Token counter ---- */
+.token-counter {
+  max-width: 740px;
+  margin: 4px auto 0;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  min-height: 1em;
+  padding: 0 2px;
+  transition: color var(--transition);
+}
+.token-counter.warn { color: var(--orange); }
+.token-counter.danger { color: var(--red); font-weight: 600; }
+
+/* ---- WebSocket reconnect banner ---- */
+.ws-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 300;
+  text-align: center;
+  font-size: 0.82rem;
+  font-weight: 500;
+  pointer-events: none;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+  transform: translateY(-100%);
+  opacity: 0;
+}
+.ws-banner.show {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.ws-banner-disconnected {
+  background: rgba(239, 68, 68, 0.9);
+  color: #fff;
+  padding: 8px 16px;
+  backdrop-filter: blur(8px);
+  animation: wsBreathe 2s ease-in-out infinite;
+}
+.ws-banner-connected {
+  background: rgba(34, 197, 94, 0.9);
+  color: #fff;
+  padding: 8px 16px;
+  backdrop-filter: blur(8px);
+}
+@keyframes wsBreathe {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; }
+}
+
+/* ---- Cancel download button ---- */
+.shard-cancel-btn {
+  background: none;
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  padding: 0;
+  transition: all var(--transition);
+  vertical-align: middle;
+}
+.shard-cancel-btn:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* ---- Remove model button ---- */
+.model-remove-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius);
+  font-size: 0.72rem;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.model-remove-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--red-dim);
+}

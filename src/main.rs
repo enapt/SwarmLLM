@@ -204,6 +204,9 @@ async fn test_split_inference(
     println!("Prompt tokens ({}): {:?}", token_ids.len(), token_ids);
 
     // Prefill: run all tokens through
+    let kv_store = swarmllm::inference::split::KvCacheStore::new(std::time::Duration::from_secs(600));
+    let test_request_id = "test-generate";
+
     let input = candle_core::Tensor::from_vec(
         token_ids.clone(),
         &[1, token_ids.len()],
@@ -211,7 +214,7 @@ async fn test_split_inference(
     )?;
 
     let logits = model
-        .forward(&input, 0)
+        .forward(&input, 0, &kv_store, test_request_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -238,7 +241,7 @@ async fn test_split_inference(
             candle_core::Tensor::from_vec(vec![last_token], &[1, 1], &candle_core::Device::Cpu)?;
 
         let logits = model
-            .forward(&input, index_pos)
+            .forward(&input, index_pos, &kv_store, test_request_id)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
         index_pos += 1;

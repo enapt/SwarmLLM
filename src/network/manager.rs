@@ -44,6 +44,8 @@ pub struct NetworkManager {
     peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
     buffered_gossip: Vec<(String, Vec<u8>)>,
+    /// Whether relay listen has been activated for this session (at most once).
+    relay_activated: bool,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -110,6 +112,7 @@ impl NetworkManager {
             shard_download_progress: HashMap::new(),
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
+            relay_activated: false,
             shutdown_rx,
         })
     }
@@ -422,9 +425,62 @@ impl NetworkManager {
                     stats.nat_status = Some(format!("{new:?}"));
                 }
                 // NET-M3: Auto-listen on relay when NAT is detected as Private
-                if matches!(new, libp2p::autonat::NatStatus::Private) {
-                    // Attempt relay listen through any known relay peers
-                    tracing::info!("NAT detected as Private — attempting relay listen");
+                if matches!(new, libp2p::autonat::NatStatus::Private)
+                    && !self.relay_activated
+                    && self.shared_state.config.network.auto_relay
+                {
+                    self.relay_activated = true;
+                    tracing::info!("NAT detected, activating relay listener");
+
+                    // Try bootstrap peers as relay candidates — they are most likely
+                    // to be publicly reachable and have relay enabled.
+                    let bootstrap_addrs = &self.shared_state.config.network.bootstrap_peers;
+                    let mut relayed = false;
+                    for addr_str in bootstrap_addrs {
+                        if let Ok(maddr) = addr_str.parse::<Multiaddr>() {
+                            // Extract the peer ID from the multiaddr (/p2p/<peer_id>)
+                            let maybe_pid = maddr.iter().find_map(|proto| {
+                                if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
+                                    Some(pid)
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(relay_pid) = maybe_pid {
+                                // Build a relay-listen address without the trailing /p2p
+                                let base: Multiaddr = maddr
+                                    .iter()
+                                    .take_while(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                    .collect();
+                                let relay_addr =
+                                    crate::network::relay::relay_listen_addr(&relay_pid, &base);
+                                match self.swarm.listen_on(relay_addr.clone()) {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            relay_peer = %relay_pid,
+                                            %relay_addr,
+                                            "Relay listen activated"
+                                        );
+                                        relayed = true;
+                                        break; // One relay is sufficient
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            relay_peer = %relay_pid,
+                                            error = %e,
+                                            "Failed to listen via relay peer"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !relayed && !bootstrap_addrs.is_empty() {
+                        tracing::warn!(
+                            "NAT detected but no relay peers accepted — node may be unreachable"
+                        );
+                    }
                 }
             }
 
@@ -477,6 +533,7 @@ impl NetworkManager {
                     latency_ms: None,
                     trust_score: 0.5,
                     peer_id_bytes: Some(peer_id.to_bytes()),
+                    active_request_count: 0,
                 };
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());

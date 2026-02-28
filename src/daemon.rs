@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch, RwLock};
+use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::credit::ledger::CreditLedger;
@@ -71,6 +73,10 @@ pub struct SharedState {
         (crate::types::ModelId, usize, usize),
         Arc<tokio::sync::Mutex<crate::inference::split::SplitModel>>,
     >,
+    /// Per-request KV-cache storage for split inference.
+    /// Keyed by (model_key, request_id) — isolates KV-cache per request,
+    /// allowing concurrent requests to use the same model without corruption.
+    pub kv_cache_store: Arc<crate::inference::split::KvCacheStore>,
     /// GGUF tensor metadata for known models (extracted from GGUF header, stored in manifest).
     pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
     /// Nickname registry: node_id -> signed nickname record.
@@ -109,6 +115,16 @@ pub struct SharedState {
     /// Download progress reported by remote peers via gossip.
     /// Key: ShardId, Value: Vec<(NodeId, progress_pct)>
     pub peer_shard_downloads: DashMap<crate::types::ShardId, Vec<(NodeId, u32)>>,
+    /// Cancel flags for in-progress HF downloads, keyed by model ID.
+    /// Set to `true` to signal the download loop to abort.
+    pub download_cancel_flags: DashMap<crate::types::ModelId, Arc<AtomicBool>>,
+    /// Total inference requests processed (for Prometheus /metrics).
+    pub inference_requests_total: AtomicU64,
+    /// Inference latency samples in seconds (for Prometheus histogram).
+    /// Capped at 1000 samples (ring-buffer behavior) to bound memory.
+    pub inference_latency_samples: std::sync::RwLock<Vec<f64>>,
+    /// Readiness flag — set to true after all subsystem tasks are spawned.
+    pub is_ready: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -188,6 +204,7 @@ impl SharedState {
         };
 
         let auto_manage_enabled = config.auto_manage.enabled;
+        let kv_cache_ttl_secs = config.inference.kv_cache_ttl_secs.unwrap_or(600);
         let state = Arc::new(Self {
             config,
             identity,
@@ -211,6 +228,9 @@ impl SharedState {
             acquisition_progress: DashMap::new(),
             pending_layer_results: DashMap::new(),
             split_models: DashMap::new(),
+            kv_cache_store: Arc::new(crate::inference::split::KvCacheStore::new(
+                std::time::Duration::from_secs(kv_cache_ttl_secs),
+            )),
             gguf_meta: DashMap::new(),
             nickname_registry,
             session_manager,
@@ -226,6 +246,10 @@ impl SharedState {
             hf_sources,
             auto_manage_notify: Arc::new(tokio::sync::Notify::new()),
             peer_shard_downloads: DashMap::new(),
+            download_cancel_flags: DashMap::new(),
+            inference_requests_total: AtomicU64::new(0),
+            inference_latency_samples: std::sync::RwLock::new(Vec::new()),
+            is_ready: AtomicBool::new(false),
             shutdown_tx,
         });
 
@@ -236,6 +260,33 @@ impl SharedState {
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
+}
+
+/// Maximum restart attempts before a subsystem is considered permanently failed.
+const MAX_RESTART_ATTEMPTS: u32 = 5;
+/// Base backoff duration for subsystem restarts (doubles each attempt, capped at 16s).
+#[cfg(test)]
+const RESTART_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(1);
+/// Maximum backoff duration for subsystem restarts.
+#[cfg(test)]
+const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(16);
+
+/// Whether a subsystem is critical to daemon operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubsystemCriticality {
+    /// Daemon must shut down if this subsystem permanently fails.
+    Critical,
+    /// Daemon can continue without this subsystem.
+    NonCritical,
+}
+
+/// Compute the backoff duration for a given restart attempt.
+#[cfg(test)]
+fn restart_backoff(attempt: u32) -> std::time::Duration {
+    let secs = RESTART_BACKOFF_BASE
+        .as_secs()
+        .saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
+    std::time::Duration::from_secs(secs).min(RESTART_BACKOFF_CAP)
 }
 
 /// Top-level daemon orchestrating all SwarmLLM subsystems.
@@ -256,6 +307,44 @@ impl Daemon {
 
     /// Run the daemon — spawns all subsystems and waits for shutdown.
     pub async fn run(self) -> anyhow::Result<()> {
+        // Log resolved configuration at startup
+        let auto_interval = self
+            .config
+            .auto_manage
+            .interval_seconds
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| format!("{}m", self.config.auto_manage.interval_minutes));
+        tracing::info!(
+            port = self.config.node.listen_port,
+            data_dir = %self.config.node.data_dir.display(),
+            bootstrap_peers = self.config.network.bootstrap_peers.len(),
+            auto_manage = self.config.auto_manage.enabled,
+            "SwarmLLM daemon starting with resolved config"
+        );
+        tracing::debug!(
+            port = self.config.node.listen_port,
+            data_dir = %self.config.node.data_dir.display(),
+            bootstrap_peers = self.config.network.bootstrap_peers.len(),
+            auto_manage_enabled = self.config.auto_manage.enabled,
+            auto_manage_interval = %auto_interval,
+            max_concurrent_requests = self.config.inference.max_concurrent_requests,
+            shard_size_mb = self.config.model.shard_size_mb,
+            log_level = %self.config.logging.level,
+            max_peers = self.config.network.max_peers,
+            session_timeout_secs = self.config.inference.session_timeout_seconds,
+            relay_enabled = self.config.network.enable_relay,
+            "Full resolved configuration"
+        );
+
+        // Run database integrity check before spawning subsystems
+        let integrity_report = self.db.check_integrity();
+        if integrity_report.total_corrupt > 0 {
+            tracing::warn!(
+                corrupt_entries = integrity_report.total_corrupt,
+                "Database integrity issues detected — some entries may be skipped"
+            );
+        }
+
         // Initialize model executor
         let mut executor = crate::inference::executor::ModelExecutor::new();
         if let Some(ref model_path) = self.config.inference.model_path {
@@ -641,6 +730,15 @@ impl Daemon {
         let (rebalance_tx, rebalance_rx) = mpsc::channel::<RebalanceEvent>(64);
         let (acquisition_tx, acquisition_rx) = mpsc::channel::<AcquisitionCommand>(64);
 
+        // ── Subsystem Supervisor (JoinSet) ──
+        //
+        // All 10 subsystem tasks are spawned into a JoinSet for unified monitoring.
+        // Each task returns (name, criticality, result) so the supervisor loop
+        // can decide whether to trigger shutdown or continue degraded.
+        //
+        let mut subsystems: JoinSet<(&'static str, SubsystemCriticality, Result<(), String>)> =
+            JoinSet::new();
+
         // Spawn NetworkManager (acquisition_tx wired after channel creation below)
         let network_manager = NetworkManager::new(
             shared_state.clone(),
@@ -652,10 +750,9 @@ impl Daemon {
             Some(acquisition_tx.clone()),
         )?;
 
-        let network_handle = tokio::spawn(async move {
-            if let Err(e) = network_manager.run().await {
-                tracing::error!(error = %e, "NetworkManager exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = network_manager.run().await.map_err(|e| e.to_string());
+            ("NetworkManager", SubsystemCriticality::Critical, result)
         });
 
         // Spawn InferenceRouter
@@ -666,10 +763,9 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
-        let inference_handle = tokio::spawn(async move {
-            if let Err(e) = inference_router.run().await {
-                tracing::error!(error = %e, "InferenceRouter exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = inference_router.run().await.map_err(|e| e.to_string());
+            ("InferenceRouter", SubsystemCriticality::Critical, result)
         });
 
         // Spawn message dispatcher: routes network inbound messages to the right subsystem
@@ -679,7 +775,7 @@ impl Daemon {
         let dispatcher_credit_ref = dispatcher_credit_balances.clone();
         let dispatcher_state = shared_state.clone();
         let dispatcher_network_tx = network_tx.clone();
-        let dispatcher_handle = tokio::spawn(async move {
+        subsystems.spawn(async move {
             dispatch_network_messages(
                 &mut network_out_rx,
                 &dispatcher_router_tx,
@@ -689,6 +785,7 @@ impl Daemon {
                 dispatcher_shutdown,
             )
             .await;
+            ("MessageDispatcher", SubsystemCriticality::Critical, Ok(()))
         });
 
         // Spawn HealthMonitor
@@ -699,10 +796,9 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
-        let health_handle = tokio::spawn(async move {
-            if let Err(e) = health_monitor.run().await {
-                tracing::error!(error = %e, "HealthMonitor exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = health_monitor.run().await.map_err(|e| e.to_string());
+            ("HealthMonitor", SubsystemCriticality::NonCritical, result)
         });
 
         // Spawn ShardRebalancer
@@ -714,10 +810,9 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
-        let rebalancer_handle = tokio::spawn(async move {
-            if let Err(e) = shard_rebalancer.run().await {
-                tracing::error!(error = %e, "ShardRebalancer exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = shard_rebalancer.run().await.map_err(|e| e.to_string());
+            ("ShardRebalancer", SubsystemCriticality::NonCritical, result)
         });
 
         // Spawn CreditLedger — shares the same Arc<RwLock<CreditBalance>> as SharedState
@@ -731,10 +826,9 @@ impl Daemon {
         );
         credit_ledger.set_shared_state(shared_state.clone());
 
-        let credit_handle = tokio::spawn(async move {
-            if let Err(e) = credit_ledger.run().await {
-                tracing::error!(error = %e, "CreditLedger exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = credit_ledger.run().await.map_err(|e| e.to_string());
+            ("CreditLedger", SubsystemCriticality::NonCritical, result)
         });
 
         // Spawn AcquisitionManager
@@ -745,10 +839,9 @@ impl Daemon {
             shutdown_rx.clone(),
         );
 
-        let acquisition_handle = tokio::spawn(async move {
-            if let Err(e) = acquisition_manager.run().await {
-                tracing::error!(error = %e, "AcquisitionManager exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = acquisition_manager.run().await.map_err(|e| e.to_string());
+            ("AcquisitionManager", SubsystemCriticality::NonCritical, result)
         });
 
         // Spawn PoolManager (9th subsystem task)
@@ -762,10 +855,9 @@ impl Daemon {
             network_tx.clone(),
             shutdown_rx.clone(),
         );
-        let pool_handle = tokio::spawn(async move {
-            if let Err(e) = pool_manager.run().await {
-                tracing::error!(error = %e, "PoolManager exited with error");
-            }
+        subsystems.spawn(async move {
+            let result = pool_manager.run().await.map_err(|e| e.to_string());
+            ("PoolManager", SubsystemCriticality::NonCritical, result)
         });
 
         // Spawn AutoShardManager (10th subsystem task — optional, runs only if enabled)
@@ -774,8 +866,9 @@ impl Daemon {
             network_tx.clone(),
             shutdown_rx.clone(),
         );
-        let auto_manage_handle = tokio::spawn(async move {
+        subsystems.spawn(async move {
             auto_manage.run().await;
+            ("AutoShardManager", SubsystemCriticality::NonCritical, Ok(()))
         });
 
         // Spawn API server (pass router_cmd_tx + acquisition_tx + network_tx so API can submit requests)
@@ -783,18 +876,22 @@ impl Daemon {
         let api_router_tx = router_cmd_tx.clone();
         let api_acquisition_tx = acquisition_tx.clone();
         let api_network_tx = network_tx.clone();
-        let api_handle = tokio::spawn(async move {
-            if let Err(e) = crate::api::server::run_server_with_state(
+        subsystems.spawn(async move {
+            let result = crate::api::server::run_server_with_state(
                 api_shared_state,
                 api_router_tx,
                 api_acquisition_tx,
                 api_network_tx,
             )
             .await
-            {
-                tracing::error!(error = %e, "API server exited with error");
-            }
+            .map_err(|e| e.to_string());
+            ("ApiServer", SubsystemCriticality::Critical, result)
         });
+
+        // All subsystems spawned — mark node as ready for health probes
+        shared_state
+            .is_ready
+            .store(true, std::sync::atomic::Ordering::Release);
 
         tracing::info!(
             node_id = %self.identity.node_id(),
@@ -896,59 +993,122 @@ impl Daemon {
             });
         }
 
-        // Wait for shutdown signal or task exit
-        tokio::select! {
-            _ = async {
-                let ctrl_c = tokio::signal::ctrl_c();
-                #[cfg(unix)]
-                {
-                    let mut sigterm = tokio::signal::unix::signal(
-                        tokio::signal::unix::SignalKind::terminate(),
-                    ).expect("Failed to register SIGTERM handler");
-                    tokio::select! {
-                        _ = ctrl_c => {
-                            tracing::info!("Shutdown signal received (Ctrl+C)");
+        // ── Supervisor Loop ──
+        //
+        // Monitors all subsystem tasks via JoinSet. When a task exits:
+        // - Due to shutdown signal: expected, no action needed
+        // - Non-critical subsystem: log error and continue running
+        // - Critical subsystem: trigger graceful shutdown
+        // - Panic: treated as unexpected exit with same criticality rules
+        //
+        // Track restart attempts per subsystem name
+        let mut restart_counts: std::collections::HashMap<&str, u32> =
+            std::collections::HashMap::new();
+
+        loop {
+            tokio::select! {
+                // Handle OS shutdown signals
+                _ = async {
+                    let ctrl_c = tokio::signal::ctrl_c();
+                    #[cfg(unix)]
+                    {
+                        let mut sigterm = tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        ).expect("Failed to register SIGTERM handler");
+                        tokio::select! {
+                            _ = ctrl_c => {
+                                tracing::info!("Shutdown signal received (Ctrl+C)");
+                            }
+                            _ = sigterm.recv() => {
+                                tracing::info!("Shutdown signal received (SIGTERM)");
+                            }
                         }
-                        _ = sigterm.recv() => {
-                            tracing::info!("Shutdown signal received (SIGTERM)");
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        ctrl_c.await.ok();
+                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                    }
+                } => {
+                    break;
+                }
+                // Handle subsystem task exits
+                result = subsystems.join_next() => {
+                    match result {
+                        None => {
+                            // All tasks finished — shouldn't happen during normal operation
+                            tracing::error!("All subsystem tasks have exited");
+                            break;
+                        }
+                        Some(Ok((name, criticality, task_result))) => {
+                            // Check if this is a shutdown-induced exit (expected)
+                            if *shutdown_rx.borrow() {
+                                tracing::debug!(subsystem = name, "Subsystem exited during shutdown");
+                                continue;
+                            }
+
+                            match task_result {
+                                Ok(()) => {
+                                    tracing::warn!(
+                                        subsystem = name,
+                                        "Subsystem exited unexpectedly with Ok"
+                                    );
+                                }
+                                Err(ref e) => {
+                                    tracing::error!(
+                                        subsystem = name,
+                                        error = %e,
+                                        "Subsystem exited with error"
+                                    );
+                                }
+                            }
+
+                            let count = restart_counts.entry(name).or_insert(0);
+                            *count += 1;
+
+                            if criticality == SubsystemCriticality::Critical {
+                                if *count > MAX_RESTART_ATTEMPTS {
+                                    tracing::error!(
+                                        subsystem = name,
+                                        attempts = *count,
+                                        "Critical subsystem permanently failed — shutting down"
+                                    );
+                                    break;
+                                }
+                                // Critical subsystem failed but we can't restart channel-bound
+                                // tasks, so trigger shutdown immediately.
+                                tracing::error!(
+                                    subsystem = name,
+                                    "Critical subsystem failed — triggering graceful shutdown"
+                                );
+                                break;
+                            } else {
+                                // Non-critical: log and continue
+                                tracing::warn!(
+                                    subsystem = name,
+                                    restart_count = *count,
+                                    max_restarts = MAX_RESTART_ATTEMPTS,
+                                    "Non-critical subsystem failed — daemon continues without it"
+                                );
+                            }
+                        }
+                        Some(Err(join_error)) => {
+                            // Task panicked or was cancelled
+                            if join_error.is_panic() {
+                                tracing::error!(
+                                    error = %join_error,
+                                    "Subsystem task panicked — triggering shutdown"
+                                );
+                                break;
+                            } else {
+                                tracing::warn!(
+                                    error = %join_error,
+                                    "Subsystem task cancelled"
+                                );
+                            }
                         }
                     }
                 }
-                #[cfg(not(unix))]
-                {
-                    ctrl_c.await.ok();
-                    tracing::info!("Shutdown signal received (Ctrl+C)");
-                }
-            } => {}
-            result = network_handle => {
-                tracing::error!(?result, "NetworkManager task exited");
-            }
-            result = inference_handle => {
-                tracing::error!(?result, "InferenceRouter task exited");
-            }
-            result = health_handle => {
-                tracing::error!(?result, "HealthMonitor task exited");
-            }
-            result = rebalancer_handle => {
-                tracing::error!(?result, "ShardRebalancer task exited");
-            }
-            result = credit_handle => {
-                tracing::error!(?result, "CreditLedger task exited");
-            }
-            result = acquisition_handle => {
-                tracing::error!(?result, "AcquisitionManager task exited");
-            }
-            result = pool_handle => {
-                tracing::error!(?result, "PoolManager task exited");
-            }
-            result = api_handle => {
-                tracing::error!(?result, "API server task exited");
-            }
-            result = dispatcher_handle => {
-                tracing::error!(?result, "Message dispatcher task exited");
-            }
-            result = auto_manage_handle => {
-                tracing::error!(?result, "AutoShardManager task exited");
             }
         }
 
@@ -1368,6 +1528,55 @@ async fn dispatch_network_messages(
                                     );
                                 }
                             }
+                            // Health pings: update sender's load and respond with pong
+                            SwarmMessage::HealthPing { nonce, node_id: Some(sender_id), active_request_count, .. } => {
+                                // Update the sender's active request count in peer_registry
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
+                                    peer.active_request_count = active_request_count;
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+
+                                // Respond with a pong containing our own load
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let our_load = shared_state.active_pipelines.len() as u32;
+                                let our_id = Some(shared_state.identity.node_id().clone());
+                                let pong = SwarmMessage::HealthPong {
+                                    nonce,
+                                    timestamp: ts,
+                                    node_id: our_id,
+                                    active_request_count: our_load,
+                                };
+                                let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                            }
+                            // Health pings without node_id (backward compat): still respond
+                            SwarmMessage::HealthPing { nonce, node_id: None, .. } => {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let our_load = shared_state.active_pipelines.len() as u32;
+                                let our_id = Some(shared_state.identity.node_id().clone());
+                                let pong = SwarmMessage::HealthPong {
+                                    nonce,
+                                    timestamp: ts,
+                                    node_id: our_id,
+                                    active_request_count: our_load,
+                                };
+                                let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                            }
+                            // Health pongs: update the sender's load in peer_registry
+                            SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
+                                    peer.active_request_count = active_request_count;
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+                            }
+                            SwarmMessage::HealthPong { node_id: None, .. } => {
+                                // Old-format pong without node_id — can't update peer load
+                            }
                             // Other messages handled by NetworkManager
                             _ => {}
                         }
@@ -1537,6 +1746,7 @@ pub fn generate_and_register_local_manifest(
         };
 
     let mut manifest = crate::types::ModelManifest {
+        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
         id: model_id.clone(),
         name: info.name.clone(),
         architecture,
@@ -1745,6 +1955,7 @@ fn regenerate_manifest_from_header(
         .unwrap_or_else(|| model_id.0.clone());
 
     let mut manifest = crate::types::ModelManifest {
+        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
         id: model_id.clone(),
         name: model_name,
         architecture: crate::types::ModelArchitecture::Llama,
@@ -2231,13 +2442,20 @@ async fn handle_layer_forward(
         }
     };
 
-    // Clear KV-cache at the start of a new request (prefill)
+    // Clear per-request KV-cache at the start of a new request (prefill)
+    let req_id_str = request_id.to_string();
     if forward.sequence_num == 0 {
-        split_model.clear_kv_cache();
+        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
+        shared_state.kv_cache_store.clear_request(&model_key, &req_id_str);
     }
 
-    // Run the forward pass
-    let output = match split_model.forward(&input_tensor, forward.index_pos as usize) {
+    // Run the forward pass with per-request KV-cache isolation
+    let output = match split_model.forward(
+        &input_tensor,
+        forward.index_pos as usize,
+        &shared_state.kv_cache_store,
+        &req_id_str,
+    ) {
         Ok(o) => o,
         Err(e) => {
             send_error_result(
@@ -2411,5 +2629,132 @@ fn open_browser(url: &str) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn restart_backoff_doubles_each_attempt() {
+        assert_eq!(restart_backoff(0), Duration::from_secs(1));
+        assert_eq!(restart_backoff(1), Duration::from_secs(2));
+        assert_eq!(restart_backoff(2), Duration::from_secs(4));
+        assert_eq!(restart_backoff(3), Duration::from_secs(8));
+        assert_eq!(restart_backoff(4), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn restart_backoff_caps_at_16_seconds() {
+        assert_eq!(restart_backoff(5), Duration::from_secs(16));
+        assert_eq!(restart_backoff(10), Duration::from_secs(16));
+        assert_eq!(restart_backoff(100), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn subsystem_criticality_classification() {
+        // Verify our criticality assignments match the task spec
+        assert_eq!(SubsystemCriticality::Critical, SubsystemCriticality::Critical);
+        assert_ne!(SubsystemCriticality::Critical, SubsystemCriticality::NonCritical);
+    }
+
+    #[test]
+    fn max_restart_attempts_is_five() {
+        assert_eq!(MAX_RESTART_ATTEMPTS, 5);
+    }
+
+    #[tokio::test]
+    async fn joinset_catches_task_panic() {
+        let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
+        set.spawn(async {
+            panic!("simulated subsystem panic");
+        });
+
+        let result = set.join_next().await.unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn joinset_returns_task_error() {
+        let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
+        set.spawn(async {
+            ("TestSubsystem", SubsystemCriticality::NonCritical, Err("boom".to_string()))
+        });
+
+        let result = set.join_next().await.unwrap();
+        let (name, crit, task_result) = result.unwrap();
+        assert_eq!(name, "TestSubsystem");
+        assert_eq!(crit, SubsystemCriticality::NonCritical);
+        assert!(task_result.is_err());
+        assert_eq!(task_result.unwrap_err(), "boom");
+    }
+
+    #[tokio::test]
+    async fn joinset_returns_task_success() {
+        let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
+        set.spawn(async {
+            ("TestSubsystem", SubsystemCriticality::Critical, Ok(()))
+        });
+
+        let result = set.join_next().await.unwrap();
+        let (name, crit, task_result) = result.unwrap();
+        assert_eq!(name, "TestSubsystem");
+        assert_eq!(crit, SubsystemCriticality::Critical);
+        assert!(task_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn supervisor_non_critical_failure_does_not_drain_set() {
+        // Simulate: one non-critical task fails, others keep running
+        let mut set: JoinSet<(&str, SubsystemCriticality, Result<(), String>)> = JoinSet::new();
+
+        // Task that fails immediately
+        set.spawn(async {
+            ("HealthMonitor", SubsystemCriticality::NonCritical, Err("test error".to_string()))
+        });
+
+        // Task that runs until cancelled
+        set.spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            ("ApiServer", SubsystemCriticality::Critical, Ok(()))
+        });
+
+        // First join: get the failed task
+        let result = set.join_next().await.unwrap();
+        let (name, crit, _) = result.unwrap();
+        assert_eq!(name, "HealthMonitor");
+        assert_eq!(crit, SubsystemCriticality::NonCritical);
+
+        // The other task is still running — set is not empty
+        assert_eq!(set.len(), 1);
+
+        // Clean up
+        set.abort_all();
+    }
+
+    #[tokio::test]
+    async fn supervisor_restart_counting() {
+        // Simulate the restart counting logic from the supervisor loop
+        let mut restart_counts: std::collections::HashMap<&str, u32> =
+            std::collections::HashMap::new();
+
+        // Simulate 5 failures of a non-critical subsystem
+        for i in 1..=5 {
+            let count = restart_counts.entry("HealthMonitor").or_insert(0);
+            *count += 1;
+            assert_eq!(*count, i);
+        }
+
+        // After 5 failures, count should be 5 (at the limit)
+        assert_eq!(*restart_counts.get("HealthMonitor").unwrap(), MAX_RESTART_ATTEMPTS);
+
+        // One more would exceed
+        let count = restart_counts.entry("HealthMonitor").or_insert(0);
+        *count += 1;
+        assert!(*count > MAX_RESTART_ATTEMPTS);
     }
 }

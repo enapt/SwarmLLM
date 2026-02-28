@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::response::Redirect;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::sync::mpsc;
 
-use crate::api::{admin, identity, middleware, openai, pool, websocket};
+use crate::api::{admin, identity, metrics, middleware, openai, pool, websocket};
 use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
@@ -67,6 +67,13 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Network map (heatmap data)
         .route("/api/admin/network-map", get(admin::network_map))
+        // Download management
+        .route(
+            "/api/admin/downloads/:model_id/cancel",
+            post(admin::cancel_download),
+        )
+        // Model management
+        .route("/api/admin/models/:id", delete(admin::delete_model))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
         // API key (requires auth)
@@ -100,6 +107,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(|| async { Redirect::to("/admin") }))
         // Health check
         .route("/health", get(health))
+        .route("/health/ready", get(metrics::health_ready))
+        // Prometheus metrics
+        .route("/metrics", get(metrics::metrics))
         // Middleware (layers run bottom-to-top: CORS first, then auth, then body limit, then handler)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB request body limit
         .layer(axum::middleware::from_fn_with_state(

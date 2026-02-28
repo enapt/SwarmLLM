@@ -19,6 +19,81 @@ use crate::error::SwarmError;
 
 const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
+// ── Per-request KV-cache store ──
+
+/// Concurrent per-request KV-cache storage.
+///
+/// Instead of storing KV-cache inside `LayerWeights` (which couples cache lifetime
+/// to the model and prevents concurrent requests), this stores caches externally,
+/// keyed by `(model_key, request_id)`.
+///
+/// Each entry is a `Vec<Option<(Tensor, Tensor)>>` — one `(K, V)` pair per layer.
+/// Entries are created lazily on first use and cleaned up when the request completes
+/// or after a timeout.
+pub struct KvCacheStore {
+    /// Per-request KV-cache: (model_key, request_id) → per-layer (K, V) pairs.
+    caches: dashmap::DashMap<(String, String), KvCacheEntry>,
+    /// TTL for abandoned cache entries.
+    ttl: std::time::Duration,
+}
+
+struct KvCacheEntry {
+    /// Per-layer KV pairs. Index corresponds to layer index within the model segment.
+    layers: Vec<Option<(Tensor, Tensor)>>,
+    /// When this entry was last accessed.
+    last_accessed: std::time::Instant,
+}
+
+impl KvCacheStore {
+    /// Create a new KV-cache store with the given TTL for abandoned entries.
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self {
+            caches: dashmap::DashMap::new(),
+            ttl,
+        }
+    }
+
+    /// Get or create the KV-cache entry for a request. Returns a mutable ref guard.
+    fn get_or_create(
+        &self,
+        model_key: &str,
+        request_id: &str,
+        num_layers: usize,
+    ) -> dashmap::mapref::one::RefMut<'_, (String, String), KvCacheEntry> {
+        let key = (model_key.to_string(), request_id.to_string());
+        self.caches.entry(key).or_insert_with(|| KvCacheEntry {
+            layers: vec![None; num_layers],
+            last_accessed: std::time::Instant::now(),
+        })
+    }
+
+    /// Clear (remove) the KV-cache for a specific request.
+    pub fn clear_request(&self, model_key: &str, request_id: &str) {
+        let key = (model_key.to_string(), request_id.to_string());
+        self.caches.remove(&key);
+    }
+
+    /// Clean up all expired cache entries. Returns the number of entries removed.
+    pub fn cleanup_expired(&self) -> usize {
+        let ttl = self.ttl;
+        let before = self.caches.len();
+        self.caches
+            .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
+        before - self.caches.len()
+    }
+
+    /// Remove all cache entries for a given request_id (across all models).
+    pub fn cleanup_request_id(&self, request_id: &str) {
+        self.caches
+            .retain(|(_model_key, req_id), _| req_id != request_id);
+    }
+
+    /// Get the number of active cache entries.
+    pub fn active_entries(&self) -> usize {
+        self.caches.len()
+    }
+}
+
 // ── BPE Tokenizer from GGUF merges ──
 
 /// BPE tokenizer built from GGUF metadata.
@@ -367,7 +442,6 @@ struct LayerWeights {
     cos: Tensor,
     sin: Tensor,
     neg_inf: Tensor,
-    kv_cache: Option<(Tensor, Tensor)>,
     /// If true, use contiguous RoPE (rope); if false, use interleaved (rope_i).
     use_rope_contiguous: bool,
 }
@@ -390,10 +464,11 @@ impl LayerWeights {
     }
 
     fn forward_attn(
-        &mut self,
+        &self,
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        kv_cache: &mut Option<(Tensor, Tensor)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         let mut q = self.attention_wq.forward(x)?;
@@ -428,19 +503,19 @@ impl LayerWeights {
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
         // KV-cache concatenation
-        let (k, v) = match &self.kv_cache {
+        let (k, v) = match kv_cache {
             None => (k, v),
             Some((k_cache, v_cache)) => {
                 if index_pos == 0 {
                     (k, v)
                 } else {
-                    let k = Tensor::cat(&[k_cache, &k], 2)?;
-                    let v = Tensor::cat(&[v_cache, &v], 2)?;
+                    let k = Tensor::cat(&[k_cache as &Tensor, &k], 2)?;
+                    let v = Tensor::cat(&[v_cache as &Tensor, &v], 2)?;
                     (k, v)
                 }
             }
         };
-        self.kv_cache = Some((k.clone(), v.clone()));
+        *kv_cache = Some((k.clone(), v.clone()));
 
         // GQA: repeat K/V heads to match Q head count
         let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
@@ -1114,7 +1189,6 @@ impl SplitModel {
                 cos: cos.clone(),
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
-                kv_cache: None,
                 use_rope_contiguous,
             });
         }
@@ -1520,7 +1594,6 @@ impl SplitModel {
                 cos: cos.clone(),
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
-                kv_cache: None,
                 use_rope_contiguous,
             });
         }
@@ -1688,7 +1761,16 @@ impl SplitModel {
     /// - For intermediate segments: `input` is hidden state activations (f32, [1, seq, hidden_dim]).
     /// - For the last segment: returns logits (f32, [vocab_size]) for the last token position.
     /// - For intermediate segments: returns hidden states (f32, [1, seq, hidden_dim]).
-    pub fn forward(&mut self, input: &Tensor, index_pos: usize) -> Result<Tensor, SwarmError> {
+    ///
+    /// `kv_cache_store` and `request_id` provide per-request KV-cache isolation.
+    /// The cache is stored externally in the `KvCacheStore`, keyed by request_id.
+    pub fn forward(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
@@ -1724,8 +1806,20 @@ impl SplitModel {
             )
         };
 
+        // Build a model_key for the KV-cache store
+        let model_key = format!("{}-{}-{}", self.layer_start, self.layer_end, self.total_layers);
+        let num_layers = self.layers.len();
+
+        // Get or create the per-request cache entry, extract the layer caches,
+        // then drop the DashMap guard before running the (potentially slow) forward pass.
+        let mut layer_kv_caches: Vec<Option<(Tensor, Tensor)>> = {
+            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            entry.last_accessed = std::time::Instant::now();
+            entry.layers.clone()
+        };
+
         // Run through our layers
-        for layer in self.layers.iter_mut() {
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
             let x = layer_in;
             let residual = &x;
             let x = layer
@@ -1733,7 +1827,7 @@ impl SplitModel {
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
             let attn = layer
-                .forward_attn(&x, mask.as_ref(), index_pos)
+                .forward_attn(&x, mask.as_ref(), index_pos, &mut layer_kv_caches[layer_idx])
                 .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
             let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
 
@@ -1747,6 +1841,13 @@ impl SplitModel {
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
             layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+        }
+
+        // Write the updated KV-caches back to the store
+        {
+            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            entry.layers = layer_kv_caches;
+            entry.last_accessed = std::time::Instant::now();
         }
 
         if is_last {
@@ -1773,13 +1874,6 @@ impl SplitModel {
         } else {
             // Intermediate segment: return hidden states for next segment
             Ok(layer_in)
-        }
-    }
-
-    /// Clear KV-cache (for new generation session).
-    pub fn clear_kv_cache(&mut self) {
-        for layer in &mut self.layers {
-            layer.kv_cache = None;
         }
     }
 
@@ -2337,5 +2431,120 @@ mod tests {
         // compute_local_layer_range still returns the longest
         let range = compute_local_layer_range(&meta, 1800, &[0, 1, 2]);
         assert_eq!(range, (0, 4));
+    }
+
+    // ── KvCacheStore tests ──
+
+    #[test]
+    fn kv_cache_store_isolates_requests() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        // Two different request IDs should get independent caches
+        let model_key = "test-model";
+        let req_a = "request-a";
+        let req_b = "request-b";
+        let num_layers = 2;
+
+        // Create caches for both requests
+        {
+            let mut entry_a = store.get_or_create(model_key, req_a, num_layers);
+            let k = Tensor::from_vec(vec![1.0f32, 2.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+            let v = Tensor::from_vec(vec![3.0f32, 4.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+            entry_a.layers[0] = Some((k, v));
+        }
+        {
+            let mut entry_b = store.get_or_create(model_key, req_b, num_layers);
+            let k = Tensor::from_vec(vec![10.0f32, 20.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+            let v = Tensor::from_vec(vec![30.0f32, 40.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
+            entry_b.layers[0] = Some((k, v));
+        }
+
+        // Verify request A has its own cache values
+        {
+            let entry_a = store.get_or_create(model_key, req_a, num_layers);
+            let (k, _v) = entry_a.layers[0].as_ref().unwrap();
+            let k_data = k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert_eq!(k_data, vec![1.0, 2.0]);
+        }
+
+        // Verify request B has its own separate cache values
+        {
+            let entry_b = store.get_or_create(model_key, req_b, num_layers);
+            let (k, _v) = entry_b.layers[0].as_ref().unwrap();
+            let k_data = k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert_eq!(k_data, vec![10.0, 20.0]);
+        }
+
+        assert_eq!(store.active_entries(), 2);
+    }
+
+    #[test]
+    fn kv_cache_store_clear_request() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let model_key = "test-model";
+        let req_a = "request-a";
+        let req_b = "request-b";
+
+        // Create caches for two requests
+        store.get_or_create(model_key, req_a, 4);
+        store.get_or_create(model_key, req_b, 4);
+        assert_eq!(store.active_entries(), 2);
+
+        // Clear only request A
+        store.clear_request(model_key, req_a);
+        assert_eq!(store.active_entries(), 1);
+
+        // Request B should still exist
+        let entry_b = store.get_or_create(model_key, req_b, 4);
+        assert_eq!(entry_b.layers.len(), 4);
+    }
+
+    #[test]
+    fn kv_cache_store_cleanup_request_id() {
+        let store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        // Create caches for the same request across multiple models
+        store.get_or_create("model-a", "req-1", 2);
+        store.get_or_create("model-b", "req-1", 2);
+        store.get_or_create("model-a", "req-2", 2);
+        assert_eq!(store.active_entries(), 3);
+
+        // cleanup_request_id removes all entries for req-1
+        store.cleanup_request_id("req-1");
+        assert_eq!(store.active_entries(), 1);
+    }
+
+    #[test]
+    fn kv_cache_store_cleanup_expired() {
+        let store = KvCacheStore::new(std::time::Duration::from_millis(1));
+
+        store.get_or_create("model", "req-1", 2);
+        store.get_or_create("model", "req-2", 2);
+        assert_eq!(store.active_entries(), 2);
+
+        // Wait for TTL to expire
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let cleaned = store.cleanup_expired();
+        assert_eq!(cleaned, 2);
+        assert_eq!(store.active_entries(), 0);
+    }
+
+    #[test]
+    fn kv_cache_store_fresh_entry_survives_cleanup() {
+        let store = KvCacheStore::new(std::time::Duration::from_millis(50));
+
+        // Create an entry that will expire
+        store.get_or_create("model", "req-old", 2);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+
+        // Create a fresh entry
+        store.get_or_create("model", "req-new", 2);
+
+        // Cleanup should only remove the old one
+        let cleaned = store.cleanup_expired();
+        assert_eq!(cleaned, 1);
+        assert_eq!(store.active_entries(), 1);
     }
 }

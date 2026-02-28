@@ -8,6 +8,9 @@
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+  <!-- WebSocket reconnect banner -->
+  <div class="ws-banner" id="ws-banner"></div>
+
   <!-- Setup wizard modal (first-run only) -->
   <div class="modal-overlay hidden" id="setup-modal">
     <div class="modal">
@@ -91,6 +94,14 @@
       <div class="modal-header">
         <h2>Settings</h2>
         <button class="btn btn-ghost btn-sm" onclick="SwarmLLM.ui.closeSettings()">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <div class="flex gap-1" style="align-items:center">
+          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
+          <button class="btn btn-sm" id="btn-copy-api-key" onclick="SwarmLLM.settings.copyApiKey()" title="Copy API key">Copy</button>
+        </div>
+        <span class="text-muted" style="font-size:0.75rem">Bearer token for API authentication</span>
       </div>
       <div class="form-group">
         <label>Nickname</label>
@@ -259,6 +270,7 @@
                         onkeydown="SwarmLLM.chat.handleKey(event)"></textarea>
               <button class="btn btn-primary" id="send-btn" onclick="SwarmLLM.chat.send()">Send</button>
             </div>
+            <div class="token-counter" id="token-counter"></div>
           </div>
         </div>
       </div>

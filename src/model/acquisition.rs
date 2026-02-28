@@ -200,6 +200,7 @@ impl AcquisitionManager {
                     model_id.clone(),
                     AcquisitionJob {
                         manifest: ModelManifest {
+                            schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
                             id: model_id.clone(),
                             name: String::new(),
                             architecture: crate::types::ModelArchitecture::Llama,

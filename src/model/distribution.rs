@@ -113,6 +113,7 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
+            schema_version: 1,
             id: ModelId("test-model".into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,

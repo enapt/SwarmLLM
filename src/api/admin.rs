@@ -2,6 +2,8 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 
+use axum::extract::Path;
+
 use crate::api::server::AppState;
 use crate::config::ContributionMode;
 use crate::error::ApiError;
@@ -937,6 +939,12 @@ pub async fn hf_download(
     };
     shared.acquisition_progress.insert(mid.clone(), status);
 
+    // Register cancellation flag for this download
+    let hf_cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    shared
+        .download_cancel_flags
+        .insert(mid.clone(), hf_cancel_flag.clone());
+
     tokio::spawn(async move {
         let (ptx, mut prx) =
             tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
@@ -1046,6 +1054,9 @@ pub async fn hf_download(
                 }
             }
         }
+
+        // Clean up cancel flag
+        download_shared.download_cancel_flags.remove(&download_mid);
     });
 
     Ok(Json(serde_json::json!({
@@ -1250,6 +1261,12 @@ pub async fn hf_download_shards(
     let response_model_id = model_id_str.clone();
     let response_shards = shard_indices.clone();
 
+    // Register cancellation flag for this download
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    shared
+        .download_cancel_flags
+        .insert(mid.clone(), cancel_flag.clone());
+
     // Capture network_tx for broadcasting HfSourceGossip + ModelManifest after download
     let network_tx = state.network_tx.clone();
 
@@ -1418,6 +1435,20 @@ pub async fn hf_download_shards(
         let mut failed = false;
 
         for &shard_idx in &shard_indices {
+            // Check cancellation flag before each shard download
+            if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                tracing::info!(model = %model_id_str, "Download cancelled by user");
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                    entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                        reason: "Cancelled by user".to_string(),
+                    };
+                    entry.log.push("Download cancelled by user".to_string());
+                }
+                // Clean up cancel flag
+                download_shared.download_cancel_flags.remove(&download_mid);
+                return;
+            }
+
             if shard_idx >= info.shard_count {
                 tracing::error!(shard_idx, max = info.shard_count - 1, "Shard index out of range");
                 failed = true;
@@ -1508,6 +1539,9 @@ pub async fn hf_download_shards(
 
         // Drop the progress sender so the updater task exits
         drop(ptx);
+
+        // Clean up cancel flag
+        download_shared.download_cancel_flags.remove(&download_mid);
 
         if failed {
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
@@ -1655,6 +1689,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     let node_id = params.shared.identity.node_id().clone();
 
     let mut manifest = crate::types::ModelManifest {
+        schema_version: crate::types::MANIFEST_SCHEMA_VERSION,
         id: model_id.clone(),
         name: model_name,
         architecture,
@@ -1844,4 +1879,159 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         .collect();
 
     Json(serde_json::json!({ "regions": region_json }))
+}
+
+/// POST /api/admin/downloads/:model_id/cancel — Cancel an in-progress HF download.
+///
+/// Sets the cancellation flag so the download loop aborts. Cleans up partial .tmp files.
+/// Returns 200 on success, 404 if no active download for that model.
+pub async fn cancel_download(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    // Check if there's an active download for this model
+    let has_active = shared
+        .acquisition_progress
+        .get(&mid)
+        .map(|entry| {
+            matches!(
+                entry.state,
+                crate::model::acquisition::AcquisitionState::Downloading
+                    | crate::model::acquisition::AcquisitionState::AwaitingManifest
+            )
+        })
+        .unwrap_or(false);
+
+    if !has_active {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            format!("No active download found for model '{}'", model_id),
+        )));
+    }
+
+    // Set the cancel flag (the download loop checks this)
+    if let Some(flag) = shared.download_cancel_flags.get(&mid) {
+        flag.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    // Mark the acquisition as failed/cancelled
+    if let Some(mut entry) = shared.acquisition_progress.get_mut(&mid) {
+        entry.state = crate::model::acquisition::AcquisitionState::Failed {
+            reason: "Cancelled by user".to_string(),
+        };
+        entry.log.push("Download cancelled by user".to_string());
+    }
+
+    // Clean up partial .tmp files in the model directory
+    let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+    if model_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&model_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    tracing::info!(path = %path.display(), "Removing partial download file");
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
+    tracing::info!(model = %model_id, "Download cancelled");
+
+    Ok(Json(serde_json::json!({
+        "status": "cancelled",
+        "model_id": model_id,
+    })))
+}
+
+/// DELETE /api/admin/models/:model_id — Remove a model and all its shard files.
+///
+/// Removes shard files from disk, clears manifest from DB, removes from SharedState
+/// registries. Returns 200 on success, 404 if model not found.
+pub async fn delete_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    // Verify the model exists
+    if shared.model_registry.get_manifest(&mid).is_none() {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            format!("Model '{}' not found", model_id),
+        )));
+    }
+
+    let node_id = shared.identity.node_id().clone();
+
+    // Remove shard files from disk
+    let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+    let mut files_removed = 0u32;
+    if model_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&model_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!(path = %path.display(), error = %e, "Failed to remove shard file");
+                    } else {
+                        files_removed += 1;
+                    }
+                }
+            }
+        }
+        // Remove the model directory itself
+        let _ = std::fs::remove_dir(&model_dir);
+    }
+
+    // Remove manifest from sled DB
+    let _ = shared.db.remove("model_meta", &model_id);
+
+    // Remove HF source from DB
+    let _ = shared.db.remove("hf_sources", &model_id);
+
+    // Remove from SharedState registries
+    shared.model_registry.remove_manifest(&mid);
+    shared.model_registry.remove_all_model_shards(&mid);
+
+    // Remove from shard_registry DashMap
+    shared
+        .shard_registry
+        .retain(|shard_id, _| shard_id.model_id != mid);
+
+    // Remove from acquisition_progress
+    shared.acquisition_progress.remove(&mid);
+
+    // Remove from gguf_meta
+    shared.gguf_meta.remove(&mid);
+
+    // Remove from hf_sources
+    shared.hf_sources.remove(&mid);
+
+    // Remove split models for this model
+    shared
+        .split_models
+        .retain(|key, _| key.0 != mid);
+
+    // Broadcast shard removal via GossipSub
+    if let Some(ref ntx) = state.network_tx {
+        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
+            node_id: node_id.clone(),
+            shards: vec![], // Empty shards = we no longer host anything for this model
+            timestamp: chrono::Utc::now(),
+        });
+        let _ = ntx
+            .send(crate::types::NetworkCommand::Broadcast(announce))
+            .await;
+    }
+
+    tracing::info!(model = %model_id, files = files_removed, "Model deleted");
+
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "model_id": model_id,
+        "files_removed": files_removed,
+    })))
 }

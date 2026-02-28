@@ -181,10 +181,21 @@ impl PipelineScheduler {
             let last_shard_idx = manifest.shard_count.saturating_sub(1);
             let can_be_last = shard_indices.contains(&last_shard_idx);
 
-            // Approximate load from active pipelines targeting this node
-            let active_load = self.shared_state.active_pipelines.iter()
-                .filter(|entry| entry.value().segments.iter().any(|s| s.node_id == node_id))
-                .count() as f32;
+            // Use peer-reported load from health pings when available,
+            // fall back to local active_pipelines count for our own node
+            let active_load = if &node_id == local_node_id {
+                self.shared_state.active_pipelines.len() as f32
+            } else {
+                self.shared_state.peer_registry
+                    .get(&node_id)
+                    .map(|p| p.active_request_count as f32)
+                    .unwrap_or_else(|| {
+                        // Fallback: estimate from active pipelines (pre-health-ping behavior)
+                        self.shared_state.active_pipelines.iter()
+                            .filter(|entry| entry.value().segments.iter().any(|s| s.node_id == node_id))
+                            .count() as f32
+                    })
+            };
 
             candidates.push(NodeCandidate {
                 node_id,
@@ -313,12 +324,19 @@ impl PipelineScheduler {
             }
 
             // Pick the candidate that covers the most layers. When tied, prefer
-            // the local node to avoid unnecessary network round-trips.
+            // the local node to avoid unnecessary network round-trips, then
+            // prefer lower-load nodes for better distribution.
             let local_node_id = self.shared_state.identity.node_id();
-            let best = options.into_iter().max_by_key(|(c, r)| {
-                let coverage = r.1 - current_layer;
-                let is_local = if c.node_id == *local_node_id { 1u32 } else { 0u32 };
-                (coverage, is_local)
+            let best = options.into_iter().max_by(|(ca, ra), (cb, rb)| {
+                let cov_a = ra.1 - current_layer;
+                let cov_b = rb.1 - current_layer;
+                let local_a = if ca.node_id == *local_node_id { 1u32 } else { 0u32 };
+                let local_b = if cb.node_id == *local_node_id { 1u32 } else { 0u32 };
+                cov_a.cmp(&cov_b)
+                    .then_with(|| local_a.cmp(&local_b))
+                    // Lower load is better → reverse comparison
+                    .then_with(|| cb.load.partial_cmp(&ca.load).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| ca.latency_ms.cmp(&cb.latency_ms).reverse())
             });
 
             match best {
@@ -410,6 +428,7 @@ mod tests {
 
     fn make_manifest(model_id: &str, num_layers: u32, shards: Vec<ShardInfo>) -> ModelManifest {
         ModelManifest {
+            schema_version: 1,
             id: ModelId(model_id.into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,
@@ -511,6 +530,7 @@ mod tests {
                 latency_ms: Some(10),
                 trust_score: 0.8,
                 peer_id_bytes: None,
+                active_request_count: 0,
             },
         );
         state.peer_registry.insert(
@@ -523,6 +543,7 @@ mod tests {
                 latency_ms: Some(15),
                 trust_score: 0.9,
                 peer_id_bytes: None,
+                active_request_count: 0,
             },
         );
 
@@ -644,5 +665,73 @@ mod tests {
         let merged = PipelineScheduler::merge_contiguous(segments);
         // A's [0,2) and [10,14) are NOT contiguous → no merge → still 3 segments
         assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn prefers_lower_load_node() {
+        // Two nodes with identical latency and trust but different load.
+        // The scheduler should prefer the node with lower load.
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_a = NodeId([10u8; 32]);
+        let node_b = NodeId([11u8; 32]);
+
+        let shards = vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 16),
+            size_bytes: 2_000_000_000,
+            hash: [0u8; 32],
+        }];
+        let manifest = make_manifest("load-test", 16, shards);
+        state.model_registry.register_manifest(manifest);
+
+        // Both nodes hold shard 0
+        let shard_id = ShardId {
+            model_id: ModelId("load-test".into()),
+            index: 0,
+        };
+        state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), node_a.clone());
+        state
+            .model_registry
+            .record_shard_holder(shard_id, node_b.clone());
+
+        // Same latency and trust, but different load via active_request_count
+        state.peer_registry.insert(
+            node_a.clone(),
+            PeerInfo {
+                node_id: node_a.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(20),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                active_request_count: 10, // high load
+            },
+        );
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(20),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                active_request_count: 1, // low load
+            },
+        );
+
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("load-test".into()), &local_id)
+            .unwrap();
+
+        // Node B (low load) should be selected over Node A (high load)
+        assert_eq!(assignment.segments.len(), 1);
+        assert_eq!(assignment.segments[0].node_id, node_b);
     }
 }

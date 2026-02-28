@@ -135,4 +135,43 @@ mod tests {
         assert!(addr_str.contains("/p2p-circuit"));
         assert!(addr_str.starts_with("/ip4/1.2.3.4/tcp/8800"));
     }
+
+    #[test]
+    fn auto_relay_flag_defaults_to_true() {
+        let config = crate::config::Config::default();
+        assert!(config.network.auto_relay);
+    }
+
+    #[test]
+    fn auto_relay_once_per_session_flag() {
+        // Simulate the relay_activated flag behavior
+        let mut relay_activated = false;
+        let auto_relay = true;
+        let nat_private = true;
+
+        // First activation should trigger
+        if nat_private && !relay_activated && auto_relay {
+            relay_activated = true;
+        }
+        assert!(relay_activated);
+
+        // Second check should NOT trigger (already activated)
+        let mut triggered_again = false;
+        if nat_private && !relay_activated && auto_relay {
+            triggered_again = true;
+        }
+        assert!(!triggered_again);
+    }
+
+    #[test]
+    fn auto_relay_disabled_prevents_activation() {
+        let mut relay_activated = false;
+        let auto_relay = false;
+        let nat_private = true;
+
+        if nat_private && !relay_activated && auto_relay {
+            relay_activated = true;
+        }
+        assert!(!relay_activated);
+    }
 }

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod identity;
+pub mod metrics;
 pub mod middleware;
 pub mod openai;
 pub mod pool;

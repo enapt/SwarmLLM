@@ -62,7 +62,7 @@ fn is_exempt_path(path: &str) -> bool {
     // dashboard endpoints are exempt.
     matches!(
         path,
-        "/" | "/health" | "/admin" | "/chat" | "/setup"
+        "/" | "/health" | "/health/ready" | "/metrics" | "/admin" | "/chat" | "/setup"
     ) || path.starts_with("/static/")
         || matches!(
             path,
@@ -153,6 +153,8 @@ mod tests {
         assert!(is_exempt_path("/api/admin/hf/probe"));
         assert!(is_exempt_path("/api/identity/nickname"));
         assert!(is_exempt_path("/api/pool/state"));
+        assert!(is_exempt_path("/health/ready"));
+        assert!(is_exempt_path("/metrics"));
     }
 
     #[test]

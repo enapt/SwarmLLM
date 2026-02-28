@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Current manifest schema version. Increment when making breaking changes.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+
 // ---- Identity ----
 /// Wrapper around Ed25519 public key. This IS the node's identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -24,6 +27,10 @@ impl fmt::Display for ModelId {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelManifest {
+    /// Schema version for forward/backward compatibility.
+    /// Missing field (legacy manifests) defaults to 0.
+    #[serde(default)]
+    pub schema_version: u32,
     pub id: ModelId,
     pub name: String,
     pub architecture: ModelArchitecture,
@@ -38,6 +45,29 @@ pub struct ModelManifest {
     pub publisher: NodeId,
     pub publish_date: chrono::DateTime<chrono::Utc>,
     pub license: String,
+}
+
+impl ModelManifest {
+    /// Validate the schema version. Warns on legacy (v0), rejects future versions.
+    pub fn validate_version(&self) -> Result<(), String> {
+        if self.schema_version == 0 {
+            tracing::warn!(
+                model = %self.id,
+                "Legacy manifest with schema_version 0 — consider re-publishing"
+            );
+        } else if self.schema_version > MANIFEST_SCHEMA_VERSION {
+            return Err(format!(
+                "Manifest schema_version {} is newer than supported version {}",
+                self.schema_version, MANIFEST_SCHEMA_VERSION
+            ));
+        }
+        Ok(())
+    }
+
+    /// Set schema_version to the current version before serialization.
+    pub fn stamp_version(&mut self) {
+        self.schema_version = MANIFEST_SCHEMA_VERSION;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,10 +288,22 @@ pub enum SwarmMessage {
     HealthPing {
         nonce: u64,
         timestamp: u64,
+        /// Sender's node ID (for updating peer load in registry).
+        #[serde(default)]
+        node_id: Option<NodeId>,
+        /// Number of active inference requests on the sender.
+        #[serde(default)]
+        active_request_count: u32,
     },
     HealthPong {
         nonce: u64,
         timestamp: u64,
+        /// Sender's node ID (for updating peer load in registry).
+        #[serde(default)]
+        node_id: Option<NodeId>,
+        /// Number of active inference requests on the sender.
+        #[serde(default)]
+        active_request_count: u32,
     },
 
     // Credits — gossip
@@ -498,6 +540,9 @@ pub struct PeerInfo {
     /// Raw libp2p PeerId bytes for directed request_response messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_id_bytes: Option<Vec<u8>>,
+    /// Active inference request count reported by this peer's last health ping/pong.
+    #[serde(default)]
+    pub active_request_count: u32,
 }
 
 // ---- Node Stats ----
@@ -595,13 +640,31 @@ mod tests {
         let msg = SwarmMessage::HealthPing {
             nonce: 42,
             timestamp: 1000,
+            node_id: Some(NodeId([1u8; 32])),
+            active_request_count: 5,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: SwarmMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SwarmMessage::HealthPing { nonce, timestamp } => {
+            SwarmMessage::HealthPing { nonce, timestamp, node_id, active_request_count } => {
                 assert_eq!(nonce, 42);
                 assert_eq!(timestamp, 1000);
+                assert_eq!(node_id, Some(NodeId([1u8; 32])));
+                assert_eq!(active_request_count, 5);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn health_ping_backward_compat() {
+        // Old messages without active_request_count/node_id should deserialize with defaults
+        let json = r#"{"HealthPing":{"nonce":1,"timestamp":2}}"#;
+        let parsed: SwarmMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SwarmMessage::HealthPing { active_request_count, node_id, .. } => {
+                assert_eq!(active_request_count, 0);
+                assert_eq!(node_id, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -618,5 +681,77 @@ mod tests {
             index: 0,
         };
         assert_eq!(a, b);
+    }
+
+    fn test_manifest() -> ModelManifest {
+        ModelManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            id: ModelId("test".into()),
+            name: "Test".into(),
+            architecture: ModelArchitecture::Llama,
+            num_layers: 2,
+            num_params_billions: 0.001,
+            quantization: Quantization::Q4KM,
+            total_size_bytes: 1024,
+            shard_count: 1,
+            shards: vec![],
+            tokenizer_hash: [0u8; 32],
+            manifest_hash: [0u8; 32],
+            publisher: NodeId([0u8; 32]),
+            publish_date: chrono::Utc::now(),
+            license: "MIT".into(),
+        }
+    }
+
+    #[test]
+    fn manifest_schema_version_current_is_valid() {
+        let m = test_manifest();
+        assert!(m.validate_version().is_ok());
+    }
+
+    #[test]
+    fn manifest_schema_version_legacy_warns_but_ok() {
+        let mut m = test_manifest();
+        m.schema_version = 0;
+        // Legacy (v0) should succeed (only warns)
+        assert!(m.validate_version().is_ok());
+    }
+
+    #[test]
+    fn manifest_schema_version_future_rejected() {
+        let mut m = test_manifest();
+        m.schema_version = MANIFEST_SCHEMA_VERSION + 1;
+        assert!(m.validate_version().is_err());
+    }
+
+    #[test]
+    fn manifest_missing_version_defaults_to_zero() {
+        // Simulate a legacy JSON manifest without schema_version
+        let json = r#"{
+            "id": "test",
+            "name": "Test",
+            "architecture": "Llama",
+            "num_layers": 2,
+            "num_params_billions": 0.001,
+            "quantization": "Q4KM",
+            "total_size_bytes": 1024,
+            "shard_count": 1,
+            "shards": [],
+            "tokenizer_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "manifest_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "publisher": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "publish_date": "2024-01-01T00:00:00Z",
+            "license": "MIT"
+        }"#;
+        let m: ModelManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.schema_version, 0);
+    }
+
+    #[test]
+    fn manifest_stamp_version_sets_current() {
+        let mut m = test_manifest();
+        m.schema_version = 0;
+        m.stamp_version();
+        assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
     }
 }

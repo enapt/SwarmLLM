@@ -86,6 +86,17 @@ impl ModelRegistry {
             .unwrap_or(false)
     }
 
+    /// Remove a model manifest from the registry.
+    pub fn remove_manifest(&self, model_id: &ModelId) {
+        self.manifests.remove(model_id);
+    }
+
+    /// Remove all shard holder entries for a given model.
+    pub fn remove_all_model_shards(&self, model_id: &ModelId) {
+        self.shard_holders
+            .retain(|shard_id, _| &shard_id.model_id != model_id);
+    }
+
     /// Iterate over all tracked shard entries (shard_id, holders).
     pub fn all_shard_entries(&self) -> Vec<(ShardId, Vec<NodeId>)> {
         self.shard_holders
@@ -146,6 +157,7 @@ mod tests {
     fn register_and_retrieve_manifest() {
         let registry = ModelRegistry::new();
         let manifest = ModelManifest {
+            schema_version: 1,
             id: ModelId("test".into()),
             name: "Test".into(),
             architecture: ModelArchitecture::Llama,
@@ -211,6 +223,7 @@ mod tests {
         assert_eq!(registry.model_count(), 0);
 
         registry.register_manifest(ModelManifest {
+            schema_version: 1,
             id: ModelId("a".into()),
             name: "A".into(),
             architecture: ModelArchitecture::Llama,
