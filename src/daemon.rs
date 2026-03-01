@@ -2059,9 +2059,10 @@ fn regenerate_manifest_from_header(
         (max_end + 31) & !31
     };
 
-    let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
+    let estimated_count = total_size.div_ceil(shard_size).max(1) as u32;
 
-    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, shard_count);
+    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, estimated_count);
+    let shard_count = layouts.len() as u32;
     let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
 
     let model_name = meta
