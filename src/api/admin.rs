@@ -1466,6 +1466,27 @@ pub async fn hf_download_shards(
             }
 
             tracing::info!(model = %model_id_str, "Broadcast manifest + HF source EARLY (before shard downloads)");
+
+            // Broadcast download intent for each shard so peers know we're
+            // working on them and auto-manage won't duplicate the download.
+            let our_node_id = download_shared.identity.node_id().clone();
+            for &idx in &shard_indices {
+                let intent_msg =
+                    crate::types::SwarmMessage::ShardDownloadProgress(
+                        crate::types::ShardDownloadProgress {
+                            node_id: our_node_id.clone(),
+                            shard_id: crate::types::ShardId {
+                                model_id: crate::types::ModelId(model_id_str.clone()),
+                                index: idx,
+                            },
+                            progress_pct: 0,
+                            state: crate::types::DownloadState::Downloading,
+                        },
+                    );
+                let _ = ntx
+                    .send(crate::types::NetworkCommand::Broadcast(intent_msg))
+                    .await;
+            }
         }
 
         // NOTE: Do NOT wake auto-manage here. Shards aren't downloaded yet,

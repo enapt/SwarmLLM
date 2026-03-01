@@ -380,6 +380,26 @@ impl AutoShardManager {
                     continue;
                 }
 
+                // Skip shards already being downloaded on THIS node (explicit or
+                // auto-manage). Prevents racing with an in-flight download.
+                if let Some(acq) = self.shared_state.acquisition_progress.get(&manifest.id) {
+                    if let Some(sp) = acq.shard_progress.get(&shard.index) {
+                        if matches!(
+                            sp.state,
+                            crate::model::acquisition::ShardState::Downloading
+                                | crate::model::acquisition::ShardState::Pending
+                                | crate::model::acquisition::ShardState::Verifying
+                        ) {
+                            tracing::debug!(
+                                model = %manifest.id,
+                                shard = shard.index,
+                                "Skipping shard — already downloading on this node"
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 // Score = popularity * rarity_bonus * configured_bonus * vram_fitness
                 // - configured_bonus: 100x for shards we're supposed to serve (highest priority)
                 // - rarity_bonus: higher when this shard has fewer holders than average
