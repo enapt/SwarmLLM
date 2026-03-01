@@ -438,11 +438,11 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 │                                                             │
 │  Tier 1: Pairwise Sessions (unicast)                        │
 │    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
-│    Forward secrecy: ephemeral X25519 per session            │
+│    Forward secrecy: ephemeral X25519 re-keying every 10min  │
 │    Session epoch mixed into key derivation (no nonce reuse) │
-│    Replay protection: recv nonce must be monotonically      │
-│    increasing (rejects nonce ≤ last_seen_recv_nonce)        │
-│    Fallback to static derivation for legacy peers           │
+│    Replay protection: atomic fetch_max on recv nonce        │
+│    (rejects nonce ≤ last_seen via lock-free TOCTOU-safe op) │
+│    Static DH fallback for initial session before first reke │
 │                                                             │
 │  Tier 2: Pipeline Sealing (inference prompts)               │
 │    Per-request ephemeral key → sealed prompt/response       │
@@ -494,7 +494,7 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 ## Sybil Resistance
 
 - Balance reports are Ed25519-signed with timestamp freshness check (5 min window)
-- Signed reports weighted at 1.0, unsigned legacy at 0.1 for tier calculations
+- Only signed reports accepted; unsigned reports rejected outright
 - Stale/replayed reports rejected
 - Subnet clustering detection: >5 nodes per /24 → elevated spot-check rate (25% vs 5%)
 - SubnetClustering trust penalty (-0.03 per cycle while clustered)
