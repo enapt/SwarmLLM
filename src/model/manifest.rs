@@ -31,11 +31,33 @@ impl ModelManifest {
 
     /// Verify the manifest hash by recomputing it from the manifest content
     /// (excluding the manifest_hash field itself).
+    ///
+    /// Allows zero-hash manifests (not yet computed, e.g. from local HF downloads).
+    /// For network-received manifests, use `verify_hash_strict()` instead.
     pub fn verify_hash(&self) -> Result<(), SwarmError> {
         // Allow manifests with a zero hash (not yet computed, e.g. from partial
-        // HF downloads or gossip-received manifests before hash is set).
+        // HF downloads before hash is set). Local-only — see verify_hash_strict.
         if self.manifest_hash == [0u8; 32] {
             return Ok(());
+        }
+        let computed = self.compute_hash();
+        if computed != self.manifest_hash {
+            return Err(SwarmError::ShardIntegrity {
+                expected: hex::encode(self.manifest_hash),
+                actual: hex::encode(computed),
+            });
+        }
+        Ok(())
+    }
+
+    /// Strict hash verification for network-received manifests.
+    /// Rejects zero-hash manifests to prevent gossip-based poisoning.
+    pub fn verify_hash_strict(&self) -> Result<(), SwarmError> {
+        if self.manifest_hash == [0u8; 32] {
+            return Err(SwarmError::ShardIntegrity {
+                expected: "non-zero manifest hash".into(),
+                actual: "zero hash (unsigned manifest)".into(),
+            });
         }
         let computed = self.compute_hash();
         if computed != self.manifest_hash {
@@ -213,7 +235,7 @@ mod tests {
     #[test]
     fn verify_hash_with_zero_hash_allowed() {
         let manifest = test_manifest(); // manifest_hash is all zeros
-        // Zero hash should be allowed (manifest not yet signed)
+                                        // Zero hash should be allowed (manifest not yet signed)
         assert!(manifest.verify_hash().is_ok());
     }
 

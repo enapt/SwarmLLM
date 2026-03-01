@@ -1074,9 +1074,15 @@ impl Daemon {
             let sighup_config = self.config.clone();
             let mut sighup_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
-                let mut sighup =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-                        .expect("Failed to register SIGHUP handler");
+                let mut sighup = match tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::hangup(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to register SIGHUP handler — config reload via signal disabled");
+                        return;
+                    }
+                };
                 loop {
                     tokio::select! {
                         _ = sighup_shutdown.changed() => {
@@ -1139,15 +1145,23 @@ impl Daemon {
                     let ctrl_c = tokio::signal::ctrl_c();
                     #[cfg(unix)]
                     {
-                        let mut sigterm = tokio::signal::unix::signal(
+                        match tokio::signal::unix::signal(
                             tokio::signal::unix::SignalKind::terminate(),
-                        ).expect("Failed to register SIGTERM handler");
-                        tokio::select! {
-                            _ = ctrl_c => {
-                                tracing::info!("Shutdown signal received (Ctrl+C)");
+                        ) {
+                            Ok(mut sigterm) => {
+                                tokio::select! {
+                                    _ = ctrl_c => {
+                                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                                    }
+                                    _ = sigterm.recv() => {
+                                        tracing::info!("Shutdown signal received (SIGTERM)");
+                                    }
+                                }
                             }
-                            _ = sigterm.recv() => {
-                                tracing::info!("Shutdown signal received (SIGTERM)");
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to register SIGTERM handler — using Ctrl+C only");
+                                ctrl_c.await.ok();
+                                tracing::info!("Shutdown signal received (Ctrl+C)");
                             }
                         }
                     }
@@ -1491,8 +1505,9 @@ async fn dispatch_network_messages(
                                     publisher = %manifest.publisher,
                                     "Received model manifest from network"
                                 );
-                                // Verify the manifest hash before trusting it
-                                match manifest.verify_hash() {
+                                // Strict verification for network-received manifests:
+                                // reject zero-hash to prevent gossip poisoning.
+                                match manifest.verify_hash_strict() {
                                     Ok(()) => {
                                         let is_new = shared_state
                                             .model_registry
@@ -1866,14 +1881,12 @@ pub fn generate_and_register_local_manifest(
                 );
 
                 // Build shard infos from layouts (handles hashing, tensor entries, layer ranges)
-                let model_dir = crate::model::shard::ShardStore::new(
-                    &shared_state.config.node.data_dir,
-                )
-                .models_dir()
-                .join(&model_id.0);
-                let shards = crate::model::manifest::build_shard_infos_from_layouts(
-                    &model_dir, &layouts,
-                );
+                let model_dir =
+                    crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir)
+                        .models_dir()
+                        .join(&model_id.0);
+                let shards =
+                    crate::model::manifest::build_shard_infos_from_layouts(&model_dir, &layouts);
 
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
@@ -1885,7 +1898,12 @@ pub fn generate_and_register_local_manifest(
                 tracing::warn!(error = %e, "Failed to extract GGUF metadata, using defaults");
                 let shard_count = file_size.div_ceil(shard_size).max(1) as u32;
                 let shards = vec![];
-                (0u32, crate::types::ModelArchitecture::Llama, shard_count, shards)
+                (
+                    0u32,
+                    crate::types::ModelArchitecture::Llama,
+                    shard_count,
+                    shards,
+                )
             }
         };
 

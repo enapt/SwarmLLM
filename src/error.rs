@@ -95,25 +95,65 @@ impl From<SwarmError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match &self.0 {
-            SwarmError::ModelNotAvailable(_) => (StatusCode::NOT_FOUND, self.0.to_string()),
-            SwarmError::NoModelLoaded => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
-            SwarmError::InferenceTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, self.0.to_string()),
-            SwarmError::InsufficientCredits { .. } => {
-                (StatusCode::PAYMENT_REQUIRED, self.0.to_string())
+        let (status, message, error_type) = match &self.0 {
+            SwarmError::ModelNotAvailable(_) => {
+                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
             }
-            SwarmError::PeerNotFound(_) => (StatusCode::SERVICE_UNAVAILABLE, self.0.to_string()),
-            SwarmError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, self.0.to_string()),
-            SwarmError::Config(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
-            SwarmError::InvalidNickname(_) => (StatusCode::BAD_REQUEST, self.0.to_string()),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()),
+            SwarmError::NoModelLoaded => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "not_found_error",
+            ),
+            SwarmError::InferenceTimeout(_) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                self.0.to_string(),
+                "server_error",
+            ),
+            SwarmError::InsufficientCredits { .. } => (
+                StatusCode::PAYMENT_REQUIRED,
+                self.0.to_string(),
+                "rate_limit_error",
+            ),
+            SwarmError::PeerNotFound(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "server_error",
+            ),
+            SwarmError::Unauthorized(_) => (
+                StatusCode::UNAUTHORIZED,
+                self.0.to_string(),
+                "authentication_error",
+            ),
+            SwarmError::Config(_) => (
+                StatusCode::BAD_REQUEST,
+                self.0.to_string(),
+                "invalid_request_error",
+            ),
+            SwarmError::InvalidNickname(_) => (
+                StatusCode::BAD_REQUEST,
+                self.0.to_string(),
+                "invalid_request_error",
+            ),
+            _ => {
+                // Log the full error internally but return a generic message
+                // to avoid leaking internal paths, peer errors, or DB details.
+                tracing::error!(
+                    error = %self.0,
+                    "Internal server error"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred".to_string(),
+                    "server_error",
+                )
+            }
         };
-        // Log 5xx errors so they appear in tracing output
-        if status.is_server_error() {
+        // Log 5xx errors so they appear in tracing output (catch non-catch-all 5xx)
+        if status.is_server_error() && error_type != "server_error" {
             tracing::error!(
                 status = status.as_u16(),
                 error = %message,
-                "Internal server error"
+                "Server error"
             );
         }
 
@@ -122,7 +162,7 @@ impl IntoResponse for ApiError {
             Json(serde_json::json!({
                 "error": {
                     "message": message,
-                    "type": "swarm_error",
+                    "type": error_type,
                     "code": status.as_u16()
                 }
             })),

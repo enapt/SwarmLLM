@@ -43,7 +43,12 @@ async fn spawn_test_server() -> (String, String) {
     let port = listener.local_addr().unwrap().port();
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

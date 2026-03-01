@@ -17,9 +17,7 @@ use crate::model::acquisition::AcquisitionCommand;
 use crate::model::shard::ShardStore;
 use crate::network::behaviour::{self, SwarmBehaviour, SwarmBehaviourEvent};
 use crate::network::discovery;
-use crate::network::protocol::{
-    self, SwarmRequest, SwarmResponse, TOPIC_MODELS,
-};
+use crate::network::protocol::{self, SwarmRequest, SwarmResponse, TOPIC_MODELS};
 use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
@@ -312,8 +310,7 @@ impl NetworkManager {
             )) => {
                 tracing::warn!(%peer, ?request_id, %error, "Request outbound failure");
                 // Check if this was a pending shard download request
-                if let Some((_peer_id, shard_id)) =
-                    self.pending_shard_requests.remove(&request_id)
+                if let Some((_peer_id, shard_id)) = self.pending_shard_requests.remove(&request_id)
                 {
                     tracing::error!(
                         %peer, shard = ?shard_id,
@@ -322,9 +319,7 @@ impl NetworkManager {
                 }
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-                request_response::Event::InboundFailure {
-                    peer, error, ..
-                },
+                request_response::Event::InboundFailure { peer, error, .. },
             )) => {
                 tracing::debug!(%peer, %error, "Request inbound failure");
             }
@@ -544,7 +539,9 @@ impl NetworkManager {
                     // connection is established.
                     if !self.swarm.is_connected(&peer_id) {
                         let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
-                            .condition(libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing)
+                            .condition(
+                                libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                            )
                             .addresses(vec![addr])
                             .build();
                         if let Err(e) = self.swarm.dial(opts) {
@@ -1026,7 +1023,8 @@ impl NetworkManager {
         let payload_len = payload.len();
         let is_connected = self.swarm.is_connected(&peer_id);
         let req = SwarmRequest::TensorPayload(payload);
-        let outbound_id = self.swarm
+        let outbound_id = self
+            .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
@@ -1098,8 +1096,7 @@ impl NetworkManager {
                 tracing::debug!(%peer, "Received tensor LayerResult");
                 match protocol::decode_layer_result(payload) {
                     Ok(result) => {
-                        if let Err(e) =
-                            self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
+                        if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
                         {
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
                         }

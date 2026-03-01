@@ -181,7 +181,13 @@ pub fn accept_reject(
 
     // All draft tokens were accepted! Sample a bonus token from the target's
     // distribution at position gamma (the last entry in target_probs).
-    let bonus = sample_from_probs(target_probs.last().unwrap());
+    let Some(last_probs) = target_probs.last() else {
+        return SpeculativeResult {
+            accepted_tokens,
+            bonus_token: None,
+        };
+    };
+    let bonus = sample_from_probs(last_probs);
     SpeculativeResult {
         accepted_tokens,
         bonus_token: Some(bonus),

@@ -1813,11 +1813,12 @@ impl SplitModel {
                     if tied_path.exists() {
                         tracing::info!("Loading output head from tied_output_weight.bin");
                         // Get tensor info from GGUF metadata
-                        let embd_info = ct.tensor_infos.get("token_embd.weight").ok_or_else(|| {
-                            candle_core::Error::Msg(
-                                "token_embd.weight not in GGUF tensor info".into(),
-                            )
-                        })?;
+                        let embd_info =
+                            ct.tensor_infos.get("token_embd.weight").ok_or_else(|| {
+                                candle_core::Error::Msg(
+                                    "token_embd.weight not in GGUF tensor info".into(),
+                                )
+                            })?;
                         let raw_data = std::fs::read(&tied_path).map_err(|e| {
                             candle_core::Error::Msg(format!(
                                 "Failed to read tied_output_weight.bin: {e}"
@@ -2527,17 +2528,45 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     }
 
     let mut pos = 0;
-    let ndim = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+
+    // Validate minimum header size: ndim(4) + dtype(4) = 8 bytes minimum
+    let ndim = u32::from_le_bytes(
+        bytes[pos..pos + 4]
+            .try_into()
+            .map_err(|_| SwarmError::Internal("Tensor bytes too short for ndim".into()))?,
+    ) as usize;
     pos += 4;
+
+    // Sanity-check ndim to avoid OOM on malicious input
+    if ndim > 8 {
+        return Err(SwarmError::Internal(format!(
+            "Tensor ndim {} exceeds maximum 8",
+            ndim
+        )));
+    }
 
     let mut shape = Vec::with_capacity(ndim);
     for _ in 0..ndim {
-        let dim = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        if pos + 4 > bytes.len() {
+            return Err(SwarmError::Internal("Tensor bytes truncated in shape".into()));
+        }
+        let dim = u32::from_le_bytes(
+            bytes[pos..pos + 4]
+                .try_into()
+                .map_err(|_| SwarmError::Internal("Tensor shape parse error".into()))?,
+        ) as usize;
         shape.push(dim);
         pos += 4;
     }
 
-    let _dtype_tag = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+    if pos + 4 > bytes.len() {
+        return Err(SwarmError::Internal("Tensor bytes truncated at dtype".into()));
+    }
+    let _dtype_tag = u32::from_le_bytes(
+        bytes[pos..pos + 4]
+            .try_into()
+            .map_err(|_| SwarmError::Internal("Tensor dtype parse error".into()))?,
+    );
     pos += 4;
 
     let num_elements: usize = shape.iter().product();
@@ -2589,7 +2618,11 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
 
     // Top-p (nucleus) sampling
     let mut sorted_indices: Vec<usize> = (0..probs.len()).collect();
-    sorted_indices.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+    sorted_indices.sort_by(|&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut cumulative = 0.0;
     let mut cutoff_idx = sorted_indices.len();

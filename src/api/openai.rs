@@ -1,5 +1,5 @@
 use axum::extract::State;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use futures::stream::Stream;
@@ -466,7 +466,7 @@ async fn forward_to_peer(
         let body = peer_resp.text().await.unwrap_or_default();
         tracing::warn!(status = %status, body = %body, "Peer returned error");
         return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Peer error ({status}): {body}"
+            "Peer returned error status {status}"
         ))));
     }
 
@@ -474,22 +474,30 @@ async fn forward_to_peer(
         // Forward the SSE stream from the peer
         let byte_stream = peer_resp.bytes_stream();
         let body = axum::body::Body::from_stream(byte_stream);
-        Ok(axum::response::Response::builder()
+        let response = axum::response::Response::builder()
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .header("x-swarm-forwarded", "true")
             .body(body)
-            .unwrap()
-            .into_response())
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to build response: {e}"
+                )))
+            })?;
+        Ok(response.into_response())
     } else {
         // Forward JSON response
         let body = peer_resp.text().await.unwrap_or_default();
-        Ok(axum::response::Response::builder()
+        let response = axum::response::Response::builder()
             .header("content-type", "application/json")
             .header("x-swarm-forwarded", "true")
             .body(axum::body::Body::from(body))
-            .unwrap()
-            .into_response())
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to build response: {e}"
+                )))
+            })?;
+        Ok(response.into_response())
     }
 }
 
@@ -676,7 +684,7 @@ async fn router_inference_stream(
                         .send(StreamEvent::Delta {
                             content: Some(format!("Error: {e}")),
                             role: None,
-                            finish_reason: Some("error".into()),
+                            finish_reason: Some("stop".into()),
                         })
                         .await;
                 }
@@ -685,7 +693,7 @@ async fn router_inference_stream(
                         .send(StreamEvent::Delta {
                             content: None,
                             role: None,
-                            finish_reason: Some("error".into()),
+                            finish_reason: Some("stop".into()),
                         })
                         .await;
                 }
@@ -718,7 +726,9 @@ async fn router_inference_stream(
             StreamEvent::Done => Ok(Event::default().data("[DONE]")),
         });
 
-    Ok(Sse::new(stream).into_response())
+    Ok(Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .into_response())
 }
 
 async fn non_stream_response(
@@ -825,7 +835,7 @@ async fn stream_response(
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
 
-    Sse::new(stream)
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
 }
 
 enum StreamEvent {
@@ -936,7 +946,7 @@ pub async fn completions(
                     .send(StreamEvent::Delta {
                         content: Some("Error: no model loaded".into()),
                         role: None,
-                        finish_reason: Some("error".into()),
+                        finish_reason: Some("stop".into()),
                     })
                     .await;
                 let _ = tx.send(StreamEvent::Done).await;
@@ -989,7 +999,9 @@ pub async fn completions(
                 StreamEvent::Done => Ok(Event::default().data("[DONE]")),
             });
 
-        Ok(Sse::new(stream).into_response())
+        Ok(Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .into_response())
     } else {
         let mut executor = state.executor.lock().await;
         if !executor.is_loaded() {
@@ -1071,7 +1083,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         data.push(ModelInfo {
             id: model_id,
             object: "model",
-            created: 0,
+            created: chrono::Utc::now().timestamp(),
             owned_by: "local".into(),
         });
     }

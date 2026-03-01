@@ -225,8 +225,8 @@ impl AcquisitionManager {
             }
         };
 
-        // SECURITY: Verify the manifest hash before trusting it
-        if let Err(e) = manifest.verify_hash() {
+        // SECURITY: Strict verification for peer-received manifests
+        if let Err(e) = manifest.verify_hash_strict() {
             tracing::error!(
                 model = %model_id,
                 error = %e,
@@ -504,7 +504,10 @@ impl AcquisitionManager {
         let progress_map = &self.shared_state.acquisition_progress;
         let node_id = self.shared_state.identity.node_id().clone();
 
-        let job = self.jobs.get_mut(&model_id).unwrap();
+        let Some(job) = self.jobs.get_mut(&model_id) else {
+            tracing::warn!(model = %model_id, "Received shard chunk for unknown job");
+            return;
+        };
 
         // Track progress
         let received = job.shard_bytes.entry(shard_index).or_insert(0);

@@ -141,7 +141,7 @@ fn build_signing_payload(
     hasher.update(&from.0);
     hasher.update(&to.0);
     hasher.update(&amount.to_le_bytes());
-    hasher.update(&serde_json::to_vec(reason).expect("TransactionReason must be serializable"));
+    hasher.update(&serde_json::to_vec(reason).unwrap_or_default());
     hasher.update(timestamp.to_rfc3339().as_bytes());
     hasher.finalize().as_bytes().to_vec()
 }

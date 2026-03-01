@@ -1,4 +1,4 @@
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -27,6 +27,25 @@ pub fn cors_layer(port: u16) -> CorsLayer {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
         ])
+}
+
+/// Security headers middleware — adds defensive headers to all responses.
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 /// Request logging middleware using tracing.
@@ -101,7 +120,12 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
 /// Checks the `Authorization: Bearer <token>` header against the stored API key.
 /// Exempt paths (frontend routes, health, static assets, WebSocket upgrades) are
 /// passed through without authentication.
-pub async fn auth_middleware(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn auth_middleware(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
@@ -110,8 +134,9 @@ pub async fn auth_middleware(State(state): State<AppState>, req: Request, next: 
         return next.run(req).await;
     }
 
-    // Exempt WebSocket upgrade requests at /api/admin/ws
+    // Exempt WebSocket upgrade requests at /api/admin/ws — loopback only
     if path == "/api/admin/ws"
+        && addr.ip().is_loopback()
         && req
             .headers()
             .get(axum::http::header::UPGRADE)
@@ -122,14 +147,16 @@ pub async fn auth_middleware(State(state): State<AppState>, req: Request, next: 
         return next.run(req).await;
     }
 
-    // Exempt peer-forwarded requests (x-swarm-forwarded: true)
-    // These come from other SwarmLLM nodes forwarding inference requests.
-    if req
-        .headers()
-        .get("x-swarm-forwarded")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "true")
-        .unwrap_or(false)
+    // Exempt peer-forwarded requests — loopback only.
+    // In production, peers forward via HTTP to the local API server.
+    // Only trust x-swarm-forwarded from loopback to prevent external auth bypass.
+    if addr.ip().is_loopback()
+        && req
+            .headers()
+            .get("x-swarm-forwarded")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v == "true")
+            .unwrap_or(false)
     {
         return next.run(req).await;
     }

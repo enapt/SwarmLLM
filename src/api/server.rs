@@ -121,6 +121,7 @@ pub fn build_router(state: AppState) -> Router {
             middleware::auth_middleware,
         ))
         .layer(middleware::cors_layer(state.config.node.listen_port))
+        .layer(axum::middleware::from_fn(middleware::security_headers))
         .with_state(state)
 }
 

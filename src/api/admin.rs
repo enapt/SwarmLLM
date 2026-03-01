@@ -140,13 +140,13 @@ pub async fn update_config(
         };
     }
     if let Some(max_reqs) = body.max_concurrent_requests {
-        config.inference.max_concurrent_requests = max_reqs;
+        config.inference.max_concurrent_requests = max_reqs.clamp(1, 256);
     }
     if let Some(bw) = body.max_bandwidth_mbps {
-        config.resources.max_bandwidth_mbps = bw;
+        config.resources.max_bandwidth_mbps = bw.clamp(1, 100_000);
     }
     if let Some(disk) = body.max_disk_mb {
-        config.resources.max_disk_mb = disk;
+        config.resources.max_disk_mb = disk.clamp(100, 10_000_000);
     }
     if let Some(auto_manage) = body.auto_manage_shards {
         config.auto_manage.enabled = auto_manage;
@@ -362,11 +362,13 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let has_shard_files = loaded_model_dir.exists()
             && std::fs::read_dir(&loaded_model_dir)
                 .ok()
-                .map(|rd| rd.flatten().any(|e| {
-                    let name = e.file_name();
-                    let n = name.to_string_lossy();
-                    n.starts_with("shard_") && n.ends_with(".bin")
-                }))
+                .map(|rd| {
+                    rd.flatten().any(|e| {
+                        let name = e.file_name();
+                        let n = name.to_string_lossy();
+                        n.starts_with("shard_") && n.ends_with(".bin")
+                    })
+                })
                 .unwrap_or(false);
 
         // Only show loaded model if files exist OR if it was loaded via --model (no shards)
@@ -374,113 +376,113 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // Stale entry — files deleted while running. Skip.
             // The model will still appear from registry/peers if applicable.
         } else {
-        let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
-        seen_ids.insert(info.name.clone());
+            let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
+            seen_ids.insert(info.name.clone());
 
-        // Try both the display name and the slugified ID to avoid duplicates.
-        // The registry may use a slug like "qwen2.5-coder-7b-instruct" while
-        // loaded_model_info.name is "Qwen2.5 Coder 7B Instruct".
-        let slug = info
-            .name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
-        seen_ids.insert(slug.clone());
+            // Try both the display name and the slugified ID to avoid duplicates.
+            // The registry may use a slug like "qwen2.5-coder-7b-instruct" while
+            // loaded_model_info.name is "Qwen2.5 Coder 7B Instruct".
+            let slug = info
+                .name
+                .to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            seen_ids.insert(slug.clone());
 
-        let mid = crate::types::ModelId(info.name.clone());
-        let manifest = state
-            .shared_state
-            .model_registry
-            .get_manifest(&mid)
-            .or_else(|| {
-                // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
-                let slug_id = crate::types::ModelId(slug.clone());
-                state.shared_state.model_registry.get_manifest(&slug_id)
-            })
-            .or_else(|| {
-                // Try matching by manifest `name` field (auto-manage sets loaded_model_info.name
-                // from manifest.name, but the registry key is manifest.id which may differ)
-                state
-                    .shared_state
-                    .model_registry
-                    .models()
-                    .into_iter()
-                    .find(|m| m.name == info.name)
-            });
+            let mid = crate::types::ModelId(info.name.clone());
+            let manifest = state
+                .shared_state
+                .model_registry
+                .get_manifest(&mid)
+                .or_else(|| {
+                    // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
+                    let slug_id = crate::types::ModelId(slug.clone());
+                    state.shared_state.model_registry.get_manifest(&slug_id)
+                })
+                .or_else(|| {
+                    // Try matching by manifest `name` field (auto-manage sets loaded_model_info.name
+                    // from manifest.name, but the registry key is manifest.id which may differ)
+                    state
+                        .shared_state
+                        .model_registry
+                        .models()
+                        .into_iter()
+                        .find(|m| m.name == info.name)
+                });
 
-        // Mark the manifest's actual registry ID as seen to prevent duplicates
-        // in section 2 (which iterates by manifest.id)
-        if let Some(ref m) = manifest {
-            seen_ids.insert(m.id.0.clone());
-        }
-        let local_node_id = &state.shared_state.identity.node_id().clone();
-        let (shard_count, hosted_local, global_available, shard_detail) = match manifest {
-            Some(ref m) => {
-                let detail = build_shard_detail(m, &state);
-                let local_count = (0..m.shard_count)
-                    .filter(|&idx| {
-                        let sid = crate::types::ShardId {
-                            model_id: m.id.clone(),
-                            index: idx,
-                        };
-                        state
-                            .shared_state
-                            .model_registry
-                            .shard_holders(&sid)
-                            .contains(local_node_id)
-                    })
-                    .count();
-                let global = (0..m.shard_count)
-                    .filter(|&idx| {
-                        let sid = crate::types::ShardId {
-                            model_id: m.id.clone(),
-                            index: idx,
-                        };
-                        !state
-                            .shared_state
-                            .model_registry
-                            .shard_holders(&sid)
-                            .is_empty()
-                    })
-                    .count();
-                (m.shard_count, local_count, global, detail)
+            // Mark the manifest's actual registry ID as seen to prevent duplicates
+            // in section 2 (which iterates by manifest.id)
+            if let Some(ref m) = manifest {
+                seen_ids.insert(m.id.0.clone());
             }
-            None => (1, 1, 1, vec![]),
-        };
+            let local_node_id = &state.shared_state.identity.node_id().clone();
+            let (shard_count, hosted_local, global_available, shard_detail) = match manifest {
+                Some(ref m) => {
+                    let detail = build_shard_detail(m, &state);
+                    let local_count = (0..m.shard_count)
+                        .filter(|&idx| {
+                            let sid = crate::types::ShardId {
+                                model_id: m.id.clone(),
+                                index: idx,
+                            };
+                            state
+                                .shared_state
+                                .model_registry
+                                .shard_holders(&sid)
+                                .contains(local_node_id)
+                        })
+                        .count();
+                    let global = (0..m.shard_count)
+                        .filter(|&idx| {
+                            let sid = crate::types::ShardId {
+                                model_id: m.id.clone(),
+                                index: idx,
+                            };
+                            !state
+                                .shared_state
+                                .model_registry
+                                .shard_holders(&sid)
+                                .is_empty()
+                        })
+                        .count();
+                    (m.shard_count, local_count, global, detail)
+                }
+                None => (1, 1, 1, vec![]),
+            };
 
-        // A model is "ready" for inference if all layers are covered across the
-        // network — no single node needs all shards. Local shard count doesn't
-        // determine readiness; network-wide coverage does.
-        let all_covered = global_available == shard_count as usize;
-        let status = if all_covered { "loaded" } else { "partial" };
+            // A model is "ready" for inference if all layers are covered across the
+            // network — no single node needs all shards. Local shard count doesn't
+            // determine readiness; network-wide coverage does.
+            let all_covered = global_available == shard_count as usize;
+            let status = if all_covered { "loaded" } else { "partial" };
 
-        // Use the manifest's canonical ID when available (matches what /v1/models returns)
-        let model_id = manifest
-            .as_ref()
-            .map(|m| m.id.0.clone())
-            .unwrap_or_else(|| slug.clone());
-        // Check for manifest.json and gguf_header.bin on disk
-        let model_dir = state.config.node.data_dir.join("models").join(&model_id);
-        let has_manifest = model_dir.join("manifest.json").exists();
-        let has_header = model_dir.join("gguf_header.bin").exists();
+            // Use the manifest's canonical ID when available (matches what /v1/models returns)
+            let model_id = manifest
+                .as_ref()
+                .map(|m| m.id.0.clone())
+                .unwrap_or_else(|| slug.clone());
+            // Check for manifest.json and gguf_header.bin on disk
+            let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+            let has_manifest = model_dir.join("manifest.json").exists();
+            let has_header = model_dir.join("gguf_header.bin").exists();
 
-        models.push(serde_json::json!({
-            "id": model_id,
-            "name": info.name,
-            "total_size_bytes": info.size_bytes,
-            "shard_count": shard_count,
-            "hosted_shards": hosted_local,
-            "global_available": global_available,
-            "healthy": all_covered,
-            "status": status,
-            "mode": if hosted_local == shard_count as usize { "full" } else { "distributed" },
-            "source": "local",
-            "local": true,
-            "peers_hosting": peer_count,
-            "shards": shard_detail,
-            "has_manifest": has_manifest,
-            "has_header": has_header,
-        }));
+            models.push(serde_json::json!({
+                "id": model_id,
+                "name": info.name,
+                "total_size_bytes": info.size_bytes,
+                "shard_count": shard_count,
+                "hosted_shards": hosted_local,
+                "global_available": global_available,
+                "healthy": all_covered,
+                "status": status,
+                "mode": if hosted_local == shard_count as usize { "full" } else { "distributed" },
+                "source": "local",
+                "local": true,
+                "peers_hosting": peer_count,
+                "shards": shard_detail,
+                "has_manifest": has_manifest,
+                "has_header": has_header,
+            }));
         } // else: stale loaded model, files deleted
     }
 
@@ -1174,18 +1176,10 @@ pub async fn shutdown_node(
     }
     tracing::info!("Shutdown requested via API from {}", addr);
 
-    // Signal all subsystems to shut down
+    // Signal all subsystems to shut down via the watch channel.
+    // The daemon.rs supervisor loop will handle graceful draining,
+    // peer cache saving, DB flushing, and process exit.
     state.shared_state.shutdown();
-
-    // Flush the database before exiting to prevent corruption
-    let db = state.shared_state.db.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Err(e) = db.flush() {
-            tracing::error!(error = %e, "Failed to flush database on shutdown");
-        }
-        std::process::exit(0);
-    });
 
     Ok(Json(serde_json::json!({ "status": "shutting_down" })))
 }
@@ -1274,11 +1268,19 @@ pub async fn hf_download_shards(
         )));
     }
 
-    // Use provided model_id if it matches an existing model, otherwise derive from filename
+    if shard_indices.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Too many shards requested (max 256)".into(),
+        )));
+    }
+
+    // Use provided model_id if it matches an existing model, otherwise derive from filename.
+    // Always sanitize to prevent path traversal.
     let safe_name = if let Some(ref mid) = body.model_id {
-        let candidate_dir = state.config.node.data_dir.join("models").join(mid);
+        let sanitized = crate::model::shard::sanitize_path_component(mid);
+        let candidate_dir = state.config.node.data_dir.join("models").join(&sanitized);
         if candidate_dir.exists() {
-            mid.clone()
+            sanitized
         } else {
             // Fall back to filename-derived name
             filename
@@ -1515,18 +1517,17 @@ pub async fn hf_download_shards(
             // working on them and auto-manage won't duplicate the download.
             let our_node_id = download_shared.identity.node_id().clone();
             for &idx in &shard_indices {
-                let intent_msg =
-                    crate::types::SwarmMessage::ShardDownloadProgress(
-                        crate::types::ShardDownloadProgress {
-                            node_id: our_node_id.clone(),
-                            shard_id: crate::types::ShardId {
-                                model_id: crate::types::ModelId(model_id_str.clone()),
-                                index: idx,
-                            },
-                            progress_pct: 0,
-                            state: crate::types::DownloadState::Downloading,
+                let intent_msg = crate::types::SwarmMessage::ShardDownloadProgress(
+                    crate::types::ShardDownloadProgress {
+                        node_id: our_node_id.clone(),
+                        shard_id: crate::types::ShardId {
+                            model_id: crate::types::ModelId(model_id_str.clone()),
+                            index: idx,
                         },
-                    );
+                        progress_pct: 0,
+                        state: crate::types::DownloadState::Downloading,
+                    },
+                );
                 let _ = ntx
                     .send(crate::types::NetworkCommand::Broadcast(intent_msg))
                     .await;
@@ -1620,8 +1621,9 @@ pub async fn hf_download_shards(
                             total_bytes: total,
                         });
                     // Update per-shard progress directly
-                    if let Some(mut entry) =
-                        shard_progress_shared.acquisition_progress.get_mut(&shard_progress_mid)
+                    if let Some(mut entry) = shard_progress_shared
+                        .acquisition_progress
+                        .get_mut(&shard_progress_mid)
                     {
                         if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
                             sp.downloaded_bytes = prog.downloaded_bytes;
@@ -2071,7 +2073,8 @@ pub async fn cancel_download(
     }
 
     // Clean up partial .tmp files in the model directory
-    let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+    let safe_id = crate::model::shard::sanitize_path_component(&model_id);
+    let model_dir = state.config.node.data_dir.join("models").join(&safe_id);
     if model_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&model_dir) {
             for entry in entries.flatten() {
@@ -2100,6 +2103,8 @@ pub async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Sanitize model_id to prevent path traversal
+    let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -2114,7 +2119,12 @@ pub async fn delete_model(
     let node_id = shared.identity.node_id().clone();
 
     // Remove shard files from disk
-    let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+    let model_dir = state
+        .config
+        .node
+        .data_dir
+        .join("models")
+        .join(&safe_model_id);
     let mut files_removed = 0u32;
     if model_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&model_dir) {
