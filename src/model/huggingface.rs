@@ -222,7 +222,8 @@ pub async fn probe_gguf_file(
     shard_size: u64,
 ) -> Result<GgufFileInfo, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -387,7 +388,8 @@ pub async fn download_gguf_header(
     header_size: u64,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| e.to_string())?;
 
