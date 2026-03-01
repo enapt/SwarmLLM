@@ -619,13 +619,16 @@ pub async fn download_shard_v2(
             return Err(format!("Shard download returned {}", resp.status()));
         }
 
+        // Buffer the coalesced range so we can extract only tensor data (skip gap bytes).
+        // Coalesced ranges merge nearby tensors with up to 4MB gaps between them.
+        // Writing the raw HTTP response would include those gap bytes, causing shard_offset
+        // mismatches in ShardReader.
         use futures::StreamExt;
+        let mut range_buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let data = chunk.map_err(|e| format!("Stream error: {e}"))?;
-            file.write_all(&data)
-                .await
-                .map_err(|e| format!("Write error: {e}"))?;
+            range_buf.extend_from_slice(&data);
             downloaded += data.len() as u64;
 
             if let Some(ref tx) = progress_tx {
@@ -633,6 +636,19 @@ pub async fn download_shard_v2(
                     downloaded_bytes: downloaded,
                     total_bytes: total_download_bytes,
                 });
+            }
+        }
+
+        // Extract only tensor data from the buffered range, skipping inter-tensor gaps
+        for (_, tensor_offset, tensor_size) in &layout.tensors {
+            if *tensor_offset >= *range_start && *tensor_offset + *tensor_size <= *range_end {
+                let buf_offset = (*tensor_offset - *range_start) as usize;
+                let buf_end = buf_offset + *tensor_size as usize;
+                if buf_end <= range_buf.len() {
+                    file.write_all(&range_buf[buf_offset..buf_end])
+                        .await
+                        .map_err(|e| format!("Write error: {e}"))?;
+                }
             }
         }
     }
@@ -771,14 +787,6 @@ mod tests {
         assert_eq!(urlencoding::encode("hello world"), "hello%20world");
         assert_eq!(urlencoding::encode("foo+bar"), "foo%2Bbar");
         assert_eq!(urlencoding::encode("simple"), "simple");
-    }
-
-    #[test]
-    fn shard_count_from_size() {
-        let total_size: u64 = 4_683_074_048; // Qwen2.5-Coder-7B Q4
-        let shard_size: u64 = 512 * 1024 * 1024;
-        let shard_count = total_size.div_ceil(shard_size).max(1) as u32;
-        assert_eq!(shard_count, 9);
     }
 
     #[test]

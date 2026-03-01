@@ -1844,62 +1844,48 @@ pub fn generate_and_register_local_manifest(
     // Shard size is configurable via [model].shard_size_mb (default 512MB).
     let shard_size: u64 = shared_state.config.model.shard_size_bytes();
     let node_id = shared_state.identity.node_id().clone();
-    let shard_count = file_size.div_ceil(shard_size).max(1) as u32;
-
-    // Compute per-shard BLAKE3 hashes by reading byte ranges (blocking I/O)
-    let hash_path = path.to_path_buf();
-    let mut shards = match tokio::task::block_in_place(|| {
-        compute_shard_hashes(&hash_path, file_size, shard_size)
-    }) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to compute shard hashes");
-            return;
-        }
-    };
 
     // Extract model metadata from GGUF header (num_layers, architecture, etc.)
-    // This MUST happen before computing per-shard layer ranges below.
-    let (num_layers, architecture) =
+    // and compute layer-aligned shard layouts. The layout count determines shard_count
+    // (NOT file_size / shard_size, which can differ from the actual layout count).
+    let (num_layers, architecture, shard_count, shards) =
         match crate::inference::split::GgufTensorMeta::from_gguf_file(path) {
             Ok(meta) => {
                 let num_layers = meta.block_count as u32;
+                // Estimate shard count from file size for layout computation
+                let estimated_count = file_size.div_ceil(shard_size).max(1) as u32;
+                let layouts =
+                    crate::inference::split::compute_layer_shard_layouts(&meta, estimated_count);
+                let actual_shard_count = layouts.len() as u32;
                 tracing::info!(
                     model = %model_id,
                     num_layers,
                     embedding_length = meta.embedding_length,
+                    shard_count = actual_shard_count,
                     "Extracted GGUF metadata for manifest"
                 );
-                // Assign layer ranges and tensor entries per shard using v2 layouts
-                let layouts =
-                    crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
-                for (shard, layout) in shards.iter_mut().zip(layouts.iter()) {
-                    shard.layer_range = (layout.layer_start, layout.layer_end);
-                    let mut shard_offset = 0u64;
-                    shard.tensors = layout
-                        .tensors
-                        .iter()
-                        .map(|(name, gguf_off, size)| {
-                            let entry = crate::types::ShardTensorEntry {
-                                name: name.clone(),
-                                gguf_offset: *gguf_off,
-                                shard_offset,
-                                size: *size,
-                            };
-                            shard_offset += size;
-                            entry
-                        })
-                        .collect();
-                }
+
+                // Build shard infos from layouts (handles hashing, tensor entries, layer ranges)
+                let model_dir = crate::model::shard::ShardStore::new(
+                    &shared_state.config.node.data_dir,
+                )
+                .models_dir()
+                .join(&model_id.0);
+                let shards = crate::model::manifest::build_shard_infos_from_layouts(
+                    &model_dir, &layouts,
+                );
+
                 // Store the metadata for later use in layer range computation
                 shared_state.gguf_meta.insert(model_id.clone(), meta);
                 // Map GGUF general.architecture string to our ModelArchitecture enum
                 let arch = map_gguf_architecture(path);
-                (num_layers, arch)
+                (num_layers, arch, actual_shard_count, shards)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to extract GGUF metadata, using defaults");
-                (0u32, crate::types::ModelArchitecture::Llama)
+                let shard_count = file_size.div_ceil(shard_size).max(1) as u32;
+                let shards = vec![];
+                (0u32, crate::types::ModelArchitecture::Llama, shard_count, shards)
             }
         };
 
@@ -2115,56 +2101,6 @@ fn regenerate_manifest_from_header(
     }
 
     Some(manifest)
-}
-
-/// Split a file into byte-range shards and compute BLAKE3 hash for each.
-fn compute_shard_hashes(
-    path: &std::path::Path,
-    file_size: u64,
-    shard_size: u64,
-) -> Result<Vec<crate::types::ShardInfo>, SwarmError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
-    let shard_count = file_size.div_ceil(shard_size).max(1);
-    let mut shards = Vec::with_capacity(shard_count as usize);
-
-    for i in 0..shard_count {
-        let offset = i * shard_size;
-        let this_shard_size = shard_size.min(file_size - offset);
-
-        file.seek(SeekFrom::Start(offset)).map_err(SwarmError::Io)?;
-
-        let mut hasher = blake3::Hasher::new();
-        let mut remaining = this_shard_size;
-        let mut buf = [0u8; 64 * 1024];
-
-        while remaining > 0 {
-            let to_read = (remaining as usize).min(buf.len());
-            let n = file.read(&mut buf[..to_read]).map_err(SwarmError::Io)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as u64;
-        }
-
-        shards.push(crate::types::ShardInfo {
-            index: i as u32,
-            layer_range: (0, 0), // Byte-range shards, not layer-based
-            size_bytes: this_shard_size,
-            hash: *hasher.finalize().as_bytes(),
-            tensors: vec![],
-        });
-    }
-
-    tracing::info!(
-        shards = shards.len(),
-        shard_size_mb = shard_size / (1024 * 1024),
-        "Computed shard hashes"
-    );
-
-    Ok(shards)
 }
 
 /// Handle an incoming LayerForward from a remote peer: run the local split model

@@ -642,10 +642,16 @@ impl AutoShardManager {
                     candidate.shard_index, candidate.score
                 ));
             } else {
+                let total_shards = self
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&mid)
+                    .map(|m| m.shard_count)
+                    .unwrap_or(1);
                 let status = crate::model::acquisition::AcquisitionStatus {
                     model_id: mid.clone(),
                     state: crate::model::acquisition::AcquisitionState::Downloading,
-                    total_shards: 1,
+                    total_shards,
                     downloaded_shards: 0,
                     verified_shards: 0,
                     failed_shards: 0,
