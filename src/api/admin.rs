@@ -350,6 +350,30 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     // 1. Locally loaded model (full model via --model flag)
     // Even though it's locally loaded, get the real manifest to show shard info
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        // Staleness check: verify model directory still exists on disk.
+        // If files were deleted while the process is running, skip this entry
+        // to avoid confusing the UI with a "loaded" model that can't run.
+        let loaded_model_dir = state.config.node.data_dir.join("models").join(
+            info.name
+                .to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', ""),
+        );
+        let has_shard_files = loaded_model_dir.exists()
+            && std::fs::read_dir(&loaded_model_dir)
+                .ok()
+                .map(|rd| rd.flatten().any(|e| {
+                    let name = e.file_name();
+                    let n = name.to_string_lossy();
+                    n.starts_with("shard_") && n.ends_with(".bin")
+                }))
+                .unwrap_or(false);
+
+        // Only show loaded model if files exist OR if it was loaded via --model (no shards)
+        if !has_shard_files && info.size_bytes > 0 {
+            // Stale entry — files deleted while running. Skip.
+            // The model will still appear from registry/peers if applicable.
+        } else {
         let peer_count = model_peers.get(&info.name).map_or(0, |s| s.len());
         seen_ids.insert(info.name.clone());
 
@@ -457,6 +481,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "has_manifest": has_manifest,
             "has_header": has_header,
         }));
+        } // else: stale loaded model, files deleted
     }
 
     // 2. Models from the P2P manifest registry
@@ -510,11 +535,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // A model is "ready" when all layers are covered across the network —
         // no single node needs all shards. Nodes participate with whatever
         // shards they have; the pipeline scheduler assembles the full pipeline.
-        let is_loaded = state
-            .shared_state
-            .split_models
-            .iter()
-            .any(|e| e.key().0 == m.id);
+        let is_loaded = if hosted_count > 0 {
+            state
+                .shared_state
+                .split_models
+                .iter()
+                .any(|e| e.key().0 == m.id)
+        } else {
+            // No local shards on disk — can't be "loaded" even if split_models
+            // has a stale entry from a previous load
+            false
+        };
         let all_covered = global_available == m.shard_count as usize;
 
         let status = if is_loaded && all_covered {
@@ -1399,6 +1430,19 @@ pub async fn hf_download_shards(
                 entry.log.push(format!("Header download failed: {}", e));
             }
             return;
+        }
+
+        // Download tied output weight if model is weight-tied (no output.weight tensor).
+        // This is needed by the last node in distributed inference for logit projection.
+        if let Err(e) = crate::model::huggingface::download_tied_output_weight(
+            &repo_id,
+            &filename,
+            &dest_dir,
+            &info.tensor_meta,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
         }
 
         // Generate manifest from header BEFORE downloading shard data.

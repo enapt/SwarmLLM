@@ -1804,6 +1804,39 @@ impl SplitModel {
             let output_tensor = ct
                 .tensor(&mut reader, "output.weight", &device)
                 .or_else(|_| ct.tensor(&mut reader, "token_embd.weight", &device))
+                .or_else(|_| {
+                    // Weight-tied model fallback: load from tied_output_weight.bin
+                    // This file contains the raw tensor data for token_embd.weight,
+                    // downloaded separately so nodes without shard 0 can still
+                    // project logits in distributed inference.
+                    let tied_path = model_dir.join("tied_output_weight.bin");
+                    if tied_path.exists() {
+                        tracing::info!("Loading output head from tied_output_weight.bin");
+                        // Get tensor info from GGUF metadata
+                        let embd_info = ct.tensor_infos.get("token_embd.weight").ok_or_else(|| {
+                            candle_core::Error::Msg(
+                                "token_embd.weight not in GGUF tensor info".into(),
+                            )
+                        })?;
+                        let raw_data = std::fs::read(&tied_path).map_err(|e| {
+                            candle_core::Error::Msg(format!(
+                                "Failed to read tied_output_weight.bin: {e}"
+                            ))
+                        })?;
+                        candle_core::quantized::ggml_file::qtensor_from_ggml(
+                            embd_info.ggml_dtype,
+                            &raw_data,
+                            embd_info.shape.dims().to_vec(),
+                            &device,
+                        )
+                    } else {
+                        Err(candle_core::Error::Msg(
+                            "No output.weight, no token_embd.weight in shards, \
+                             and no tied_output_weight.bin found"
+                                .into(),
+                        ))
+                    }
+                })
                 .map_err(|e| SwarmError::Internal(format!("Failed to load output head: {e}")))?;
             Some(
                 QMatMul::from_qtensor(output_tensor)

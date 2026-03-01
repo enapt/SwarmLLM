@@ -267,11 +267,11 @@ async fn completions_without_model_returns_503() {
 }
 
 #[tokio::test]
-async fn unauthenticated_api_key_endpoint_returns_401() {
+async fn unauthenticated_openai_endpoint_returns_401() {
     let (base, _key) = spawn_test_server().await;
-    // No Bearer token — should get 401 on the api-key endpoint (requires auth)
+    // No Bearer token — should get 401 on OpenAI-compatible endpoints
     let resp = reqwest::Client::new()
-        .get(format!("{base}/api/admin/api-key"))
+        .get(format!("{base}/v1/models"))
         .send()
         .await
         .unwrap();
@@ -285,8 +285,9 @@ async fn unauthenticated_api_key_endpoint_returns_401() {
 async fn wrong_api_key_returns_401() {
     let (base, _key) = spawn_test_server().await;
     let client = auth_client("wrong-key-12345");
+    // Wrong Bearer token — should get 401 on auth-required endpoints
     let resp = client
-        .get(format!("{base}/api/admin/api-key"))
+        .get(format!("{base}/v1/models"))
         .send()
         .await
         .unwrap();

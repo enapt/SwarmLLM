@@ -83,6 +83,7 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
+                | "/api/admin/api-key"
         ) || path.starts_with("/api/identity/")
             || path.starts_with("/api/pool/");
     }
@@ -212,8 +213,8 @@ mod tests {
         // PUT /api/identity/nickname requires auth
         assert!(!is_exempt_request("/api/identity/nickname", &put));
         assert!(!is_exempt_request("/api/identity/nickname", &delete));
-        // Sensitive admin endpoints require auth
-        assert!(!is_exempt_request("/api/admin/api-key", &Method::GET));
+        // API key is readable from dashboard (CORS-restricted to localhost)
+        assert!(is_exempt_request("/api/admin/api-key", &Method::GET));
         assert!(!is_exempt_request("/api/admin/shutdown", &post));
         assert!(!is_exempt_request("/api/admin/hf/download", &post));
         assert!(!is_exempt_request("/api/admin/hf/download-shards", &post));

@@ -427,6 +427,80 @@ pub async fn download_gguf_header(
     Ok(dest_path)
 }
 
+/// Download `token_embd.weight` for weight-tied models (no separate `output.weight`).
+///
+/// Weight-tied models reuse the embedding table as the output head. When shards are
+/// distributed across nodes, the last node needs this tensor but may not have shard 0.
+/// This downloads the tensor data separately and saves it as `tied_output_weight.bin`.
+///
+/// Returns `Ok(path)` if downloaded, `Ok(None)` if the model has a separate output.weight.
+pub async fn download_tied_output_weight(
+    repo_id: &str,
+    filename: &str,
+    dest_dir: &std::path::Path,
+    tensor_meta: &crate::inference::split::GgufTensorMeta,
+) -> Result<Option<std::path::PathBuf>, String> {
+    // Check if model is weight-tied: has token_embd.weight but no output.weight
+    let has_output = tensor_meta.tensors.contains_key("output.weight");
+    let embd = tensor_meta.tensors.get("token_embd.weight");
+
+    if has_output || embd.is_none() {
+        return Ok(None); // Not weight-tied, or no embedding — nothing to do
+    }
+
+    let embd_loc = embd.unwrap();
+    let abs_offset = tensor_meta.tensor_data_offset + embd_loc.offset;
+    let size = embd_loc.size;
+
+    tracing::info!(
+        repo = %repo_id,
+        size_mb = size / (1024 * 1024),
+        "Downloading tied output weight (token_embd.weight) for weight-tied model"
+    );
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = download_url(repo_id, filename);
+    let range_end = abs_offset + size - 1;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "SwarmLLM/0.1")
+        .header("Range", format!("bytes={abs_offset}-{range_end}"))
+        .send()
+        .await
+        .map_err(|e| format!("Tied output weight download failed: {e}"))?;
+
+    if resp.status().as_u16() != 206 && !resp.status().is_success() {
+        return Err(format!(
+            "Tied output weight download returned {}",
+            resp.status()
+        ));
+    }
+
+    let data = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read tied output weight bytes: {e}"))?;
+
+    std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+    let dest_path = dest_dir.join("tied_output_weight.bin");
+    std::fs::write(&dest_path, &data)
+        .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
+
+    tracing::info!(
+        size = data.len(),
+        path = %dest_path.display(),
+        "Downloaded tied output weight from HuggingFace"
+    );
+
+    Ok(Some(dest_path))
+}
+
 /// Parse the `Retry-After` header value.
 ///
 /// Supports two formats per RFC 7231:
@@ -688,6 +762,13 @@ pub async fn download_shards_v2(
 ) -> Result<std::path::PathBuf, String> {
     // Download the GGUF header
     download_gguf_header(repo_id, filename, dest_dir, info.header_size).await?;
+
+    // Download tied output weight for weight-tied models (no separate output.weight)
+    if let Err(e) =
+        download_tied_output_weight(repo_id, filename, dest_dir, &info.tensor_meta).await
+    {
+        tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+    }
 
     let total_shard_bytes: u64 = shard_indices
         .iter()

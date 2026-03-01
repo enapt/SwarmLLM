@@ -503,9 +503,7 @@ var SwarmLLM = (function() {
         if (hostedShards > 0 || isDownloading) {
           var hasManifest = m.has_manifest !== false;
           var hasHeader = m.has_header !== false;
-          if (hasManifest && hasHeader) {
-            fileIndicators = '<span style="color:var(--green);font-size:0.7rem;margin-left:6px" title="Manifest and header present">Ready to run</span>';
-          } else {
+          if (!hasManifest || !hasHeader) {
             var missing = [];
             if (!hasManifest) missing.push('manifest');
             if (!hasHeader) missing.push('header');

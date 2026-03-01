@@ -830,7 +830,7 @@ impl AutoShardManager {
                     }
                 };
 
-                // Download header + shard
+                // Download header + tied output weight (if weight-tied) + shard
                 crate::model::huggingface::download_gguf_header(
                     &repo_id,
                     &filename,
@@ -839,6 +839,18 @@ impl AutoShardManager {
                 )
                 .await
                 .ok();
+
+                // Download tied output weight for weight-tied models
+                if let Err(e) = crate::model::huggingface::download_tied_output_weight(
+                    &repo_id,
+                    &filename,
+                    &dest,
+                    &info.tensor_meta,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
+                }
 
                 match crate::model::huggingface::download_shard_v2(
                     &repo_id,
