@@ -38,11 +38,16 @@ pub struct SwarmBehaviour {
 }
 
 /// Build the combined network behaviour with all sub-protocols configured.
+///
+/// `known_peers` is the count of peers from the peer cache, used to auto-scale
+/// GossipSub mesh parameters. Small clusters (< 10 peers) use lower thresholds,
+/// while larger networks scale up for faster message propagation.
 pub fn build_behaviour(
     local_key: &Keypair,
     relay_behaviour: relay::client::Behaviour,
     relay_server_config: Option<&RelayServerConfig>,
     enable_mdns: bool,
+    known_peers: usize,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -68,18 +73,34 @@ pub fn build_behaviour(
         let hash = blake3::hash(&input);
         gossipsub::MessageId::from(hex::encode(&hash.as_bytes()[..16]))
     };
+    // Auto-scale GossipSub mesh parameters based on known peer count.
+    // Small clusters need low thresholds to form a mesh; large networks need
+    // higher values for faster message propagation (O(log n) hops).
+    let (mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min) = if known_peers >= 100 {
+        (6, 4, 12, 3) // Full GossipSub defaults — fast propagation
+    } else if known_peers >= 30 {
+        (4, 3, 8, 2) // Medium networks
+    } else if known_peers >= 10 {
+        (3, 2, 6, 1) // Small-medium networks
+    } else {
+        (2, 1, 4, 1) // Tiny clusters (dev/early alpha)
+    };
+    tracing::info!(
+        known_peers,
+        mesh_n,
+        mesh_n_low,
+        mesh_n_high,
+        "Auto-scaled GossipSub mesh parameters"
+    );
+
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(10))
         .validation_mode(gossipsub::ValidationMode::Strict)
         .message_id_fn(message_id_fn)
-        // Lower mesh thresholds so small clusters (2-3 nodes) can form a mesh.
-        // Defaults are mesh_n=6, mesh_n_low=4, mesh_n_high=12 — too high for
-        // dev/small deployments.
-        .mesh_n(2)
-        .mesh_n_low(1)
-        .mesh_n_high(4)
-        // NET-M2: At least 1 outbound mesh peer for message delivery
-        .mesh_outbound_min(1)
+        .mesh_n(mesh_n)
+        .mesh_n_low(mesh_n_low)
+        .mesh_n_high(mesh_n_high)
+        .mesh_outbound_min(mesh_outbound_min)
         .build()
         .map_err(|e| format!("GossipSub config error: {e}"))?;
     let gossipsub = gossipsub::Behaviour::new(
@@ -161,7 +182,7 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, false);
+        let result = build_behaviour(&keypair, relay_behaviour, None, false, 0);
         assert!(result.is_ok());
     }
 
@@ -175,7 +196,7 @@ mod tests {
             max_circuits: 8,
             ..Default::default()
         };
-        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false);
+        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false, 0);
         assert!(result.is_ok());
     }
 }

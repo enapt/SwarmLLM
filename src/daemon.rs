@@ -19,8 +19,8 @@ use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, NetworkCommand, NodeId, NodeStats, PeerInfo, PipelineAssignment, RebalanceEvent,
-    ShardId, SwarmMessage,
+    CreditBalance, EphemeralKeyExchange, NetworkCommand, NodeId, NodeStats, PeerInfo,
+    PipelineAssignment, RebalanceEvent, ShardId, SwarmMessage,
 };
 
 /// Thread-safe shared state accessible by all daemon tasks.
@@ -1023,12 +1023,20 @@ impl Daemon {
             });
         }
 
-        // Spawn key rotation task (evicts stale encryption sessions)
+        // Spawn key rotation task (evicts stale sessions + ephemeral re-keying)
         {
             let rotation_sm = shared_state.session_manager.clone();
             let rotation_shutdown = shutdown_rx.clone();
+            let rotation_network_tx = network_tx.clone();
+            let rotation_node_id = shared_state.identity.node_id().clone();
             tokio::spawn(async move {
-                crate::crypto::key_rotation::run_key_rotation(rotation_sm, rotation_shutdown).await;
+                crate::crypto::key_rotation::run_key_rotation(
+                    rotation_sm,
+                    rotation_network_tx,
+                    rotation_node_id,
+                    rotation_shutdown,
+                )
+                .await;
             });
         }
 
@@ -1739,6 +1747,33 @@ async fn dispatch_network_messages(
                             }
                             SwarmMessage::HealthPong { node_id: None, .. } => {
                                 // Old-format pong without node_id — can't update peer load
+                            }
+                            // Ephemeral key exchange for forward secrecy
+                            SwarmMessage::EphemeralKeyExchange(exchange) => {
+                                let sm = shared_state.session_manager.clone();
+                                let our_id = shared_state.identity.node_id().clone();
+                                if exchange.node_id == our_id {
+                                    // Ignore our own broadcast
+                                } else if exchange.is_initiator {
+                                    // Peer wants to re-key: accept and reply
+                                    let response_pub = sm.accept_ephemeral_exchange(
+                                        &exchange.node_id,
+                                        &exchange.ephemeral_pubkey,
+                                    );
+                                    let reply = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
+                                        session_id: exchange.session_id,
+                                        node_id: our_id,
+                                        ephemeral_pubkey: response_pub,
+                                        is_initiator: false,
+                                    });
+                                    let _ = network_tx.send(NetworkCommand::Broadcast(reply)).await;
+                                } else {
+                                    // Response to our initiation: complete the exchange
+                                    sm.complete_ephemeral_session(
+                                        &exchange.node_id,
+                                        &exchange.ephemeral_pubkey,
+                                    );
+                                }
                             }
                             // Other messages handled by NetworkManager
                             _ => {}

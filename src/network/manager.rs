@@ -79,6 +79,9 @@ impl NetworkManager {
         let kp_clone = keypair.clone();
         let relay_cfg = relay_server_config;
         let enable_mdns = config.network.enable_mdns;
+        // Load cached peer count to auto-scale GossipSub mesh parameters.
+        let known_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len()
+            + config.network.bootstrap_peers.len();
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_quic()
@@ -90,6 +93,7 @@ impl NetworkManager {
                     relay_behaviour,
                     relay_cfg.as_ref(),
                     enable_mdns,
+                    known_peers,
                 )
                 .map_err(|e| {
                     Box::new(std::io::Error::other(e.to_string()))

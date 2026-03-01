@@ -245,6 +245,49 @@ pub async fn chat_completions(
             }
         }
 
+        // Cold-start wait: shard announcements may still be propagating.
+        // Poll for up to 10 seconds before giving up.
+        for attempt in 1..=20u32 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Re-check distributed inference availability
+            if all_shards_available(&state, &req.model) {
+                tracing::info!(
+                    request_id = %request_id,
+                    model = %req.model,
+                    wait_ms = attempt * 500,
+                    "Model became available after cold-start wait"
+                );
+                if let Some(router_tx) = &state.router_tx {
+                    if req.stream {
+                        return router_inference_stream(
+                            router_tx.clone(),
+                            &state,
+                            &req,
+                            request_id,
+                            created,
+                        )
+                        .await;
+                    } else {
+                        return router_inference(router_tx.clone(), &req, request_id, created)
+                            .await;
+                    }
+                }
+                break;
+            }
+            // Re-check peer forwarding
+            if !is_forwarded {
+                if let Some(peer_url) = find_peer_with_model(&state, &req.model) {
+                    tracing::info!(
+                        request_id = %request_id,
+                        peer_url = %peer_url,
+                        wait_ms = attempt * 500,
+                        "Found peer after cold-start wait"
+                    );
+                    return forward_to_peer(&peer_url, &req, req.stream).await;
+                }
+            }
+        }
+
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
     }
 
