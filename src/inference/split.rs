@@ -2784,17 +2784,24 @@ pub fn compute_layer_shard_layouts(
         // Check if this is the last layer going to the last shard
         let is_last_layer = i == layer_sizes.len() - 1;
         let remaining_shards = shard_count as usize - layouts.len() - 1;
+        let remaining_layers = layer_sizes.len() - i - 1;
 
-        // Emit shard when we've reached target or must to avoid running out of shards
-        let should_emit = if is_last_layer {
-            true // Last layer always emits
-        } else if remaining_shards == 0 {
-            false // Can't emit more, keep accumulating
+        // Emit shard when we've reached target size, OR when we must emit to ensure
+        // enough shards are created for remaining layers. Without the force-emit check,
+        // models where layers are large relative to target_per_shard produce fewer
+        // shards than requested (e.g., 28 layers / 8 shards → 7 shards).
+        let should_emit = if is_last_layer || remaining_shards == 0 {
+            // Last layer → handled after loop (final shard with suffix).
+            // No remaining shards → keep accumulating for final shard.
+            false
+        } else if remaining_shards > remaining_layers {
+            // Must emit now: more shards needed than layers remaining
+            true
         } else {
-            current_size >= target_per_shard && remaining_shards > 0
+            current_size >= target_per_shard
         };
 
-        if should_emit && !is_last_layer && remaining_shards > 0 {
+        if should_emit {
             current_tensors.sort_by_key(|(_, off, _)| *off);
             layouts.push(LayerShardLayout {
                 index: layouts.len() as u32,

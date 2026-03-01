@@ -626,6 +626,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                         "downloaded_bytes": entry.downloaded_bytes,
                         "total_bytes": entry.total_bytes,
                         "downloaded_shards": entry.downloaded_shards,
+                        "speed_bytes_per_sec": entry.speed_bytes_per_sec,
                     })
                 })
         } else {
@@ -1650,7 +1651,11 @@ pub async fn hf_download_shards(
             let total = total_shard_bytes;
             let shard_progress_shared = shared.clone();
             let shard_progress_mid = mid.clone();
+            let gossip_ntx = network_tx.clone();
+            let gossip_node_id = shared.identity.node_id().clone();
+            let gossip_model_id = model_id_str.clone();
             let progress_task = tokio::spawn(async move {
+                let mut last_broadcast_pct: u32 = 0;
                 while let Some(prog) = shard_rx.recv().await {
                     // Forward cumulative bytes to the overall progress updater
                     let _ =
@@ -1668,6 +1673,29 @@ pub async fn hf_download_shards(
                             if sp.total_bytes == 0 {
                                 sp.total_bytes = prog.total_bytes;
                             }
+                        }
+                    }
+                    // Broadcast progress to peers every ~2% so they see near real-time updates
+                    let pct = if prog.total_bytes > 0 {
+                        ((prog.downloaded_bytes as f64 / prog.total_bytes as f64) * 100.0) as u32
+                    } else {
+                        0
+                    };
+                    if pct >= last_broadcast_pct + 2 {
+                        last_broadcast_pct = pct;
+                        if let Some(ref ntx) = gossip_ntx {
+                            let msg = crate::types::SwarmMessage::ShardDownloadProgress(
+                                crate::types::ShardDownloadProgress {
+                                    node_id: gossip_node_id.clone(),
+                                    shard_id: crate::types::ShardId {
+                                        model_id: crate::types::ModelId(gossip_model_id.clone()),
+                                        index: shard_idx,
+                                    },
+                                    progress_pct: pct,
+                                    state: crate::types::DownloadState::Downloading,
+                                },
+                            );
+                            let _ = ntx.send(crate::types::NetworkCommand::Broadcast(msg)).await;
                         }
                     }
                 }

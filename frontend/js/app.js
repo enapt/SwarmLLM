@@ -570,22 +570,46 @@ var SwarmLLM = (function() {
           if (legendParts.length > 0) shardHtml += '<div class="shard-legend" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>';
         }
 
-        // Download progress bar — compute from per-shard data when available
+        // Download progress bar — segmented by shard with ETA
         var progressHtml = '';
         if (isDownloading && m.acquisition_progress) {
           var ap = m.acquisition_progress;
           var dlBytes = ap.downloaded_bytes || 0;
           var totalBytes = ap.total_bytes || 0;
-          // Clamp to avoid > 100%
           if (dlBytes > totalBytes && totalBytes > 0) dlBytes = totalBytes;
           var pct = totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0;
+          var speed = ap.speed_bytes_per_sec || 0;
+          var etaStr = '';
+          if (speed > 0 && totalBytes > dlBytes) {
+            var secsLeft = Math.round((totalBytes - dlBytes) / speed);
+            if (secsLeft >= 3600) etaStr = Math.floor(secsLeft / 3600) + 'h ' + Math.floor((secsLeft % 3600) / 60) + 'm';
+            else if (secsLeft >= 60) etaStr = Math.floor(secsLeft / 60) + 'm ' + (secsLeft % 60) + 's';
+            else etaStr = secsLeft + 's';
+          }
+          // Build segmented bar — one segment per downloading shard
+          var dlShards = shards.filter(function(s) { return s.download || s.local; });
+          var segmentCount = Math.max(dlShards.length, shardCount);
+          var segmentsHtml = '';
+          if (segmentCount > 0) {
+            var segW = (100 / segmentCount);
+            for (var si = 0; si < segmentCount; si++) {
+              var sh = shards.find(function(s) { return s.index === si; });
+              var segPct = 0;
+              if (sh && sh.local) segPct = 100;
+              else if (sh && sh.download) segPct = sh.download.progress_pct || 0;
+              segmentsHtml += '<div class="dl-seg" style="width:' + segW.toFixed(2) + '%;"><div class="dl-seg-fill" style="width:' + segPct + '%"></div></div>';
+            }
+          }
           var shardLabel = ap.downloaded_shards !== undefined ? ('Shard ' + ap.downloaded_shards + '/' + shardCount) : 'Downloading';
+          var rightText = formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)';
+          if (speed > 0) rightText += ' &middot; ' + formatSpeed(speed);
+          if (etaStr) rightText += ' &middot; ETA ' + etaStr;
           progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '" data-last-pct="' + pct + '">' +
             '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
             '<span class="text-muted">' + shardLabel + '</span>' +
-            '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)</span>' +
+            '<span class="mono dl-progress-text">' + rightText + '</span>' +
             '</div>' +
-            '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>' +
+            '<div class="dl-bar">' + (segmentsHtml || '<div class="dl-fill" style="width:' + pct + '%"></div>') + '</div>' +
             '</div>';
         }
 
@@ -690,16 +714,36 @@ var SwarmLLM = (function() {
               progressEl.setAttribute('data-last-pct', '' + pct);
               var speed = acq.speed_bytes_per_sec || 0;
               var shardLabel = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || shardDetails.length)) : 'Downloading';
+              var etaStr = '';
+              if (speed > 0 && acq.total_bytes > dlBytes) {
+                var secsLeft = Math.round((acq.total_bytes - dlBytes) / speed);
+                if (secsLeft >= 3600) etaStr = Math.floor(secsLeft / 3600) + 'h ' + Math.floor((secsLeft % 3600) / 60) + 'm';
+                else if (secsLeft >= 60) etaStr = Math.floor(secsLeft / 60) + 'm ' + (secsLeft % 60) + 's';
+                else etaStr = secsLeft + 's';
+              }
               var textEl = progressEl.querySelector('.dl-progress-text');
               if (textEl) {
-                textEl.textContent = formatBytes(dlBytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct + '%)' +
-                  (speed > 0 ? ' \u2014 ' + formatSpeed(speed) : '');
+                var txt = formatBytes(dlBytes) + ' / ' + formatBytes(acq.total_bytes) + ' (' + pct + '%)';
+                if (speed > 0) txt += ' \u00b7 ' + formatSpeed(speed);
+                if (etaStr) txt += ' \u00b7 ETA ' + etaStr;
+                textEl.textContent = txt;
               }
               var labelEl = progressEl.querySelector('.text-muted');
               if (labelEl) labelEl.textContent = shardLabel;
-              var fillEl = progressEl.querySelector('.dl-fill');
-              if (fillEl) {
-                fillEl.style.width = pct + '%';
+              // Update segmented bar fills
+              var segs = progressEl.querySelectorAll('.dl-seg');
+              if (segs.length > 0) {
+                shardDetails.forEach(function(sd, i) {
+                  if (segs[sd.index]) {
+                    var segFill = segs[sd.index].querySelector('.dl-seg-fill');
+                    var segPct = sd.local ? 100 : (sd.download ? (sd.download.progress_pct || 0) : 0);
+                    if (segFill) segFill.style.width = segPct + '%';
+                  }
+                });
+              } else {
+                // Fallback: single fill bar
+                var fillEl = progressEl.querySelector('.dl-fill');
+                if (fillEl) fillEl.style.width = pct + '%';
               }
             }
           } else if (!progressEl && acq.total_bytes > 0 && acq.downloaded_bytes > 0) {
