@@ -2861,11 +2861,6 @@ pub fn available_layer_ranges_from_manifest(
     ranges
 }
 
-// V1 byte-range layer functions (build_available_layer_bitmap,
-// compute_available_layer_ranges, compute_local_layer_range) have been removed.
-// All callers now use available_layer_ranges_from_manifest() which reads
-// accurate layer_range data from v2 manifest ShardInfo entries.
-
 #[cfg(test)]
 mod tests {
     use super::*;

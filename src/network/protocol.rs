@@ -32,6 +32,12 @@ pub const TOPIC_IDENTITY: &str = "swarm/identity";
 /// GossipSub topic for device pool management.
 pub const TOPIC_POOLS: &str = "swarm/pools";
 
+/// Maximum message size for request_response protocol (256 MB).
+const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+
+/// Maximum activation payload size in layer results (128 MB).
+const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
+
 /// Codec for SwarmLLM request/response protocol using serde_json.
 #[derive(Debug, Clone, Default)]
 pub struct SwarmCodec;
@@ -83,7 +89,7 @@ impl request_response::Codec for SwarmCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        if len > 256 * 1024 * 1024 {
+        if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Message too large",
@@ -115,7 +121,7 @@ impl request_response::Codec for SwarmCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        if len > 256 * 1024 * 1024 {
+        if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Response too large",
@@ -470,7 +476,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
     let activations = if pos + 4 <= data.len() {
         let act_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        if act_len > 128 * 1024 * 1024 {
+        if act_len > MAX_ACTIVATION_SIZE {
             return Err(SwarmError::Network(format!(
                 "Activation data too large: {act_len} bytes"
             )));
@@ -829,8 +835,8 @@ mod tests {
     }
 
     #[test]
-    fn layer_forward_without_layer_range_backward_compat() {
-        // Simulate an old encoder that doesn't write the trailer
+    fn layer_forward_without_layer_range() {
+        // Messages without layer_range (e.g. encrypted) should decode with None
         let forward = LayerForward {
             request_id: uuid::Uuid::nil(),
             sequence_num: 0,

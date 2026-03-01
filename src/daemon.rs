@@ -1722,22 +1722,8 @@ async fn dispatch_network_messages(
                                 };
                                 let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
                             }
-                            // Health pings without node_id (backward compat): still respond
-                            SwarmMessage::HealthPing { nonce, node_id: None, .. } => {
-                                let ts = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs();
-                                let our_load = shared_state.active_pipelines.len() as u32;
-                                let our_id = Some(shared_state.identity.node_id().clone());
-                                let pong = SwarmMessage::HealthPong {
-                                    nonce,
-                                    timestamp: ts,
-                                    node_id: our_id,
-                                    active_request_count: our_load,
-                                };
-                                let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
-                            }
+                            // Ignore health pings without node_id (pre-alpha format)
+                            SwarmMessage::HealthPing { node_id: None, .. } => {}
                             // Health pongs: update the sender's load in peer_registry
                             SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
@@ -1745,9 +1731,8 @@ async fn dispatch_network_messages(
                                     peer.last_seen = chrono::Utc::now();
                                 }
                             }
-                            SwarmMessage::HealthPong { node_id: None, .. } => {
-                                // Old-format pong without node_id — can't update peer load
-                            }
+                            // Ignore health pongs without node_id (pre-alpha format)
+                            SwarmMessage::HealthPong { node_id: None, .. } => {}
                             // Ephemeral key exchange for forward secrecy
                             SwarmMessage::EphemeralKeyExchange(exchange) => {
                                 let sm = shared_state.session_manager.clone();

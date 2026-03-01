@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::time::SystemTime;
 
+/// Size of the GGUF header probe download (16 MB).
+/// Most GGUF headers are <10MB; 16MB gives margin for large vocab models.
+const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
+
 /// A GGUF model file discovered on HuggingFace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HfModelResult {
@@ -248,9 +252,7 @@ pub async fn probe_gguf_file(
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or("Server did not return Content-Length")?;
 
-    // Download the first 16MB to parse the GGUF header.
-    // Most GGUF headers are <10MB; 16MB gives margin for large vocab models.
-    let probe_size: u64 = 16 * 1024 * 1024;
+    let probe_size: u64 = GGUF_HEADER_PROBE_SIZE;
     let range_end = (probe_size - 1).min(total_size - 1);
 
     let probe_resp = client

@@ -633,9 +633,8 @@ mod tests {
     }
 
     #[test]
-    fn static_session_still_works_as_fallback() {
-        // Verify the existing static-key session path still works
-        // (backward compatibility when peers don't support ephemeral)
+    fn static_session_works_before_ephemeral_upgrade() {
+        // Verify static-key session works (used before first ephemeral exchange)
         let (sm_a, sm_b, node_a, node_b) = make_session_pair();
 
         let plaintext = b"static key message";

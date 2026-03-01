@@ -27,8 +27,7 @@ impl fmt::Display for ModelId {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelManifest {
-    /// Schema version for forward/backward compatibility.
-    /// Missing field (legacy manifests) defaults to 0.
+    /// Schema version (current: 2). Older versions are rejected.
     #[serde(default)]
     pub schema_version: u32,
     pub id: ModelId,
@@ -48,13 +47,13 @@ pub struct ModelManifest {
 }
 
 impl ModelManifest {
-    /// Validate the schema version. Warns on legacy (v0), rejects future versions.
+    /// Validate the schema version. Rejects legacy (< 2) and future versions.
     pub fn validate_version(&self) -> Result<(), String> {
-        if self.schema_version == 0 {
-            tracing::warn!(
-                model = %self.id,
-                "Legacy manifest with schema_version 0 — consider re-publishing"
-            );
+        if self.schema_version < MANIFEST_SCHEMA_VERSION {
+            return Err(format!(
+                "Manifest schema_version {} is outdated (current: {})",
+                self.schema_version, MANIFEST_SCHEMA_VERSION
+            ));
         } else if self.schema_version > MANIFEST_SCHEMA_VERSION {
             return Err(format!(
                 "Manifest schema_version {} is newer than supported version {}",
@@ -792,11 +791,10 @@ mod tests {
     }
 
     #[test]
-    fn manifest_schema_version_legacy_warns_but_ok() {
+    fn manifest_schema_version_legacy_rejected() {
         let mut m = test_manifest();
         m.schema_version = 0;
-        // Legacy (v0) should succeed (only warns)
-        assert!(m.validate_version().is_ok());
+        assert!(m.validate_version().is_err());
     }
 
     #[test]

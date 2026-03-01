@@ -425,11 +425,7 @@ pub async fn apply_credit_direct(
 /// Maximum staleness for a signed balance report (5 minutes).
 const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
 
-/// Weight for signed (verified) balance reports in percentile estimation.
-const SIGNED_REPORT_WEIGHT: f64 = 1.0;
 
-/// Weight for unsigned (legacy) balance reports in percentile estimation.
-const UNSIGNED_REPORT_WEIGHT: f64 = 0.1;
 
 /// Build the deterministic signing payload for a balance report.
 /// Format: "swarmllm-balance-v1" || node_id(32) || balance_bucket(8) || timestamp_secs(8)
@@ -464,12 +460,11 @@ pub fn sign_balance_report(
 /// 2. The signing key matches the claimed node_id (node_id == verifying_key bytes)
 /// 3. Timestamp is within `BALANCE_REPORT_MAX_AGE_SECS` of `now`
 ///
-/// Returns `Ok(true)` for valid signed reports, `Ok(false)` for unsigned legacy reports,
-/// and `Err` for invalid signatures or stale timestamps.
-pub fn verify_balance_report(gossip: &CreditGossip) -> Result<bool, SwarmError> {
-    // Legacy unsigned report — accept at reduced weight
+/// Returns `Ok(())` for valid signed reports, `Err` for invalid/unsigned/stale.
+pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
+    // Reject unsigned reports
     if gossip.signature.is_empty() {
-        return Ok(false);
+        return Err(SwarmError::InvalidSignature);
     }
 
     // Timestamp freshness check
@@ -505,13 +500,13 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<bool, SwarmError> 
         .verify(&payload, &sig)
         .map_err(|_| SwarmError::InvalidSignature)?;
 
-    Ok(true)
+    Ok(())
 }
 
 /// Process a received balance gossip message with Sybil resistance.
 ///
-/// Signed reports get weight 1.0, unsigned legacy reports get weight 0.1.
-/// Invalid signatures and stale reports are rejected entirely.
+/// Only signed reports are accepted. Invalid signatures, unsigned reports,
+/// and stale reports are rejected entirely.
 pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossip: &CreditGossip) {
     // Reject implausible balance buckets
     const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000;
@@ -524,25 +519,9 @@ pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossi
     }
 
     match verify_balance_report(gossip) {
-        Ok(is_signed) => {
-            let weight = if is_signed {
-                SIGNED_REPORT_WEIGHT
-            } else {
-                UNSIGNED_REPORT_WEIGHT
-            };
-
+        Ok(()) => {
             let mut balances = peer_balances.write().await;
-
-            if weight >= 1.0 {
-                // Signed report: full weight — add once
-                balances.push(gossip.balance_bucket);
-            } else {
-                // Unsigned legacy: reduced weight — only add if we randomly
-                // decide to include it (probabilistic weighting)
-                if rand::random::<f64>() < weight {
-                    balances.push(gossip.balance_bucket);
-                }
-            }
+            balances.push(gossip.balance_bucket);
 
             // Keep a rolling window of the most recent 1000 observations
             if balances.len() > 1000 {
@@ -553,9 +532,7 @@ pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossi
             tracing::debug!(
                 peer = %gossip.node_id,
                 bucket = gossip.balance_bucket,
-                signed = is_signed,
-                weight,
-                "Processed credit gossip"
+                "Processed signed credit gossip"
             );
         }
         Err(e) => {
@@ -785,13 +762,11 @@ mod tests {
             signature,
         };
 
-        let result = verify_balance_report(&gossip);
-        assert!(result.is_ok());
-        assert!(result.unwrap()); // true = signed
+        assert!(verify_balance_report(&gossip).is_ok());
     }
 
     #[test]
-    fn unsigned_legacy_report_accepted_at_low_weight() {
+    fn unsigned_report_rejected() {
         let identity = crate::identity::Identity::generate();
         let gossip = CreditGossip {
             node_id: identity.node_id().clone(),
@@ -800,9 +775,7 @@ mod tests {
             signature: Vec::new(), // unsigned
         };
 
-        let result = verify_balance_report(&gossip);
-        assert!(result.is_ok());
-        assert!(!result.unwrap()); // false = unsigned
+        assert!(verify_balance_report(&gossip).is_err());
     }
 
     #[test]
@@ -881,7 +854,7 @@ mod tests {
             signature,
         };
 
-        assert!(verify_balance_report(&gossip).unwrap());
+        assert!(verify_balance_report(&gossip).is_ok());
     }
 
     #[tokio::test]

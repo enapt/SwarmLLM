@@ -70,15 +70,6 @@ impl Token {
         }
     }
 
-    #[allow(dead_code)]
-    fn trims_left(&self) -> bool {
-        matches!(self, Token::TagTrimLeft(_) | Token::TagTrimBoth(_))
-    }
-
-    #[allow(dead_code)]
-    fn trims_right(&self) -> bool {
-        matches!(self, Token::TagTrimRight(_) | Token::TagTrimBoth(_))
-    }
 }
 
 // ── Tokenizer ──

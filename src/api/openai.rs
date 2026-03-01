@@ -13,6 +13,15 @@ use crate::inference::chat_template;
 use crate::inference::router::{RouterCommand, StreamingTokenEvent};
 use crate::types::{ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams};
 
+/// Timeout for peer-forwarded inference requests (seconds).
+const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
+
+/// SSE keep-alive interval for streaming responses (seconds).
+const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+
+/// Maximum cold-start wait time before returning 503 (seconds).
+const COLD_START_WAIT_SECS: u32 = 10;
+
 // ---- Request types ----
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -247,7 +256,8 @@ pub async fn chat_completions(
 
         // Cold-start wait: shard announcements may still be propagating.
         // Poll for up to 10 seconds before giving up.
-        for attempt in 1..=20u32 {
+        let max_polls = COLD_START_WAIT_SECS * 2; // 500ms intervals
+        for attempt in 1..=max_polls {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             // Re-check distributed inference availability
             if all_shards_available(&state, &req.model) {
@@ -477,7 +487,7 @@ static PEER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::
 fn get_peer_client() -> &'static reqwest::Client {
     PEER_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(INFERENCE_FORWARD_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -770,7 +780,7 @@ async fn router_inference_stream(
         });
 
     Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
             .into_response())
 }
 
@@ -878,7 +888,7 @@ async fn stream_response(
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
 }
 
 enum StreamEvent {
@@ -1043,7 +1053,7 @@ pub async fn completions(
             });
 
         Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
             .into_response())
     } else {
         let mut executor = state.executor.lock().await;
