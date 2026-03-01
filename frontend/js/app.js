@@ -498,6 +498,21 @@ var SwarmLLM = (function() {
         if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
         if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
 
+        // Local file indicators (manifest + header needed to run shards)
+        var fileIndicators = '';
+        if (hostedShards > 0 || isDownloading) {
+          var hasManifest = m.has_manifest !== false;
+          var hasHeader = m.has_header !== false;
+          if (hasManifest && hasHeader) {
+            fileIndicators = '<span style="color:var(--green);font-size:0.7rem;margin-left:6px" title="Manifest and header present">Ready to run</span>';
+          } else {
+            var missing = [];
+            if (!hasManifest) missing.push('manifest');
+            if (!hasHeader) missing.push('header');
+            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem;margin-left:6px" title="Missing: ' + missing.join(', ') + '">Missing ' + missing.join(' + ') + '</span>';
+          }
+        }
+
         // Shard grid
         var shardHtml = '';
         if (shardCount > 1 && shards.length > 0) {
@@ -601,7 +616,7 @@ var SwarmLLM = (function() {
             '<span class="model-name">' + escapeHtml(name) + '</span>' +
             '<span>' + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
-          '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + '</div>' +
+          '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
           shardHtml + progressHtml;
 
         list.appendChild(card);

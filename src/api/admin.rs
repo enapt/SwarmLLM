@@ -435,6 +435,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .as_ref()
             .map(|m| m.id.0.clone())
             .unwrap_or_else(|| slug.clone());
+        // Check for manifest.json and gguf_header.bin on disk
+        let model_dir = state.config.node.data_dir.join("models").join(&model_id);
+        let has_manifest = model_dir.join("manifest.json").exists();
+        let has_header = model_dir.join("gguf_header.bin").exists();
+
         models.push(serde_json::json!({
             "id": model_id,
             "name": info.name,
@@ -449,6 +454,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "local": true,
             "peers_hosting": peer_count,
             "shards": shard_detail,
+            "has_manifest": has_manifest,
+            "has_header": has_header,
         }));
     }
 
@@ -556,6 +563,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
         let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes);
 
+        // Check for manifest.json and gguf_header.bin on disk
+        let model_dir = state.config.node.data_dir.join("models").join(&m.id.0);
+        let has_manifest = model_dir.join("manifest.json").exists();
+        let has_header = model_dir.join("gguf_header.bin").exists();
+
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
@@ -571,6 +583,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "peers_hosting": peer_count,
             "shards": shard_detail,
             "estimated_vram_mb": estimated_vram,
+            "has_manifest": has_manifest,
+            "has_header": has_header,
             "acquisition": acq_state,
             "acquisition_progress": acq_progress,
         }));
@@ -1099,6 +1113,15 @@ pub async fn hf_download(
 
         // Clean up cancel flag
         download_shared.download_cancel_flags.remove(&download_mid);
+
+        // Clean up acquisition_progress after a delay so the frontend sees
+        // the final state and triggers a re-render before we remove it.
+        let cleanup_shared = download_shared.clone();
+        let cleanup_mid = download_mid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+        });
     });
 
     Ok(Json(serde_json::json!({
@@ -1337,13 +1360,27 @@ pub async fn hf_download_shards(
         };
 
         if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
-            entry.total_bytes = info.total_size;
-            entry.total_shards = info.shard_count();
+            // Set total_bytes to the sum of requested shards only (not full model size)
+            let requested_bytes: u64 = shard_indices
+                .iter()
+                .filter_map(|&idx| info.layouts.get(idx as usize))
+                .map(|l| l.size_bytes)
+                .sum();
+            entry.total_bytes = requested_bytes;
+            // Don't overwrite total_shards — keep as the requested count, not the full model count
             entry.log.push(format!(
                 "Probed: {} shards, {:.1} MB total",
                 info.shard_count(),
                 info.total_size as f64 / (1024.0 * 1024.0)
             ));
+            // Set per-shard total_bytes now that we know sizes from the probe
+            for &idx in &shard_indices {
+                if let Some(layout) = info.layouts.get(idx as usize) {
+                    if let Some(sp) = entry.shard_progress.get_mut(&idx) {
+                        sp.total_bytes = layout.size_bytes;
+                    }
+                }
+            }
         }
 
         // Download GGUF header (~6MB) — needed for manifest generation
@@ -1431,8 +1468,9 @@ pub async fn hf_download_shards(
             tracing::info!(model = %model_id_str, "Broadcast manifest + HF source EARLY (before shard downloads)");
         }
 
-        // Wake auto-manage on this node too (gossipsub doesn't self-deliver)
-        download_shared.auto_manage_notify.notify_one();
+        // NOTE: Do NOT wake auto-manage here. Shards aren't downloaded yet,
+        // so holder_count == 0 and auto-manage would race to download them
+        // from HF. The notify happens AFTER downloads complete (line ~1666).
 
         // ── Phase 2: Download shard data ────────────────────────────────
 
@@ -1506,13 +1544,27 @@ pub async fn hf_download_shards(
             let progress_tx_clone = ptx.clone();
             let base_downloaded = cumulative_downloaded;
             let total = total_shard_bytes;
+            let shard_progress_shared = shared.clone();
+            let shard_progress_mid = mid.clone();
             let progress_task = tokio::spawn(async move {
                 while let Some(prog) = shard_rx.recv().await {
+                    // Forward cumulative bytes to the overall progress updater
                     let _ =
                         progress_tx_clone.try_send(crate::model::huggingface::DownloadProgress {
                             downloaded_bytes: base_downloaded + prog.downloaded_bytes,
                             total_bytes: total,
                         });
+                    // Update per-shard progress directly
+                    if let Some(mut entry) =
+                        shard_progress_shared.acquisition_progress.get_mut(&shard_progress_mid)
+                    {
+                        if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
+                            sp.downloaded_bytes = prog.downloaded_bytes;
+                            if sp.total_bytes == 0 {
+                                sp.total_bytes = prog.total_bytes;
+                            }
+                        }
+                    }
                 }
             });
 
@@ -1636,6 +1688,15 @@ pub async fn hf_download_shards(
 
             // Wake auto-manage again to re-evaluate (maybe download more shards)
             download_shared.auto_manage_notify.notify_one();
+
+            // Clean up acquisition_progress after a delay so the frontend sees
+            // the "complete" state and triggers a re-render before we remove it.
+            let cleanup_shared = download_shared.clone();
+            let cleanup_mid = download_mid.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+            });
         }
     });
 

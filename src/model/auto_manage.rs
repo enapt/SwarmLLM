@@ -959,6 +959,15 @@ impl AutoShardManager {
                         // more shards (libp2p gossipsub doesn't deliver our own
                         // broadcasts back to us, so we must notify ourselves).
                         shared.auto_manage_notify.notify_one();
+
+                        // Clean up acquisition_progress after a delay so the
+                        // frontend sees "complete" before we remove it.
+                        let cleanup_shared = shared.clone();
+                        let cleanup_mid = model_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(
