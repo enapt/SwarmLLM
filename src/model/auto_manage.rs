@@ -169,6 +169,26 @@ impl AutoShardManager {
         let config = &self.shared_state.config.auto_manage;
         let local_node_id = self.shared_state.identity.node_id().clone();
 
+        // Peer warmup grace period: if we have zero peers and just started,
+        // wait for peer discovery before evaluating. Prevents a fresh node
+        // from immediately downloading everything from HF before it learns
+        // that peers already hold shards.
+        let peers = self.shared_state.peer_registry.len();
+        if peers == 0 {
+            let stats = self.shared_state.node_stats.read().await;
+            let uptime_secs = (chrono::Utc::now() - stats.uptime_start)
+                .num_seconds()
+                .max(0) as u64;
+            drop(stats);
+            if uptime_secs < 60 {
+                tracing::info!(
+                    uptime_secs,
+                    "AutoShardManager: waiting for peer discovery before evaluation (no peers yet)"
+                );
+                return;
+            }
+        }
+
         // Discover HF sources from hf_source.json files alongside manifests
         self.discover_hf_sources();
 
@@ -346,6 +366,19 @@ impl AutoShardManager {
                     Some((start, end)) => shard.index >= start && shard.index <= end,
                     None => false,
                 };
+
+                // Skip shards already held by peers — distributed inference handles
+                // cross-node shards. Only download from HF to seed the network
+                // (holder_count == 0) or to fill our configured --shards range.
+                if holder_count > 0 && !in_configured_range {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        shard = shard.index,
+                        holders = holder_count,
+                        "Skipping shard — already held by peers"
+                    );
+                    continue;
+                }
 
                 // Score = popularity * rarity_bonus * configured_bonus * vram_fitness
                 // - configured_bonus: 100x for shards we're supposed to serve (highest priority)
