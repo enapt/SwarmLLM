@@ -2548,7 +2548,9 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     let mut shape = Vec::with_capacity(ndim);
     for _ in 0..ndim {
         if pos + 4 > bytes.len() {
-            return Err(SwarmError::Internal("Tensor bytes truncated in shape".into()));
+            return Err(SwarmError::Internal(
+                "Tensor bytes truncated in shape".into(),
+            ));
         }
         let dim = u32::from_le_bytes(
             bytes[pos..pos + 4]
@@ -2560,7 +2562,9 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     }
 
     if pos + 4 > bytes.len() {
-        return Err(SwarmError::Internal("Tensor bytes truncated at dtype".into()));
+        return Err(SwarmError::Internal(
+            "Tensor bytes truncated at dtype".into(),
+        ));
     }
     let _dtype_tag = u32::from_le_bytes(
         bytes[pos..pos + 4]

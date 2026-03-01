@@ -425,8 +425,6 @@ pub async fn apply_credit_direct(
 /// Maximum staleness for a signed balance report (5 minutes).
 const BALANCE_REPORT_MAX_AGE_SECS: i64 = 300;
 
-
-
 /// Build the deterministic signing payload for a balance report.
 /// Format: "swarmllm-balance-v1" || node_id(32) || balance_bucket(8) || timestamp_secs(8)
 fn build_balance_report_payload(

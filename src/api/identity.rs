@@ -106,13 +106,20 @@ fn default_limit() -> usize {
     50
 }
 
-/// Minimum age (days) for a peer to appear on the leaderboard.
+/// Minimum age (days) for anti-spoofing on large networks (>20 peers).
 const MIN_LIFETIME_DAYS: u64 = 7;
-/// Minimum verified dual-signed transactions for leaderboard eligibility.
+/// Minimum verified dual-signed transactions for anti-spoofing on large networks.
 const MIN_VERIFIED_TRANSACTIONS: u32 = 10;
+/// Below this peer count, all known peers appear on the leaderboard.
+const SMALL_NETWORK_THRESHOLD: usize = 20;
 
 /// Check if a peer is eligible for the leaderboard based on anti-spoofing rules.
-fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32) -> bool {
+/// On small networks (<20 peers), all peers are shown. On larger networks,
+/// peers must meet age and transaction thresholds to prevent sybil manipulation.
+fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: usize) -> bool {
+    if peer_count < SMALL_NETWORK_THRESHOLD {
+        return true;
+    }
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -127,18 +134,18 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32) -> bool {
 
 /// GET /api/identity/leaderboard?limit=50 — top N peers by credits.
 ///
-/// Anti-spoofing protection: peers must meet minimum age and transaction count
-/// thresholds to appear on the leaderboard. Trust scores are included for each entry.
+/// Shows all peers on small networks. On large networks (20+), applies anti-spoofing
+/// filters (7-day age, 10 verified transactions). Uses gossiped credit balances.
 pub async fn leaderboard(
     State(state): State<AppState>,
     Query(query): Query<LeaderboardQuery>,
 ) -> Json<serde_json::Value> {
     let limit = query.limit.min(200);
+    let peer_count = state.shared_state.peer_registry.len();
 
-    // Gather all known peers with their credit info
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
-    // Add self (always eligible) — clone values and drop lock before peer iteration
+    // Add self (always included)
     let self_id = state.shared_state.identity.node_id();
     let (self_balance, self_tier) = {
         let self_credit = state.shared_state.credit_balance.read().await;
@@ -156,23 +163,27 @@ pub async fn leaderboard(
         "eligible": true,
     }));
 
-    // Add known peers — filter by leaderboard eligibility (anti-spoofing).
-    // Per-peer credit balances aren't tracked in SharedState, so we derive a rough
-    // estimate: high trust_score peers likely have positive balances.
+    // Add known peers — use gossiped credit balances when available
     for peer in state.shared_state.peer_registry.iter() {
-        let eligible = is_leaderboard_eligible(peer.first_seen, peer.verified_transaction_count);
+        let eligible =
+            is_leaderboard_eligible(peer.first_seen, peer.verified_transaction_count, peer_count);
         if !eligible {
             continue;
         }
 
         let peer_name = display_name(&peer.node_id, &state.shared_state.nickname_registry);
-        // Estimate credit bucket from trust_score (0.0-1.0 → mapped to balance range)
-        let estimated_balance = (peer.trust_score * 5000.0) as i64;
-        let peer_tier = crate::credit::priority::PriorityCalculator::tier_name(estimated_balance);
+        // Use actual gossiped balance if available, otherwise estimate from trust
+        let balance = state
+            .shared_state
+            .peer_credit_balances
+            .get(&peer.node_id)
+            .map(|v| *v)
+            .unwrap_or_else(|| (peer.trust_score * 5000.0) as i64);
+        let peer_tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),
             "display_name": peer_name,
-            "credits": estimated_balance,
+            "credits": balance,
             "tier": peer_tier,
             "trust_score": peer.trust_score,
             "eligible": true,

@@ -2112,6 +2112,7 @@ var SwarmLLM = (function() {
 
     setup.init();
     settings.init();
+    settings.loadApiKey();
     dashboard.loadInitial();
     loadModels();
     connectWebSocket();

@@ -81,7 +81,6 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        // Read type tag
         let mut tag_buf = [0u8; 1];
         io.read_exact(&mut tag_buf).await?;
 
@@ -147,23 +146,33 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        match req {
+        // Build the complete frame in a single buffer before writing.
+        // Quinn's QUIC stream has no BufWriter and flush() is a no-op,
+        // so a single write_all() is more reliable than multiple small writes.
+        let frame = match req {
             SwarmRequest::TensorPayload(payload) => {
-                io.write_all(&[WIRE_TAG_TENSOR]).await?;
                 let len = (payload.len() as u32).to_be_bytes();
-                io.write_all(&len).await?;
-                io.write_all(&payload).await?;
+                let mut frame = Vec::with_capacity(1 + 4 + payload.len());
+                frame.push(WIRE_TAG_TENSOR);
+                frame.extend_from_slice(&len);
+                frame.extend_from_slice(&payload);
+                frame
             }
             other => {
-                io.write_all(&[WIRE_TAG_JSON]).await?;
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let len = (data.len() as u32).to_be_bytes();
-                io.write_all(&len).await?;
-                io.write_all(&data).await?;
+                let mut frame = Vec::with_capacity(1 + 4 + data.len());
+                frame.push(WIRE_TAG_JSON);
+                frame.extend_from_slice(&len);
+                frame.extend_from_slice(&data);
+                frame
             }
-        }
-        io.close().await?;
+        };
+        io.write_all(&frame).await?;
+        // Do NOT call io.close() here — the request_response handler manages stream
+        // lifecycle (close + read_response). Closing in the codec corrupts the QUIC
+        // stream state and silently prevents message delivery.
         Ok(())
     }
 
@@ -176,23 +185,30 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        match resp {
+        // Single write_all — see write_request comment.
+        let frame = match resp {
             SwarmResponse::TensorPayload(payload) => {
-                io.write_all(&[WIRE_TAG_TENSOR]).await?;
                 let len = (payload.len() as u32).to_be_bytes();
-                io.write_all(&len).await?;
-                io.write_all(&payload).await?;
+                let mut frame = Vec::with_capacity(1 + 4 + payload.len());
+                frame.push(WIRE_TAG_TENSOR);
+                frame.extend_from_slice(&len);
+                frame.extend_from_slice(&payload);
+                frame
             }
             other => {
-                io.write_all(&[WIRE_TAG_JSON]).await?;
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let len = (data.len() as u32).to_be_bytes();
-                io.write_all(&len).await?;
-                io.write_all(&data).await?;
+                let mut frame = Vec::with_capacity(1 + 4 + data.len());
+                frame.push(WIRE_TAG_JSON);
+                frame.extend_from_slice(&len);
+                frame.extend_from_slice(&data);
+                frame
             }
-        }
-        io.close().await?;
+        };
+        io.write_all(&frame).await?;
+        // Do NOT call io.close() here — the request_response handler manages stream
+        // lifecycle. Closing in the codec corrupts QUIC stream state.
         Ok(())
     }
 }

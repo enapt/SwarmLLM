@@ -487,7 +487,9 @@ static PEER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::
 fn get_peer_client() -> &'static reqwest::Client {
     PEER_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(INFERENCE_FORWARD_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(
+                INFERENCE_FORWARD_TIMEOUT_SECS,
+            ))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -780,8 +782,10 @@ async fn router_inference_stream(
         });
 
     Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
-            .into_response())
+        .keep_alive(
+            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+        )
+        .into_response())
 }
 
 async fn non_stream_response(
@@ -888,7 +892,9 @@ async fn stream_response(
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
+    Sse::new(stream).keep_alive(
+        KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+    )
 }
 
 enum StreamEvent {
@@ -1053,7 +1059,10 @@ pub async fn completions(
             });
 
         Ok(Sse::new(stream)
-            .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+            )
             .into_response())
     } else {
         let mut executor = state.executor.lock().await;

@@ -77,6 +77,43 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     // Hardware detection
     let hardware = detect_hardware(&state.shared_state);
 
+    // Inference performance metrics from latency samples
+    let inference_perf = {
+        let samples = state.shared_state.inference_latency_samples.read();
+        match samples {
+            Ok(s) if !s.is_empty() => {
+                let count = s.len();
+                let sum: f64 = s.iter().sum();
+                let avg_ms = (sum / count as f64) * 1000.0;
+                let min_ms = s.iter().cloned().fold(f64::INFINITY, f64::min) * 1000.0;
+                let max_ms = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 1000.0;
+                // p50 / p95 / p99
+                let mut sorted: Vec<f64> = s.iter().cloned().collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let p50_ms = sorted[count / 2] * 1000.0;
+                let p95_ms = sorted[(count as f64 * 0.95) as usize] * 1000.0;
+                let p99_ms = sorted[((count as f64 * 0.99) as usize).min(count - 1)] * 1000.0;
+                serde_json::json!({
+                    "total_requests": state.shared_state.inference_requests_total
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "avg_latency_ms": (avg_ms * 10.0).round() / 10.0,
+                    "min_latency_ms": (min_ms * 10.0).round() / 10.0,
+                    "max_latency_ms": (max_ms * 10.0).round() / 10.0,
+                    "p50_latency_ms": (p50_ms * 10.0).round() / 10.0,
+                    "p95_latency_ms": (p95_ms * 10.0).round() / 10.0,
+                    "p99_latency_ms": (p99_ms * 10.0).round() / 10.0,
+                    "samples": count,
+                })
+            }
+            _ => serde_json::json!({
+                "total_requests": state.shared_state.inference_requests_total
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "avg_latency_ms": null,
+                "samples": 0,
+            }),
+        }
+    };
+
     Json(serde_json::json!({
         "node_id": node_id,
         "version": env!("CARGO_PKG_VERSION"),
@@ -94,6 +131,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
             "lifetime_spent": credit.lifetime_spent,
         },
         "hardware": hardware,
+        "inference": inference_perf,
     }))
 }
 
@@ -1988,22 +2026,32 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         }
     }
 
-    // Aggregate peer regions from capabilities
+    // Aggregate peer regions from capabilities.
+    // Peers without capability/region info are placed in our own region (most peers
+    // on a LAN share the same region) or "??" as fallback.
+    let self_region = {
+        let detected = state.shared_state.detected_region.read().await;
+        detected.as_deref().unwrap_or("??").to_uppercase()
+    };
     for peer in state.shared_state.peer_registry.iter() {
-        if let Some(ref cap) = peer.value().capability {
-            if let Some(ref region) = cap.region {
-                let code = region.to_uppercase();
-                let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
-                entry.0 += 1;
-                // Count distinct models this peer hosts
-                let mut peer_models = std::collections::HashSet::new();
-                for shard in &cap.hosted_shards {
-                    peer_models.insert(shard.model_id.0.clone());
-                }
-                for model_id in peer_models {
-                    *entry.1.entry(model_id).or_insert(0) += 1;
-                }
+        let (region_code, hosted_shards) = match peer.value().capability {
+            Some(ref cap) => {
+                let code = cap.region.as_deref().unwrap_or(&self_region).to_uppercase();
+                (code, &cap.hosted_shards[..])
             }
+            None => (self_region.clone(), &[][..]),
+        };
+        let entry = regions
+            .entry(region_code)
+            .or_insert_with(|| (0, HashMap::new()));
+        entry.0 += 1;
+        // Count distinct models this peer hosts
+        let mut peer_models = std::collections::HashSet::new();
+        for shard in hosted_shards {
+            peer_models.insert(shard.model_id.0.clone());
+        }
+        for model_id in peer_models {
+            *entry.1.entry(model_id).or_insert(0) += 1;
         }
     }
 

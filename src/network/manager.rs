@@ -199,7 +199,14 @@ impl NetworkManager {
                 // Outbound commands from other daemon tasks
                 cmd = self.inbound_rx.recv() => {
                     match cmd {
-                        Some(cmd) => self.handle_outbound_command(cmd).await,
+                        Some(cmd) => {
+                            self.handle_outbound_command(cmd).await;
+                            // After handling commands that call send_request(),
+                            // drive the swarm to process pending behaviour events
+                            // before returning to select!. This ensures NotifyHandler
+                            // events are delivered to the connection task promptly.
+                            self.drain_pending_swarm_events().await;
+                        },
                         None => {
                             self.save_peer_cache();
                             tracing::info!("Inbound channel closed, shutting down");
@@ -220,6 +227,32 @@ impl NetworkManager {
         }
 
         Ok(())
+    }
+
+    /// Drive the swarm to process any pending behaviour events (e.g. from send_request()).
+    ///
+    /// After calling methods like `behaviour_mut().request_response.send_request()`, the
+    /// behaviour has internal pending events (NotifyHandler) that need to be delivered
+    /// to the connection task. Without explicitly driving the swarm, these events wait
+    /// until the next `select!` iteration polls the swarm future. This method ensures
+    /// they are processed immediately.
+    async fn drain_pending_swarm_events(&mut self) {
+        use futures::StreamExt;
+        use std::task::Poll;
+        let mut drained = 0u32;
+        // Poll the swarm in a non-blocking loop until it returns Pending.
+        while let Some(event) = std::future::poll_fn(|cx| match self.swarm.poll_next_unpin(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(Some(event)),
+            Poll::Pending | Poll::Ready(None) => Poll::Ready(None),
+        })
+        .await
+        {
+            drained += 1;
+            self.handle_swarm_event(event).await;
+        }
+        if drained > 0 {
+            tracing::trace!(drained, "Drained pending swarm events after command");
+        }
     }
 
     async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
@@ -263,8 +296,8 @@ impl NetworkManager {
                                 source = %propagation_source,
                                 "Received GossipSub message"
                             );
-                            if let Err(e) = self.outbound_tx.send(msg).await {
-                                tracing::warn!(error = %e, "Failed to forward gossipsub message");
+                            if let Err(e) = self.outbound_tx.try_send(msg) {
+                                tracing::warn!(error = %e, "Dispatcher backpressured, dropping gossipsub message");
                             }
                         }
                     }
@@ -328,8 +361,10 @@ impl NetworkManager {
                 tracing::debug!(%peer, %error, "Request inbound failure");
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-                request_response::Event::ResponseSent { .. },
-            )) => {}
+                request_response::Event::ResponseSent { peer, request_id },
+            )) => {
+                tracing::debug!(%peer, ?request_id, "Response sent to peer");
+            }
 
             // ── GossipSub peer subscribed — flush buffered messages (NET-I4) ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(
@@ -720,8 +755,8 @@ impl NetworkManager {
                     _ => {
                         // Forward all other messages to dispatcher
                         tracing::debug!(%peer, "Handling protocol message request");
-                        if let Err(e) = self.outbound_tx.send(*msg).await {
-                            tracing::warn!(error = %e, "Failed to forward request message");
+                        if let Err(e) = self.outbound_tx.try_send(*msg) {
+                            tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
                         }
                     }
                 }
@@ -790,8 +825,8 @@ impl NetworkManager {
                     self.handle_pex_response(&pex_resp.peers);
                     return;
                 }
-                if let Err(e) = self.outbound_tx.send(*msg).await {
-                    tracing::warn!(%peer, error = %e, "Failed to forward response message");
+                if let Err(e) = self.outbound_tx.try_send(*msg) {
+                    tracing::warn!(%peer, error = %e, "Dispatcher backpressured, dropping response message");
                 }
             }
             SwarmResponse::ShardData(data) => {
@@ -973,9 +1008,7 @@ impl NetworkManager {
 
         // Try to find the peer's NodeId for encryption
         let peer_node_id = self.find_node_id_for_peer(&peer_id);
-        let use_encryption = peer_node_id
-            .as_ref()
-            .is_some_and(|nid| self.shared_state.session_manager.has_session(nid));
+        let use_encryption = peer_node_id.is_some();
 
         let payload = if use_encryption {
             let node_id = peer_node_id.unwrap();
@@ -1025,10 +1058,8 @@ impl NetworkManager {
         };
 
         let payload_len = payload.len();
-        let is_connected = self.swarm.is_connected(&peer_id);
         let req = SwarmRequest::TensorPayload(payload);
-        let outbound_id = self
-            .swarm
+        self.swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
@@ -1038,8 +1069,6 @@ impl NetworkManager {
             seq = forward.sequence_num,
             encrypted = use_encryption,
             payload_len,
-            ?outbound_id,
-            is_connected,
             "Sent tensor forward"
         );
     }
@@ -1060,14 +1089,16 @@ impl NetworkManager {
 
         match protocol::encode_layer_result(&result) {
             Ok(payload) => {
+                let payload_len = payload.len();
                 let req = SwarmRequest::TensorPayload(payload);
                 self.swarm
                     .behaviour_mut()
                     .request_response
                     .send_request(&peer_id, req);
-                tracing::debug!(
+                tracing::info!(
                     %peer_id,
                     request_id = %result.request_id,
+                    payload_len,
                     "Sent tensor result"
                 );
             }
@@ -1080,9 +1111,10 @@ impl NetworkManager {
     /// Process an inbound binary tensor payload (from either request or response).
     fn handle_tensor_payload(&mut self, peer: libp2p::PeerId, payload: &[u8]) {
         let tag = payload.first().copied().unwrap_or(0);
+        tracing::debug!(%peer, tag, payload_len = payload.len(), "handle_tensor_payload");
         match tag {
             protocol::TENSOR_TAG_FORWARD => {
-                tracing::debug!(%peer, "Received tensor LayerForward");
+                tracing::info!(%peer, payload_len = payload.len(), "Received tensor LayerForward");
                 match protocol::decode_layer_forward(payload) {
                     Ok(mut forward) => {
                         forward.sender_peer_bytes = Some(peer.to_bytes());
@@ -1097,9 +1129,16 @@ impl NetworkManager {
                 }
             }
             protocol::TENSOR_TAG_RESULT => {
-                tracing::debug!(%peer, "Received tensor LayerResult");
+                tracing::info!(%peer, payload_len = payload.len(), "Received tensor LayerResult");
                 match protocol::decode_layer_result(payload) {
                     Ok(result) => {
+                        tracing::debug!(
+                            %peer,
+                            request_id = %result.request_id,
+                            tokens = result.token_ids.len(),
+                            activations_bytes = result.activations.len(),
+                            "Decoded tensor LayerResult, dispatching"
+                        );
                         if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
                         {
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");

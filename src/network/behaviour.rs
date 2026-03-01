@@ -140,7 +140,12 @@ pub fn build_behaviour(
         .unwrap_or_default();
     let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
 
-    // NET-I5: Connection limits to prevent resource exhaustion
+    // NET-I5: Connection limits to prevent resource exhaustion.
+    // max_established_per_peer=2: Allow bootstrap + mDNS connections to coexist.
+    // With max=1, if both nodes dial each other simultaneously (mDNS + identify),
+    // the denied second connection confuses request_response routing — it registers
+    // the connection before connection_limits denies it, then routes requests to
+    // the dead connection, causing silent delivery failure.
     let conn_limits = connection_limits::ConnectionLimits::default()
         .with_max_established_per_peer(Some(2))
         .with_max_established(Some(500));

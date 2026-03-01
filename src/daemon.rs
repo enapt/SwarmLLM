@@ -136,6 +136,9 @@ pub struct SharedState {
     /// Auto-detected country code from IP geolocation (e.g. "US", "DE").
     /// Falls back to config.identity.region if geolocation fails.
     pub detected_region: RwLock<Option<String>>,
+    /// Per-peer credit balance buckets from gossip, for leaderboard display.
+    /// Keyed by NodeId, value is the latest gossiped balance bucket.
+    pub peer_credit_balances: DashMap<NodeId, i64>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -258,6 +261,7 @@ impl SharedState {
             config_watch_tx,
             trust_manager,
             detected_region: RwLock::new(None),
+            peer_credit_balances: DashMap::new(),
             shutdown_tx,
         });
 
@@ -1401,6 +1405,11 @@ async fn dispatch_network_messages(
                                     &credit_peer_balances,
                                     &gossip,
                                 ).await;
+                                // Store per-peer balance for leaderboard display
+                                shared_state.peer_credit_balances.insert(
+                                    gossip.node_id.clone(),
+                                    gossip.balance_bucket,
+                                );
                             }
                             SwarmMessage::ModelVote(vote) => {
                                 tracing::info!(
