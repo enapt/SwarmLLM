@@ -318,7 +318,7 @@ mod tests {
 
         // First token goes to block 5, offset 0 → slot 80
         let slots = entry.slot_mapping_for_append(1);
-        assert_eq!(slots, vec![5 * BLOCK_SIZE as i64 + 0]);
+        assert_eq!(slots, vec![5 * BLOCK_SIZE as i64]);
 
         entry.seq_len = 15;
         // Token at pos 15 goes to block 5, offset 15 → slot 95
@@ -328,7 +328,7 @@ mod tests {
         entry.seq_len = 16;
         // Token at pos 16 goes to block 10, offset 0 → slot 160
         let slots = entry.slot_mapping_for_append(1);
-        assert_eq!(slots, vec![10 * BLOCK_SIZE as i64 + 0]);
+        assert_eq!(slots, vec![10 * BLOCK_SIZE as i64]);
     }
 
     #[test]

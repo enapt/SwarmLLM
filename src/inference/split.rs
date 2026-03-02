@@ -33,8 +33,9 @@ const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 /// Entries are created lazily on first use and cleaned up when the request completes
 /// or after a timeout.
 pub struct KvCacheStore {
-    /// Per-request KV-cache: (model_key, request_id) → per-layer (K, V) pairs.
-    caches: dashmap::DashMap<(String, String), KvCacheEntry>,
+    /// Per-request KV-cache: "model_key\0request_id" → per-layer (K, V) pairs.
+    /// Single-String key enables `&str` lookups via `Borrow<str>` (no allocation on hot path).
+    caches: dashmap::DashMap<String, KvCacheEntry>,
     /// TTL for abandoned cache entries.
     ttl: std::time::Duration,
 }
@@ -57,23 +58,48 @@ impl KvCacheStore {
     }
 
     /// Get or create the KV-cache entry for a request. Returns a mutable ref guard.
+    /// Build the composite key for the KV-cache DashMap.
+    #[inline]
+    pub(crate) fn cache_key(model_key: &str, request_id: &str) -> String {
+        format!("{model_key}\0{request_id}")
+    }
+
+    /// Get or create a KV-cache entry using a pre-formatted key string.
+    /// The caller should build the key once via `cache_key()` and reuse it
+    /// for both take and writeback, avoiding redundant allocations.
+    pub(crate) fn get_or_create_keyed(
+        &self,
+        key: &str,
+        num_layers: usize,
+    ) -> dashmap::mapref::one::RefMut<'_, String, KvCacheEntry> {
+        // Fast path: entry already exists (all tokens after the first).
+        // DashMap::get_mut takes &str via String: Borrow<str> — zero allocation.
+        if let Some(entry) = self.caches.get_mut(key) {
+            return entry;
+        }
+        // Slow path: first access for this request — allocate key and create entry.
+        self.caches
+            .entry(key.to_string())
+            .or_insert_with(|| KvCacheEntry {
+                layers: vec![None; num_layers],
+                last_accessed: std::time::Instant::now(),
+            })
+    }
+
     pub(crate) fn get_or_create(
         &self,
         model_key: &str,
         request_id: &str,
         num_layers: usize,
-    ) -> dashmap::mapref::one::RefMut<'_, (String, String), KvCacheEntry> {
-        let key = (model_key.to_string(), request_id.to_string());
-        self.caches.entry(key).or_insert_with(|| KvCacheEntry {
-            layers: vec![None; num_layers],
-            last_accessed: std::time::Instant::now(),
-        })
+    ) -> dashmap::mapref::one::RefMut<'_, String, KvCacheEntry> {
+        let key = Self::cache_key(model_key, request_id);
+        self.get_or_create_keyed(&key, num_layers)
     }
 
     /// Clear (remove) the KV-cache for a specific request.
     pub fn clear_request(&self, model_key: &str, request_id: &str) {
-        let key = (model_key.to_string(), request_id.to_string());
-        self.caches.remove(&key);
+        let key = Self::cache_key(model_key, request_id);
+        self.caches.remove(key.as_str());
     }
 
     /// Clean up all expired cache entries. Returns the number of entries removed.
@@ -88,7 +114,7 @@ impl KvCacheStore {
     /// Remove all cache entries for a given request_id (across all models).
     pub fn cleanup_request_id(&self, request_id: &str) {
         self.caches
-            .retain(|(_model_key, req_id), _| req_id != request_id);
+            .retain(|key, _| !key.ends_with(&format!("\0{request_id}")));
     }
 
     /// Get the number of active cache entries.
@@ -110,12 +136,16 @@ pub struct SplitModelEntry {
     pub estimated_vram_mb: u64,
     /// Optional batch forwarder for this model segment.
     pub batch_forwarder: Option<std::sync::Arc<BatchForwarder>>,
+    /// True if this entry has both embedding (first) and output head (last) — i.e., all layers.
+    /// Set at construction time so the fast path can check without locking the model mutex.
+    pub is_complete: bool,
 }
 
 impl SplitModelEntry {
     /// Create a new entry wrapping a split model.
     pub fn new(model: SplitModel) -> Self {
         let estimated_vram_mb = model.estimate_vram_mb();
+        let is_complete = model.is_first() && model.is_last();
         Self {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(model)),
             last_used: std::sync::atomic::AtomicU64::new(
@@ -126,6 +156,7 @@ impl SplitModelEntry {
             ),
             estimated_vram_mb,
             batch_forwarder: None,
+            is_complete,
         }
     }
 
@@ -136,6 +167,7 @@ impl SplitModelEntry {
         max_batch_size: usize,
     ) -> Self {
         let estimated_vram_mb = model.estimate_vram_mb();
+        let is_complete = model.is_first() && model.is_last();
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let batch_forwarder = if max_batch_size > 1 {
             Some(std::sync::Arc::new(BatchForwarder::new(
@@ -156,6 +188,7 @@ impl SplitModelEntry {
             ),
             estimated_vram_mb,
             batch_forwarder,
+            is_complete,
         }
     }
 
@@ -632,6 +665,16 @@ impl BpeTokenizer {
                 .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
                 .collect()
         }
+    }
+
+    /// Return a reference to the byte decoder mapping (for caching outside the lock).
+    pub fn byte_decoder(&self) -> &HashMap<char, u8> {
+        &self.byte_decoder
+    }
+
+    /// Whether this tokenizer uses SentencePiece encoding (vs GPT-2 byte BPE).
+    pub fn is_sentencepiece(&self) -> bool {
+        self.is_sentencepiece
     }
 }
 
@@ -1732,6 +1775,9 @@ pub struct SplitModel {
     eos_token: String,
     /// Maximum sequence length for KV cache pre-allocation.
     max_seq_len: usize,
+    /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
+    /// Avoids a `format!` allocation on every forward pass.
+    kv_model_key: String,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -3104,6 +3150,7 @@ impl SplitModel {
             bos_token,
             eos_token,
             max_seq_len: context_length,
+            kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
         })
     }
 
@@ -4087,6 +4134,7 @@ impl SplitModel {
             bos_token,
             eos_token,
             max_seq_len: context_length,
+            kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
         })
     }
 
@@ -4185,19 +4233,16 @@ impl SplitModel {
             .dim(1)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
-        // Build a model_key for the KV-cache store
-        let model_key = format!(
-            "{}-{}-{}",
-            self.layer_start, self.layer_end, self.total_layers
-        );
         let num_layers = self.layers.len();
+        // Build the cache key once — reused for both take and writeback (zero alloc on hot path).
+        let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);
 
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
+        // Use mem::take instead of clone to avoid copying the KV cache Vec.
         let mut layer_kv_caches: Vec<Option<KvCache>> = {
-            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
-            entry.last_accessed = std::time::Instant::now();
-            entry.layers.clone()
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            std::mem::take(&mut entry.layers)
         };
 
         // Detect pre-populated prefix cache entries (KV already present from prefix
@@ -4303,9 +4348,9 @@ impl SplitModel {
             }
         }
 
-        // Write the updated KV-caches back to the store
+        // Write the updated KV-caches back to the store (reuses cache_key — zero alloc).
         {
-            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
             entry.layers = layer_kv_caches;
             entry.last_accessed = std::time::Instant::now();
         }
@@ -4389,10 +4434,10 @@ impl SplitModel {
             tp_rank, self.layer_start, self.layer_end, self.total_layers
         );
         let num_layers = self.layers.len();
+        let cache_key = KvCacheStore::cache_key(&model_key, request_id);
         let mut layer_kv_caches: Vec<Option<KvCache>> = {
-            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
-            entry.last_accessed = std::time::Instant::now();
-            entry.layers.clone()
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+            std::mem::take(&mut entry.layers)
         };
 
         let mask = if seq_len == 1 {
@@ -4466,9 +4511,9 @@ impl SplitModel {
         let partial =
             (attn_partial + mlp_partial).map_err(|e| SwarmError::Internal(e.to_string()))?;
 
-        // Write updated KV cache back
+        // Write updated KV cache back (reuses cache_key — zero alloc)
         {
-            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
             entry.layers = layer_kv_caches;
             entry.last_accessed = std::time::Instant::now();
         }
@@ -5028,59 +5073,104 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
         .to_vec1::<f32>()
         .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
+    if logits_vec.is_empty() {
+        return Err(SwarmError::Internal("Empty logits".into()));
+    }
+
     if temperature <= 0.0 {
-        // Greedy: argmax
+        // Greedy: argmax — O(V)
         let (idx, _) = logits_vec
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .ok_or_else(|| SwarmError::Internal("Empty logits".into()))?;
+            .unwrap();
         return Ok(idx as u32);
     }
 
-    // Apply temperature
-    let scaled: Vec<f32> = logits_vec.iter().map(|&x| x / temperature).collect();
+    // Apply temperature + softmax — O(V)
+    let inv_temp = 1.0 / temperature;
+    let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut probs: Vec<f32> = logits_vec
+        .iter()
+        .map(|&x| ((x - max_val) * inv_temp).exp())
+        .collect();
+    let sum: f32 = probs.iter().sum();
+    let inv_sum = 1.0 / sum;
+    for p in probs.iter_mut() {
+        *p *= inv_sum;
+    }
 
-    // Softmax
-    let max_val = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exps: Vec<f32> = scaled.iter().map(|&x| (x - max_val).exp()).collect();
-    let sum: f32 = exps.iter().sum();
-    let probs: Vec<f32> = exps.iter().map(|&x| x / sum).collect();
+    // Top-p >= 1.0: sample directly from full distribution — O(V), no sort needed
+    if top_p >= 1.0 {
+        let r: f32 = rand::random();
+        let mut cumulative = 0.0;
+        for (i, &p) in probs.iter().enumerate() {
+            cumulative += p;
+            if r < cumulative {
+                return Ok(i as u32);
+            }
+        }
+        return Ok((probs.len() - 1) as u32);
+    }
 
-    // Top-p (nucleus) sampling
-    let mut sorted_indices: Vec<usize> = (0..probs.len()).collect();
-    sorted_indices.sort_by(|&a, &b| {
+    // Top-p < 1.0: use partial sort — O(V + K log K) where K << V
+    // First pass: partition top-K candidates via select_nth_unstable_by (O(V))
+    // then sort only those K elements (O(K log K))
+    let mut indices: Vec<usize> = (0..probs.len()).collect();
+    let k = 256.min(probs.len() - 1);
+    indices.select_nth_unstable_by(k, |&a, &b| {
+        probs[b]
+            .partial_cmp(&probs[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    // Sort top-K+1 elements descending by probability
+    indices[..=k].sort_unstable_by(|&a, &b| {
         probs[b]
             .partial_cmp(&probs[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Scan top-K for cumulative >= top_p
     let mut cumulative = 0.0;
-    let mut cutoff_idx = sorted_indices.len();
-    for (i, &idx) in sorted_indices.iter().enumerate() {
+    let mut cutoff = k + 1;
+    for (i, &idx) in indices[..=k].iter().enumerate() {
         cumulative += probs[idx];
         if cumulative >= top_p {
-            cutoff_idx = i + 1;
+            cutoff = i + 1;
             break;
         }
     }
 
-    // Renormalize over the top-p subset
-    let subset = &sorted_indices[..cutoff_idx];
-    let subset_sum: f32 = subset.iter().map(|&i| probs[i]).sum();
-    let renormed: Vec<f32> = subset.iter().map(|&i| probs[i] / subset_sum).collect();
-
-    // Random sample
-    let r: f32 = rand::random();
-    let mut cumulative = 0.0;
-    for (i, &p) in renormed.iter().enumerate() {
-        cumulative += p;
-        if r < cumulative {
-            return Ok(subset[i] as u32);
+    // If top-K wasn't enough (very flat distribution), fall back to full sort
+    if cumulative < top_p {
+        indices[k + 1..].sort_unstable_by(|&a, &b| {
+            probs[b]
+                .partial_cmp(&probs[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, &idx) in indices[k + 1..].iter().enumerate() {
+            cumulative += probs[idx];
+            if cumulative >= top_p {
+                cutoff = k + 1 + i + 1;
+                break;
+            }
         }
     }
 
-    Ok(*subset.last().unwrap_or(&0) as u32)
+    // Renormalize and sample from the top-p subset
+    let subset = &indices[..cutoff];
+    let subset_sum: f32 = subset.iter().map(|&i| probs[i]).sum();
+    let r: f32 = rand::random();
+    let mut cumulative = 0.0;
+    let inv_subset = 1.0 / subset_sum;
+    for &idx in subset {
+        cumulative += probs[idx] * inv_subset;
+        if r < cumulative {
+            return Ok(idx as u32);
+        }
+    }
+
+    Ok(subset[subset.len() - 1] as u32)
 }
 
 // ── V2 Layer-Aligned Sharding ──
@@ -5527,12 +5617,14 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
+            kv_model_key: String::from("0-0-0"),
         };
         SplitModelEntry {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(dummy_model)),
             last_used: std::sync::atomic::AtomicU64::new(0),
             estimated_vram_mb: vram_mb,
             batch_forwarder: None,
+            is_complete: false,
         }
     }
 
@@ -5740,6 +5832,7 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len,
+            kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
         }
     }
 
@@ -6040,6 +6133,7 @@ mod tests {
     // ── GQA verification tests ──
 
     /// Helper: create a SplitModel with explicit GQA configuration.
+    #[allow(clippy::too_many_arguments)]
     fn make_gqa_test_model(
         num_layers: usize,
         hidden_dim: usize,
@@ -6120,6 +6214,7 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len,
+            kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
         }
     }
 
@@ -6506,6 +6601,7 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len,
+            kv_model_key: String::from("0-1-3"),
         };
 
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
@@ -7170,6 +7266,7 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len,
+            kv_model_key: String::from("0-2-4"),
         }
     }
 
@@ -7530,6 +7627,7 @@ mod tests {
             bos_token: String::new(),
             eos_token: String::new(),
             max_seq_len,
+            kv_model_key: String::from("0-4-8"),
         };
 
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));

@@ -285,16 +285,13 @@ pub async fn messages(
     let network_available = crate::api::openai::all_shards_available(&state, &model);
 
     // Fast path: if we have a complete local split model, generate directly.
-    let has_local_split_model = {
-        let model_entry = state.shared_state.split_models.iter().next();
-        if let Some(entry) = model_entry {
-            let e = entry.value();
-            let m = e.model.lock().await;
-            m.is_first() && m.is_last()
-        } else {
-            false
-        }
-    };
+    let has_local_split_model = state
+        .shared_state
+        .split_models
+        .iter()
+        .next()
+        .map(|e| e.value().is_complete)
+        .unwrap_or(false);
 
     if has_local_split_model {
         let (tmpl, bos, eos) = {

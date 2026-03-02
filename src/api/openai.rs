@@ -532,16 +532,14 @@ pub async fn chat_completions(
     // Fast path: if we have a complete local split model (all layers), generate directly.
     // This avoids the distributed pipeline overhead (per-token segment coordination,
     // activation serialization, mutex per token). ~5-10x faster for local inference.
-    let has_local_split_model = {
-        let model_entry = state.shared_state.split_models.iter().next();
-        if let Some(entry) = model_entry {
-            let e = entry.value();
-            let m = e.model.lock().await;
-            m.is_first() && m.is_last()
-        } else {
-            false
-        }
-    };
+    // Uses the pre-computed is_complete flag — no model mutex needed.
+    let has_local_split_model = state
+        .shared_state
+        .split_models
+        .iter()
+        .next()
+        .map(|e| e.value().is_complete)
+        .unwrap_or(false);
 
     if has_local_split_model {
         if req.stream {

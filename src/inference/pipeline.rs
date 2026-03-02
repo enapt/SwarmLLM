@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,64 @@ use crate::types::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkCommand,
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
 };
+
+/// Cached vocabulary and tokenizer state for lock-free token decoding during streaming.
+/// Extracted once from the model under the mutex, then used for all subsequent decoding
+/// without re-acquiring the lock.
+struct CachedDecoder {
+    vocab: Vec<String>,
+    byte_decoder: HashMap<char, u8>,
+    is_sentencepiece: bool,
+    has_tokenizer: bool,
+}
+
+impl CachedDecoder {
+    fn decode_tokens(&self, token_ids: &[u32]) -> String {
+        if self.has_tokenizer {
+            let mut bytes = Vec::new();
+            for &id in token_ids {
+                if let Some(token_str) = self.vocab.get(id as usize) {
+                    bytes.extend(self.decode_token_bytes(token_str));
+                }
+            }
+            String::from_utf8_lossy(&bytes).to_string()
+        } else if !self.vocab.is_empty() {
+            let mut raw = String::new();
+            for &id in token_ids {
+                if let Some(token_str) = self.vocab.get(id as usize) {
+                    raw.push_str(token_str);
+                } else {
+                    raw.push_str(&format!("[{id}]"));
+                }
+            }
+            decode_bpe_text(&raw)
+        } else {
+            token_ids
+                .iter()
+                .map(|id| format!("[{id}]"))
+                .collect::<String>()
+        }
+    }
+
+    fn decode_token_bytes(&self, token_str: &str) -> Vec<u8> {
+        if self.is_sentencepiece {
+            if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
+                if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+                    return vec![byte];
+                }
+            }
+            if token_str.starts_with('<') && token_str.ends_with('>') {
+                return vec![];
+            }
+            token_str.replace('\u{2581}', " ").into_bytes()
+        } else {
+            token_str
+                .chars()
+                .filter_map(|c| self.byte_decoder.get(&c).copied())
+                .collect()
+        }
+    }
+}
 
 /// Timeout for a single layer forward pass across the network.
 /// Used in full distributed execution (Phase 6+ with Cap'n Proto protocol).
@@ -197,9 +256,17 @@ impl PipelineExecutor {
         // Will be set after the first forward pass (once the split model is loaded with tokenizer)
         let mut prompt_token_count: Option<usize> = None;
 
-        // Cache EOS tokens and vocab after the first forward pass (avoids Mutex
-        // acquisition every token — saves ~1ms per token on contended GPU).
+        // Cached EOS tokens and decoder — extracted once after prefill under a single
+        // model lock acquisition. Avoids per-token mutex + DashMap scan.
         let mut cached_eos: Option<Vec<u32>> = None;
+        let mut cached_decoder: Option<CachedDecoder> = None;
+        let is_streaming = token_tx.is_some();
+        // For streaming: accumulate decoded text to avoid redundant final decode
+        let mut streamed_text = if is_streaming {
+            Some(String::new())
+        } else {
+            None
+        };
 
         // Token generation loop
         for seq_num in 0..max_tokens {
@@ -218,26 +285,34 @@ impl PipelineExecutor {
                 .await
             {
                 Ok(result) => {
-                    // After the first forward pass, the split model is loaded with its tokenizer.
-                    // Use it to compute the real prompt token count for correct KV-cache positioning.
+                    // After the first forward pass, extract everything we need from the model
+                    // in a SINGLE lock acquisition: prompt token count, EOS tokens, and
+                    // cached decoder for lock-free per-token decoding.
                     if seq_num == 0 {
-                        let ptc = self.compute_prompt_token_count(&prompt).await;
+                        let (ptc, eos, decoder) = self.extract_model_cache(&prompt).await;
                         index_pos = ptc;
                         prompt_token_count = Some(ptc);
-                        // Cache EOS tokens now that the model is loaded
-                        cached_eos = Some(self.get_eos_tokens().await);
+                        cached_eos = Some(eos);
+                        cached_decoder = Some(decoder);
                     } else {
                         index_pos += 1;
                     }
 
                     generated_tokens.extend(&result.token_ids);
 
-                    // Stream each non-EOS token as it arrives
+                    // Stream each non-EOS token — uses cached decoder (no mutex)
                     if let Some(ref tx) = token_tx {
                         let eos = cached_eos.as_deref().unwrap_or(&[2]);
+                        let decoder = cached_decoder.as_ref();
                         for &tid in &result.token_ids {
                             if !eos.contains(&tid) {
-                                let text = self.decode_tokens(&[tid]).await;
+                                let text = match decoder {
+                                    Some(d) => d.decode_tokens(&[tid]),
+                                    None => format!("[{tid}]"),
+                                };
+                                if let Some(ref mut st) = streamed_text {
+                                    st.push_str(&text);
+                                }
                                 let _ = tx
                                     .send(StreamingTokenEvent {
                                         text,
@@ -301,8 +376,41 @@ impl PipelineExecutor {
             .filter(|t| !eos_tokens.contains(t))
             .collect();
 
-        // Decode generated token IDs to text using the split model's vocabulary
-        let generated_text = self.decode_tokens(&clean_tokens).await;
+        // For streaming: use already-decoded text. For non-streaming: decode once at end.
+        let generated_text = match streamed_text {
+            Some(text) => text,
+            None => match cached_decoder.as_ref() {
+                Some(d) => d.decode_tokens(&clean_tokens),
+                None => self.decode_tokens(&clean_tokens).await,
+            },
+        };
+
+        // Batch credit write — one DB persist for the entire request instead of per-token.
+        // The CreditLedger task also persists periodically, so this is durable enough.
+        let total_tokens = generated_tokens.len() as i64;
+        if total_tokens > 0 {
+            let local_layers: i64 = self
+                .assignment
+                .segments
+                .iter()
+                .filter(|s| s.node_id == *self.shared_state.identity.node_id())
+                .map(|s| (s.layer_range.1 - s.layer_range.0) as i64)
+                .sum();
+            let total_earned =
+                crate::credit::ledger::RATE_INFERENCE_SERVE * local_layers * total_tokens;
+            if total_earned > 0 {
+                if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                    &self.shared_state.credit_balance,
+                    &self.shared_state.db,
+                    total_earned,
+                    false,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Failed to persist batched credit earn");
+                }
+            }
+        }
 
         Ok(InferenceOutput {
             request_id,
@@ -312,25 +420,6 @@ impl PipelineExecutor {
             finish_reason,
             session_id: self.request.session_id.clone(),
         })
-    }
-
-    /// Compute prompt token count using BPE tokenizer if available, else byte-level count.
-    async fn compute_prompt_token_count(&self, prompt: &str) -> usize {
-        let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_arc = self
-            .shared_state
-            .split_models
-            .iter()
-            .find(|e| e.key().0 == *model_id)
-            .map(|e| e.value().model.clone());
-        if let Some(model_arc) = model_arc {
-            let model = model_arc.lock().await;
-            if let Some(tokenizer) = model.tokenizer() {
-                return tokenizer.encode(prompt).len();
-            }
-        }
-        // Rough estimate: ~4 chars per token for non-ASCII text
-        prompt.chars().count() / 4
     }
 
     /// Decode token IDs to text using the GGUF vocabulary from the split model.
@@ -374,8 +463,11 @@ impl PipelineExecutor {
             .collect::<String>()
     }
 
-    /// Get EOS token IDs from the loaded split model, falling back to [2].
-    async fn get_eos_tokens(&self) -> Vec<u32> {
+    /// Extract prompt token count, EOS tokens, and a cached decoder in a SINGLE
+    /// model lock acquisition. This replaces three separate calls to
+    /// compute_prompt_token_count + get_eos_tokens + (per-token decode_tokens),
+    /// each of which previously acquired the model mutex independently.
+    async fn extract_model_cache(&self, prompt: &str) -> (usize, Vec<u32>, CachedDecoder) {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
         let model_arc = self
             .shared_state
@@ -383,11 +475,62 @@ impl PipelineExecutor {
             .iter()
             .find(|e| e.key().0 == *model_id)
             .map(|e| e.value().model.clone());
+
         if let Some(model_arc) = model_arc {
             let model = model_arc.lock().await;
-            return model.eos_tokens().to_vec();
+
+            // 1. Prompt token count
+            let ptc = if let Some(tokenizer) = model.tokenizer() {
+                tokenizer.encode(prompt).len()
+            } else {
+                prompt.chars().count() / 4
+            };
+
+            // 2. EOS tokens
+            let eos = model.eos_tokens().to_vec();
+
+            // 3. Cached decoder — clone vocab + byte_decoder for lock-free decoding
+            let decoder = if let Some(vocab) = model.vocab() {
+                let (byte_decoder, is_sentencepiece, has_tokenizer) =
+                    if let Some(tokenizer) = model.tokenizer() {
+                        (
+                            tokenizer.byte_decoder().clone(),
+                            tokenizer.is_sentencepiece(),
+                            true,
+                        )
+                    } else {
+                        (HashMap::new(), false, false)
+                    };
+                CachedDecoder {
+                    vocab: vocab.clone(),
+                    byte_decoder,
+                    is_sentencepiece,
+                    has_tokenizer,
+                }
+            } else {
+                CachedDecoder {
+                    vocab: Vec::new(),
+                    byte_decoder: HashMap::new(),
+                    is_sentencepiece: false,
+                    has_tokenizer: false,
+                }
+            };
+
+            (ptc, eos, decoder)
+        } else {
+            // No model loaded — use fallbacks
+            let ptc = prompt.chars().count() / 4;
+            (
+                ptc,
+                vec![2],
+                CachedDecoder {
+                    vocab: Vec::new(),
+                    byte_decoder: HashMap::new(),
+                    is_sentencepiece: false,
+                    has_tokenizer: false,
+                },
+            )
         }
-        vec![2]
     }
 
     /// Forward activation data through all pipeline segments in order.
@@ -712,23 +855,9 @@ impl PipelineExecutor {
                 .submit(input_tensor, index_pos, request_id_str.clone())
                 .await?;
 
-            // Track credits
-            {
-                let layers_processed = (layer_end - layer_start) as i64;
-                if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
-                    stats.forwards_served += 1;
-                }
-                let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-                if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                    &self.shared_state.credit_balance,
-                    &self.shared_state.db,
-                    earned,
-                    false,
-                )
-                .await
-                {
-                    tracing::warn!(error = %e, "Failed to persist layer-forward credit earn");
-                }
+            // Track stats (credit persistence is batched at end of request)
+            if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                stats.forwards_served += 1;
             }
 
             // Post-process: need model lock for EOS tokens and sampling
@@ -968,23 +1097,9 @@ impl PipelineExecutor {
             lora_adapter.as_deref(),
         )?;
 
-        // Track local layer-forward participation and persist earned credits
-        {
-            let layers_processed = (layer_end - layer_start) as i64;
-            if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
-                stats.forwards_served += 1;
-            }
-            let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-            if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                &self.shared_state.credit_balance,
-                &self.shared_state.db,
-                earned,
-                false,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "Failed to persist layer-forward credit earn");
-            }
+        // Track stats (credit persistence is batched at end of request)
+        if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+            stats.forwards_served += 1;
         }
 
         if is_last {

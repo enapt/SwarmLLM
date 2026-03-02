@@ -138,8 +138,9 @@ mod tests {
 
     #[test]
     fn max_return_layers_is_reasonable() {
-        assert!(MAX_RETURN_LAYERS >= 64);
-        assert!(MAX_RETURN_LAYERS <= 256);
+        let val = MAX_RETURN_LAYERS;
+        assert!(val >= 64);
+        assert!(val <= 256);
     }
 
     #[test]
