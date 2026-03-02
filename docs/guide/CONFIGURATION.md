@@ -261,9 +261,12 @@ enabled = true
 reduced_hours_start = 22    # 10 PM
 reduced_hours_end = 8       # 8 AM
 reduced_contribution = "minimal"
+prune_aggressiveness = "aggressive"  # More aggressively prune shards at night
 ```
 
-This automatically switches to "minimal" contribution between 10 PM and 8 AM.
+This automatically switches to "minimal" contribution between 10 PM and 8 AM, and prunes over-replicated shards more aggressively during those hours.
+
+> **Tip:** The resource schedule can also be managed at runtime via the Dashboard (Schedule card) or API (`GET/PUT /api/admin/schedule`) without editing the config file.
 
 ---
 
@@ -296,6 +299,7 @@ Below is every configuration option, organized by section.
 | `reduced_hours_start` | integer | `22` | Hour (0–23) to start reduced mode. |
 | `reduced_hours_end` | integer | `8` | Hour (0–23) to end reduced mode. |
 | `reduced_contribution` | string | `"minimal"` | Contribution level during reduced hours. |
+| `prune_aggressiveness` | string | `"normal"` | Shard pruning aggressiveness during reduced hours: `"normal"`, `"aggressive"`, or `"conservative"`. |
 
 ### `[network]` — Networking
 
@@ -365,6 +369,10 @@ Below is every configuration option, organized by section.
 | `interval_minutes` | integer | `5` | How often to check for new shards to download. |
 | `max_shards` | integer | `0` | Max shards to hold. `0` = unlimited (within disk budget). |
 | `max_concurrent_downloads` | integer | `3` | Max simultaneous shard downloads. |
+| `prune_enabled` | boolean | `true` | Automatically remove over-replicated shards to free disk/VRAM. |
+| `min_replicas` | integer | `2` | Minimum network-wide replica count before pruning is allowed. |
+| `prune_cooldown_secs` | integer | `300` | Minimum seconds between prune actions for the same model. |
+| `max_holder_load_for_prune` | integer | `3` | Block pruning if remaining holders' average load exceeds this. |
 
 ### `[pool]` — Device Pool
 

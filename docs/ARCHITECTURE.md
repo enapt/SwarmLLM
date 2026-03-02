@@ -34,6 +34,11 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ModelId, CancelFlag>   — download cancels   │  │
 │  │  TrustManager                   — peer trust scores  │  │
 │  │  watch::Sender<OperationalParams> — config reload    │  │
+│  │  DashMap<ModelId, AtomicU64>    — request counts     │  │
+│  │  RwLock<ResourceSchedule>       — resource schedule  │  │
+│  │  broadcast::Sender<PruneEvent>  — prune events       │  │
+│  │  RwLock<VecDeque<PruneEvent>>   — prune history      │  │
+│  │  DashMap<ShardId, bool>         — locked shards      │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -400,6 +405,8 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | trust_scores | {node_id_hex} | f64 trust score |
 | escrow | {escrow_id} | EscrowEntry |
 | hf_sources | {model_id} | HfSource metadata |
+| locked_shards | {shard_id_json} | bool (presence = locked) |
+| resource_schedule | "current" | ResourceSchedule JSON |
 
 ## Auto-Manage Shards
 
@@ -428,7 +435,55 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
 - **Budget limits**: max_storage_mb, max_shards_per_cycle (2), skips in-progress acquisitions
-- **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`
+- **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`
+
+### Smart Shard Pruning
+
+When auto-manage is enabled and `prune_enabled = true`, the AutoShardManager also removes
+over-replicated shards to free VRAM and disk on smaller nodes.
+
+**Dynamic Target Replicas** — popularity-scaled based on per-model request counts (rolling 10-min window):
+- 0 requests → base target (min_replicas, default 2)
+- 1-10 requests → 1.5x base
+- 11-50 requests → 2.0x base
+- 51+ requests → 3.0x base
+
+**Prune Scoring** (highest score pruned first):
+```
++ redundancy_ratio (holder_count / target)
++ 1.0 if not loaded in VRAM (cold shard)
++ 0.5 × resource_pressure
+- 0.5 if first/last shard (pipeline completeness)
+- 0.3 if rarest shard for the model
+- 0.2 if recently acquired (< 30 min)
+```
+
+**Safety Checks** — pruning is blocked if:
+- Shard is locked/pinned by user
+- Shard is in configured `--shards` range
+- `holder_count <= adjusted_target_replicas`
+- Would eliminate last holder in this node's region
+- Average remaining holder load > `max_holder_load_for_prune`
+- Model actively loaded and used in last 5 minutes
+- No re-acquisition path available (no HF source or reachable peers)
+- Cooldown not expired (5 min per model)
+
+**Resource Pressure** — `max(disk_pressure, vram_pressure)`:
+- < 0.5: relaxed (+1 to target, keep extras)
+- 0.5–0.8: normal
+- 0.8–0.95: eager (-1 from target)
+- \> 0.95: urgent (-2, prune up to 2 shards/model/cycle)
+
+**Resource Schedule** — configurable via API and UI, adds pressure bonus during reduced hours:
+- "aggressive" → +0.3 pressure during reduced hours
+- "normal" → +0.15 pressure
+- "conservative" → no extra pressure
+
+**Per-Model Control** — `PUT /api/admin/models/:id/auto-manage` with `prune_enabled: false` disables pruning per-model while keeping downloads active.
+
+**Per-Shard Lock** — `PUT /api/admin/models/:id/shards/:index/lock` pins individual shards, preventing auto-pruning regardless of model-level settings.
+
+**Notifications** — prune events pushed via WebSocket (`prune_event` type), toast notifications in UI, prune history accessible via `GET /api/admin/prune-history`
 
 ## E2E Encryption
 
@@ -539,7 +594,6 @@ allowing candle to parse the full tensor index while only loading assigned layer
 
 ### OpenAI-Compatible (Bearer auth required)
 - `POST /v1/chat/completions` — Chat completions (streaming + non-streaming)
-- `POST /v1/completions` — Text completions
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
 
@@ -585,6 +639,11 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `POST   /api/admin/config/reload` — Hot-reload operational config parameters
 - `POST   /api/admin/downloads/:model_id/cancel` — Cancel in-progress HF download
 - `DELETE /api/admin/models/:model_id` — Remove model (shards + manifest + state)
+- `DELETE /api/admin/models/:id/shards/:index` — Delete a single shard
+- `GET/PUT /api/admin/models/:id/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
+- `PUT    /api/admin/models/:id/shards/:index/lock` — Lock/unlock a shard (prevent auto-pruning)
+- `GET/PUT /api/admin/schedule` — Resource schedule management
+- `GET    /api/admin/prune-history` — Recent auto-prune events
 - `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
 - `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 

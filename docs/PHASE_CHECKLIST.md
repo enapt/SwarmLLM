@@ -356,3 +356,48 @@
 - `src/credit/escrow.rs` — EscrowManager with credit escrow lifecycle
 
 **Test results**: 340 tests passing (324 unit + 16 integration), 0 failures, clean clippy
+
+---
+
+## Phase 12: Smart Shard Pruning
+
+**Goal**: Intelligent auto-removal of over-replicated shards based on popularity, resource pressure, region diversity, and peer load — completing the auto-manage lifecycle (acquire + prune).
+
+**Date**: 2026-03-02
+
+### Core Pruning Logic
+- [x] `evaluate_and_prune()` in AutoShardManager — runs after download evaluation each tick
+- [x] Dynamic target replicas — popularity-scaled (0→1.0x, 1-10→1.5x, 11-50→2.0x, 51+→3.0x)
+- [x] Prune scoring: redundancy ratio, cold shard bonus, resource pressure, pipeline completeness penalty, rarest shard penalty, recency penalty
+- [x] Safety checks: locked shards, configured range, min replicas, region diversity, peer load, model usage recency, re-acquisition cost, cooldown
+- [x] Resource pressure scaling: disk + VRAM → relaxed/normal/eager/urgent thresholds
+- [x] Pipeline completeness bonus for first/last shards
+
+### Config & Persistence
+- [x] `AutoManageConfig`: `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`
+- [x] `ResourceSchedule`: `prune_aggressiveness` (normal/aggressive/conservative)
+- [x] `ModelAutoManagePolicy`: `prune_enabled` per-model toggle
+- [x] `PruneEvent` type in `types.rs`
+- [x] SharedState: `model_request_counts`, `resource_schedule`, `prune_events_tx`, `prune_history`, `locked_shards`
+- [x] Locked shards persisted to sled `locked_shards` tree
+- [x] Resource schedule persisted to sled `resource_schedule` tree
+
+### API Endpoints
+- [x] `GET/PUT /api/admin/schedule` — resource schedule management
+- [x] `GET /api/admin/prune-history` — recent prune events
+- [x] `PUT /api/admin/models/:id/shards/:index/lock` — lock/unlock individual shards
+- [x] Extended `PUT /api/admin/models/:id/auto-manage` with `prune_enabled`
+- [x] Extended `GET /api/admin/shard-storage` with `locked` field per shard
+
+### Notifications & UI
+- [x] WebSocket `prune_event` push via broadcast channel
+- [x] Frontend: prune toast notifications, prune history card, schedule management card
+- [x] Frontend: lock/unlock in shard context menu, lock icon overlay on shard cells
+- [x] Frontend: per-model prune toggle in auto-manage panel
+
+### Request Tracking
+- [x] `model_request_counts: DashMap<ModelId, AtomicU64>` in SharedState
+- [x] InferenceRouter increments count per model on each request
+- [x] AutoShardManager resets counts every 10 minutes
+
+**Test results**: 401 tests passing (355 unit + 15 API + 31 integration), 0 failures, clean clippy
