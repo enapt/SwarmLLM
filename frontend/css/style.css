@@ -1381,15 +1381,6 @@ input[type="range"]::-webkit-slider-thumb {
 .panel-body { transition: max-height 0.3s ease, opacity 0.2s ease; overflow: hidden; }
 .panel-body.collapsed { max-height: 0 !important; opacity: 0; padding: 0 !important; margin: 0 !important; }
 
-/* ─── Advanced mode toggle ─── */
-.advanced-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-muted); cursor: pointer; }
-.advanced-toggle input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
-[data-advanced="true"] { display: none; }
-[data-advanced-tab="true"] { display: none; }
-body.advanced-mode [data-advanced="true"] { display: block; }
-body.advanced-mode .grid[data-advanced="true"] { display: grid; }
-body.advanced-mode [data-advanced-tab="true"] { display: inline-flex; }
-
 /* ─── Mobile model picker (inside chat view) ─── */
 .mobile-model-bar {
   display: none; padding: 6px 12px; background: var(--bg-secondary);

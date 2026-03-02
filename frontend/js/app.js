@@ -3047,25 +3047,6 @@ var SwarmLLM = (function() {
   }
 
   // ========================================================================
-  // Advanced Mode Toggle
-  // ========================================================================
-  function initAdvancedMode() {
-    var toggle = document.getElementById('advanced-mode-toggle');
-    if (!toggle) return;
-
-    // Restore from localStorage
-    var saved = localStorage.getItem('swarmllm_advanced_mode') === 'true';
-    toggle.checked = saved;
-    if (saved) document.body.classList.add('advanced-mode');
-
-    toggle.addEventListener('change', function() {
-      var on = toggle.checked;
-      document.body.classList.toggle('advanced-mode', on);
-      localStorage.setItem('swarmllm_advanced_mode', on ? 'true' : 'false');
-    });
-  }
-
-  // ========================================================================
   // Collapsible Panels
   // ========================================================================
   function initCollapsiblePanels() {
@@ -3192,7 +3173,6 @@ var SwarmLLM = (function() {
 
   function init() {
     bindEvents();
-    initAdvancedMode();
     initCollapsiblePanels();
     initMobileModelSync();
 

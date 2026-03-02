@@ -310,7 +310,7 @@ pub struct ModelInfo {
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<ChatCompletionRequest>,
+    Json(mut req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     // Validate session_id length to prevent memory abuse
     if let Some(ref sid) = req.session_id {
@@ -330,6 +330,51 @@ pub async fn chat_completions(
     // Track requests made by this node
     if let Ok(mut stats) = state.shared_state.node_stats.try_write() {
         stats.requests_made += 1;
+    }
+
+    // Resolve "auto" model alias to the first available model.
+    // Check loaded_model_info first (local split model), then fall back to registry ID.
+    if req.model == "auto" {
+        let resolved = {
+            let info = state.shared_state.loaded_model_info.read().await;
+            info.as_ref().and_then(|i| {
+                // Find the registry key for this loaded model (may differ from display name)
+                let slug = i
+                    .name
+                    .to_lowercase()
+                    .replace(' ', "-")
+                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+                let registry_id = state
+                    .shared_state
+                    .model_registry
+                    .get_manifest(&crate::types::ModelId(slug.clone()))
+                    .map(|m| m.id.0.clone())
+                    .or_else(|| {
+                        state
+                            .shared_state
+                            .model_registry
+                            .models()
+                            .into_iter()
+                            .find(|m| m.name == i.name)
+                            .map(|m| m.id.0.clone())
+                    });
+                registry_id.or(Some(slug))
+            })
+        };
+        // Fall back to the first model in the registry if nothing loaded locally
+        let resolved = resolved.or_else(|| {
+            state
+                .shared_state
+                .model_registry
+                .models()
+                .into_iter()
+                .next()
+                .map(|m| m.id.0.clone())
+        });
+        if let Some(id) = resolved {
+            tracing::info!(resolved_model = %id, "Resolved 'auto' model alias");
+            req.model = id;
+        }
     }
 
     let image_count: usize = internal_messages.iter().map(|m| m.images.len()).sum();
@@ -1182,6 +1227,112 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         object: "list",
         data,
     })
+}
+
+// ---- Embeddings ----
+
+#[derive(Debug, Deserialize)]
+pub struct EmbeddingRequest {
+    pub model: String,
+    pub input: EmbeddingInput,
+    #[serde(default = "default_encoding_format")]
+    pub encoding_format: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+fn default_encoding_format() -> String {
+    "float".into()
+}
+
+/// POST /v1/embeddings — OpenAI-compatible embeddings endpoint.
+///
+/// Returns mean-pooled token embeddings from the loaded model's embedding layer.
+/// This is a best-effort embedding — dedicated embedding models (e.g. text-embedding-3)
+/// will produce better results for retrieval tasks.
+pub async fn embeddings(
+    State(state): State<AppState>,
+    Json(req): Json<EmbeddingRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Check if we have a loaded split model with tok_embeddings
+    let model_entry = state.shared_state.split_models.iter().next();
+
+    let model_ref = match model_entry {
+        Some(entry) => entry,
+        None => {
+            return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+        }
+    };
+    let model_entry = model_ref.value();
+
+    let inputs = match &req.input {
+        EmbeddingInput::Single(s) => vec![s.clone()],
+        EmbeddingInput::Batch(v) => v.clone(),
+    };
+
+    if inputs.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Input must not be empty".into(),
+        )));
+    }
+
+    // Lock the model to compute embeddings
+    let model = model_entry.model.lock().await;
+
+    let mut data = Vec::new();
+    let mut total_tokens = 0usize;
+
+    for (idx, text) in inputs.iter().enumerate() {
+        // tokenize_and_embed returns (1, seq_len, hidden_dim) tensor
+        let embedding = model.tokenize_and_embed(text).map_err(ApiError)?;
+
+        // Count tokens from the embedding's seq dimension
+        let seq_len = embedding.dim(1).map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Dim error: {e}"
+            )))
+        })?;
+        total_tokens += seq_len;
+
+        // Mean pool: average across the sequence dimension → (1, hidden_dim)
+        let mean = embedding.mean(1).map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Mean pooling failed: {e}"
+            )))
+        })?;
+        let mean = mean.squeeze(0).map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Squeeze failed: {e}"
+            )))
+        })?;
+
+        let values: Vec<f32> = mean.to_vec1().map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Tensor conversion failed: {e}"
+            )))
+        })?;
+
+        data.push(serde_json::json!({
+            "object": "embedding",
+            "index": idx,
+            "embedding": values,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "model": req.model,
+        "usage": {
+            "prompt_tokens": total_tokens,
+            "total_tokens": total_tokens,
+        }
+    })))
 }
 
 /// GET /v1/status — SwarmLLM extension endpoint

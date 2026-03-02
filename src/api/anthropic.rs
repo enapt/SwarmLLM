@@ -248,6 +248,39 @@ pub async fn messages(
         info.as_ref().map(|i| i.name.clone())
     };
 
+    // Resolve model to local registry ID when the Anthropic model name (e.g. "claude-3-opus")
+    // doesn't match any known registry model but we have a local model loaded.
+    let model = if model_name.is_some() && !crate::api::openai::all_shards_available(&state, &model)
+    {
+        let info = state.shared_state.loaded_model_info.read().await;
+        if let Some(i) = info.as_ref() {
+            let slug = i
+                .name
+                .to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            let registry_id = state
+                .shared_state
+                .model_registry
+                .get_manifest(&crate::types::ModelId(slug.clone()))
+                .map(|m| m.id.0.clone())
+                .or_else(|| {
+                    state
+                        .shared_state
+                        .model_registry
+                        .models()
+                        .into_iter()
+                        .find(|m| m.name == i.name)
+                        .map(|m| m.id.0.clone())
+                });
+            registry_id.unwrap_or(slug)
+        } else {
+            model
+        }
+    } else {
+        model
+    };
+
     // Check if network has all shards for this model
     let network_available = crate::api::openai::all_shards_available(&state, &model);
 

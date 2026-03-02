@@ -1476,7 +1476,7 @@ impl AutoShardManager {
             _ => 3.0,
         };
         let target = (base * factor).ceil() as u32;
-        target.clamp(min_replicas, pool_size as u32)
+        target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
     }
 
     /// Adjust target based on resource pressure.
@@ -2108,7 +2108,7 @@ mod tests {
             _ => 3.0,
         };
         let target = (base * factor).ceil() as u32;
-        target.clamp(min_replicas, pool_size as u32)
+        target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
     }
 
     /// Helper: adjust target based on resource pressure.
@@ -2159,6 +2159,14 @@ mod tests {
         assert_eq!(target_replicas_pure(0, 2, 4), 2);
         // pool_size=2, 51+ requests → ceil(2*3.0)=6, clamped to 2
         assert_eq!(target_replicas_pure(100, 2, 2), 2);
+    }
+
+    #[test]
+    fn popularity_pool_size_zero() {
+        // Single node, no peers → pool_size=0, should not panic
+        assert_eq!(target_replicas_pure(0, 1, 0), 1);
+        assert_eq!(target_replicas_pure(100, 2, 0), 2);
+        assert_eq!(target_replicas_pure(0, 1, 1), 1);
     }
 
     #[test]

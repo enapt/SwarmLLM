@@ -107,7 +107,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
 
 ### Operations
-- **Built-in Web UI** — Admin dashboard with operation mode indicator (Swarm/Cloud/Hybrid/Standalone), chat interface, model browser, shard visualization, first-run setup wizard, advanced mode toggle, collapsible panels, mobile-responsive layout
+- **Built-in Web UI** — Admin dashboard with operation mode indicator (Swarm/Cloud/Hybrid/Standalone), chat interface, model browser, shard visualization, first-run setup wizard, collapsible panels, mobile-responsive layout
 - **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API
@@ -313,7 +313,7 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 518 tests | Limited | Limited | Varies |
+| **Test Suite** | 519 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 
