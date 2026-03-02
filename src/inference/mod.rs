@@ -1,6 +1,7 @@
 pub mod chat_template;
 pub mod executor;
 pub mod kv_cache;
+pub mod paged_kv;
 pub mod pipeline;
 pub mod router;
 pub mod sampling;

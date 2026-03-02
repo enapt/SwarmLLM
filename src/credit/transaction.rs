@@ -72,10 +72,9 @@ pub fn verify_transaction(
     db: &crate::storage::db::Database,
 ) -> Result<(), SwarmError> {
     // SEC-C3: Check for transaction replay via UUID deduplication
-    if let Ok(Some(_)) = db.get_json::<CreditTransaction>(
-        crate::credit::ledger::TREE_TRANSACTIONS,
-        &tx.id.to_string(),
-    ) {
+    if let Ok(Some(_)) = db
+        .get_json::<CreditTransaction>(crate::credit::ledger::TREE_TRANSACTIONS, &tx.id.to_string())
+    {
         return Err(SwarmError::Internal(format!(
             "Duplicate transaction: {}",
             tx.id

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use candle_core::quantized::gguf_file;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, IndexOp, Result as CandleResult, Tensor};
+use candle_nn::kv_cache::KvCache;
 use candle_nn::{Embedding, Module};
 use candle_transformers::quantized_nn::RmsNorm;
 
@@ -38,8 +39,9 @@ pub struct KvCacheStore {
 }
 
 struct KvCacheEntry {
-    /// Per-layer KV pairs. Index corresponds to layer index within the model segment.
-    layers: Vec<Option<(Tensor, Tensor)>>,
+    /// Per-layer KV cache. Index corresponds to layer index within the model segment.
+    /// Each `KvCache` pre-allocates a buffer and appends new K/V without `Tensor::cat`.
+    layers: Vec<Option<KvCache>>,
     /// When this entry was last accessed.
     last_accessed: std::time::Instant,
 }
@@ -724,6 +726,124 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> CandleResu
     mask.where_cond(&on_true.broadcast_as(shape.dims())?, on_false)
 }
 
+/// Standard O(n^2) matmul attention with optional causal mask.
+/// Input/output layout: BHSD `(b, n_head, seq, head_dim)`.
+#[allow(clippy::too_many_arguments)]
+fn standard_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    head_dim: usize,
+    n_head: usize,
+    n_kv_head: usize,
+    neg_inf: &Tensor,
+) -> CandleResult<Tensor> {
+    let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
+    let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
+
+    let att = (q.matmul(&k.t()?)? / (head_dim as f64).sqrt())?;
+    let att = match mask {
+        None => att,
+        Some(mask) => {
+            let mask = mask.broadcast_as(att.shape())?;
+            masked_fill(&att, &mask, neg_inf)?
+        }
+    };
+    let att = candle_nn::ops::softmax_last_dim(&att)?;
+    att.matmul(&v.contiguous()?)
+}
+
+/// Unified attention dispatch: selects the best backend for the device.
+///
+/// - **CPU**: Uses `candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>()` which
+///   handles GQA natively (no `repeat_kv` needed) and uses O(1) memory via tiled online softmax.
+/// - **GPU with `flash-attn` feature**: Uses `candle_flash_attn::flash_attn()` with F16 —
+///   fused CUDA kernel, GQA native, O(1) memory. Requires SM80+ (RTX 3070 SM86 compatible).
+/// - **GPU without `flash-attn` / fallback**: Standard matmul path with `repeat_kv`.
+///
+/// All paths produce output in BHSD layout `(b, n_head, seq, head_dim)`.
+#[allow(clippy::too_many_arguments)]
+fn run_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: Option<&Tensor>,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+    neg_inf: &Tensor,
+) -> CandleResult<Tensor> {
+    match q.device() {
+        Device::Cpu => {
+            // CPU flash attention: input BSHD, output BHSD
+            // Transpose Q/K/V from BHSD (b,h,s,d) to BSHD (b,s,h,d)
+            let q_bshd = q.transpose(1, 2)?.contiguous()?;
+            let k_bshd = k.transpose(1, 2)?.contiguous()?;
+            let v_bshd = v.transpose(1, 2)?.contiguous()?;
+
+            let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+            let seq_len = q.dim(2)?;
+
+            // Build float additive mask for prefill (decode has seq_len==1, no mask needed)
+            let flash_mask = if seq_len > 1 {
+                if let Some(u8_mask) = mask {
+                    // Convert u8 causal mask (1=masked, 0=visible) to float (NEG_INF=masked, 0=visible)
+                    let zeros = u8_mask.zeros_like()?.to_dtype(DType::F32)?;
+                    let neg_inf_scalar = Tensor::new(f32::NEG_INFINITY, u8_mask.device())?;
+                    let float_mask = u8_mask.where_cond(
+                        &neg_inf_scalar.broadcast_as(u8_mask.shape().dims())?,
+                        &zeros,
+                    )?;
+                    Some(float_mask)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // run_flash_attn_cpu handles GQA natively — no repeat_kv needed
+            // Output shape: (b, n_head, seq, head_dim) — BHSD
+            candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
+                &q_bshd,
+                &k_bshd,
+                &v_bshd,
+                flash_mask.as_ref(),
+                softmax_scale,
+                None, // no ALiBi
+                None, // no softcap
+            )
+        }
+        #[cfg(feature = "flash-attn")]
+        Device::Cuda(_) => {
+            // GPU flash attention: input BSHD, output BSHD → transpose to BHSD
+            let q_bshd = q.transpose(1, 2)?.contiguous()?;
+            let k_bshd = k.transpose(1, 2)?.contiguous()?;
+            let v_bshd = v.transpose(1, 2)?.contiguous()?;
+
+            // Flash attention requires F16
+            let q_f16 = q_bshd.to_dtype(DType::F16)?;
+            let k_f16 = k_bshd.to_dtype(DType::F16)?;
+            let v_f16 = v_bshd.to_dtype(DType::F16)?;
+
+            let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+            let seq_len = q.dim(2)?;
+
+            // flash_attn handles GQA and causal masking natively
+            let out =
+                candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, seq_len > 1)?;
+
+            // Output is BSHD — transpose to BHSD and cast back to F32
+            out.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()
+        }
+        _ => {
+            // Fallback: standard matmul attention
+            standard_attention(q, k, v, mask, head_dim, n_head, n_kv_head, neg_inf)
+        }
+    }
+}
+
 impl LayerWeights {
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
@@ -741,7 +861,8 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
-        kv_cache: &mut Option<(Tensor, Tensor)>,
+        kv_cache: &mut Option<KvCache>,
+        max_seq_len: usize,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         let mut q = self.attention_wq.forward(x)?;
@@ -775,35 +896,34 @@ impl LayerWeights {
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
 
-        // KV-cache concatenation
+        // KV-cache: use pre-allocated KvCache buffers (avoids Tensor::cat per step)
         let (k, v) = match kv_cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
+            None => {
+                let mut cache = KvCache::new(2, max_seq_len);
+                let kv = cache.append(&k, &v)?;
+                *kv_cache = Some(cache);
+                kv
+            }
+            Some(cache) => {
                 if index_pos == 0 {
-                    (k, v)
-                } else {
-                    let k = Tensor::cat(&[k_cache as &Tensor, &k], 2)?;
-                    let v = Tensor::cat(&[v_cache as &Tensor, &v], 2)?;
-                    (k, v)
+                    cache.reset();
                 }
+                cache.append(&k, &v)?
             }
         };
-        *kv_cache = Some((k.clone(), v.clone()));
 
-        // GQA: repeat K/V heads to match Q head count
-        let k = candle_transformers::utils::repeat_kv(k, self.n_head / self.n_kv_head)?;
-        let v = candle_transformers::utils::repeat_kv(v, self.n_head / self.n_kv_head)?;
-
-        let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-        let att = match mask {
-            None => att,
-            Some(mask) => {
-                let mask = mask.broadcast_as(att.shape())?;
-                masked_fill(&att, &mask, &self.neg_inf)?
-            }
-        };
-        let att = candle_nn::ops::softmax_last_dim(&att)?;
-        let y = att.matmul(&v.contiguous()?)?;
+        // Unified attention dispatch: flash (CPU/GPU) or standard matmul fallback.
+        // All backends return BHSD (b, n_head, seq, head_dim).
+        let y = run_attention(
+            &q,
+            &k,
+            &v,
+            mask,
+            self.n_head,
+            self.n_kv_head,
+            self.head_dim,
+            &self.neg_inf,
+        )?;
 
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
         self.attention_wo.forward(&y)
@@ -845,6 +965,8 @@ pub struct SplitModel {
     bos_token: String,
     /// EOS token string from GGUF metadata.
     eos_token: String,
+    /// Maximum sequence length for KV cache pre-allocation.
+    max_seq_len: usize,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -1657,6 +1779,7 @@ impl SplitModel {
             chat_template,
             bos_token,
             eos_token,
+            max_seq_len: context_length,
         })
     }
 
@@ -2094,6 +2217,7 @@ impl SplitModel {
             chat_template,
             bos_token,
             eos_token,
+            max_seq_len: context_length,
         })
     }
 
@@ -2178,11 +2302,13 @@ impl SplitModel {
 
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
-        let mut layer_kv_caches: Vec<Option<(Tensor, Tensor)>> = {
+        let mut layer_kv_caches: Vec<Option<KvCache>> = {
             let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
             entry.last_accessed = std::time::Instant::now();
             entry.layers.clone()
         };
+
+        let max_seq_len = self.max_seq_len;
 
         // Run through our layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -2198,6 +2324,7 @@ impl SplitModel {
                     mask.as_ref(),
                     index_pos,
                     &mut layer_kv_caches[layer_idx],
+                    max_seq_len,
                 )
                 .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
             let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
@@ -2319,7 +2446,7 @@ impl SplitModel {
         let num_layers = self.layers.len();
 
         // Extract all per-request KV-caches up front (drop DashMap guards immediately)
-        let mut all_kv_caches: Vec<Vec<Option<(Tensor, Tensor)>>> = items
+        let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = items
             .iter()
             .map(|item| {
                 let mut entry =
@@ -2328,6 +2455,8 @@ impl SplitModel {
                 entry.layers.clone()
             })
             .collect();
+
+        let max_seq_len = self.max_seq_len;
 
         // Stack all hidden states into a single batch tensor: [batch, 1, hidden_dim]
         let batch_refs: Vec<&Tensor> = per_request.iter().collect();
@@ -2358,6 +2487,7 @@ impl SplitModel {
                         None, // seq_len=1 → no mask needed
                         item.index_pos,
                         &mut all_kv_caches[req_idx][layer_idx],
+                        max_seq_len,
                     )
                     .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
                 attn_outputs.push(attn_out);
@@ -2967,24 +3097,29 @@ mod tests {
         let req_b = "request-b";
         let num_layers = 2;
 
-        // Create caches for both requests
+        // Create caches for both requests using KvCache
         {
             let mut entry_a = store.get_or_create(model_key, req_a, num_layers);
+            let mut cache = KvCache::new(2, 128);
             let k = Tensor::from_vec(vec![1.0f32, 2.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
             let v = Tensor::from_vec(vec![3.0f32, 4.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
-            entry_a.layers[0] = Some((k, v));
+            cache.append(&k, &v).unwrap();
+            entry_a.layers[0] = Some(cache);
         }
         {
             let mut entry_b = store.get_or_create(model_key, req_b, num_layers);
+            let mut cache = KvCache::new(2, 128);
             let k = Tensor::from_vec(vec![10.0f32, 20.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
             let v = Tensor::from_vec(vec![30.0f32, 40.0], &[1, 1, 1, 2], &Device::Cpu).unwrap();
-            entry_b.layers[0] = Some((k, v));
+            cache.append(&k, &v).unwrap();
+            entry_b.layers[0] = Some(cache);
         }
 
         // Verify request A has its own cache values
         {
             let entry_a = store.get_or_create(model_key, req_a, num_layers);
-            let (k, _v) = entry_a.layers[0].as_ref().unwrap();
+            let cache = entry_a.layers[0].as_ref().unwrap();
+            let k = cache.k().unwrap().unwrap();
             let k_data = k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
             assert_eq!(k_data, vec![1.0, 2.0]);
         }
@@ -2992,7 +3127,8 @@ mod tests {
         // Verify request B has its own separate cache values
         {
             let entry_b = store.get_or_create(model_key, req_b, num_layers);
-            let (k, _v) = entry_b.layers[0].as_ref().unwrap();
+            let cache = entry_b.layers[0].as_ref().unwrap();
+            let k = cache.k().unwrap().unwrap();
             let k_data = k.flatten_all().unwrap().to_vec1::<f32>().unwrap();
             assert_eq!(k_data, vec![10.0, 20.0]);
         }
@@ -3092,6 +3228,7 @@ mod tests {
             chat_template: None,
             bos_token: String::new(),
             eos_token: String::new(),
+            max_seq_len: DEFAULT_MAX_SEQ_LEN,
         };
         SplitModelEntry {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(dummy_model)),
@@ -3298,6 +3435,7 @@ mod tests {
             chat_template: None,
             bos_token: String::new(),
             eos_token: String::new(),
+            max_seq_len,
         }
     }
 
@@ -3435,5 +3573,107 @@ mod tests {
             let output = result.unwrap();
             assert_eq!(output.dims()[2], hidden_dim);
         }
+    }
+
+    #[test]
+    fn flash_attn_cpu_vs_standard_attention() {
+        // Compare CPU flash attention output vs standard matmul attention
+        let device = Device::Cpu;
+        let b = 1;
+        let n_head = 4;
+        let n_kv_head = 2; // GQA: 4 Q heads, 2 KV heads
+        let seq_len = 8;
+        let head_dim = 32;
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, seq_len, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        // Build causal mask (u8: 1=masked, 0=visible)
+        let mask_data: Vec<u8> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
+
+        // Standard path
+        let out_std = standard_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            head_dim,
+            n_head,
+            n_kv_head,
+            &neg_inf,
+        )
+        .unwrap();
+
+        // Flash path (run_attention dispatches to CPU flash on CPU device)
+        let out_flash = run_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            n_head,
+            n_kv_head,
+            head_dim,
+            &neg_inf,
+        )
+        .unwrap();
+
+        assert_eq!(out_std.shape(), out_flash.shape());
+
+        let diff = (&out_std - &out_flash).unwrap().abs().unwrap();
+        let max_diff: f32 = diff
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap();
+        assert!(
+            max_diff < 1e-4,
+            "CPU flash attention differs from standard: max_diff={max_diff}"
+        );
+    }
+
+    #[test]
+    fn flash_attn_cpu_decode_no_mask() {
+        // Test decode step (seq_len=1) — no mask needed
+        let device = Device::Cpu;
+        let b = 1;
+        let n_head = 4;
+        let n_kv_head = 2;
+        let head_dim = 32;
+        let kv_len = 16;
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, 1, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        // Standard path (no mask for decode)
+        let out_std =
+            standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf).unwrap();
+
+        // Flash path
+        let out_flash =
+            run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, &neg_inf).unwrap();
+
+        assert_eq!(out_std.shape(), out_flash.shape());
+
+        let diff = (&out_std - &out_flash).unwrap().abs().unwrap();
+        let max_diff: f32 = diff
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap();
+        assert!(
+            max_diff < 1e-4,
+            "CPU flash decode differs from standard: max_diff={max_diff}"
+        );
     }
 }

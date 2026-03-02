@@ -139,6 +139,11 @@ pub struct SharedState {
     /// Per-peer credit balance buckets from gossip, for leaderboard display.
     /// Keyed by NodeId, value is the latest gossiped balance bucket.
     pub peer_credit_balances: DashMap<NodeId, i64>,
+    /// Paged KV cache pool for PagedAttention (CUDA-only, feature-gated).
+    /// When `None`, callers fall back to `KvCacheStore` (Phase 1 pre-allocated buffers).
+    pub paged_kv_pool: Option<Arc<crate::inference::paged_kv::PagedKvPool>>,
+    /// Paged KV store: per-request block table tracking.
+    pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -262,6 +267,8 @@ impl SharedState {
             trust_manager,
             detected_region: RwLock::new(None),
             peer_credit_balances: DashMap::new(),
+            paged_kv_pool: None,
+            paged_kv_store: None,
             shutdown_tx,
         });
 

@@ -71,6 +71,8 @@ llama-cpp-2 = { version = "0.1", optional = true }
 candle-core = { version = "0.9", default-features = false }
 candle-nn = { version = "0.9", default-features = false }
 candle-transformers = { version = "0.9", default-features = false }
+candle-flash-attn = { version = "0.9", optional = true }
+candle-paged-attention = { path = "vendor/candle-paged-attention", optional = true }
 
 # Database
 sled = "0.34"
@@ -105,7 +107,9 @@ default = []
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
-cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda"]
+flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
+paged-attn = ["candle-cuda", "dep:candle-paged-attention"]
+cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn", "paged-attn"]
 metal = ["llama", "llama-cpp-2/metal", "candle-metal"]
 rocm = ["llama", "llama-cpp-2/rocm"]
 
