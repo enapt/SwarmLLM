@@ -172,6 +172,14 @@ pub struct SharedState {
     pub prefix_cache: std::sync::Mutex<crate::inference::prefix_cache::PrefixCache>,
     /// Per-channel backpressure metrics (capacity, sent, dropped).
     pub channel_metrics: ChannelMetricsSet,
+    /// Number of peers discovered via mDNS (LAN peers).
+    pub lan_peer_count: std::sync::atomic::AtomicUsize,
+    /// Broadcast channel for LAN peer discovery events (WebSocket push).
+    pub lan_discovery_tx: broadcast::Sender<u32>,
+    /// Update checker shared state (version info, last checked, etc.).
+    pub update_state: Arc<RwLock<crate::update::UpdateState>>,
+    /// Broadcast channel for update availability notifications (WebSocket push).
+    pub update_tx: broadcast::Sender<crate::update::UpdateInfo>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -408,6 +416,10 @@ impl SharedState {
                 config.inference.prefix_cache_max_entries,
             )),
             channel_metrics: ChannelMetricsSet::new(),
+            lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
+            lan_discovery_tx: broadcast::channel(16).0,
+            update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
+            update_tx: broadcast::channel(4).0,
             shutdown_tx,
         });
 
@@ -1077,6 +1089,28 @@ impl Daemon {
                 Ok(()),
             )
         });
+
+        // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled)
+        {
+            let update_config = self.config.updates.clone();
+            let update_state = shared_state.update_state.clone();
+            let update_tx = shared_state.update_tx.clone();
+            let update_shutdown = shutdown_rx.clone();
+            let checker = crate::update::UpdateChecker::new(
+                update_config,
+                "enapt/SwarmLLM".to_string(),
+                update_state,
+                update_tx,
+            );
+            subsystems.spawn(async move {
+                checker.run(update_shutdown).await;
+                (
+                    "UpdateChecker",
+                    SubsystemCriticality::NonCritical,
+                    Ok(()),
+                )
+            });
+        }
 
         // Spawn API server (pass router_cmd_tx + acquisition_tx + network_tx so API can submit requests)
         let api_shared_state = shared_state.clone();

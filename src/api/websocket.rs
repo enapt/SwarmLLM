@@ -24,9 +24,11 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let last_pong = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
     let last_pong_push = last_pong.clone();
 
-    // Spawn a task to push stats every 2 seconds + ping every 30 seconds + prune events
+    // Spawn a task to push stats every 2 seconds + ping every 30 seconds + prune/LAN events
     let push_state = shared_state.clone();
     let mut prune_rx = shared_state.prune_events_tx.subscribe();
+    let mut lan_rx = shared_state.lan_discovery_tx.subscribe();
+    let mut update_rx = shared_state.update_tx.subscribe();
     let push_task = tokio::spawn(async move {
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -72,6 +74,38 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                                 "holder_count_before": event.holder_count_before,
                                 "holder_count_after": event.holder_count_after,
                                 "timestamp": event.timestamp.to_rfc3339(),
+                            }
+                        });
+                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                count = lan_rx.recv() => {
+                    if let Ok(count) = count {
+                        let msg = serde_json::json!({
+                            "type": "lan_peer_discovered",
+                            "data": {
+                                "peer_count": count,
+                            }
+                        });
+                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                update_info = update_rx.recv() => {
+                    if let Ok(info) = update_info {
+                        let msg = serde_json::json!({
+                            "type": "update_available",
+                            "data": {
+                                "current_version": info.current_version,
+                                "latest_version": info.latest_version,
+                                "changelog": info.changelog,
+                                "published_at": info.published_at,
+                                "downloaded": info.downloaded,
                             }
                         });
                         let msg_str = serde_json::to_string(&msg).unwrap_or_default();
@@ -204,8 +238,11 @@ async fn build_stats_message(
         None
     };
 
+    let lan_peers = state.lan_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+
     let mut data = serde_json::json!({
         "peers": stats.peers_connected,
+        "lan_peers": lan_peers,
         "credits": {
             "balance": credit.balance,
             "lifetime_earned": credit.lifetime_earned,

@@ -54,11 +54,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the SwarmLLM daemon
-    Run,
+    Run {
+        /// Disable automatic update checking
+        #[arg(long)]
+        no_update_check: bool,
+    },
     /// Print version information
     Version,
     /// Show node status (queries running daemon)
     Status,
+    /// Check for updates and apply if available
+    Update {
+        /// Only check, do not download or apply
+        #[arg(long)]
+        check_only: bool,
+    },
     /// Test split inference locally (no networking, single-node diagnostic)
     TestSplit {
         /// Number of tokens to generate
@@ -72,12 +82,22 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     init_tracing(cli.verbose);
 
-    match cli.command.as_ref().unwrap_or(&Commands::Run) {
-        Commands::Run => run_daemon(cli).await,
+    // Determine if update checking is disabled via CLI flag
+    let no_update_check = matches!(
+        &cli.command,
+        Some(Commands::Run { no_update_check: true })
+    );
+    // Take command out of cli so we can move cli into run_daemon
+    let command = cli.command.take().unwrap_or(Commands::Run {
+        no_update_check: false,
+    });
+
+    match command {
+        Commands::Run { .. } => run_daemon(cli, no_update_check).await,
         Commands::Version => {
             println!("swarmllm {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -108,13 +128,14 @@ async fn main() -> anyhow::Result<()> {
                 });
             query_status(port, &data_dir).await
         }
+        Commands::Update { check_only } => run_update_command(check_only).await,
         Commands::TestSplit { max_tokens, prompt } => {
-            test_split_inference(cli.model, *max_tokens, prompt).await
+            test_split_inference(cli.model.clone(), max_tokens, &prompt).await
         }
     }
 }
 
-async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
+async fn run_daemon(cli: Cli, no_update_check: bool) -> anyhow::Result<()> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting SwarmLLM");
 
     // Load config
@@ -139,6 +160,11 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
         } else {
             anyhow::bail!("Invalid --shards format: expected 'START-END' (e.g. '0-4')");
         }
+    }
+
+    // CLI --no-update-check overrides config
+    if no_update_check {
+        config.updates.auto_update = swarmllm::config::AutoUpdateMode::Disabled;
     }
 
     // Ensure data directory exists
@@ -177,6 +203,68 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     // Build and run daemon (spawns network, health, API tasks)
     let daemon = Daemon::new(config, identity, db);
     daemon.run().await
+}
+
+async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
+    use swarmllm::update::{UpdateChecker, UpdateState};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    println!("SwarmLLM {} — checking for updates...", env!("CARGO_PKG_VERSION"));
+
+    let config = swarmllm::config::UpdateConfig::default();
+    let state = Arc::new(RwLock::new(UpdateState::default()));
+    let (update_tx, _) = tokio::sync::broadcast::channel(4);
+    let checker = UpdateChecker::new(
+        config,
+        "enapt/SwarmLLM".to_string(),
+        state,
+        update_tx,
+    );
+
+    match checker.check_for_update().await {
+        Ok(Some(info)) => {
+            println!("Update available: v{} -> v{}", info.current_version, info.latest_version);
+            println!("Published: {}", info.published_at);
+            if !info.changelog.is_empty() {
+                println!("\nChangelog:\n{}", info.changelog);
+            }
+
+            if check_only {
+                return Ok(());
+            }
+
+            println!("\nDownloading...");
+            match checker.download_update(&info).await {
+                Ok(tmp_path) => {
+                    println!("Downloaded to: {}", tmp_path.display());
+                    println!("Applying update...");
+                    match checker.apply_update(&tmp_path) {
+                        Ok(()) => {
+                            println!("Update applied successfully! Restart SwarmLLM to use v{}.", info.latest_version);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to apply update: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to download update: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Ok(None) => {
+            println!("You are running the latest version (v{}).", env!("CARGO_PKG_VERSION"));
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
 }
 
 async fn query_status(port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {

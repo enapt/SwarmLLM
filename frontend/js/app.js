@@ -424,7 +424,19 @@ var SwarmLLM = (function() {
     },
 
     updateStats: function(data) {
-      if (data.peers !== undefined) document.getElementById('stat-peers').textContent = data.peers;
+      if (data.peers !== undefined) {
+        document.getElementById('stat-peers').textContent = data.peers;
+        // Show LAN peer badge if any
+        var lanBadge = document.getElementById('lan-peer-badge');
+        if (lanBadge) {
+          if (data.lan_peers && data.lan_peers > 0) {
+            lanBadge.textContent = data.lan_peers + ' LAN';
+            lanBadge.style.display = 'inline-block';
+          } else {
+            lanBadge.style.display = 'none';
+          }
+        }
+      }
       if (data.credits !== undefined) {
         var bal, earned, spent;
         if (typeof data.credits === 'object') {
@@ -867,10 +879,11 @@ var SwarmLLM = (function() {
             var div = document.createElement('div');
             div.style.cssText = 'margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
             var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
+            var lanTag = p.is_lan_peer ? '<span class="lan-badge">LAN</span>' : '';
             var nodeId = '<span class="mono" style="font-size:0.8rem">' + escapeHtml(p.node_id || 'unknown') + '</span>';
             var details = '';
             if (p.gpu) details += '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:3px">GPU: ' + escapeHtml(p.gpu) + '</div>';
-            div.innerHTML = statusDot + nodeId + details;
+            div.innerHTML = statusDot + lanTag + nodeId + details;
             list.appendChild(div);
           });
         }
@@ -1463,6 +1476,11 @@ var SwarmLLM = (function() {
           if (msg.data.region_summary && activeTab === 'network-map') {
             networkMap.updateFromWs(msg.data.region_summary);
           }
+        } else if (msg.type === 'lan_peer_discovered') {
+          var count = msg.data.peer_count || 1;
+          showLanDiscoveryToast('Found ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on your local network \u2014 zero configuration needed!');
+        } else if (msg.type === 'update_available') {
+          showUpdateBanner(msg.data);
         } else if (msg.type === 'prune_event') {
           var d = msg.data;
           var freed = formatBytes(d.freed_bytes || 0);
@@ -1609,6 +1627,97 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Shard Context Menu
   // ========================================================================
+  // ========================================================================
+  // LAN Discovery Toast Notifications
+  // ========================================================================
+  function showLanDiscoveryToast(text) {
+    var container = document.getElementById('prune-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'prune-toast-container';
+      container.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;max-width:400px';
+      document.body.appendChild(container);
+    }
+    var toast = document.createElement('div');
+    toast.className = 'lan-discovery-toast';
+    toast.style.cssText = 'background:var(--card-bg,#1e1e2e);color:var(--text,#cdd6f4);border:1px solid #a6e3a1;border-radius:8px;padding:0.75rem 1rem;font-size:0.8rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);opacity:0;transform:translateX(100%);transition:all 0.3s ease';
+    toast.innerHTML = '<span style="margin-right:0.5rem">&#128279;</span>' + escapeHtml(text);
+    container.appendChild(toast);
+    requestAnimationFrame(function() {
+      toast.style.opacity = '1';
+      toast.style.transform = 'translateX(0)';
+    });
+    setTimeout(function() {
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateX(100%)';
+      setTimeout(function() { toast.remove(); }, 300);
+    }, 8000);
+  }
+
+  // ========================================================================
+  // Update Banner
+  // ========================================================================
+  function showUpdateBanner(data) {
+    // Only show once — don't re-create if already visible
+    if (document.getElementById('update-banner')) return;
+    var banner = document.createElement('div');
+    banner.id = 'update-banner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:#f9e2af;color:#1e1e2e;padding:0.6rem 1rem;display:flex;align-items:center;justify-content:center;gap:1rem;font-size:0.85rem;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
+    var text = 'Update available: v' + escapeHtml(data.current_version) + ' \u2192 v' + escapeHtml(data.latest_version);
+    banner.innerHTML = '<span>' + text + '</span>';
+    if (data.downloaded) {
+      var applyBtn = document.createElement('button');
+      applyBtn.textContent = 'Apply & Restart';
+      applyBtn.style.cssText = 'background:#1e1e2e;color:#f9e2af;border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      applyBtn.onclick = async function() {
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Applying...';
+        try {
+          var resp = await authFetch('/api/admin/update/apply', { method: 'POST' });
+          if (resp.ok) {
+            banner.querySelector('span').textContent = 'Update applied! Restart the daemon to use v' + escapeHtml(data.latest_version);
+            applyBtn.style.display = 'none';
+          } else {
+            var err = await resp.json().catch(function() { return {}; });
+            applyBtn.textContent = 'Failed';
+            setTimeout(function() { applyBtn.textContent = 'Retry'; applyBtn.disabled = false; }, 3000);
+          }
+        } catch (e) {
+          applyBtn.textContent = 'Error';
+          setTimeout(function() { applyBtn.textContent = 'Retry'; applyBtn.disabled = false; }, 3000);
+        }
+      };
+      banner.appendChild(applyBtn);
+    } else {
+      var dlBtn = document.createElement('button');
+      dlBtn.textContent = 'Download & Apply';
+      dlBtn.style.cssText = 'background:#1e1e2e;color:#f9e2af;border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      dlBtn.onclick = async function() {
+        dlBtn.disabled = true;
+        dlBtn.textContent = 'Checking...';
+        try {
+          var resp = await authFetch('/api/admin/update/check', { method: 'POST' });
+          if (resp.ok) {
+            var result = await resp.json();
+            if (result.status === 'update_available' && result.info && result.info.downloaded) {
+              dlBtn.textContent = 'Applying...';
+              var applyResp = await authFetch('/api/admin/update/apply', { method: 'POST' });
+              if (applyResp.ok) {
+                banner.querySelector('span').textContent = 'Update applied! Restart the daemon to use v' + escapeHtml(data.latest_version);
+                dlBtn.style.display = 'none';
+              }
+            }
+          }
+        } catch (e) {
+          dlBtn.textContent = 'Error';
+        }
+        setTimeout(function() { dlBtn.textContent = 'Download & Apply'; dlBtn.disabled = false; }, 3000);
+      };
+      banner.appendChild(dlBtn);
+    }
+    document.body.prepend(banner);
+  }
+
   // ========================================================================
   // Prune Toast Notifications
   // ========================================================================

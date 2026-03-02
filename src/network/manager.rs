@@ -587,13 +587,16 @@ impl NetworkManager {
                 peers,
             ))) => {
                 for (peer_id, addr) in peers {
-                    tracing::info!(%peer_id, %addr, "mDNS: discovered LAN peer");
                     // Do NOT add mDNS addresses to Kademlia. Kademlia's periodic
                     // routing table refresh dials all known addresses, creating
                     // duplicate connections every 30s that corrupt request_response
                     // routing. The identify protocol handles address exchange after
                     // connection is established.
                     if !self.swarm.is_connected(&peer_id) {
+                        tracing::info!(
+                            %peer_id, %addr,
+                            "LAN peer discovered automatically — no configuration needed"
+                        );
                         let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                             .condition(
                                 libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
@@ -609,7 +612,22 @@ impl NetworkManager {
                     // Mark as LAN peer if we can derive their NodeId
                     if let Some(node_id) = self.peer_to_node.get(&peer_id) {
                         if let Some(mut peer) = self.shared_state.peer_registry.get_mut(&*node_id) {
-                            peer.is_lan_peer = true;
+                            if !peer.is_lan_peer {
+                                peer.is_lan_peer = true;
+                                drop(peer);
+                                // Increment LAN peer count and notify WebSocket clients
+                                let count = self.shared_state.lan_peer_count.fetch_add(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                ) + 1;
+                                let _ = self.shared_state.lan_discovery_tx.send(count as u32);
+                                tracing::info!(
+                                    lan_peers = count,
+                                    "Found {} peer{} on your local network",
+                                    count,
+                                    if count == 1 { "" } else { "s" }
+                                );
+                            }
                         }
                     }
                 }
@@ -620,6 +638,19 @@ impl NetworkManager {
             ))) => {
                 for (peer_id, _addr) in peers {
                     tracing::debug!(%peer_id, "mDNS: peer expired");
+                    // Decrement LAN peer count if this was a tracked LAN peer
+                    if let Some(node_id) = self.peer_to_node.get(&peer_id) {
+                        if let Some(mut peer) = self.shared_state.peer_registry.get_mut(&*node_id) {
+                            if peer.is_lan_peer {
+                                peer.is_lan_peer = false;
+                                drop(peer);
+                                self.shared_state.lan_peer_count.fetch_sub(
+                                    1,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                            }
+                        }
+                    }
                 }
             }
 

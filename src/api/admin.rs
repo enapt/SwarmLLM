@@ -785,6 +785,7 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
                 "healthy": healthy,
                 "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
                 "hosted_models": hosted_models,
+                "is_lan_peer": peer.is_lan_peer,
             })
         })
         .collect();
@@ -3125,4 +3126,143 @@ pub async fn delete_adapter(
             "Adapter '{adapter_id}' not found"
         ))))
     }
+}
+
+// ========================================================================
+// Update / Version Endpoints
+// ========================================================================
+
+/// GET /api/admin/version — Current and latest version info.
+pub async fn version_info(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let update_state = state.shared_state.update_state.read().await;
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    let (latest_version, update_available, changelog) =
+        if let Some(ref info) = update_state.update_available {
+            (
+                Some(info.latest_version.clone()),
+                true,
+                Some(info.changelog.clone()),
+            )
+        } else {
+            (None, false, None)
+        };
+
+    let channel = match state.shared_state.config.updates.auto_update {
+        crate::config::AutoUpdateMode::Disabled => "disabled",
+        crate::config::AutoUpdateMode::Stable => "stable",
+        crate::config::AutoUpdateMode::All => "all",
+    };
+
+    Json(serde_json::json!({
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "update_available": update_available,
+        "channel": channel,
+        "last_checked": update_state.last_checked,
+        "last_error": update_state.last_error,
+        "changelog": changelog,
+    }))
+}
+
+/// POST /api/admin/update/check — Trigger an immediate update check.
+pub async fn check_update(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = state.shared_state.config.updates.clone();
+    let update_state = state.shared_state.update_state.clone();
+    let update_tx = state.shared_state.update_tx.clone();
+
+    let checker = crate::update::UpdateChecker::new(
+        config,
+        "enapt/SwarmLLM".to_string(),
+        update_state.clone(),
+        update_tx,
+    );
+
+    match checker.check_for_update().await {
+        Ok(Some(info)) => {
+            // Auto-download
+            let mut info = info;
+            if let Ok(tmp_path) = checker.download_update(&info).await {
+                info.downloaded = true;
+                let _ = tmp_path; // path is known from binary location
+            }
+            let mut us = update_state.write().await;
+            us.update_available = Some(info.clone());
+            us.last_checked = Some(chrono::Utc::now().to_rfc3339());
+            us.last_error = None;
+            // Notify WebSocket
+            let _ = state.shared_state.update_tx.send(info.clone());
+            Ok(Json(serde_json::json!({
+                "status": "update_available",
+                "info": info,
+            })))
+        }
+        Ok(None) => {
+            let mut us = update_state.write().await;
+            us.last_checked = Some(chrono::Utc::now().to_rfc3339());
+            us.last_error = None;
+            Ok(Json(serde_json::json!({
+                "status": "up_to_date",
+                "current_version": env!("CARGO_PKG_VERSION"),
+            })))
+        }
+        Err(e) => {
+            let mut us = update_state.write().await;
+            us.last_checked = Some(chrono::Utc::now().to_rfc3339());
+            us.last_error = Some(e.to_string());
+            Err(ApiError(e))
+        }
+    }
+}
+
+/// POST /api/admin/update/apply — Apply a downloaded update (restart required).
+pub async fn apply_update(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let update_state = state.shared_state.update_state.read().await;
+    let info = match &update_state.update_available {
+        Some(info) if info.downloaded => info.clone(),
+        Some(_) => {
+            return Err(ApiError(crate::error::SwarmError::Internal(
+                "Update not yet downloaded — call POST /api/admin/update/check first".to_string(),
+            )));
+        }
+        None => {
+            return Err(ApiError(crate::error::SwarmError::Internal(
+                "No update available".to_string(),
+            )));
+        }
+    };
+    drop(update_state);
+
+    let config = state.shared_state.config.updates.clone();
+    let (tx, _) = tokio::sync::broadcast::channel(1);
+    let checker = crate::update::UpdateChecker::new(
+        config,
+        "enapt/SwarmLLM".to_string(),
+        state.shared_state.update_state.clone(),
+        tx,
+    );
+
+    let binary_path = std::env::current_exe()
+        .map_err(|e| ApiError(crate::error::SwarmError::Internal(format!("Cannot determine binary path: {e}"))))?;
+    let tmp_path = binary_path.with_extension("update.tmp");
+
+    if !tmp_path.exists() {
+        return Err(ApiError(crate::error::SwarmError::Internal(
+            "Downloaded update file not found — re-run update check".to_string(),
+        )));
+    }
+
+    checker.apply_update(&tmp_path).map_err(ApiError)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "applied",
+        "version": info.latest_version,
+        "message": "Update applied. Restart the daemon to use the new version.",
+    })))
 }
