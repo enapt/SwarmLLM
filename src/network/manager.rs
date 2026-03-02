@@ -616,10 +616,11 @@ impl NetworkManager {
                                 peer.is_lan_peer = true;
                                 drop(peer);
                                 // Increment LAN peer count and notify WebSocket clients
-                                let count = self.shared_state.lan_peer_count.fetch_add(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                ) + 1;
+                                let count = self
+                                    .shared_state
+                                    .lan_peer_count
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1;
                                 let _ = self.shared_state.lan_discovery_tx.send(count as u32);
                                 tracing::info!(
                                     lan_peers = count,
@@ -644,10 +645,9 @@ impl NetworkManager {
                             if peer.is_lan_peer {
                                 peer.is_lan_peer = false;
                                 drop(peer);
-                                self.shared_state.lan_peer_count.fetch_sub(
-                                    1,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
+                                self.shared_state
+                                    .lan_peer_count
+                                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }

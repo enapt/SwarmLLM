@@ -391,6 +391,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         activations,
         format,
         layer_range,
+        tp_meta: None,
         sender_peer_bytes: None,
     })
 }
@@ -659,6 +660,7 @@ pub fn decode_layer_forward_encrypted(
         activations: vec![], // Will be filled after decryption
         format,
         layer_range: None, // Encrypted messages don't carry layer_range in AAD header
+        tp_meta: None,
         sender_peer_bytes: None,
     };
 
@@ -849,6 +851,7 @@ mod tests {
             activations: vec![1, 2, 3, 4, 5, 6, 7, 8],
             format: TensorFormat::FP16,
             layer_range: None,
+            tp_meta: None,
             sender_peer_bytes: None,
         };
 
@@ -876,6 +879,7 @@ mod tests {
                 activations: vec![],
                 format: fmt,
                 layer_range: None,
+                tp_meta: None,
                 sender_peer_bytes: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
@@ -900,6 +904,7 @@ mod tests {
             activations: data.clone(),
             format: TensorFormat::FP32,
             layer_range: None,
+            tp_meta: None,
             sender_peer_bytes: None,
         };
 
@@ -918,6 +923,7 @@ mod tests {
             activations: vec![0xAA; 64],
             format: TensorFormat::FP32,
             layer_range: Some((10, 14)),
+            tp_meta: None,
             sender_peer_bytes: None,
         };
 
@@ -940,6 +946,7 @@ mod tests {
             activations: vec![1, 2, 3],
             format: TensorFormat::FP16,
             layer_range: None,
+            tp_meta: None,
             sender_peer_bytes: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1096,6 +1103,7 @@ mod tests {
             activations: vec![0xBB; 4096],
             format: TensorFormat::FP32,
             layer_range: Some((2, 8)),
+            tp_meta: None,
             sender_peer_bytes: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();

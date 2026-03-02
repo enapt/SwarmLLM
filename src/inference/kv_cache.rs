@@ -483,6 +483,7 @@ mod tests {
                 },
             ],
             standbys: vec![],
+            tp_groups: vec![],
         }
     }
 

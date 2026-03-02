@@ -832,6 +832,65 @@ impl Mlp {
         }
         Ok(down)
     }
+
+    /// Tensor-parallel MLP: each TP node computes a fraction of the intermediate dimension.
+    ///
+    /// Gate and Up projections are column-parallel (each node gets `intermediate / tp_size`
+    /// output columns). The Down projection is row-parallel (each node multiplies its
+    /// fraction of rows and the results are summed across TP nodes via AllReduce).
+    ///
+    /// Returns a partial output of shape `[b, seq, hidden_dim]` that must be summed
+    /// across TP nodes.
+    fn forward_tp(&self, xs: &Tensor, tp_rank: usize, tp_size: usize) -> CandleResult<Tensor> {
+        // Full gate and up projections
+        let gate_full = self.ffn_gate.forward(xs)?;
+        let up_full = self.ffn_up.forward(xs)?;
+
+        // Determine intermediate dimension and split it
+        let intermediate_dim = gate_full.dim(gate_full.dims().len() - 1)?;
+        let chunk_size = intermediate_dim / tp_size;
+        let start = tp_rank * chunk_size;
+        let len = if tp_rank == tp_size - 1 {
+            intermediate_dim - start // Last rank gets remainder
+        } else {
+            chunk_size
+        };
+        let last_dim = gate_full.dims().len() - 1;
+
+        // Slice to this rank's fraction of intermediate dimension
+        let gate_local = gate_full.narrow(last_dim, start, len)?;
+        let up_local = up_full.narrow(last_dim, start, len)?;
+
+        // Activation + elementwise multiply
+        let activated = match self.activation {
+            Activation::SiLU => candle_nn::ops::silu(&gate_local)?,
+            Activation::Gelu => gate_local.gelu()?,
+        };
+        let combined = (activated * up_local)?;
+
+        // Down projection on the local slice.
+        // For correct row-parallel semantics, we need to use only the corresponding
+        // rows of the down matrix. Since QMatMul doesn't support row slicing, we
+        // pad the combined tensor with zeros at other positions so the full matmul
+        // only activates our rows.
+        let b = combined.dims()[0];
+        let s = combined.dims()[1];
+        let remaining = intermediate_dim - (start + len);
+        let padded = if start > 0 && remaining > 0 {
+            let z_before = Tensor::zeros((b, s, start), combined.dtype(), combined.device())?;
+            let z_after = Tensor::zeros((b, s, remaining), combined.dtype(), combined.device())?;
+            Tensor::cat(&[&z_before, &combined, &z_after], 2)?
+        } else if start > 0 {
+            let z_before = Tensor::zeros((b, s, start), combined.dtype(), combined.device())?;
+            Tensor::cat(&[&z_before, &combined], 2)?
+        } else if remaining > 0 {
+            let z_after = Tensor::zeros((b, s, remaining), combined.dtype(), combined.device())?;
+            Tensor::cat(&[&combined, &z_after], 2)?
+        } else {
+            combined
+        };
+        self.ffn_down.forward(&padded)
+    }
 }
 
 // ── Per-layer weights ──
@@ -1163,6 +1222,140 @@ impl LayerWeights {
             }
         }
         Ok(wo_out)
+    }
+
+    /// Tensor-parallel attention: computes only the assigned fraction of heads.
+    ///
+    /// Each TP node handles `n_head / tp_size` query heads and the corresponding
+    /// KV heads (respecting GQA ratio). The O projection produces a partial output
+    /// of shape `[b, seq, hidden_dim]` that must be summed across TP nodes.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_attn_tp(
+        &self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        index_pos: usize,
+        kv_cache: &mut Option<KvCache>,
+        max_seq_len: usize,
+        tp_rank: usize,
+        tp_size: usize,
+    ) -> CandleResult<Tensor> {
+        let (b_sz, seq_len, _n_embd) = x.dims3()?;
+
+        // Full Q/K/V projections (we slice the heads after projection)
+        let q = self.attention_wq.forward(x)?;
+        let k = self.attention_wk.forward(x)?;
+        let v = self.attention_wv.forward(x)?;
+
+        // Apply biases if present (Qwen2)
+        let q = if let Some(ref bq) = self.attention_bq {
+            q.broadcast_add(bq)?
+        } else {
+            q
+        };
+        let k = if let Some(ref bk) = self.attention_bk {
+            k.broadcast_add(bk)?
+        } else {
+            k
+        };
+        let v = if let Some(ref bv) = self.attention_bv {
+            v.broadcast_add(bv)?
+        } else {
+            v
+        };
+
+        // Reshape to head layout: [b, seq, n_head, head_dim]
+        let q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
+        let k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
+        let v = v.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
+
+        // Slice heads for this TP rank
+        let heads_per_rank = self.n_head / tp_size;
+        let kv_heads_per_rank = self.n_kv_head.max(1) / tp_size.min(self.n_kv_head).max(1);
+        let q_start = tp_rank * heads_per_rank;
+        let kv_start = tp_rank * kv_heads_per_rank;
+
+        // Narrow along head dimension (dim=2)
+        let q = q.narrow(2, q_start, heads_per_rank)?;
+        let k = k.narrow(2, kv_start, kv_heads_per_rank.max(1))?;
+        let v = v.narrow(2, kv_start, kv_heads_per_rank.max(1))?;
+
+        // Transpose to BHSD: [b, n_head_local, seq, head_dim]
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(1, 2)?.contiguous()?;
+
+        // RoPE (operates per-head, independent of head count)
+        let q = self.apply_rotary_emb(&q, index_pos)?;
+        let k = self.apply_rotary_emb(&k, index_pos)?;
+
+        // KV cache for this TP rank's heads
+        let (k, v) = match kv_cache {
+            None => {
+                let mut cache = KvCache::new(2, max_seq_len);
+                let kv = cache.append(&k, &v)?;
+                *kv_cache = Some(cache);
+                kv
+            }
+            Some(cache) => {
+                if index_pos == 0 {
+                    cache.reset();
+                }
+                cache.append(&k, &v)?
+            }
+        };
+
+        // Attention on local heads only
+        let y = standard_attention(
+            &q,
+            &k,
+            &v,
+            mask,
+            self.head_dim,
+            heads_per_rank,
+            kv_heads_per_rank.max(1),
+            &self.neg_inf,
+            self.attn_logit_softcap,
+        )?;
+
+        // Reshape back: [b, seq, heads_per_rank * head_dim]
+        let local_dim = heads_per_rank * self.head_dim;
+        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, local_dim])?;
+
+        // O projection: produces [b, seq, hidden_dim] partial output.
+        // For true column-parallel, we'd slice O's input dim. Instead, we project
+        // the local head subset through the full O matrix and pad with zeros
+        // so the sum across TP nodes gives the correct result.
+        //
+        // Equivalent approach: project local heads and use the fact that
+        // O = [O_0 | O_1 | ... | O_{tp-1}] along input columns.
+        // y_local @ O_local = y_local @ O[:, q_start*hd : (q_start+hpr)*hd]
+        //
+        // Since QMatMul doesn't support column slicing directly, we pad y with
+        // zeros at the other head positions and do a full O matmul. The zeros
+        // ensure those columns contribute nothing.
+        let full_embd = self.n_head * self.head_dim;
+        if local_dim < full_embd {
+            // Build zero-padded tensor: [b, seq, full_embd]
+            let before_dim = q_start * self.head_dim;
+            let remaining = full_embd - (before_dim + local_dim);
+            let y_padded = if before_dim > 0 && remaining > 0 {
+                let z_before = Tensor::zeros((b_sz, seq_len, before_dim), y.dtype(), y.device())?;
+                let z_after = Tensor::zeros((b_sz, seq_len, remaining), y.dtype(), y.device())?;
+                Tensor::cat(&[&z_before, &y, &z_after], 2)?
+            } else if before_dim > 0 {
+                let z_before = Tensor::zeros((b_sz, seq_len, before_dim), y.dtype(), y.device())?;
+                Tensor::cat(&[&z_before, &y], 2)?
+            } else if remaining > 0 {
+                let z_after = Tensor::zeros((b_sz, seq_len, remaining), y.dtype(), y.device())?;
+                Tensor::cat(&[&y, &z_after], 2)?
+            } else {
+                y
+            };
+            self.attention_wo.forward(&y_padded)
+        } else {
+            self.attention_wo.forward(&y)
+        }
     }
 }
 
@@ -2732,6 +2925,125 @@ impl SplitModel {
         }
     }
 
+    /// Tensor-parallel forward pass for a single layer.
+    ///
+    /// Each TP node computes only its fraction of the computation:
+    /// - Attention: processes `n_head / tp_size` heads (head-parallel)
+    /// - MLP: processes `intermediate_dim / tp_size` columns (column-parallel gate/up,
+    ///   row-parallel down)
+    ///
+    /// Returns a **partial** hidden state that must be summed (AllReduced) across all
+    /// TP nodes to produce the correct full output. The caller (pipeline executor)
+    /// coordinates the AllReduce between layers.
+    ///
+    /// `abs_layer_idx` is the absolute layer index in the full model (not relative
+    /// to this segment's layer_start).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_tp_layer(
+        &mut self,
+        input: &Tensor,
+        abs_layer_idx: usize,
+        index_pos: usize,
+        tp_rank: usize,
+        tp_size: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
+        // Map absolute layer index to our local layer array index
+        let local_idx = abs_layer_idx.checked_sub(self.layer_start).ok_or_else(|| {
+            SwarmError::Internal(format!(
+                "Layer {abs_layer_idx} not in segment [{}, {})",
+                self.layer_start, self.layer_end
+            ))
+        })?;
+        if local_idx >= self.layers.len() {
+            return Err(SwarmError::Internal(format!(
+                "Layer index {local_idx} out of range (have {} layers)",
+                self.layers.len()
+            )));
+        }
+
+        let input = input
+            .to_device(&self.device)
+            .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
+
+        let seq_len = input
+            .dim(1)
+            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+        // KV-cache keyed by model key + request_id
+        let model_key = format!(
+            "tp{}-{}-{}-{}",
+            tp_rank, self.layer_start, self.layer_end, self.total_layers
+        );
+        let num_layers = self.layers.len();
+        let mut layer_kv_caches: Vec<Option<KvCache>> = {
+            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            entry.last_accessed = std::time::Instant::now();
+            entry.layers.clone()
+        };
+
+        let mask = if seq_len == 1 {
+            None
+        } else {
+            Some(
+                self.mask(seq_len)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        };
+
+        let layer = &self.layers[local_idx];
+        let x = &input;
+        // Attention norm (full — not split)
+        let normed = layer
+            .attention_norm
+            .forward(x)
+            .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
+
+        // Head-parallel attention: only compute assigned heads
+        let attn_partial = layer
+            .forward_attn_tp(
+                &normed,
+                mask.as_ref(),
+                index_pos,
+                &mut layer_kv_caches[local_idx],
+                self.max_seq_len,
+                tp_rank,
+                tp_size,
+            )
+            .map_err(|e| SwarmError::Internal(format!("attn_tp: {e}")))?;
+
+        // Partial attention result — needs AllReduce with other TP nodes.
+        // The residual connection is applied AFTER AllReduce by the coordinator:
+        //   full_attn = sum(attn_partial_0, attn_partial_1, ...) + residual
+
+        // FFN norm on full input (not the partial attention — norm goes before residual add)
+        let ffn_normed = layer
+            .ffn_norm
+            .forward(x)
+            .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
+
+        // Column-parallel MLP: each TP node handles a fraction of the intermediate dimension
+        let mlp_partial = layer
+            .mlp
+            .forward_tp(&ffn_normed, tp_rank, tp_size)
+            .map_err(|e| SwarmError::Internal(format!("mlp_tp: {e}")))?;
+
+        // Return partial = attn_partial + mlp_partial
+        // The coordinator will AllReduce this and add the residual (input)
+        let partial =
+            (attn_partial + mlp_partial).map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+        // Write updated KV cache back
+        {
+            let mut entry = kv_cache_store.get_or_create(&model_key, request_id, num_layers);
+            entry.layers = layer_kv_caches;
+            entry.last_accessed = std::time::Instant::now();
+        }
+
+        Ok(partial)
+    }
+
     /// Forward pass for multimodal (vision + text) inference.
     ///
     /// If this is the first segment and `vision_embeddings` is provided, the
@@ -3004,6 +3316,51 @@ impl SplitModel {
     /// Return the EOS token string from GGUF metadata.
     pub fn eos_token_str(&self) -> &str {
         &self.eos_token
+    }
+
+    /// Tokenize a prompt string and return the embedded hidden states.
+    ///
+    /// Used by tensor-parallel execution where embedding happens before
+    /// layer-by-layer forwarding. Only works on the first segment (has embeddings).
+    pub fn tokenize_and_embed(&self, prompt: &str) -> Result<Tensor, SwarmError> {
+        let emb = self
+            .tok_embeddings
+            .as_ref()
+            .ok_or_else(|| SwarmError::Internal("No embedding table (not first segment)".into()))?;
+
+        // Tokenize — BpeTokenizer returns Vec<i64>
+        let token_ids: Vec<i64> = if let Some(ref tokenizer) = self.tokenizer {
+            tokenizer.encode(prompt)
+        } else {
+            // Fallback: byte-level encoding
+            prompt.bytes().map(|b| b as i64).collect()
+        };
+
+        let input = Tensor::new(&token_ids[..], &self.device)
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
+            .unsqueeze(0)
+            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
+
+        emb.forward(&input)
+            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))
+    }
+
+    /// Embed a single token ID into hidden states.
+    ///
+    /// Used by tensor-parallel execution for autoregressive decoding.
+    pub fn embed_token(&self, token_id: u32) -> Result<Tensor, SwarmError> {
+        let emb = self
+            .tok_embeddings
+            .as_ref()
+            .ok_or_else(|| SwarmError::Internal("No embedding table (not first segment)".into()))?;
+
+        let input = Tensor::new(&[token_id as i64][..], &self.device)
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
+            .unsqueeze(0)
+            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
+
+        emb.forward(&input)
+            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))
     }
 
     /// Estimate GPU memory usage in MB for this model segment.
@@ -3740,6 +4097,7 @@ mod tests {
                 layer_range: (0, 10),
             }],
             standbys: vec![],
+            tp_groups: vec![],
         };
         active_pipelines.insert(uuid::Uuid::new_v4(), pipeline);
 

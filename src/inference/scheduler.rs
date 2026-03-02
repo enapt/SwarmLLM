@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::types::{ModelId, ModelManifest, NodeId, PipelineAssignment, PipelineSegment, ShardId};
+use crate::types::{
+    ModelId, ModelManifest, NodeId, PipelineAssignment, PipelineSegment, ShardId,
+    TensorParallelGroup,
+};
 
 /// PipelineScheduler assembles a distributed inference pipeline
 /// by selecting the best nodes for each layer range.
@@ -92,11 +95,15 @@ impl PipelineScheduler {
         // Identify standby nodes for each segment
         let standbys = self.find_standbys(&segments, &candidates);
 
+        // Detect tensor-parallel opportunities: LAN peers sharing the same layer range.
+        let tp_groups = self.detect_tp_groups(&segments, &candidates, &manifest);
+
         tracing::info!(
             request_id = %request_id,
             model = %model_id,
             segments = segments.len(),
             standbys = standbys.len(),
+            tp_groups = tp_groups.len(),
             "Pipeline assembled"
         );
 
@@ -104,6 +111,7 @@ impl PipelineScheduler {
             request_id,
             segments,
             standbys,
+            tp_groups,
         })
     }
 
@@ -396,6 +404,104 @@ impl PipelineScheduler {
             merged.push(seg);
         }
         merged
+    }
+
+    /// Detect tensor-parallel opportunities among LAN peers.
+    ///
+    /// For each pipeline segment, check if there are additional LAN peers that
+    /// could serve the same layer range. If so, form a TensorParallelGroup
+    /// containing the primary node plus LAN peers (up to 4 nodes per group).
+    ///
+    /// Tensor parallelism is only beneficial on LAN (<5ms latency) because the
+    /// AllReduce communication between layers requires low latency.
+    fn detect_tp_groups(
+        &self,
+        segments: &[PipelineSegment],
+        candidates: &[NodeCandidate],
+        manifest: &ModelManifest,
+    ) -> Vec<TensorParallelGroup> {
+        let mut tp_groups = Vec::new();
+        let local_node_id = self.shared_state.identity.node_id();
+
+        for segment in segments {
+            // Find LAN peers that can serve the same layer range
+            let mut group_nodes = vec![segment.node_id.clone()];
+            let mut group_shard_ids = vec![segment.shard_id.clone()];
+
+            for candidate in candidates {
+                // Skip the primary node
+                if candidate.node_id == segment.node_id {
+                    continue;
+                }
+                // Must be a LAN peer (low latency for AllReduce)
+                let is_lan = if &candidate.node_id == local_node_id {
+                    // Local node is always "LAN" with itself
+                    group_nodes.iter().any(|n| {
+                        self.shared_state
+                            .peer_registry
+                            .get(n)
+                            .map(|p| p.is_lan_peer)
+                            .unwrap_or(false)
+                    })
+                } else {
+                    self.shared_state
+                        .peer_registry
+                        .get(&candidate.node_id)
+                        .map(|p| p.is_lan_peer)
+                        .unwrap_or(false)
+                };
+                if !is_lan {
+                    continue;
+                }
+                // Must be able to cover the same layer range
+                let covers = candidate
+                    .available_ranges
+                    .iter()
+                    .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1);
+                if !covers {
+                    continue;
+                }
+                group_nodes.push(candidate.node_id.clone());
+                group_shard_ids.push(candidate.shard_id.clone());
+                // Cap at 4 TP nodes (diminishing returns beyond that on LAN)
+                if group_nodes.len() >= 4 {
+                    break;
+                }
+            }
+
+            // Only form a TP group if we have 2+ nodes
+            if group_nodes.len() >= 2 {
+                // Collect all shard IDs needed for this layer range
+                let needed_shard_ids: Vec<ShardId> = manifest
+                    .shards
+                    .iter()
+                    .filter(|s| {
+                        s.layer_range.0 < segment.layer_range.1
+                            && s.layer_range.1 > segment.layer_range.0
+                    })
+                    .map(|s| ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    })
+                    .collect();
+
+                tracing::info!(
+                    tp_size = group_nodes.len(),
+                    layer_range = ?segment.layer_range,
+                    "Tensor-parallel group detected on LAN"
+                );
+                tp_groups.push(TensorParallelGroup {
+                    nodes: group_nodes,
+                    layer_range: segment.layer_range,
+                    shard_ids: if needed_shard_ids.is_empty() {
+                        group_shard_ids
+                    } else {
+                        needed_shard_ids
+                    },
+                });
+            }
+        }
+        tp_groups
     }
 
     /// Find standby (backup) nodes for each pipeline segment.
@@ -773,5 +879,134 @@ mod tests {
         // Node B (low load) should be selected over Node A (high load)
         assert_eq!(assignment.segments.len(), 1);
         assert_eq!(assignment.segments[0].node_id, node_b);
+    }
+
+    #[test]
+    fn detects_tp_group_for_lan_peers() {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_b = NodeId([20u8; 32]);
+
+        let shards = vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }];
+        let manifest = make_manifest("tp-model", 32, shards);
+        state.model_registry.register_manifest(manifest);
+
+        // Both local node and Node B host the same shard
+        let shard_id = ShardId {
+            model_id: ModelId("tp-model".into()),
+            index: 0,
+        };
+        state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), local_id.clone());
+        state
+            .model_registry
+            .record_shard_holder(shard_id, node_b.clone());
+
+        // Mark Node B as a LAN peer
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(1),
+                trust_score: 0.9,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: true,
+            },
+        );
+
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("tp-model".into()), &local_id)
+            .unwrap();
+
+        // Pipeline should have 1 segment (local node wins) + 1 TP group with both nodes
+        assert_eq!(assignment.segments.len(), 1);
+        assert_eq!(assignment.tp_groups.len(), 1);
+        assert_eq!(assignment.tp_groups[0].tp_size(), 2);
+        assert!(assignment.tp_groups[0].nodes.contains(&local_id));
+        assert!(assignment.tp_groups[0].nodes.contains(&node_b));
+        assert_eq!(assignment.tp_groups[0].layer_range, (0, 32));
+    }
+
+    #[test]
+    fn no_tp_group_for_wan_peers() {
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_b = NodeId([21u8; 32]);
+
+        let shards = vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }];
+        let manifest = make_manifest("wan-model", 32, shards);
+        state.model_registry.register_manifest(manifest);
+
+        let shard_id = ShardId {
+            model_id: ModelId("wan-model".into()),
+            index: 0,
+        };
+        state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), local_id.clone());
+        state
+            .model_registry
+            .record_shard_holder(shard_id, node_b.clone());
+
+        // Node B is NOT a LAN peer
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b,
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(100),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("wan-model".into()), &local_id)
+            .unwrap();
+
+        // Should have segments but NO TP groups (WAN peer)
+        assert_eq!(assignment.segments.len(), 1);
+        assert!(assignment.tp_groups.is_empty());
+    }
+
+    #[test]
+    fn tp_group_rank_of() {
+        let group = TensorParallelGroup {
+            nodes: vec![NodeId([1u8; 32]), NodeId([2u8; 32]), NodeId([3u8; 32])],
+            layer_range: (0, 32),
+            shard_ids: vec![],
+        };
+        assert_eq!(group.rank_of(&NodeId([1u8; 32])), Some(0));
+        assert_eq!(group.rank_of(&NodeId([2u8; 32])), Some(1));
+        assert_eq!(group.rank_of(&NodeId([3u8; 32])), Some(2));
+        assert_eq!(group.rank_of(&NodeId([4u8; 32])), None);
+        assert_eq!(group.tp_size(), 3);
     }
 }

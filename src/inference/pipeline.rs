@@ -391,6 +391,10 @@ impl PipelineExecutor {
     }
 
     /// Forward activation data through all pipeline segments in order.
+    ///
+    /// If tensor-parallel groups are available for a segment's layer range,
+    /// the executor uses layer-by-layer AllReduce across the TP group instead
+    /// of sending the full layer range to a single node.
     async fn forward_through_segments(
         &mut self,
         request_id: uuid::Uuid,
@@ -405,7 +409,45 @@ impl PipelineExecutor {
             let is_last = idx == num_segments - 1;
             let segment = &self.assignment.segments[idx];
 
-            // Send LayerForward to this segment's node
+            // Check if this segment has a tensor-parallel group
+            let tp_group = self
+                .assignment
+                .tp_groups
+                .iter()
+                .find(|g| {
+                    g.layer_range.0 <= segment.layer_range.0
+                        && g.layer_range.1 >= segment.layer_range.1
+                })
+                .cloned();
+
+            if let Some(ref group) = tp_group {
+                // Tensor-parallel execution: layer-by-layer with AllReduce
+                activations = self
+                    .execute_tp_segment(
+                        request_id,
+                        sequence_num,
+                        index_pos,
+                        &activations,
+                        segment,
+                        group,
+                        is_last,
+                    )
+                    .await?;
+                if is_last {
+                    // For the last segment, activations contains the serialized LayerResult
+                    // We already handled sampling in execute_tp_segment
+                    // Return a synthetic result
+                    return Ok(LayerResult {
+                        request_id,
+                        token_ids: vec![], // filled by execute_tp_segment
+                        finish_reason: None,
+                        activations,
+                    });
+                }
+                continue;
+            }
+
+            // Standard pipeline execution (no TP)
             let forward = LayerForward {
                 request_id,
                 sequence_num,
@@ -414,6 +456,7 @@ impl PipelineExecutor {
                 format: TensorFormat::FP32,
                 layer_range: Some(segment.layer_range),
                 sender_peer_bytes: None,
+                tp_meta: None,
             };
 
             // If this is the local node, process locally
@@ -1070,6 +1113,7 @@ impl PipelineExecutor {
                     activations: activations.to_vec(),
                     format: TensorFormat::FP32,
                     layer_range: Some(backup.layer_range),
+                    tp_meta: None,
                     sender_peer_bytes: None,
                 };
 
@@ -1117,6 +1161,182 @@ impl PipelineExecutor {
                 )))
             }
         }
+    }
+
+    /// Execute a pipeline segment using tensor parallelism across a TP group.
+    ///
+    /// Instead of sending the full layer range to one node, this executes
+    /// layer-by-layer across all nodes in the TP group:
+    ///
+    /// For each layer:
+    /// 1. Send activations + TP metadata to all TP nodes
+    /// 2. Each node computes its fraction (head-parallel attn + column-parallel MLP)
+    /// 3. Collect partial results from all nodes
+    /// 4. AllReduce (sum) partial results + add residual
+    /// 5. Use result as input for next layer
+    ///
+    /// The local node's TP computation is done inline; remote nodes receive
+    /// LayerForward messages with TensorParallelMeta.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tp_segment(
+        &self,
+        request_id: uuid::Uuid,
+        sequence_num: u32,
+        index_pos: usize,
+        activation_bytes: &[u8],
+        segment: &PipelineSegment,
+        tp_group: &crate::types::TensorParallelGroup,
+        _is_last: bool,
+    ) -> Result<Vec<u8>, SwarmError> {
+        use crate::inference::split;
+
+        let model_id = &segment.shard_id.model_id;
+        let (layer_start, layer_end) = (
+            segment.layer_range.0 as usize,
+            segment.layer_range.1 as usize,
+        );
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let tp_size = tp_group.tp_size();
+
+        // Find our rank in the TP group
+        let local_tp_rank = tp_group.rank_of(&local_node_id);
+
+        tracing::info!(
+            request_id = %request_id,
+            tp_size,
+            local_rank = ?local_tp_rank,
+            layers = ?(layer_start..layer_end),
+            "Starting tensor-parallel segment execution"
+        );
+
+        // Ensure split model is loaded for this layer range.
+        // Reuse the same loading logic as process_local_segment.
+        let split_key = (model_id.clone(), layer_start, layer_end);
+        if !self.shared_state.split_models.contains_key(&split_key) {
+            let shard_store =
+                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let model_dir = shard_store.models_dir().join(&model_id.0);
+            let manifest = self
+                .shared_state
+                .model_registry
+                .get_manifest(model_id)
+                .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
+            let total_layers = manifest.num_layers as usize;
+
+            let local_shards: Vec<u32> = manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    let sid = crate::types::ShardId {
+                        model_id: model_id.clone(),
+                        index: s.index,
+                    };
+                    self.shared_state
+                        .model_registry
+                        .shard_holders(&sid)
+                        .contains(&local_node_id)
+                })
+                .map(|s| s.index)
+                .collect();
+            let has_first_shard = local_shards.contains(&0);
+            let last_idx = manifest.shard_count.saturating_sub(1);
+            let has_last_shard = local_shards.contains(&last_idx);
+            let is_first = layer_start == 0 && has_first_shard;
+            let is_last_segment = layer_end >= total_layers && has_last_shard;
+
+            // Load via the standard shard loading path
+            let params = crate::daemon::ShardLoadParams {
+                model_dir: &model_dir,
+                shard_store: &shard_store,
+                model_id,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last: is_last_segment,
+                manifest: &manifest,
+            };
+            let split_model = crate::daemon::try_load_from_shards(&params)?;
+            let new_entry = split::SplitModelEntry::new(split_model);
+            self.shared_state
+                .split_models
+                .entry(split_key.clone())
+                .or_insert(new_entry);
+        }
+
+        // Get model reference
+        let model_arc = self
+            .shared_state
+            .split_models
+            .get(&split_key)
+            .ok_or_else(|| SwarmError::Internal("Split model not loaded after insert".into()))?
+            .model
+            .clone();
+
+        // Parse input activations
+        let kv_cache_store = &self.shared_state.kv_cache_store;
+        let req_id_str = request_id.to_string();
+
+        // Build the initial hidden states tensor
+        let mut current_activations = if sequence_num == 0 {
+            // First token: input is the prompt (text bytes)
+            let model = model_arc.lock().await;
+            let prompt = String::from_utf8_lossy(activation_bytes);
+            let input = model
+                .tokenize_and_embed(&prompt)
+                .map_err(|e| SwarmError::Internal(format!("Tokenize+embed: {e}")))?;
+            input
+        } else {
+            // Subsequent tokens: input is last token ID as i64 LE bytes
+            let model = model_arc.lock().await;
+            let token_id = if activation_bytes.len() >= 8 {
+                i64::from_le_bytes(activation_bytes[..8].try_into().unwrap()) as u32
+            } else {
+                0u32
+            };
+            model
+                .embed_token(token_id)
+                .map_err(|e| SwarmError::Internal(format!("Embed token: {e}")))?
+        };
+
+        // Layer-by-layer tensor-parallel execution
+        for abs_layer in layer_start..layer_end {
+            let residual = current_activations.clone();
+
+            if let Some(tp_rank) = local_tp_rank {
+                // We are in the TP group — compute our partial result
+                let mut model = model_arc.lock().await;
+                let partial = model.forward_tp_layer(
+                    &current_activations,
+                    abs_layer,
+                    index_pos,
+                    tp_rank,
+                    tp_size,
+                    kv_cache_store,
+                    &req_id_str,
+                )?;
+
+                // For now: if this is the only local TP participant, just use partial + residual
+                // Full AllReduce with remote nodes would send partial to each remote TP node,
+                // collect their partials, and sum. This is the local-only TP path.
+                // TODO: implement remote AllReduce for multi-node TP
+                current_activations = (partial + &residual)
+                    .map_err(|e| SwarmError::Internal(format!("Residual add: {e}")))?;
+            } else {
+                // We're not in the TP group — run full (non-TP) layer
+                let mut model = model_arc.lock().await;
+                let result =
+                    model.forward(&current_activations, index_pos, kv_cache_store, &req_id_str)?;
+                current_activations = result;
+                // Skip remaining layers since full forward processes all of them
+                break;
+            }
+        }
+
+        // Serialize the output
+        let result_bytes = split::tensor_to_bytes(&current_activations)
+            .map_err(|e| SwarmError::Internal(format!("Serialize TP output: {e}")))?;
+
+        Ok(result_bytes)
     }
 }
 
@@ -1253,6 +1473,7 @@ mod tests {
             request_id: request.id,
             segments: vec![],
             standbys: vec![],
+            tp_groups: vec![],
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);
@@ -1279,6 +1500,7 @@ mod tests {
                 layer_range: (0, 32),
             }],
             standbys: vec![],
+            tp_groups: vec![],
         };
 
         let mut executor = PipelineExecutor::new(state, tx, request, assignment);

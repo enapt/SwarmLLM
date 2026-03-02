@@ -500,6 +500,7 @@ impl InferenceRouter {
                 request_id: queued.request.id,
                 segments: vec![],
                 standbys: vec![],
+                tp_groups: vec![],
             },
             cache_start_pos.unwrap_or(0),
         );

@@ -317,6 +317,12 @@ pub struct PipelineAssignment {
     pub request_id: uuid::Uuid,
     pub segments: Vec<PipelineSegment>,
     pub standbys: Vec<PipelineSegment>,
+    /// Tensor-parallel groups: each group of LAN peers processes the same layers
+    /// in parallel, splitting attention heads and MLP dimensions across nodes.
+    /// When present, the pipeline executor uses layer-by-layer AllReduce instead
+    /// of sequential pipeline forwarding for these layer ranges.
+    #[serde(default)]
+    pub tp_groups: Vec<TensorParallelGroup>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -324,6 +330,45 @@ pub struct PipelineSegment {
     pub node_id: NodeId,
     pub shard_id: ShardId,
     pub layer_range: (u32, u32),
+}
+
+// ---- Tensor Parallelism ----
+
+/// A group of LAN-local nodes that execute the same layers via tensor parallelism.
+/// Instead of pipeline (sequential layers), each node computes a fraction of each
+/// layer's computation (subset of attention heads + MLP columns) and results are
+/// summed via AllReduce.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TensorParallelGroup {
+    /// Ordered list of nodes in this TP group. Index = tp_rank.
+    pub nodes: Vec<NodeId>,
+    /// Which layers this group covers.
+    pub layer_range: (u32, u32),
+    /// Shard IDs needed (all nodes must have these shards).
+    pub shard_ids: Vec<ShardId>,
+}
+
+impl TensorParallelGroup {
+    /// Number of nodes in this tensor-parallel group.
+    pub fn tp_size(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get the TP rank for a given node (its index in the group).
+    pub fn rank_of(&self, node_id: &NodeId) -> Option<usize> {
+        self.nodes.iter().position(|n| n == node_id)
+    }
+}
+
+/// Tensor-parallel metadata attached to a LayerForward for TP execution.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TensorParallelMeta {
+    /// This node's rank within the TP group (0-indexed).
+    pub tp_rank: u8,
+    /// Total number of nodes in the TP group.
+    pub tp_size: u8,
+    /// Process only this single layer (layer-by-layer TP execution).
+    pub single_layer: u32,
 }
 
 // ---- Network Messages ----
@@ -430,6 +475,10 @@ pub struct LayerForward {
     /// `None` for backward compatibility with older peers.
     #[serde(default)]
     pub layer_range: Option<(u32, u32)>,
+    /// Tensor-parallel metadata. When present, the receiving node should process
+    /// only the specified single layer using its TP rank/size for head and MLP slicing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tp_meta: Option<TensorParallelMeta>,
     /// Populated locally after receiving from the network — not serialized over the wire.
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]
