@@ -227,12 +227,34 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 The SplitModel loader detects the model architecture from GGUF metadata
 (`general.architecture`) and applies architecture-specific behavior:
 
-| Feature | Llama | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 |
-|---------|-------|-------|--------------|-------|---------|------------|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous |
-| QKV biases | None | Yes | None | Yes | None | Yes |
-| Context length | 4096 (default) | 32768 | 8192 | 4096 | 32768 | 16384 |
-| EOS tokens | 2 | 151643, 151645 | Arch-specific | Arch-specific | Arch-specific | Arch-specific |
+| Feature | Llama | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 |
+|---------|-------|-------|--------------|-------|---------|------------|----------------|
+| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) |
+| QKV biases | None | Yes | None | Yes | None | Yes | None (MLA projections) |
+| Attention | Standard MHA/GQA | Standard MHA | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) |
+| FFN | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k experts) + shared experts |
+| Context length | 4096 (default) | 32768 | 8192 | 4096 | 32768 | 16384 | 163840 |
+| EOS tokens | 2 | 151643, 151645 | Arch-specific | Arch-specific | Arch-specific | Arch-specific | Arch-specific |
+
+### DeepSeek-V2/V3 MoE + MLA Support
+
+DeepSeek models use two specialized mechanisms that differ from standard transformers:
+
+**Multi-head Latent Attention (MLA)** — compressed KV via low-rank projections:
+- Q path: `x → q_a (compress) → RMSNorm → q_b (decompress) → split (q_nope, q_rope) → RoPE on q_rope`
+- KV path: `x → kv_a (compress) → split (c_kv, k_rope) → RoPE on k_rope → RMSNorm(c_kv) → kv_b → split (k_nope, v)`
+- Full K/V stored in KV cache (decompressed, not latent)
+- Uses `standard_attention()` due to asymmetric key/value dimensions
+
+**Mixture-of-Experts (MoE)** — router-selected sparse FFN:
+- Router: `x.matmul(gate.T) → softmax → top-k selection (CPU argsort)`
+- Expert loop: per-token top-k experts selected from stacked `[n_experts, dim, dim]` tensors via `index_select`
+- Shared experts (always active) added to routed expert output
+- Expert tensors dequantized at load time for `index_select` compatibility
+
+**Per-layer type detection** — early DeepSeek layers (~1-3) use standard dense attention + dense FFN; subsequent layers use MLA + MoE. The `LayerVariant` enum handles both:
+- `LayerVariant::Dense(LayerWeights)` — standard transformer layer
+- `LayerVariant::DeepSeek { attention: MlaWeights, ffn: DeepSeekFfn, ... }` — MLA + MoE/dense FFN
 
 ### Vision Language Models (VLM)
 
@@ -635,9 +657,17 @@ allowing candle to parse the full tensor index while only loading assigned layer
 
 ### OpenAI-Compatible (Bearer auth required)
 - `POST /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
+- `POST /v1/messages` — Anthropic Messages API (native format with SSE streaming)
 - `POST /v1/embeddings` — Text embeddings
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
+
+### Multi-Provider Gateway
+When a requested model isn't available locally, requests are routed to cloud providers:
+- Model prefix routing: `claude-*` → Anthropic, `gpt-*` → OpenAI, `deepseek-*` → DeepSeek, `mistral-*` → Mistral
+- Explicit syntax: `provider:model` (e.g., `openai:gpt-4o`, `groq:llama-3.1-70b`)
+- Custom providers via `[providers.custom]` config section
+- Admin API: `GET/PUT /api/admin/providers` — view/configure provider API keys
 
 ### Admin API (CORS-protected, no Bearer auth)
 - `GET/PUT /api/admin/config` — Configuration read/update
