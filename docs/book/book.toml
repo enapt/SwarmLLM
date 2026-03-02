@@ -1,0 +1,23 @@
+[book]
+title = "SwarmLLM Documentation"
+authors = ["SwarmLLM Contributors"]
+description = "Documentation for SwarmLLM — decentralized peer-to-peer LLM inference"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../../target/book"
+create-missing = false
+
+[output.html]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+git-repository-url = "https://github.com/swarmllm/swarmllm"
+edit-url-template = "https://github.com/swarmllm/swarmllm/edit/main/docs/book/src/{path}"
+site-url = "/swarmllm/"
+no-section-label = false
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-hierarchical-headings = true

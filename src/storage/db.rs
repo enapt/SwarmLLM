@@ -80,8 +80,9 @@ impl Database {
     /// Open (or create) the redb database at `data_dir/db.redb`.
     pub fn open(data_dir: &Path) -> Result<Self, SwarmError> {
         let db_path = data_dir.join("db.redb");
-        let inner = redb::Database::create(&db_path)
-            .map_err(|e| SwarmError::Database(format!("Failed to open {}: {e}", db_path.display())))?;
+        let inner = redb::Database::create(&db_path).map_err(|e| {
+            SwarmError::Database(format!("Failed to open {}: {e}", db_path.display()))
+        })?;
         tracing::info!(path = %db_path.display(), "Opened database");
 
         let db = Self {
@@ -118,10 +119,8 @@ impl Database {
     /// The file is not auto-deleted; callers should use `tempfile::tempdir()`
     /// + `Database::open()` if cleanup is needed.
     pub fn open_temp() -> Result<Self, SwarmError> {
-        let temp_path = std::env::temp_dir().join(format!(
-            "swarmllm_test_{}.redb",
-            uuid::Uuid::new_v4()
-        ));
+        let temp_path =
+            std::env::temp_dir().join(format!("swarmllm_test_{}.redb", uuid::Uuid::new_v4()));
         let inner = redb::Database::create(&temp_path)
             .map_err(|e| SwarmError::Database(format!("Failed to create temp db: {e}")))?;
         Ok(Self {
@@ -139,15 +138,20 @@ impl Database {
     ) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
         let bytes = serde_json::to_vec(value)?;
-        let write_txn = self.inner.begin_write()
+        let write_txn = self
+            .inner
+            .begin_write()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         {
-            let mut table = write_txn.open_table(DATA_TABLE)
+            let mut table = write_txn
+                .open_table(DATA_TABLE)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-            table.insert(k.as_slice(), bytes.as_slice())
+            table
+                .insert(k.as_slice(), bytes.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
         }
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
@@ -159,14 +163,17 @@ impl Database {
         key: &str,
     ) -> Result<Option<T>, SwarmError> {
         let k = make_key(tree_name, key);
-        let read_txn = self.inner.begin_read()
+        let read_txn = self
+            .inner
+            .begin_read()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         let table = match read_txn.open_table(DATA_TABLE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(SwarmError::Database(e.to_string())),
         };
-        match table.get(k.as_slice())
+        match table
+            .get(k.as_slice())
             .map_err(|e| SwarmError::Database(e.to_string()))?
         {
             Some(guard) => {
@@ -184,7 +191,9 @@ impl Database {
     ) -> Result<Vec<T>, SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        let read_txn = self.inner.begin_read()
+        let read_txn = self
+            .inner
+            .begin_read()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         let table = match read_txn.open_table(DATA_TABLE) {
             Ok(t) => t,
@@ -193,12 +202,12 @@ impl Database {
         };
 
         let mut results = Vec::new();
-        let range = table.range(start.as_slice()..end.as_slice())
+        let range = table
+            .range(start.as_slice()..end.as_slice())
             .map_err(|e| SwarmError::Database(e.to_string()))?;
 
         for entry in range {
-            let (key_guard, val_guard) = entry
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            let (key_guard, val_guard) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
             match serde_json::from_slice(val_guard.value()) {
                 Ok(val) => results.push(val),
                 Err(e) => {
@@ -220,13 +229,12 @@ impl Database {
     /// Iterate all raw key-value pairs in a named tree.
     /// Returns (sub_key_bytes, value_bytes) pairs.
     #[allow(clippy::type_complexity)]
-    pub fn iter_raw(
-        &self,
-        tree_name: &str,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SwarmError> {
+    pub fn iter_raw(&self, tree_name: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        let read_txn = self.inner.begin_read()
+        let read_txn = self
+            .inner
+            .begin_read()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         let table = match read_txn.open_table(DATA_TABLE) {
             Ok(t) => t,
@@ -235,12 +243,12 @@ impl Database {
         };
 
         let mut results = Vec::new();
-        let range = table.range(start.as_slice()..end.as_slice())
+        let range = table
+            .range(start.as_slice()..end.as_slice())
             .map_err(|e| SwarmError::Database(e.to_string()))?;
 
         for entry in range {
-            let (key_guard, val_guard) = entry
-                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            let (key_guard, val_guard) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
             let subkey = extract_subkey(key_guard.value())
                 .unwrap_or_default()
                 .to_vec();
@@ -250,22 +258,22 @@ impl Database {
     }
 
     /// Insert a raw byte value into a named tree.
-    pub fn insert_raw(
-        &self,
-        tree_name: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), SwarmError> {
+    pub fn insert_raw(&self, tree_name: &str, key: &str, value: &[u8]) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        let write_txn = self.inner.begin_write()
+        let write_txn = self
+            .inner
+            .begin_write()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         {
-            let mut table = write_txn.open_table(DATA_TABLE)
+            let mut table = write_txn
+                .open_table(DATA_TABLE)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-            table.insert(k.as_slice(), value)
+            table
+                .insert(k.as_slice(), value)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
         }
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
@@ -273,15 +281,20 @@ impl Database {
     /// Remove a key from a named tree.
     pub fn remove(&self, tree_name: &str, key: &str) -> Result<(), SwarmError> {
         let k = make_key(tree_name, key);
-        let write_txn = self.inner.begin_write()
+        let write_txn = self
+            .inner
+            .begin_write()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         {
-            let mut table = write_txn.open_table(DATA_TABLE)
+            let mut table = write_txn
+                .open_table(DATA_TABLE)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
-            table.remove(k.as_slice())
+            table
+                .remove(k.as_slice())
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
         }
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
@@ -296,29 +309,34 @@ impl Database {
     pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);
         let end = tree_range_end(tree_name);
-        let write_txn = self.inner.begin_write()
+        let write_txn = self
+            .inner
+            .begin_write()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         {
-            let mut table = write_txn.open_table(DATA_TABLE)
+            let mut table = write_txn
+                .open_table(DATA_TABLE)
                 .map_err(|e| SwarmError::Database(e.to_string()))?;
             // Collect keys to remove (can't mutate while iterating)
             let keys: Vec<Vec<u8>> = {
-                let range = table.range(start.as_slice()..end.as_slice())
+                let range = table
+                    .range(start.as_slice()..end.as_slice())
                     .map_err(|e| SwarmError::Database(e.to_string()))?;
                 let mut ks = Vec::new();
                 for entry in range {
-                    let (key_guard, _) = entry
-                        .map_err(|e| SwarmError::Database(e.to_string()))?;
+                    let (key_guard, _) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
                     ks.push(key_guard.value().to_vec());
                 }
                 ks
             };
             for key in &keys {
-                table.remove(key.as_slice())
+                table
+                    .remove(key.as_slice())
                     .map_err(|e| SwarmError::Database(e.to_string()))?;
             }
         }
-        write_txn.commit()
+        write_txn
+            .commit()
             .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }

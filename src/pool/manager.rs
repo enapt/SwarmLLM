@@ -145,6 +145,9 @@ impl PoolManager {
             PoolCommand::InboundInvitation { invitation } => {
                 self.handle_inbound_invitation(invitation).await;
             }
+            PoolCommand::InboundBlindedInvitation { blinded } => {
+                self.handle_inbound_blinded_invitation(blinded).await;
+            }
             PoolCommand::InboundAcceptance { acceptance } => {
                 self.handle_inbound_acceptance(acceptance).await;
             }
@@ -296,11 +299,11 @@ impl PoolManager {
         self.pending_invitations
             .insert(invitation.id, invitation.clone());
 
-        // SEC-M18: TODO — Broadcasting full PoolInvitation with invitee_node_id exposes the
-        // invitee's identity to the network. Consider using a blinded commitment (hash of
-        // invitee_node_id) in the broadcast and sending the full invitation via direct P2P message.
-        let msg =
-            SwarmMessage::PoolMessage(crate::types::PoolMessage::Invitation(invitation.clone()));
+        // SEC-M18 FIX: Broadcast a blinded invitation that hides the invitee's identity.
+        // Only the intended invitee can recognize the invitation by recomputing the BLAKE3
+        // commitment H("pool_invitee_commit_v1" || their_node_id || invitation_id).
+        let blinded = BlindedPoolInvitation::from_invitation(&invitation);
+        let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::BlindedInvitation(blinded));
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!(
@@ -695,6 +698,63 @@ impl PoolManager {
                 "Received pool invitation"
             );
         }
+    }
+
+    /// SEC-M18: Handle a blinded invitation broadcast.
+    /// Recompute the commitment with our node_id to check if the invitation is for us.
+    async fn handle_inbound_blinded_invitation(&mut self, blinded: BlindedPoolInvitation) {
+        let my_id = self.shared_state.identity.node_id();
+        let expected = compute_invitee_commitment(my_id, &blinded.id);
+
+        if expected != blinded.invitee_commitment {
+            // Not for us — ignore silently (this is expected for most nodes)
+            return;
+        }
+
+        // This invitation is for us! Reconstruct a full PoolInvitation for local storage.
+        let invitation = PoolInvitation {
+            id: blinded.id,
+            pool_id: blinded.pool_id.clone(),
+            invitee_node_id: my_id.clone(),
+            expires_at: blinded.expires_at,
+            owner_signature: blinded.owner_signature.clone(),
+            created_at: blinded.created_at,
+        };
+
+        // Verify owner signature before storing
+        let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&invitation.pool_id.0) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::warn!("Invalid owner key in blinded invitation");
+                return;
+            }
+        };
+        if crypto::verify_invitation(&invitation, &owner_key).is_err() {
+            tracing::warn!(pool_id = %invitation.pool_id, "Invalid owner signature on blinded invitation");
+            return;
+        }
+
+        // Check expiry
+        if invitation.expires_at < chrono::Utc::now() {
+            tracing::debug!(invitation_id = %invitation.id, "Ignoring expired blinded invitation");
+            return;
+        }
+
+        // Store as pending
+        self.pending_invitations
+            .insert(invitation.id, invitation.clone());
+        if let Err(e) = self.shared_state.db.put_json(
+            TREE_POOL_INVITATIONS,
+            &invitation.id.to_string(),
+            &invitation,
+        ) {
+            tracing::warn!(error = %e, "Failed to persist blinded invitation");
+        }
+        tracing::info!(
+            pool_id = %invitation.pool_id,
+            invitation_id = %invitation.id,
+            "Recognized blinded pool invitation for us"
+        );
     }
 
     async fn handle_inbound_acceptance(&mut self, acceptance: PoolAcceptance) {

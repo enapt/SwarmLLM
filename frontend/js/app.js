@@ -376,6 +376,7 @@ var SwarmLLM = (function() {
         dashboard.renderModels(models);
       } catch (e) {}
 
+      dlQueue.load();
       dashboard.loadNetworkData();
       loadNetworkCode();
     },
@@ -644,14 +645,21 @@ var SwarmLLM = (function() {
         // Gear icon for per-model auto-manage settings
         var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
 
+        // GGUF metadata info button (only if header file exists)
+        var metaBtnHtml = '';
+        if (m.has_header) {
+          metaBtnHtml = '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>';
+        }
+
         var name = m.name || m.id;
         card.innerHTML =
           '<div class="model-header">' +
             '<span class="model-name">' + escapeHtml(name) + probedBadge + '</span>' +
-            '<span>' + gearHtml + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
+            '<span>' + metaBtnHtml + gearHtml + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
-          shardHtml + progressHtml;
+          shardHtml + progressHtml +
+          '<div class="gguf-metadata-panel hidden" data-meta-panel="' + escapeHtml(m.id) + '"></div>';
 
         list.appendChild(card);
       });
@@ -1451,6 +1459,7 @@ var SwarmLLM = (function() {
           if (msg.data.acquisitions) dashboard.updateAcquisitionProgress(msg.data.acquisitions);
           // Live-update shard grid cells and progress bars without full re-render
           dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
+          dlQueue.updateFromWs(msg.data.acquisitions);
           if (msg.data.region_summary && activeTab === 'network-map') {
             networkMap.updateFromWs(msg.data.region_summary);
           }
@@ -1835,6 +1844,244 @@ var SwarmLLM = (function() {
         }
       } catch (e) {
         ui.showBanner('error', 'Lock update failed: ' + e.message);
+      }
+    }
+  };
+
+  // ========================================================================
+  // GGUF Metadata Panel
+  // ========================================================================
+  var metadataCache = {};
+
+  async function toggleMetadataPanel(modelId) {
+    var panel = document.querySelector('[data-meta-panel="' + modelId + '"]');
+    if (!panel) return;
+    if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
+    panel.classList.remove('hidden');
+    if (panel.innerHTML) return;
+
+    panel.innerHTML = '<div class="meta-loading"><span class="spinner" style="width:14px;height:14px;border-width:1.5px"></span> Loading metadata...</div>';
+    try {
+      var data = metadataCache[modelId];
+      if (!data) {
+        var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/metadata');
+        if (!resp.ok) throw new Error('Failed to load metadata');
+        data = await resp.json();
+        metadataCache[modelId] = data;
+      }
+      renderMetadataPanel(panel, data);
+    } catch (e) {
+      panel.innerHTML = '<div class="meta-error">Failed to load GGUF metadata</div>';
+    }
+  }
+
+  function renderMetadataPanel(panel, data) {
+    var html = '<div class="meta-header">GGUF Metadata</div>';
+    var g = data.general || {};
+    var m = data.model || {};
+    var summaryParts = [];
+    if (g.architecture) summaryParts.push('<span class="meta-tag">' + escapeHtml(g.architecture) + '</span>');
+    if (g.quantization) summaryParts.push('<span class="meta-tag">' + escapeHtml(g.quantization) + '</span>');
+    if (m.context_length) summaryParts.push('<span class="meta-tag">ctx ' + m.context_length.toLocaleString() + '</span>');
+    if (m.block_count) summaryParts.push('<span class="meta-tag">' + m.block_count + ' layers</span>');
+    if (m.vocab_size) summaryParts.push('<span class="meta-tag">vocab ' + m.vocab_size.toLocaleString() + '</span>');
+    if (summaryParts.length > 0) html += '<div class="meta-summary">' + summaryParts.join('') + '</div>';
+
+    html += '<table class="meta-table"><thead><tr><th colspan="2">Model Parameters</th></tr></thead><tbody>';
+    var modelFields = [
+      ['Context Length', m.context_length], ['Layers (block_count)', m.block_count],
+      ['Embedding Dimension', m.embedding_length], ['Attention Heads', m.head_count],
+      ['KV Heads (GQA)', m.head_count_kv], ['RoPE Dimension', m.rope_dimension_count],
+      ['RoPE Freq Base', m.rope_freq_base], ['RMS Norm Epsilon', m.layer_norm_rms_epsilon],
+      ['Vocab Size', m.vocab_size],
+    ];
+    modelFields.forEach(function(f) {
+      if (f[1] != null) {
+        var val = typeof f[1] === 'number' ? f[1].toLocaleString() : escapeHtml(String(f[1]));
+        html += '<tr><td class="meta-key">' + f[0] + '</td><td class="meta-val">' + val + '</td></tr>';
+      }
+    });
+    html += '</tbody></table>';
+
+    var t = data.tokenizer || {};
+    if (t.model || t.eos_token_id != null || t.bos_token_id != null) {
+      html += '<table class="meta-table"><thead><tr><th colspan="2">Tokenizer</th></tr></thead><tbody>';
+      [['Tokenizer Model', t.model], ['Pre-tokenizer', t.pre], ['BOS Token ID', t.bos_token_id],
+       ['EOS Token ID', t.eos_token_id], ['Padding Token ID', t.padding_token_id]
+      ].forEach(function(f) {
+        if (f[1] != null) html += '<tr><td class="meta-key">' + escapeHtml(f[0]) + '</td><td class="meta-val">' + escapeHtml(String(f[1])) + '</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+
+    var tens = data.tensors || {};
+    if (tens.count) html += '<div class="meta-tensor-info">' + tens.count + ' tensors, data offset: ' + formatBytes(tens.data_offset || 0) + '</div>';
+
+    var raw = data.raw || [];
+    if (raw.length > 0) {
+      html += '<details class="meta-raw-details"><summary>All metadata keys (' + raw.length + ')</summary>';
+      html += '<table class="meta-table meta-raw-table"><tbody>';
+      raw.forEach(function(r) { html += '<tr><td class="meta-key">' + escapeHtml(r.key) + '</td><td class="meta-val">' + escapeHtml(r.value) + '</td></tr>'; });
+      html += '</tbody></table></details>';
+    }
+    panel.innerHTML = html;
+  }
+
+  // ========================================================================
+  // Download Queue
+  // ========================================================================
+  var dlQueue = {
+    load: async function() {
+      try {
+        var resp = await authFetch('/api/admin/downloads');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        dlQueue.render(data.downloads || []);
+      } catch (e) {}
+    },
+
+    render: function(downloads) {
+      var panel = document.getElementById('download-queue-panel');
+      var list = document.getElementById('download-queue-list');
+      var empty = document.getElementById('download-queue-empty');
+      var count = document.getElementById('download-queue-count');
+      if (!panel || !list) return;
+
+      var active = downloads.filter(function(d) {
+        var st = typeof d.state === 'string' ? d.state : '';
+        return st !== 'complete';
+      });
+
+      if (active.length === 0 && downloads.length === 0) { panel.classList.add('hidden'); return; }
+      panel.classList.remove('hidden');
+      if (active.length === 0) { list.innerHTML = ''; empty.classList.remove('hidden'); count.textContent = ''; return; }
+
+      empty.classList.add('hidden');
+      count.textContent = active.length + ' active';
+      list.innerHTML = '';
+
+      active.forEach(function(dl) {
+        var item = document.createElement('div');
+        item.className = 'dl-queue-item';
+        item.setAttribute('data-dl-model', dl.model_id);
+
+        var stateName = typeof dl.state === 'string' ? dl.state : 'unknown';
+        var stateLabel = stateName, stateClass = 'waiting';
+        if (stateName === 'downloading') { stateLabel = 'Downloading'; stateClass = 'active'; }
+        else if (stateName === 'awaiting_manifest') { stateLabel = 'Awaiting manifest'; stateClass = 'waiting'; }
+        else if (stateName === 'complete') { stateLabel = 'Complete'; stateClass = 'done'; }
+        else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
+          stateLabel = 'Failed'; stateClass = 'fail';
+          if (typeof dl.state === 'object' && dl.state.failed) stateLabel = 'Failed: ' + (dl.state.failed.reason || '').substring(0, 40);
+        }
+
+        var sourceLabel = dl.source === 'huggingface' ? 'HF' : 'Network';
+        var sourceClass = dl.source === 'huggingface' ? 'hf' : 'net';
+        var pct = dl.overall_pct || 0;
+        var speed = dl.speed_bytes_per_sec || 0;
+        var etaStr = '';
+        if (dl.eta_secs) {
+          var s = dl.eta_secs;
+          if (s >= 3600) etaStr = Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+          else if (s >= 60) etaStr = Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+          else etaStr = s + 's';
+        }
+
+        var statsRight = formatBytes(dl.downloaded_bytes || 0) + ' / ' + formatBytes(dl.total_bytes || 0);
+        if (speed > 0) statsRight += ' \u00b7 ' + formatSpeed(speed);
+        if (etaStr) statsRight += ' \u00b7 ETA ' + etaStr;
+
+        var cancelBtn = dl.cancellable ? '<button class="dl-queue-cancel" data-dl-cancel="' + escapeHtml(dl.model_id) + '">Cancel</button>' : '';
+        var logToggle = (dl.log && dl.log.length > 0) ? '<button class="dl-queue-log-toggle" data-dl-log-toggle="' + escapeHtml(dl.model_id) + '">Log (' + dl.log.length + ')</button>' : '';
+        var logHtml = '';
+        if (dl.log && dl.log.length > 0) {
+          logHtml = '<div class="dl-queue-log" data-dl-log="' + escapeHtml(dl.model_id) + '">' +
+            dl.log.map(function(l) { return '<div class="dl-queue-log-line">' + escapeHtml(l) + '</div>'; }).join('') + '</div>';
+        }
+
+        var shardInfo = dl.downloaded_shards + '/' + dl.total_shards + ' shards';
+        if (dl.verified_shards > 0) shardInfo += ' (' + dl.verified_shards + ' verified)';
+
+        item.innerHTML =
+          '<div class="dl-queue-row">' +
+            '<span class="dl-queue-name" title="' + escapeHtml(dl.model_id) + '">' + escapeHtml(dl.model_name || dl.model_id) + '</span>' +
+            '<div class="dl-queue-actions">' +
+              '<span class="dl-queue-source ' + sourceClass + '">' + sourceLabel + '</span>' +
+              '<span class="dl-queue-state ' + stateClass + '">' + stateLabel + '</span>' +
+              cancelBtn +
+            '</div>' +
+          '</div>' +
+          '<div class="dl-queue-bar"><div class="dl-queue-bar-fill" style="width:' + pct + '%"></div></div>' +
+          '<div class="dl-queue-stats">' +
+            '<span>' + shardInfo + ' \u00b7 ' + pct + '%</span>' +
+            '<span>' + statsRight + '</span>' +
+          '</div>' +
+          '<div class="dl-queue-row">' + logToggle + '</div>' + logHtml;
+
+        list.appendChild(item);
+      });
+    },
+
+    updateFromWs: function(acquisitions) {
+      if (!acquisitions || acquisitions.length === 0) return;
+      var panel = document.getElementById('download-queue-panel');
+      if (!panel) return;
+
+      var hasActive = acquisitions.some(function(a) {
+        var st = typeof a.state === 'string' ? a.state : '';
+        return st === 'downloading' || st === 'awaiting_manifest';
+      });
+      if (hasActive && panel.classList.contains('hidden')) { dlQueue.load(); return; }
+
+      acquisitions.forEach(function(acq) {
+        var item = document.querySelector('[data-dl-model="' + acq.model_id + '"]');
+        if (!item) {
+          if (acq.state === 'downloading' || acq.state === 'awaiting_manifest') dlQueue.load();
+          return;
+        }
+
+        var totalBytes = acq.total_bytes || 0;
+        var dlBytes = acq.downloaded_bytes || 0;
+        var pct = totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0;
+        var speed = acq.speed_bytes_per_sec || 0;
+
+        var barFill = item.querySelector('.dl-queue-bar-fill');
+        if (barFill) barFill.style.width = pct + '%';
+
+        var statsEl = item.querySelector('.dl-queue-stats');
+        if (statsEl) {
+          var shardInfo = (acq.downloaded_shards || 0) + '/' + (acq.total_shards || 0) + ' shards';
+          var right = formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes);
+          if (speed > 0) right += ' \u00b7 ' + formatSpeed(speed);
+          if (speed > 0 && totalBytes > dlBytes) {
+            var etaSecs = Math.round((totalBytes - dlBytes) / speed);
+            var etaStr;
+            if (etaSecs >= 3600) etaStr = Math.floor(etaSecs / 3600) + 'h ' + Math.floor((etaSecs % 3600) / 60) + 'm';
+            else if (etaSecs >= 60) etaStr = Math.floor(etaSecs / 60) + 'm ' + (etaSecs % 60) + 's';
+            else etaStr = etaSecs + 's';
+            right += ' \u00b7 ETA ' + etaStr;
+          }
+          statsEl.innerHTML = '<span>' + shardInfo + ' \u00b7 ' + pct + '%</span><span>' + right + '</span>';
+        }
+
+        if (typeof acq.state === 'string' && acq.state === 'complete') {
+          setTimeout(function() { dlQueue.load(); }, 2000);
+        }
+      });
+    },
+
+    cancelDownload: async function(modelId) {
+      try {
+        var resp = await authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
+        if (resp.ok) {
+          ui.showBanner('success', 'Download cancelled');
+          setTimeout(function() { dlQueue.load(); loadModels(); }, 1000);
+        } else {
+          var err = await resp.json().catch(function() { return {}; });
+          ui.showBanner('error', err.error || 'Failed to cancel download');
+        }
+      } catch (e) {
+        ui.showBanner('error', 'Cancel failed: ' + e.message);
       }
     }
   };
@@ -2503,6 +2750,22 @@ var SwarmLLM = (function() {
 
       // Shard context menu action button
       if (target.id === 'shard-ctx-action') { shardMenu.execute(); return; }
+
+      // GGUF metadata toggle button
+      var metaToggle = target.getAttribute('data-meta-toggle');
+      if (metaToggle) { toggleMetadataPanel(metaToggle); return; }
+
+      // Download queue cancel button
+      var dlCancel = target.getAttribute('data-dl-cancel');
+      if (dlCancel) { dlQueue.cancelDownload(dlCancel); return; }
+
+      // Download queue log toggle
+      var dlLogToggle = target.getAttribute('data-dl-log-toggle');
+      if (dlLogToggle) {
+        var logEl = document.querySelector('[data-dl-log="' + dlLogToggle + '"]');
+        if (logEl) logEl.classList.toggle('open');
+        return;
+      }
 
       // Auto-manage gear icon
       var gearId = target.getAttribute('data-am-gear');

@@ -1,0 +1,44 @@
+# Quick-start monitoring stack for SwarmLLM.
+#
+# Usage:
+#   cd monitoring/
+#   docker compose up -d
+#
+# Then open:
+#   - Grafana:    http://localhost:3000  (admin/admin)
+#   - Prometheus: http://localhost:9090
+#
+# The SwarmLLM dashboard is auto-provisioned on first start.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/swarmllm/grafana-dashboard.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./:/var/lib/grafana/dashboards/swarmllm:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

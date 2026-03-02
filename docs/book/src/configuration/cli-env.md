@@ -1,0 +1,61 @@
+# CLI Flags & Environment Variables
+
+## CLI Flags
+
+| Flag | Short | Description |
+|---|---|---|
+| `--port <PORT>` | `-p` | Listen port |
+| `--data-dir <PATH>` | `-d` | Data directory |
+| `--config <PATH>` | `-c` | Config file path |
+| `--model <PATH>` | `-m` | Path to a GGUF model file |
+| `--gpu-layers <N>` | | Layers to offload to GPU |
+| `--bootstrap <ADDR>` | | Bootstrap peer address (repeatable) |
+| `--shards <RANGE>` | | Shard range for split inference (e.g., `"0-4"`) |
+| `--verbose` | `-v` | Increase log verbosity (`-v`, `-vv`, `-vvv`) |
+
+## Subcommands
+
+| Command | Description |
+|---|---|
+| `run` | Start the daemon (default if no subcommand) |
+| `status` | Query running daemon status |
+| `chat` | Interactive CLI chat with streaming |
+| `bench` | Benchmark inference (tokens/sec, TTFT) |
+| `peers` | List connected peers |
+| `test-split` | Test split inference locally (diagnostic) |
+| `version` | Print version |
+
+### `chat` Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--model-name <NAME>` | auto-detect | Model to chat with |
+| `--system <TEXT>` | none | System prompt |
+| `--max-tokens <N>` | `2048` | Max tokens per response |
+| `--temperature <F>` | `0.7` | Sampling temperature |
+
+### `bench` Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--model-name <NAME>` | auto-detect | Model to benchmark |
+| `--prompt <TEXT>` | "Write a short essay..." | Benchmark prompt |
+| `--max-tokens <N>` | `128` | Tokens to generate |
+| `--iterations <N>` | `1` | Number of benchmark runs |
+
+## Environment Variables
+
+Every config option can be set via `SWARMLLM_` prefix:
+
+| Config Path | Environment Variable |
+|---|---|
+| `node.listen_port` | `SWARMLLM_NODE_LISTEN_PORT` |
+| `node.data_dir` | `SWARMLLM_NODE_DATA_DIR` |
+| `logging.level` | `SWARMLLM_LOGGING_LEVEL` |
+| `inference.model_path` | `SWARMLLM_INFERENCE_MODEL_PATH` |
+| `inference.gpu_layers` | `SWARMLLM_INFERENCE_GPU_LAYERS` |
+
+Example:
+```bash
+SWARMLLM_NODE_LISTEN_PORT=9000 SWARMLLM_LOGGING_LEVEL=debug ./swarmllm run
+```

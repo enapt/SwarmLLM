@@ -68,10 +68,13 @@ pub fn build_router(state: AppState) -> Router {
         // Network map (heatmap data)
         .route("/api/admin/network-map", get(admin::network_map))
         // Download management
+        .route("/api/admin/downloads", get(admin::download_queue))
         .route(
             "/api/admin/downloads/:model_id/cancel",
             post(admin::cancel_download),
         )
+        // GGUF metadata browser
+        .route("/api/admin/models/:id/metadata", get(admin::model_metadata))
         // Single-shard management
         .route(
             "/api/admin/models/:id/shards/:index",
@@ -98,6 +101,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/hf/source/:model_id", get(admin::hf_source))
         // Model management
         .route("/api/admin/models/:id", delete(admin::delete_model))
+        // LoRA adapters
+        .route(
+            "/api/admin/adapters",
+            get(admin::list_adapters).post(admin::register_adapter),
+        )
+        .route("/api/admin/adapters/:id", delete(admin::delete_adapter))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
         // API key (requires auth)
@@ -123,6 +132,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pool/leave", post(pool::pool_leave))
         .route("/api/pool/invitations", get(pool::pool_invitations))
         .route("/api/pool/leaderboard", get(pool::pool_leaderboard))
+        // Pool credit rates
+        .route(
+            "/api/admin/pools/:id/rates",
+            get(pool::pool_rates_get).put(pool::pool_rates_set),
+        )
         // WebSocket
         .route("/api/admin/ws", get(websocket::handler))
         // Static files (embedded frontend)

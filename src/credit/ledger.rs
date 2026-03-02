@@ -13,15 +13,14 @@ use crate::types::{
 /// Earning/spending rates (credits per unit).
 /// These are initial values — tunable via config in the future.
 ///
-/// SEC-M16: TODO — Credit inflation risk: RATE_INFERENCE_SERVE (10) > RATE_INFERENCE_CONSUME (8)
-/// means a serving node earns more than the requesting node spends per unit of work.
-/// Over time this creates net credit inflation. Consider equalizing rates or adding a
-/// configurable network-wide burn/fee mechanism to balance supply.
+/// Earning/spending rates (credits per unit).
+/// SEC-M16 FIX: Rates are balanced (serve == consume) to prevent net credit inflation.
+/// All rates are configurable via `[pool.credit_rates]` in config.toml.
 pub const RATE_INFERENCE_SERVE: i64 = 10; // per layer per token
 pub const RATE_SHARD_HOSTING: i64 = 1; // per GB per hour
 pub const RATE_SHARD_SEEDING: i64 = 5; // per GB transferred
 pub const RATE_RELAY_SERVICE: i64 = 2; // per connection hour
-pub const RATE_INFERENCE_CONSUME: i64 = 8; // per layer per token (cost)
+pub const RATE_INFERENCE_CONSUME: i64 = 10; // per layer per token (cost) — balanced with serve
 pub const PENALTY_SERVE_FAILURE: i64 = 50; // per incident
 
 /// Database tree name for credit data.
@@ -107,6 +106,24 @@ impl CreditLedger {
         self.balance.read().await.clone()
     }
 
+    /// Resolve effective credit rates: per-pool override > global config > compile-time defaults.
+    fn credit_rates(&self) -> crate::config::CreditRateConfig {
+        if let Some(ref ss) = self.shared_state {
+            // Check for a per-pool override first
+            if let Ok(pool_state) = ss.pool_state.try_read() {
+                if let Some(ref ps) = *pool_state {
+                    if let Some(rates) = ss.pool_credit_rates.get(&ps.pool_id) {
+                        return rates.value().clone();
+                    }
+                }
+            }
+            // Fall back to global config rates
+            ss.config.pool.credit_rates.clone()
+        } else {
+            crate::config::CreditRateConfig::default()
+        }
+    }
+
     /// Earn credits for serving inference.
     ///
     /// If this node is a pool member (not owner), forwards credits to the pool owner.
@@ -116,7 +133,8 @@ impl CreditLedger {
         tokens: u32,
         layers: u32,
     ) -> Result<i64, SwarmError> {
-        let amount = RATE_INFERENCE_SERVE * (layers as i64) * (tokens as i64);
+        let rates = self.credit_rates();
+        let amount = rates.inference_serve * (layers as i64) * (tokens as i64);
         self.apply_credit(amount, true).await?;
         self.persist_balance().await?;
 
@@ -155,7 +173,8 @@ impl CreditLedger {
         tokens: u32,
         layers: u32,
     ) -> Result<i64, SwarmError> {
-        let amount = RATE_INFERENCE_CONSUME * (layers as i64) * (tokens as i64);
+        let rates = self.credit_rates();
+        let amount = rates.inference_consume * (layers as i64) * (tokens as i64);
         self.apply_credit(-amount, false).await?;
         self.persist_balance().await?;
 
@@ -177,7 +196,8 @@ impl CreditLedger {
         size_gb: f64,
         hours: f32,
     ) -> Result<i64, SwarmError> {
-        let amount = (RATE_SHARD_HOSTING as f64 * size_gb * hours as f64) as i64;
+        let rates = self.credit_rates();
+        let amount = (rates.shard_hosting as f64 * size_gb * hours as f64) as i64;
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -192,7 +212,8 @@ impl CreditLedger {
         bytes_transferred: u64,
     ) -> Result<i64, SwarmError> {
         let gb = bytes_transferred as f64 / (1024.0 * 1024.0 * 1024.0);
-        let amount = (RATE_SHARD_SEEDING as f64 * gb) as i64;
+        let rates = self.credit_rates();
+        let amount = (rates.shard_seeding as f64 * gb) as i64;
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -203,7 +224,8 @@ impl CreditLedger {
     /// Earn credits for relay service.
     pub async fn earn_relay_service(&self, duration_seconds: u64) -> Result<i64, SwarmError> {
         let hours = duration_seconds as f64 / 3600.0;
-        let amount = (RATE_RELAY_SERVICE as f64 * hours) as i64;
+        let rates = self.credit_rates();
+        let amount = (rates.relay_service as f64 * hours) as i64;
         if amount > 0 {
             self.apply_credit(amount, true).await?;
             self.persist_balance().await?;
@@ -213,11 +235,13 @@ impl CreditLedger {
 
     /// Apply a penalty (e.g., for serve failure/timeout).
     pub async fn apply_penalty(&self, reason: &str) -> Result<(), SwarmError> {
-        self.apply_credit(-PENALTY_SERVE_FAILURE, false).await?;
+        let rates = self.credit_rates();
+        self.apply_credit(-rates.penalty_serve_failure, false)
+            .await?;
         self.persist_balance().await?;
 
         tracing::warn!(
-            penalty = PENALTY_SERVE_FAILURE,
+            penalty = rates.penalty_serve_failure,
             reason,
             "Applied credit penalty"
         );
@@ -631,12 +655,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 8 credits/layer/token * 3 layers * 5 tokens = 120
-        assert_eq!(spent, 120);
+        // 10 credits/layer/token * 3 layers * 5 tokens = 150
+        assert_eq!(spent, 150);
 
         let bal = balance.read().await;
-        assert_eq!(bal.balance, 880); // 1000 - 120
-        assert_eq!(bal.lifetime_spent, 120);
+        assert_eq!(bal.balance, 850); // 1000 - 150
+        assert_eq!(bal.lifetime_spent, 150);
     }
 
     #[tokio::test]

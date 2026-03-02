@@ -3,6 +3,7 @@ pub mod auto_manage;
 pub mod distribution;
 pub mod governance;
 pub mod huggingface;
+pub mod lora;
 pub mod manifest;
 pub mod quantization;
 pub mod registry;

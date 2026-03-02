@@ -243,6 +243,7 @@ async fn test_split_inference(
         let messages = vec![swarmllm::types::ChatMessage {
             role: swarmllm::types::Role::User,
             content: prompt.to_string(),
+            images: vec![],
         }];
         let bos = model.bos_token();
         let eos = model.eos_token_str();

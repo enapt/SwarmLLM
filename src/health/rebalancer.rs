@@ -153,7 +153,10 @@ impl ShardRebalancer {
                         })
                         .is_err()
                     {
-                        self.shared_state.channel_metrics.acquisition.record_dropped();
+                        self.shared_state
+                            .channel_metrics
+                            .acquisition
+                            .record_dropped();
                     } else {
                         self.shared_state.channel_metrics.acquisition.record_sent();
                     }
@@ -239,7 +242,10 @@ impl ShardRebalancer {
                     })
                     .is_err()
                 {
-                    self.shared_state.channel_metrics.acquisition.record_dropped();
+                    self.shared_state
+                        .channel_metrics
+                        .acquisition
+                        .record_dropped();
                 } else {
                     self.shared_state.channel_metrics.acquisition.record_sent();
                 }

@@ -83,6 +83,31 @@ pub enum ModelArchitecture {
         experts_per_token: u32,
     },
     Phi,
+    /// LLaVA: CLIP ViT vision encoder + Llama/Mistral LLM backbone.
+    LLaVA {
+        vision_config: VisionConfig,
+    },
+    /// Qwen2-VL: ViT vision encoder + Qwen2 LLM backbone.
+    Qwen2VL {
+        vision_config: VisionConfig,
+    },
+}
+
+/// Vision encoder configuration for multimodal models.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VisionConfig {
+    /// Image size the vision encoder expects (e.g. 336 for CLIP-ViT-L/14@336px).
+    pub image_size: u32,
+    /// Patch size for the ViT (e.g. 14).
+    pub patch_size: u32,
+    /// Hidden dimension of the vision encoder.
+    pub vision_hidden_size: u32,
+    /// Number of transformer layers in the vision encoder.
+    pub vision_num_layers: u32,
+    /// Number of attention heads in the vision encoder.
+    pub vision_num_heads: u32,
+    /// Dimension of the multimodal projection (maps vision → LLM hidden dim).
+    pub projection_dim: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,12 +211,30 @@ pub struct InferenceRequest {
     /// prefill and setting `start_pos` to the cached token count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Optional LoRA adapter ID for per-request fine-tuned inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_adapter: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Decoded image data for VLM inference (not serialized over the wire — populated
+    /// by the API layer after parsing OpenAI-format image_url content parts).
+    #[serde(skip)]
+    pub images: Vec<ImageData>,
+}
+
+/// Decoded image ready for vision encoder processing.
+#[derive(Clone, Debug)]
+pub struct ImageData {
+    /// Raw RGB pixel data (H*W*3 bytes, row-major).
+    pub rgb_bytes: Vec<u8>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -535,6 +578,8 @@ pub struct ModelVote {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PoolMessage {
     Invitation(crate::pool::types::PoolInvitation),
+    /// SEC-M18: Privacy-preserving blinded invitation broadcast.
+    BlindedInvitation(crate::pool::types::BlindedPoolInvitation),
     Acceptance(crate::pool::types::PoolAcceptance),
     StateGossip(crate::pool::types::PoolState),
     CreditForward(crate::pool::types::PoolCreditForward),
@@ -706,6 +751,7 @@ mod tests {
         let msg = ChatMessage {
             role: Role::User,
             content: "hello".into(),
+            images: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ChatMessage = serde_json::from_str(&json).unwrap();

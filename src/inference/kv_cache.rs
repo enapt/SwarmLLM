@@ -1,6 +1,10 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
+use crate::error::SwarmError;
+use crate::storage::db::Database;
 use crate::types::{NodeId, PipelineAssignment};
 
 /// Unique identifier for a KV-cache session (conversation).
@@ -321,6 +325,122 @@ impl KvCacheManager {
     pub fn get_previous_pipeline(&mut self, session_id: &SessionId) -> Option<PipelineAssignment> {
         self.get_session(session_id).map(|s| s.pipeline.clone())
     }
+
+    /// Persist all active multi-turn sessions to the database.
+    ///
+    /// Called during graceful shutdown so sessions can be restored on next startup.
+    /// Only multi-turn sessions (those with a non-empty cached_prompt) are worth
+    /// persisting — ephemeral single-request sessions won't be reused.
+    pub fn save_to_db(&self, db: &Database) -> Result<usize, SwarmError> {
+        db.clear_tree("kv_sessions")?;
+
+        let mut saved = 0;
+        for (user_session_id, internal_id) in &self.multi_turn_sessions {
+            if let Some(session) = self.sessions.get(internal_id) {
+                if session.last_accessed.elapsed() > self.ttl {
+                    continue;
+                }
+
+                let now_system = SystemTime::now();
+                let elapsed = session.last_accessed.elapsed();
+                let last_accessed_system = now_system.checked_sub(elapsed).unwrap_or(now_system);
+
+                let persisted = PersistedSession {
+                    user_session_id: user_session_id.clone(),
+                    internal_id: session.session_id,
+                    pipeline: session.pipeline.clone(),
+                    cached_tokens: session.cached_tokens,
+                    cache_holders: session.cache_holders.clone(),
+                    cached_prompt: session.cached_prompt.clone(),
+                    last_accessed: last_accessed_system,
+                    ttl_secs: self.ttl.as_secs(),
+                };
+
+                db.put_json("kv_sessions", user_session_id, &persisted)?;
+                saved += 1;
+            }
+        }
+
+        tracing::info!(saved, "Persisted KV-cache sessions to database");
+        Ok(saved)
+    }
+
+    /// Restore sessions from the database.
+    ///
+    /// Called on startup to resume multi-turn conversations that are still
+    /// within their TTL. Sessions whose TTL has elapsed since the last access
+    /// are silently discarded.
+    pub fn restore_from_db(&mut self, db: &Database) -> Result<usize, SwarmError> {
+        let entries: Vec<PersistedSession> = db.iter_json("kv_sessions")?;
+        let now = SystemTime::now();
+        let mut restored = 0;
+
+        for persisted in entries {
+            let elapsed = now
+                .duration_since(persisted.last_accessed)
+                .unwrap_or(Duration::from_secs(u64::MAX));
+
+            let ttl = Duration::from_secs(persisted.ttl_secs);
+            if elapsed > ttl {
+                tracing::debug!(
+                    user_session_id = %persisted.user_session_id,
+                    elapsed_secs = elapsed.as_secs(),
+                    ttl_secs = persisted.ttl_secs,
+                    "Skipping expired persisted session"
+                );
+                continue;
+            }
+
+            let last_accessed = Instant::now()
+                .checked_sub(elapsed)
+                .unwrap_or_else(Instant::now);
+
+            let session = KvCacheSession {
+                session_id: persisted.internal_id,
+                pipeline: persisted.pipeline,
+                cached_tokens: persisted.cached_tokens,
+                last_accessed,
+                cache_holders: persisted.cache_holders,
+                cached_prompt: persisted.cached_prompt,
+            };
+
+            self.sessions.insert(persisted.internal_id, session);
+            self.multi_turn_sessions
+                .insert(persisted.user_session_id.clone(), persisted.internal_id);
+            restored += 1;
+
+            tracing::debug!(
+                user_session_id = %persisted.user_session_id,
+                cached_tokens = persisted.cached_tokens,
+                remaining_ttl_secs = ttl.as_secs().saturating_sub(elapsed.as_secs()),
+                "Restored persisted KV-cache session"
+            );
+        }
+
+        if restored > 0 {
+            tracing::info!(restored, "Restored KV-cache sessions from database");
+        }
+        Ok(restored)
+    }
+}
+
+/// Serializable representation of a KV-cache session for database persistence.
+///
+/// Stores session metadata (NOT tensor data) so multi-turn conversations
+/// can resume after a node restart. The actual KV tensor cache is rebuilt
+/// by re-processing the cached prompt prefix on the first request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSession {
+    pub user_session_id: String,
+    pub internal_id: SessionId,
+    pub pipeline: PipelineAssignment,
+    pub cached_tokens: u32,
+    pub cache_holders: Vec<NodeId>,
+    pub cached_prompt: String,
+    /// Wall-clock time of last access (serializable, unlike `Instant`).
+    pub last_accessed: SystemTime,
+    /// The TTL in seconds that was in effect when the session was saved.
+    pub ttl_secs: u64,
 }
 
 /// Result of pipeline validation for a KV-cache session.
@@ -603,5 +723,105 @@ mod tests {
             CacheReuse::Miss => {}
             CacheReuse::Hit { .. } => panic!("Expected miss for unknown session"),
         }
+    }
+
+    #[test]
+    fn persist_and_restore_sessions() {
+        let db = Database::open_temp().unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        let id1 = uuid::Uuid::new_v4();
+        let pipeline1 = make_pipeline(id1);
+        mgr.register_multi_turn(
+            "user-sess-1",
+            id1,
+            pipeline1,
+            100,
+            "Hello world".to_string(),
+        );
+
+        let id2 = uuid::Uuid::new_v4();
+        let pipeline2 = make_pipeline(id2);
+        mgr.register_multi_turn(
+            "user-sess-2",
+            id2,
+            pipeline2,
+            200,
+            "How are you?".to_string(),
+        );
+
+        let saved = mgr.save_to_db(&db).unwrap();
+        assert_eq!(saved, 2);
+
+        let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
+        let restored = mgr2.restore_from_db(&db).unwrap();
+        assert_eq!(restored, 2);
+        assert_eq!(mgr2.active_sessions(), 2);
+
+        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        match mgr2.check_multi_turn_reuse("user-sess-1", "Hello world, more text", &active) {
+            CacheReuse::Hit { start_pos } => assert_eq!(start_pos, 100),
+            CacheReuse::Miss => panic!("Expected cache hit after restore"),
+        }
+    }
+
+    #[test]
+    fn restore_skips_expired_sessions() {
+        let db = Database::open_temp().unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(1));
+        let id = uuid::Uuid::new_v4();
+        let pipeline = make_pipeline(id);
+        mgr.register_multi_turn("user-sess-1", id, pipeline, 50, "Hello".to_string());
+
+        let saved = mgr.save_to_db(&db).unwrap();
+        assert_eq!(saved, 1);
+
+        std::thread::sleep(Duration::from_millis(1100));
+
+        let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
+        let restored = mgr2.restore_from_db(&db).unwrap();
+        assert_eq!(restored, 0);
+        assert_eq!(mgr2.active_sessions(), 0);
+    }
+
+    #[test]
+    fn persist_skips_expired_sessions() {
+        let db = Database::open_temp().unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_millis(1));
+        let id = uuid::Uuid::new_v4();
+        let pipeline = make_pipeline(id);
+        mgr.register_multi_turn("user-sess-1", id, pipeline, 50, "Hello".to_string());
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        let saved = mgr.save_to_db(&db).unwrap();
+        assert_eq!(saved, 0);
+    }
+
+    #[test]
+    fn persist_overwrites_previous() {
+        let db = Database::open_temp().unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        let id = uuid::Uuid::new_v4();
+        let pipeline = make_pipeline(id);
+        mgr.register_multi_turn("sess-1", id, pipeline, 50, "Hello".to_string());
+
+        mgr.save_to_db(&db).unwrap();
+
+        let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
+        let id2 = uuid::Uuid::new_v4();
+        let pipeline2 = make_pipeline(id2);
+        mgr2.register_multi_turn("sess-2", id2, pipeline2, 75, "Goodbye".to_string());
+
+        mgr2.save_to_db(&db).unwrap();
+
+        let mut mgr3 = KvCacheManager::new(Duration::from_secs(600));
+        let restored = mgr3.restore_from_db(&db).unwrap();
+        assert_eq!(restored, 1);
+        assert!(mgr3.get_internal_id("sess-2").is_some());
+        assert!(mgr3.get_internal_id("sess-1").is_none());
     }
 }

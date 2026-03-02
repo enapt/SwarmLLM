@@ -572,10 +572,12 @@ mod tests {
             ChatMessage {
                 role: Role::System,
                 content: "You are helpful.".into(),
+                images: vec![],
             },
             ChatMessage {
                 role: Role::User,
                 content: "Hello".into(),
+                images: vec![],
             },
         ]
     }
@@ -620,6 +622,7 @@ mod tests {
         let msgs = vec![ChatMessage {
             role: Role::User,
             content: "Hello".into(),
+            images: vec![],
         }];
         let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
         assert_eq!(result, "<s>[INST] Hello [/INST]");
@@ -673,6 +676,7 @@ mod tests {
         let msgs = vec![ChatMessage {
             role: Role::User,
             content: "Hi".into(),
+            images: vec![],
         }];
         let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
         assert_eq!(result, "<s>Hi</s>");

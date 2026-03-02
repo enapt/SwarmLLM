@@ -8,6 +8,7 @@ use libp2p::{
     autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response, StreamProtocol,
 };
 
+use crate::config::NetworkConfig;
 use crate::network::protocol::SwarmCodec;
 use crate::network::relay::RelayServerConfig;
 
@@ -48,6 +49,7 @@ pub fn build_behaviour(
     relay_server_config: Option<&RelayServerConfig>,
     enable_mdns: bool,
     known_peers: usize,
+    network_config: Option<&NetworkConfig>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -114,7 +116,17 @@ pub fn build_behaviour(
     // - Binary tensor payloads (activation forwarding)
     // Uses a unified codec with type-tag byte to distinguish formats.
     // NET-C3: 300s timeout for shard transfers (large files need more time)
-    let request_response = request_response::Behaviour::new(
+    let codec = if let Some(net_cfg) = network_config {
+        SwarmCodec {
+            compress_tensors: net_cfg.tensor_compression,
+            compress_level: net_cfg.tensor_compress_level,
+            compress_threshold: net_cfg.tensor_compress_threshold,
+        }
+    } else {
+        SwarmCodec::default()
+    };
+    let request_response = request_response::Behaviour::with_codec(
+        codec,
         [(
             StreamProtocol::new("/swarmllm/1.0.0"),
             request_response::ProtocolSupport::Full,
@@ -187,7 +199,7 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, false, 0);
+        let result = build_behaviour(&keypair, relay_behaviour, None, false, 0, None);
         assert!(result.is_ok());
     }
 
@@ -201,7 +213,7 @@ mod tests {
             max_circuits: 8,
             ..Default::default()
         };
-        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false, 0);
+        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false, 0, None);
         assert!(result.is_ok());
     }
 }

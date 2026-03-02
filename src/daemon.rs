@@ -196,7 +196,8 @@ impl ChannelCounters {
     }
 
     pub fn record_dropped(&self) {
-        self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.dropped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

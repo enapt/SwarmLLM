@@ -298,7 +298,10 @@ impl NetworkManager {
                                 "Received GossipSub message"
                             );
                             if let Err(e) = self.outbound_tx.try_send(msg) {
-                                self.shared_state.channel_metrics.network_out.record_dropped();
+                                self.shared_state
+                                    .channel_metrics
+                                    .network_out
+                                    .record_dropped();
                                 tracing::warn!(error = %e, "Dispatcher backpressured, dropping gossipsub message");
                             } else {
                                 self.shared_state.channel_metrics.network_out.record_sent();
@@ -770,7 +773,10 @@ impl NetworkManager {
                         // Forward all other messages to dispatcher
                         tracing::debug!(%peer, "Handling protocol message request");
                         if let Err(e) = self.outbound_tx.try_send(*msg) {
-                            self.shared_state.channel_metrics.network_out.record_dropped();
+                            self.shared_state
+                                .channel_metrics
+                                .network_out
+                                .record_dropped();
                             tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
                         } else {
                             self.shared_state.channel_metrics.network_out.record_sent();
@@ -843,7 +849,10 @@ impl NetworkManager {
                     return;
                 }
                 if let Err(e) = self.outbound_tx.try_send(*msg) {
-                    self.shared_state.channel_metrics.network_out.record_dropped();
+                    self.shared_state
+                        .channel_metrics
+                        .network_out
+                        .record_dropped();
                     tracing::warn!(%peer, error = %e, "Dispatcher backpressured, dropping response message");
                 } else {
                     self.shared_state.channel_metrics.network_out.record_sent();
@@ -1140,7 +1149,10 @@ impl NetworkManager {
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.outbound_tx.try_send(msg) {
-                            self.shared_state.channel_metrics.network_out.record_dropped();
+                            self.shared_state
+                                .channel_metrics
+                                .network_out
+                                .record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
                         } else {
                             self.shared_state.channel_metrics.network_out.record_sent();
@@ -1164,7 +1176,10 @@ impl NetworkManager {
                         );
                         if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
                         {
-                            self.shared_state.channel_metrics.network_out.record_dropped();
+                            self.shared_state
+                                .channel_metrics
+                                .network_out
+                                .record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
                         } else {
                             self.shared_state.channel_metrics.network_out.record_sent();
@@ -1193,7 +1208,10 @@ impl NetworkManager {
                                         .outbound_tx
                                         .try_send(SwarmMessage::LayerForward(forward))
                                     {
-                                        self.shared_state.channel_metrics.network_out.record_dropped();
+                                        self.shared_state
+                                            .channel_metrics
+                                            .network_out
+                                            .record_dropped();
                                         tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
                                     } else {
                                         self.shared_state.channel_metrics.network_out.record_sent();

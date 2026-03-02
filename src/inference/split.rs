@@ -17,6 +17,7 @@ use candle_nn::{Embedding, Module};
 use candle_transformers::quantized_nn::RmsNorm;
 
 use crate::error::SwarmError;
+use crate::model::lora::LoraAdapter;
 
 const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
@@ -38,12 +39,12 @@ pub struct KvCacheStore {
     ttl: std::time::Duration,
 }
 
-struct KvCacheEntry {
+pub(crate) struct KvCacheEntry {
     /// Per-layer KV cache. Index corresponds to layer index within the model segment.
     /// Each `KvCache` pre-allocates a buffer and appends new K/V without `Tensor::cat`.
-    layers: Vec<Option<KvCache>>,
+    pub(crate) layers: Vec<Option<KvCache>>,
     /// When this entry was last accessed.
-    last_accessed: std::time::Instant,
+    pub(crate) last_accessed: std::time::Instant,
 }
 
 impl KvCacheStore {
@@ -56,7 +57,7 @@ impl KvCacheStore {
     }
 
     /// Get or create the KV-cache entry for a request. Returns a mutable ref guard.
-    fn get_or_create(
+    pub(crate) fn get_or_create(
         &self,
         model_key: &str,
         request_id: &str,
@@ -661,6 +662,96 @@ fn build_gpt2_byte_encoder() -> ([char; 256], HashMap<char, u8>) {
     (encoder, decoder)
 }
 
+// ── Model architecture detection ──
+
+/// Known model architectures from GGUF `general.architecture` metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelArch {
+    /// Llama family (Llama 1/2/3, CodeLlama, Yi, Mistral 7B)
+    Llama,
+    /// Qwen2 / Qwen2.5 / Qwen3
+    Qwen2,
+    /// Google Gemma 1
+    Gemma,
+    /// Google Gemma 2 — different RmsNorm (+1), Gelu activation, attention logit soft-capping
+    Gemma2,
+    /// Microsoft Phi-3/3.5 — SuRoPE scaling, partial rotary embedding
+    Phi3,
+    /// Mistral (when explicitly tagged, most Mistral GGUFs use "llama" arch)
+    Mistral,
+    /// StarCoder2
+    Starcoder2,
+    /// DeepSeek-V2/V3 — MoE + MLA, NOT supported for split inference
+    DeepSeek2,
+    /// Architecture not recognized — falls back to Llama-like behavior
+    Unknown(String),
+}
+
+impl ModelArch {
+    /// Detect architecture from GGUF `general.architecture` metadata string.
+    pub fn from_gguf_arch(arch: &str) -> Self {
+        match arch {
+            "llama" => ModelArch::Llama,
+            "qwen2" | "qwen3" => ModelArch::Qwen2,
+            "gemma" => ModelArch::Gemma,
+            "gemma2" => ModelArch::Gemma2,
+            "phi3" => ModelArch::Phi3,
+            "mistral" => ModelArch::Mistral,
+            "starcoder2" => ModelArch::Starcoder2,
+            "deepseek2" => ModelArch::DeepSeek2,
+            other => ModelArch::Unknown(other.to_string()),
+        }
+    }
+
+    /// Whether this architecture uses contiguous RoPE (vs interleaved).
+    pub fn use_rope_contiguous(&self) -> bool {
+        matches!(self, ModelArch::Qwen2)
+    }
+
+    /// Default activation function for this architecture's MLP.
+    fn default_activation(&self) -> Activation {
+        match self {
+            ModelArch::Gemma | ModelArch::Gemma2 => Activation::Gelu,
+            _ => Activation::SiLU,
+        }
+    }
+
+    /// Whether this architecture uses the Gemma-style RmsNorm (adds 1 to weights).
+    pub fn use_gemma_norm(&self) -> bool {
+        matches!(self, ModelArch::Gemma | ModelArch::Gemma2)
+    }
+
+    /// Whether this architecture is supported for split inference.
+    pub fn is_supported(&self) -> bool {
+        !matches!(self, ModelArch::DeepSeek2)
+    }
+}
+
+impl std::fmt::Display for ModelArch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelArch::Llama => write!(f, "llama"),
+            ModelArch::Qwen2 => write!(f, "qwen2"),
+            ModelArch::Gemma => write!(f, "gemma"),
+            ModelArch::Gemma2 => write!(f, "gemma2"),
+            ModelArch::Phi3 => write!(f, "phi3"),
+            ModelArch::Mistral => write!(f, "mistral"),
+            ModelArch::Starcoder2 => write!(f, "starcoder2"),
+            ModelArch::DeepSeek2 => write!(f, "deepseek2"),
+            ModelArch::Unknown(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// Activation function used in the MLP/FFN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activation {
+    /// SiLU / Swish — used by Llama, Qwen2, Mistral, Phi-3
+    SiLU,
+    /// Gelu — used by Gemma, Gemma 2
+    Gelu,
+}
+
 // ── Quantized MatMul wrapper ──
 
 #[derive(Debug, Clone)]
@@ -686,13 +777,60 @@ struct Mlp {
     ffn_gate: QMatMul,
     ffn_down: QMatMul,
     ffn_up: QMatMul,
+    activation: Activation,
 }
 
 impl Mlp {
-    fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
-        let gate = self.ffn_gate.forward(xs)?;
-        let up = self.ffn_up.forward(xs)?;
-        self.ffn_down.forward(&(candle_nn::ops::silu(&gate)? * up)?)
+    fn forward(&self, xs: &Tensor, lora: Option<(&LoraAdapter, usize)>) -> CandleResult<Tensor> {
+        let mut gate = self.ffn_gate.forward(xs)?;
+        let mut up = self.ffn_up.forward(xs)?;
+
+        if let Some((adapter, abs_layer)) = lora {
+            let key_gate = format!("blk.{abs_layer}.ffn_gate");
+            if let Some(lw) = adapter.weights.get(&key_gate) {
+                gate = crate::model::lora::apply_lora(
+                    &gate,
+                    xs,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_gate: {e}")))?;
+            }
+            let key_up = format!("blk.{abs_layer}.ffn_up");
+            if let Some(lw) = adapter.weights.get(&key_up) {
+                up = crate::model::lora::apply_lora(
+                    &up,
+                    xs,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_up: {e}")))?;
+            }
+        }
+
+        let activated = match self.activation {
+            Activation::SiLU => candle_nn::ops::silu(&gate)?,
+            Activation::Gelu => gate.gelu()?,
+        };
+        let combined = (activated * up)?;
+
+        let mut down = self.ffn_down.forward(&combined)?;
+        if let Some((adapter, abs_layer)) = lora {
+            let key_down = format!("blk.{abs_layer}.ffn_down");
+            if let Some(lw) = adapter.weights.get(&key_down) {
+                down = crate::model::lora::apply_lora(
+                    &down,
+                    &combined,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_down: {e}")))?;
+            }
+        }
+        Ok(down)
     }
 }
 
@@ -719,6 +857,8 @@ struct LayerWeights {
     neg_inf: Tensor,
     /// If true, use contiguous RoPE (rope); if false, use interleaved (rope_i).
     use_rope_contiguous: bool,
+    /// Gemma 2 attention logit soft-capping: `tanh(logits / cap) * cap` before softmax.
+    attn_logit_softcap: Option<f32>,
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> CandleResult<Tensor> {
@@ -728,6 +868,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> CandleResu
 
 /// Standard O(n^2) matmul attention with optional causal mask.
 /// Input/output layout: BHSD `(b, n_head, seq, head_dim)`.
+/// Supports optional Gemma 2 attention logit soft-capping.
 #[allow(clippy::too_many_arguments)]
 fn standard_attention(
     q: &Tensor,
@@ -738,11 +879,19 @@ fn standard_attention(
     n_head: usize,
     n_kv_head: usize,
     neg_inf: &Tensor,
+    attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
     let k = candle_transformers::utils::repeat_kv(k.clone(), n_head / n_kv_head)?;
     let v = candle_transformers::utils::repeat_kv(v.clone(), n_head / n_kv_head)?;
 
     let att = (q.matmul(&k.t()?)? / (head_dim as f64).sqrt())?;
+    // Gemma 2 attention logit soft-capping: tanh(logits / cap) * cap
+    let att = if let Some(cap) = attn_logit_softcap {
+        let cap_f64 = cap as f64;
+        ((att / cap_f64)?.tanh()? * cap_f64)?
+    } else {
+        att
+    };
     let att = match mask {
         None => att,
         Some(mask) => {
@@ -773,6 +922,7 @@ fn run_attention(
     n_kv_head: usize,
     head_dim: usize,
     neg_inf: &Tensor,
+    attn_logit_softcap: Option<f32>,
 ) -> CandleResult<Tensor> {
     match q.device() {
         Device::Cpu => {
@@ -805,18 +955,40 @@ fn run_attention(
 
             // run_flash_attn_cpu handles GQA natively — no repeat_kv needed
             // Output shape: (b, n_head, seq, head_dim) — BHSD
-            candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
+            let out = candle_nn::cpu_flash_attention::run_flash_attn_cpu::<f32>(
                 &q_bshd,
                 &k_bshd,
                 &v_bshd,
                 flash_mask.as_ref(),
                 softmax_scale,
                 None, // no ALiBi
-                None, // no softcap
-            )
+                attn_logit_softcap,
+            )?;
+            Ok(out)
         }
         #[cfg(feature = "flash-attn")]
         Device::Cuda(_) => {
+            let q_len = q.dim(2)?;
+            let k_len = k.dim(2)?;
+
+            // Flash attention only supports simple causal masking. When the KV cache
+            // has pre-populated prefix entries (k_len > q_len with q_len > 1), the
+            // offset causal mask can't be expressed via flash_attn's boolean causal
+            // flag. Fall back to standard matmul attention with the explicit mask.
+            if k_len > q_len && q_len > 1 {
+                return standard_attention(
+                    q,
+                    k,
+                    v,
+                    mask,
+                    head_dim,
+                    n_head,
+                    n_kv_head,
+                    neg_inf,
+                    attn_logit_softcap,
+                );
+            }
+
             // GPU flash attention: input BSHD, output BSHD → transpose to BHSD
             let q_bshd = q.transpose(1, 2)?.contiguous()?;
             let k_bshd = k.transpose(1, 2)?.contiguous()?;
@@ -828,18 +1000,27 @@ fn run_attention(
             let v_f16 = v_bshd.to_dtype(DType::F16)?;
 
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-            let seq_len = q.dim(2)?;
 
             // flash_attn handles GQA and causal masking natively
             let out =
-                candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, seq_len > 1)?;
+                candle_flash_attn::flash_attn(&q_f16, &k_f16, &v_f16, softmax_scale, q_len > 1)?;
 
             // Output is BSHD — transpose to BHSD and cast back to F32
             out.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()
         }
         _ => {
-            // Fallback: standard matmul attention
-            standard_attention(q, k, v, mask, head_dim, n_head, n_kv_head, neg_inf)
+            // Fallback: standard matmul attention with optional soft-capping
+            standard_attention(
+                q,
+                k,
+                v,
+                mask,
+                head_dim,
+                n_head,
+                n_kv_head,
+                neg_inf,
+                attn_logit_softcap,
+            )
         }
     }
 }
@@ -863,11 +1044,49 @@ impl LayerWeights {
         index_pos: usize,
         kv_cache: &mut Option<KvCache>,
         max_seq_len: usize,
+        lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         let mut q = self.attention_wq.forward(x)?;
         let mut k = self.attention_wk.forward(x)?;
         let mut v = self.attention_wv.forward(x)?;
+
+        // Apply LoRA deltas to Q/K/V projections if adapter is active
+        if let Some((adapter, abs_layer)) = lora {
+            let key_q = format!("blk.{abs_layer}.attn_q");
+            if let Some(lw) = adapter.weights.get(&key_q) {
+                q = crate::model::lora::apply_lora(
+                    &q,
+                    x,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_q: {e}")))?;
+            }
+            let key_k = format!("blk.{abs_layer}.attn_k");
+            if let Some(lw) = adapter.weights.get(&key_k) {
+                k = crate::model::lora::apply_lora(
+                    &k,
+                    x,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_k: {e}")))?;
+            }
+            let key_v = format!("blk.{abs_layer}.attn_v");
+            if let Some(lw) = adapter.weights.get(&key_v) {
+                v = crate::model::lora::apply_lora(
+                    &v,
+                    x,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_v: {e}")))?;
+            }
+        }
 
         // Apply QKV biases if present (Qwen2 has biases)
         if let Some(ref bq) = self.attention_bq {
@@ -923,17 +1142,35 @@ impl LayerWeights {
             self.n_kv_head,
             self.head_dim,
             &self.neg_inf,
+            self.attn_logit_softcap,
         )?;
 
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
-        self.attention_wo.forward(&y)
+        let mut wo_out = self.attention_wo.forward(&y)?;
+
+        // Apply LoRA delta to O projection
+        if let Some((adapter, abs_layer)) = lora {
+            let key_o = format!("blk.{abs_layer}.attn_output");
+            if let Some(lw) = adapter.weights.get(&key_o) {
+                wo_out = crate::model::lora::apply_lora(
+                    &wo_out,
+                    &y,
+                    lw,
+                    adapter.metadata.alpha,
+                    adapter.metadata.rank,
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("LoRA attn_output: {e}")))?;
+            }
+        }
+        Ok(wo_out)
     }
 }
 
 // ── Split model: loads only a range of layers from a GGUF ──
 
-/// A partial Llama model that loads and runs only a specific range of layers.
+/// A partial transformer model that loads and runs only a specific range of layers.
 /// Used for split inference where each node holds different layers.
+/// Supports multiple architectures: Llama, Qwen2, Gemma 2, Phi-3, Mistral.
 pub struct SplitModel {
     /// Token embedding table (only loaded by the first segment).
     tok_embeddings: Option<Embedding>,
@@ -951,6 +1188,8 @@ pub struct SplitModel {
     pub total_layers: usize,
     /// Hidden dimension (embedding_length).
     pub hidden_dim: usize,
+    /// Detected model architecture.
+    pub arch: ModelArch,
     /// Device (CPU or CUDA).
     device: Device,
     /// Vocabulary from GGUF (token ID → string), for decoding generated tokens.
@@ -1432,12 +1671,23 @@ impl SplitModel {
         }
 
         // Detect architecture prefix from GGUF metadata
-        let arch = ct
+        let arch_str = ct
             .metadata
             .get("general.architecture")
             .and_then(|v| v.to_string().ok().cloned())
             .unwrap_or_else(|| "llama".to_string());
+        let model_arch = ModelArch::from_gguf_arch(&arch_str);
 
+        if !model_arch.is_supported() {
+            return Err(SwarmError::Internal(format!(
+                "Architecture '{arch_str}' is not supported for split inference. \
+                 DeepSeek-V2/V3 uses MoE+MLA which requires a fundamentally different forward path."
+            )));
+        }
+
+        tracing::info!(arch = %model_arch, "Detected model architecture");
+
+        let arch = &arch_str; // keep for metadata key lookups
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
             ct.metadata
@@ -1473,14 +1723,39 @@ impl SplitModel {
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
             .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
 
-        // Determine RoPE variant: Qwen2 uses contiguous (split), Llama uses interleaved
-        let use_rope_contiguous = matches!(arch.as_str(), "qwen2" | "qwen3");
+        // Gemma 2 attention logit soft-capping (from GGUF metadata)
+        let attn_logit_softcap = ct
+            .metadata
+            .get(&format!("{arch}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f32().ok())
+            .filter(|&v| v > 0.0);
+
+        let use_rope_contiguous = model_arch.use_rope_contiguous();
+        let activation = model_arch.default_activation();
 
         let head_dim = embedding_length / head_count;
         let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        let use_gemma_norm = model_arch.use_gemma_norm();
+
+        // Helper: create RmsNorm, applying Gemma's +1 weight offset if needed.
+        // Gemma stores weights that expect: output = x * (1 + w) / rms(x)
+        // We add 1 at load time so the standard forward pass works correctly.
+        let make_norm = |qtensor: QTensor, eps: f64| -> Result<RmsNorm, SwarmError> {
+            if use_gemma_norm {
+                let w = qtensor
+                    .dequantize(&device)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                let w_plus_one = (w + 1.0).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                let qt = QTensor::quantize(&w_plus_one, candle_core::quantized::GgmlDType::F32)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                RmsNorm::from_qtensor(qt, eps).map_err(|e| SwarmError::Internal(e.to_string()))
+            } else {
+                RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
+            }
+        };
 
         // Load embedding table only for first segment
         let tok_embeddings = if is_first {
@@ -1500,10 +1775,7 @@ impl SplitModel {
             let norm_tensor = ct
                 .tensor(&mut file, "output_norm.weight", &device)
                 .map_err(|e| SwarmError::Internal(format!("Failed to load output_norm: {e}")))?;
-            Some(
-                RmsNorm::from_qtensor(norm_tensor, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
+            Some(make_norm(norm_tensor, rms_norm_eps)?)
         } else {
             None
         };
@@ -1606,8 +1878,7 @@ impl SplitModel {
                 attention_bq,
                 attention_bk,
                 attention_bv,
-                attention_norm: RmsNorm::from_qtensor(attn_norm, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                 mlp: Mlp {
                     ffn_gate: QMatMul::from_qtensor(ffn_gate)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -1615,9 +1886,9 @@ impl SplitModel {
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
                     ffn_up: QMatMul::from_qtensor(ffn_up)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    activation,
                 },
-                ffn_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                 n_head: head_count,
                 n_kv_head: head_count_kv,
                 head_dim,
@@ -1625,6 +1896,7 @@ impl SplitModel {
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
                 use_rope_contiguous,
+                attn_logit_softcap,
             });
         }
 
@@ -1751,13 +2023,14 @@ impl SplitModel {
 
         let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
-            arch = %arch,
+            arch = %model_arch,
             layers = format!("[{layer_start}..{layer_end})"),
             total = block_count,
             is_first,
             is_last,
             has_qkv_biases = has_biases,
             rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
+            activation = ?activation,
             context_length,
             "Loaded split model segment"
         );
@@ -1772,6 +2045,7 @@ impl SplitModel {
             layer_end,
             total_layers: block_count,
             hidden_dim: embedding_length,
+            arch: model_arch,
             device,
             vocabulary,
             tokenizer,
@@ -1850,12 +2124,23 @@ impl SplitModel {
             tracing::info!("Split model using CPU (no CUDA available)");
         }
 
-        let arch = ct
+        let arch_str = ct
             .metadata
             .get("general.architecture")
             .and_then(|v| v.to_string().ok().cloned())
             .unwrap_or_else(|| "llama".to_string());
+        let model_arch = ModelArch::from_gguf_arch(&arch_str);
 
+        if !model_arch.is_supported() {
+            return Err(SwarmError::Internal(format!(
+                "Architecture '{arch_str}' is not supported for split inference. \
+                 DeepSeek-V2/V3 uses MoE+MLA which requires a fundamentally different forward path."
+            )));
+        }
+
+        tracing::info!(arch = %model_arch, "Detected model architecture");
+
+        let arch = &arch_str;
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
             ct.metadata
@@ -1891,13 +2176,35 @@ impl SplitModel {
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
             .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
 
-        let use_rope_contiguous = matches!(arch.as_str(), "qwen2" | "qwen3");
+        let attn_logit_softcap = ct
+            .metadata
+            .get(&format!("{arch}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f32().ok())
+            .filter(|&v| v > 0.0);
+
+        let use_rope_contiguous = model_arch.use_rope_contiguous();
+        let activation = model_arch.default_activation();
 
         let head_dim = embedding_length / head_count;
         let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        let use_gemma_norm = model_arch.use_gemma_norm();
+
+        let make_norm = |qtensor: QTensor, eps: f64| -> Result<RmsNorm, SwarmError> {
+            if use_gemma_norm {
+                let w = qtensor
+                    .dequantize(&device)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                let w_plus_one = (w + 1.0).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                let qt = QTensor::quantize(&w_plus_one, candle_core::quantized::GgmlDType::F32)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                RmsNorm::from_qtensor(qt, eps).map_err(|e| SwarmError::Internal(e.to_string()))
+            } else {
+                RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
+            }
+        };
 
         let tok_embeddings = if is_first {
             let tok_embd = ct
@@ -1915,10 +2222,7 @@ impl SplitModel {
             let norm_tensor = ct
                 .tensor(&mut reader, "output_norm.weight", &device)
                 .map_err(|e| SwarmError::Internal(format!("Failed to load output_norm: {e}")))?;
-            Some(
-                RmsNorm::from_qtensor(norm_tensor, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
+            Some(make_norm(norm_tensor, rms_norm_eps)?)
         } else {
             None
         };
@@ -2057,8 +2361,7 @@ impl SplitModel {
                 attention_bq,
                 attention_bk,
                 attention_bv,
-                attention_norm: RmsNorm::from_qtensor(attn_norm, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                attention_norm: make_norm(attn_norm, rms_norm_eps)?,
                 mlp: Mlp {
                     ffn_gate: QMatMul::from_qtensor(ffn_gate)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -2066,9 +2369,9 @@ impl SplitModel {
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
                     ffn_up: QMatMul::from_qtensor(ffn_up)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    activation,
                 },
-                ffn_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                 n_head: head_count,
                 n_kv_head: head_count_kv,
                 head_dim,
@@ -2076,6 +2379,7 @@ impl SplitModel {
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
                 use_rope_contiguous,
+                attn_logit_softcap,
             });
         }
 
@@ -2189,13 +2493,14 @@ impl SplitModel {
 
         let has_biases = layers.first().is_some_and(|l| l.attention_bq.is_some());
         tracing::info!(
-            arch = %arch,
+            arch = %model_arch,
             layers = format!("[{layer_start}..{layer_end})"),
             total = block_count,
             is_first,
             is_last,
             has_qkv_biases = has_biases,
             rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
+            activation = ?activation,
             context_length,
             "Loaded split model from shard files"
         );
@@ -2210,6 +2515,7 @@ impl SplitModel {
             layer_end,
             total_layers: block_count,
             hidden_dim: embedding_length,
+            arch: model_arch,
             device,
             vocabulary,
             tokenizer,
@@ -2241,6 +2547,22 @@ impl SplitModel {
         Ok(mask)
     }
 
+    /// Build a causal mask with KV offset for prefix-cached inference.
+    ///
+    /// When the KV cache has been pre-populated with prefix tokens,
+    /// query tokens (suffix) attend to all prefix positions plus earlier suffix
+    /// positions with proper causal ordering.
+    ///
+    /// `query_len`: number of new (suffix) tokens being processed.
+    /// `kv_len`: total KV length (prefix_len + query_len).
+    fn mask_with_offset(&self, query_len: usize, kv_len: usize) -> CandleResult<Tensor> {
+        let offset = kv_len - query_len;
+        let mask: Vec<_> = (0..query_len)
+            .flat_map(|i| (0..kv_len).map(move |j| u8::from(j > offset + i)))
+            .collect();
+        Tensor::from_slice(&mask, (query_len, kv_len), &self.device)
+    }
+
     /// Run the forward pass for this segment's layer range.
     ///
     /// - For the first segment: `input` is token IDs (i64 tensor, shape [1, seq_len]).
@@ -2257,6 +2579,21 @@ impl SplitModel {
         index_pos: usize,
         kv_cache_store: &KvCacheStore,
         request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
+        self.forward_with_lora(input, index_pos, kv_cache_store, request_id, None)
+    }
+
+    /// Forward pass with optional LoRA adapter applied per-layer.
+    ///
+    /// When `lora_adapter` is `Some`, the adapter's low-rank deltas are applied
+    /// to attention (Q/K/V/O) and MLP (gate/up/down) projections at each layer.
+    pub fn forward_with_lora(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
     ) -> Result<Tensor, SwarmError> {
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
@@ -2284,14 +2621,6 @@ impl SplitModel {
         let seq_len = layer_in
             .dim(1)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
-        let mask = if seq_len == 1 {
-            None
-        } else {
-            Some(
-                self.mask(seq_len)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
-        };
 
         // Build a model_key for the KV-cache store
         let model_key = format!(
@@ -2308,10 +2637,37 @@ impl SplitModel {
             entry.layers.clone()
         };
 
+        // Detect pre-populated prefix cache entries (KV already present from prefix
+        // cache restoration). If so, build an offset causal mask that allows the
+        // suffix query tokens to attend to all prefix KV positions.
+        let kv_offset = layer_kv_caches
+            .first()
+            .and_then(|c| c.as_ref())
+            .map(|c| c.current_seq_len())
+            .unwrap_or(0);
+
+        let mask = if seq_len == 1 {
+            None
+        } else if kv_offset > 0 {
+            // Prefix cache: suffix query attends to (offset + seq_len) key positions
+            Some(
+                self.mask_with_offset(seq_len, kv_offset + seq_len)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        } else {
+            Some(
+                self.mask(seq_len)
+                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+            )
+        };
+
         let max_seq_len = self.max_seq_len;
 
         // Run through our layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
+            let abs_layer = self.layer_start + layer_idx;
+            let lora_param = lora_adapter.map(|a| (a, abs_layer));
+
             let x = layer_in;
             let residual = &x;
             let x = layer
@@ -2325,6 +2681,7 @@ impl SplitModel {
                     index_pos,
                     &mut layer_kv_caches[layer_idx],
                     max_seq_len,
+                    lora_param,
                 )
                 .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
             let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
@@ -2336,7 +2693,7 @@ impl SplitModel {
                 .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
             let x = layer
                 .mlp
-                .forward(&x)
+                .forward(&x, lora_param)
                 .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
             layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
         }
@@ -2372,6 +2729,58 @@ impl SplitModel {
         } else {
             // Intermediate segment: return hidden states for next segment
             Ok(layer_in)
+        }
+    }
+
+    /// Forward pass for multimodal (vision + text) inference.
+    ///
+    /// If this is the first segment and `vision_embeddings` is provided, the
+    /// vision embeddings are prepended to the text token embeddings before
+    /// entering the transformer layers. Otherwise falls back to regular `forward`.
+    ///
+    /// `vision_embeddings` shape: (num_image_tokens, hidden_dim)
+    pub fn forward_multimodal(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        vision_embeddings: Option<&Tensor>,
+    ) -> Result<Tensor, SwarmError> {
+        let is_first = self.tok_embeddings.is_some();
+
+        match (is_first, vision_embeddings) {
+            (true, Some(vision_emb)) => {
+                // First segment with vision: embed text tokens, merge with vision, then forward
+                let input_dev = input
+                    .to_device(&self.device)
+                    .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
+
+                let text_embeddings = self
+                    .tok_embeddings
+                    .as_ref()
+                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
+                    .forward(&input_dev)
+                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
+
+                // Merge: prepend vision tokens before text tokens
+                let merged = crate::inference::vision::merge_vision_text_embeddings(
+                    &text_embeddings,
+                    vision_emb,
+                    &[],
+                )?;
+
+                // Now run through layers with the merged hidden states.
+                // Temporarily remove tok_embeddings so forward() treats input as hidden states.
+                let tok_emb = self.tok_embeddings.take();
+                let result = self.forward(&merged, index_pos, kv_cache_store, request_id);
+                self.tok_embeddings = tok_emb;
+                result
+            }
+            _ => {
+                // No vision embeddings or not the first segment — regular forward
+                self.forward(input, index_pos, kv_cache_store, request_id)
+            }
         }
     }
 
@@ -2488,6 +2897,7 @@ impl SplitModel {
                         item.index_pos,
                         &mut all_kv_caches[req_idx][layer_idx],
                         max_seq_len,
+                        None, // LoRA not supported in batch mode
                     )
                     .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
                 attn_outputs.push(attn_out);
@@ -2509,7 +2919,7 @@ impl SplitModel {
                 .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
             let x = layer
                 .mlp
-                .forward(&x)
+                .forward(&x, None) // LoRA not supported in batch mode
                 .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
             batched = (&x + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
         }
@@ -2564,6 +2974,16 @@ impl SplitModel {
     /// Return a reference to the BPE tokenizer, if available.
     pub fn tokenizer(&self) -> Option<&BpeTokenizer> {
         self.tokenizer.as_ref()
+    }
+
+    /// Return the number of transformer layers in this segment.
+    pub fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Return the maximum sequence length supported by this model.
+    pub fn max_seq_len(&self) -> usize {
+        self.max_seq_len
     }
 
     /// Return the EOS token IDs loaded from GGUF metadata.
@@ -3221,6 +3641,7 @@ mod tests {
             layer_end: 0,
             total_layers: 0,
             hidden_dim: 0,
+            arch: ModelArch::Llama,
             device: candle_core::Device::Cpu,
             vocabulary: None,
             tokenizer: None,
@@ -3406,6 +3827,7 @@ mod tests {
                     ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                     ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                     ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                    activation: Activation::SiLU,
                 },
                 ffn_norm: make_rms_norm(&norm_w),
                 n_head,
@@ -3415,6 +3837,7 @@ mod tests {
                 sin: sin.clone(),
                 neg_inf: neg_inf.clone(),
                 use_rope_contiguous: true,
+                attn_logit_softcap: None,
             });
         }
 
@@ -3428,6 +3851,7 @@ mod tests {
             layer_end: num_layers,
             total_layers: num_layers + 2, // Not last segment
             hidden_dim,
+            arch: ModelArch::Llama,
             device,
             vocabulary: None,
             tokenizer: None,
@@ -3606,6 +4030,7 @@ mod tests {
             n_head,
             n_kv_head,
             &neg_inf,
+            None,
         )
         .unwrap();
 
@@ -3619,6 +4044,7 @@ mod tests {
             n_kv_head,
             head_dim,
             &neg_inf,
+            None,
         )
         .unwrap();
 
@@ -3654,12 +4080,16 @@ mod tests {
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
 
         // Standard path (no mask for decode)
-        let out_std =
-            standard_attention(&q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf).unwrap();
+        let out_std = standard_attention(
+            &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+        )
+        .unwrap();
 
         // Flash path
-        let out_flash =
-            run_attention(&q, &k, &v, None, n_head, n_kv_head, head_dim, &neg_inf).unwrap();
+        let out_flash = run_attention(
+            &q, &k, &v, None, n_head, n_kv_head, head_dim, &neg_inf, None,
+        )
+        .unwrap();
 
         assert_eq!(out_std.shape(), out_flash.shape());
 
@@ -3674,6 +4104,642 @@ mod tests {
         assert!(
             max_diff < 1e-4,
             "CPU flash decode differs from standard: max_diff={max_diff}"
+        );
+    }
+
+    // ── Model architecture detection tests ──
+
+    #[test]
+    fn model_arch_detection() {
+        assert_eq!(ModelArch::from_gguf_arch("llama"), ModelArch::Llama);
+        assert_eq!(ModelArch::from_gguf_arch("qwen2"), ModelArch::Qwen2);
+        assert_eq!(ModelArch::from_gguf_arch("qwen3"), ModelArch::Qwen2);
+        assert_eq!(ModelArch::from_gguf_arch("gemma"), ModelArch::Gemma);
+        assert_eq!(ModelArch::from_gguf_arch("gemma2"), ModelArch::Gemma2);
+        assert_eq!(ModelArch::from_gguf_arch("phi3"), ModelArch::Phi3);
+        assert_eq!(ModelArch::from_gguf_arch("mistral"), ModelArch::Mistral);
+        assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
+        assert!(matches!(
+            ModelArch::from_gguf_arch("unknown_arch"),
+            ModelArch::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn model_arch_properties() {
+        // RoPE contiguous: only Qwen2 family
+        assert!(ModelArch::Qwen2.use_rope_contiguous());
+        assert!(!ModelArch::Llama.use_rope_contiguous());
+        assert!(!ModelArch::Gemma2.use_rope_contiguous());
+        assert!(!ModelArch::Phi3.use_rope_contiguous());
+        assert!(!ModelArch::Mistral.use_rope_contiguous());
+
+        // Activation: Gemma uses Gelu, others SiLU
+        assert_eq!(ModelArch::Gemma.default_activation(), Activation::Gelu);
+        assert_eq!(ModelArch::Gemma2.default_activation(), Activation::Gelu);
+        assert_eq!(ModelArch::Llama.default_activation(), Activation::SiLU);
+        assert_eq!(ModelArch::Qwen2.default_activation(), Activation::SiLU);
+        assert_eq!(ModelArch::Phi3.default_activation(), Activation::SiLU);
+        assert_eq!(ModelArch::Mistral.default_activation(), Activation::SiLU);
+
+        // Gemma norm: only Gemma family
+        assert!(ModelArch::Gemma.use_gemma_norm());
+        assert!(ModelArch::Gemma2.use_gemma_norm());
+        assert!(!ModelArch::Llama.use_gemma_norm());
+        assert!(!ModelArch::Qwen2.use_gemma_norm());
+
+        // Supported: DeepSeek2 is not supported
+        assert!(ModelArch::Llama.is_supported());
+        assert!(ModelArch::Qwen2.is_supported());
+        assert!(ModelArch::Gemma2.is_supported());
+        assert!(ModelArch::Phi3.is_supported());
+        assert!(!ModelArch::DeepSeek2.is_supported());
+    }
+
+    // ── GQA verification tests ──
+
+    /// Helper: create a SplitModel with explicit GQA configuration.
+    fn make_gqa_test_model(
+        num_layers: usize,
+        hidden_dim: usize,
+        n_head: usize,
+        n_kv_head: usize,
+        use_rope_contiguous: bool,
+        activation: Activation,
+        attn_logit_softcap: Option<f32>,
+        arch: ModelArch,
+    ) -> SplitModel {
+        let device = candle_core::Device::Cpu;
+        let head_dim = hidden_dim / n_head;
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+
+        let max_seq_len = 128;
+        let rope_dim = head_dim;
+        let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let kv_dim = n_kv_head * head_dim;
+        let mut layers = Vec::new();
+        for _ in 0..num_layers {
+            let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
+            let make_rms_norm = |w: &Tensor| {
+                let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+                RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            };
+            layers.push(LayerWeights {
+                attention_wq: make_qmatmul(hidden_dim, hidden_dim),
+                attention_wk: make_qmatmul(hidden_dim, kv_dim),
+                attention_wv: make_qmatmul(hidden_dim, kv_dim),
+                attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+                attention_bq: None,
+                attention_bk: None,
+                attention_bv: None,
+                attention_norm: make_rms_norm(&norm_w),
+                mlp: Mlp {
+                    ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+                    ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
+                    ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                    activation,
+                },
+                ffn_norm: make_rms_norm(&norm_w),
+                n_head,
+                n_kv_head,
+                head_dim,
+                cos: cos.clone(),
+                sin: sin.clone(),
+                neg_inf: neg_inf.clone(),
+                use_rope_contiguous,
+                attn_logit_softcap,
+            });
+        }
+
+        SplitModel {
+            tok_embeddings: None,
+            layers,
+            norm: None,
+            output: None,
+            masks: HashMap::new(),
+            layer_start: 0,
+            layer_end: num_layers,
+            total_layers: num_layers + 2,
+            hidden_dim,
+            arch,
+            device,
+            vocabulary: None,
+            tokenizer: None,
+            eos_tokens: vec![2],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+            max_seq_len,
+        }
+    }
+
+    /// Helper: assert two tensors are close within tolerance.
+    fn assert_tensors_close(a: &Tensor, b: &Tensor, tol: f32, msg: &str) {
+        assert_eq!(a.shape(), b.shape(), "{msg}: shape mismatch");
+        let diff = (a - b).unwrap().abs().unwrap();
+        let max_diff: f32 = diff
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap();
+        assert!(max_diff < tol, "{msg}: max_diff={max_diff} >= tol={tol}");
+    }
+
+    #[test]
+    fn gqa_standard_attention_llama3_ratio() {
+        // Llama 3 8B: GQA ratio=4 (scaled: n_head=8, n_kv_head=2)
+        let device = Device::Cpu;
+        let (b, n_head, n_kv_head, seq_len, head_dim) = (1, 8, 2, 12, 32);
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, seq_len, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let mask_data: Vec<u8> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
+
+        let out = standard_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            head_dim,
+            n_head,
+            n_kv_head,
+            &neg_inf,
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "Output contains NaN/Inf"
+        );
+    }
+
+    #[test]
+    fn gqa_standard_attention_mqa_ratio() {
+        // Multi-Query Attention: n_kv_head=1 (extreme GQA)
+        let device = Device::Cpu;
+        let (b, n_head, n_kv_head, seq_len, head_dim) = (1, 8, 1, 6, 32);
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, seq_len, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let out = standard_attention(
+            &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+        )
+        .unwrap();
+        assert_eq!(out.dims(), &[b, n_head, seq_len, head_dim]);
+    }
+
+    #[test]
+    fn gqa_flash_vs_standard_llama3_prefill() {
+        // CPU flash vs standard with GQA ratio=4, causal mask
+        let device = Device::Cpu;
+        let (b, n_head, n_kv_head, seq_len, head_dim) = (1, 8, 2, 10, 32);
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, seq_len, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let mask_data: Vec<u8> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask_data, (seq_len, seq_len), &device).unwrap();
+
+        let out_std = standard_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            head_dim,
+            n_head,
+            n_kv_head,
+            &neg_inf,
+            None,
+        )
+        .unwrap();
+        let out_flash = run_attention(
+            &q,
+            &k,
+            &v,
+            Some(&mask),
+            n_head,
+            n_kv_head,
+            head_dim,
+            &neg_inf,
+            None,
+        )
+        .unwrap();
+        assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA ratio=4 flash vs standard");
+    }
+
+    #[test]
+    fn gqa_flash_vs_standard_llama3_decode() {
+        // Decode step (seq_len=1 Q, longer KV) with GQA ratio=4
+        let device = Device::Cpu;
+        let (b, n_head, n_kv_head, head_dim, kv_len) = (1, 8, 2, 32, 20);
+
+        let q = Tensor::randn(0f32, 0.1, (b, n_head, 1, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 0.1, (b, n_kv_head, kv_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let out_std = standard_attention(
+            &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+        )
+        .unwrap();
+        let out_flash = run_attention(
+            &q, &k, &v, None, n_head, n_kv_head, head_dim, &neg_inf, None,
+        )
+        .unwrap();
+        assert_tensors_close(&out_std, &out_flash, 1e-4, "GQA decode flash vs standard");
+    }
+
+    #[test]
+    fn gqa_forward_llama3_style() {
+        // End-to-end forward with Llama 3-style GQA
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 2);
+        let mut model = make_gqa_test_model(
+            2,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::SiLU,
+            None,
+            ModelArch::Llama,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        // Prefill
+        let input = Tensor::randn(0f32, 1.0, (1, 6, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "llama3").unwrap();
+        assert_eq!(out.dims(), &[1, 6, hidden_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()));
+
+        // Decode
+        let decode = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&decode, 6, &kv_store, "llama3").unwrap();
+        assert_eq!(out.dims(), &[1, 1, hidden_dim]);
+    }
+
+    #[test]
+    fn gqa_forward_mistral_style() {
+        // Mistral 7B: same GQA as Llama 3
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 2);
+        let mut model = make_gqa_test_model(
+            2,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::SiLU,
+            None,
+            ModelArch::Mistral,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let input = Tensor::randn(0f32, 1.0, (1, 8, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "mistral").unwrap();
+        assert_eq!(out.dims(), &[1, 8, hidden_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn gqa_forward_phi3_mha_style() {
+        // Phi-3-mini: MHA (n_head == n_kv_head)
+        let (hidden_dim, n_head, n_kv_head) = (192, 6, 6);
+        let mut model = make_gqa_test_model(
+            2,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::SiLU,
+            None,
+            ModelArch::Phi3,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let input = Tensor::randn(0f32, 1.0, (1, 8, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "phi3").unwrap();
+        assert_eq!(out.dims(), &[1, 8, hidden_dim]);
+    }
+
+    #[test]
+    fn gemma2_gelu_activation_forward() {
+        // Gemma 2 uses Gelu activation in MLP
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 4);
+        let mut model = make_gqa_test_model(
+            1,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::Gelu,
+            None,
+            ModelArch::Gemma2,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let input = Tensor::randn(0f32, 1.0, (1, 6, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "gemma2-gelu").unwrap();
+        assert_eq!(out.dims(), &[1, 6, hidden_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "Gemma2 Gelu produced NaN/Inf"
+        );
+    }
+
+    #[test]
+    fn gemma2_attn_logit_softcap() {
+        // Test attention logit soft-capping (Gemma 2 feature)
+        // Use stddev=1.0 so logits are large enough for softcap to visibly affect output
+        let device = Device::Cpu;
+        let (b, n_head, n_kv_head, seq_len, head_dim) = (1, 4, 2, 6, 32);
+
+        let q = Tensor::randn(0f32, 1.0, (b, n_head, seq_len, head_dim), &device).unwrap();
+        let k = Tensor::randn(0f32, 1.0, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let v = Tensor::randn(0f32, 1.0, (b, n_kv_head, seq_len, head_dim), &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        // Without soft-capping
+        let out_no_cap = standard_attention(
+            &q, &k, &v, None, head_dim, n_head, n_kv_head, &neg_inf, None,
+        )
+        .unwrap();
+
+        // With soft-capping (cap=50.0 like Gemma 2)
+        let out_capped = standard_attention(
+            &q,
+            &k,
+            &v,
+            None,
+            head_dim,
+            n_head,
+            n_kv_head,
+            &neg_inf,
+            Some(50.0),
+        )
+        .unwrap();
+
+        // Both should produce valid output
+        assert_eq!(out_no_cap.shape(), out_capped.shape());
+        let flat: Vec<f32> = out_capped.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "Soft-capped attention NaN/Inf"
+        );
+
+        // Outputs should differ (soft-capping changes the attention weights)
+        let diff = (&out_no_cap - &out_capped).unwrap().abs().unwrap();
+        let max_diff: f32 = diff
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap();
+        assert!(max_diff > 0.0, "Soft-capping should change the output");
+    }
+
+    #[test]
+    fn gemma2_full_forward_with_softcap() {
+        // Gemma 2 end-to-end: Gelu + softcap + GQA
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 4);
+        let mut model = make_gqa_test_model(
+            2,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::Gelu,
+            Some(50.0),
+            ModelArch::Gemma2,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        // Prefill
+        let input = Tensor::randn(0f32, 1.0, (1, 8, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "gemma2-full").unwrap();
+        assert_eq!(out.dims(), &[1, 8, hidden_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()));
+
+        // Decode
+        let decode = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&decode, 8, &kv_store, "gemma2-full").unwrap();
+        assert_eq!(out.dims(), &[1, 1, hidden_dim]);
+    }
+
+    #[test]
+    fn qwen2_forward_with_biases() {
+        // Qwen2: GQA + contiguous RoPE + QKV biases
+        let device = Device::Cpu;
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 2);
+        let head_dim = hidden_dim / n_head;
+        let kv_dim = n_kv_head * head_dim;
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+
+        let max_seq_len = 128;
+        let (cos, sin) = precompute_freqs_cis(head_dim, 10000.0, max_seq_len, &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+        let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
+        let make_rms_norm = |w: &Tensor| {
+            let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+        };
+
+        let layer = LayerWeights {
+            attention_wq: make_qmatmul(hidden_dim, hidden_dim),
+            attention_wk: make_qmatmul(hidden_dim, kv_dim),
+            attention_wv: make_qmatmul(hidden_dim, kv_dim),
+            attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+            attention_bq: Some(Tensor::randn(0f32, 0.01, (hidden_dim,), &device).unwrap()),
+            attention_bk: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
+            attention_bv: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
+            attention_norm: make_rms_norm(&norm_w),
+            mlp: Mlp {
+                ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+                ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
+                ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
+                activation: Activation::SiLU,
+            },
+            ffn_norm: make_rms_norm(&norm_w),
+            n_head,
+            n_kv_head,
+            head_dim,
+            cos,
+            sin,
+            neg_inf,
+            use_rope_contiguous: true,
+            attn_logit_softcap: None,
+        };
+
+        let mut model = SplitModel {
+            tok_embeddings: None,
+            layers: vec![layer],
+            norm: None,
+            output: None,
+            masks: HashMap::new(),
+            layer_start: 0,
+            layer_end: 1,
+            total_layers: 3,
+            hidden_dim,
+            arch: ModelArch::Qwen2,
+            device,
+            vocabulary: None,
+            tokenizer: None,
+            eos_tokens: vec![2],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+            max_seq_len,
+        };
+
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let input = Tensor::randn(0f32, 1.0, (1, 6, hidden_dim), &Device::Cpu).unwrap();
+        let out = model.forward(&input, 0, &kv_store, "qwen2").unwrap();
+        assert_eq!(out.dims(), &[1, 6, hidden_dim]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn gqa_kv_cache_dimensions() {
+        // KV-cache stores with n_kv_head (not n_head)
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 2);
+        let head_dim = hidden_dim / n_head;
+        let mut model = make_gqa_test_model(
+            1,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::SiLU,
+            None,
+            ModelArch::Llama,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let seq_len = 5;
+        let input = Tensor::randn(0f32, 1.0, (1, seq_len, hidden_dim), &Device::Cpu).unwrap();
+        model.forward(&input, 0, &kv_store, "cache-test").unwrap();
+
+        let model_key = format!(
+            "{}-{}-{}",
+            model.layer_start, model.layer_end, model.total_layers
+        );
+        let entry = kv_store.get_or_create(&model_key, "cache-test", 1);
+        let k = entry.layers[0].as_ref().unwrap().k().unwrap().unwrap();
+        assert_eq!(
+            k.dims(),
+            &[1, n_kv_head, seq_len, head_dim],
+            "KV cache should have n_kv_head={n_kv_head}, not n_head={n_head}"
+        );
+    }
+
+    #[test]
+    fn gqa_multiple_decode_steps() {
+        // Multiple decode steps with GQA
+        let (hidden_dim, n_head, n_kv_head) = (256, 8, 2);
+        let mut model = make_gqa_test_model(
+            2,
+            hidden_dim,
+            n_head,
+            n_kv_head,
+            false,
+            Activation::SiLU,
+            None,
+            ModelArch::Llama,
+        );
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+
+        let input = Tensor::randn(0f32, 1.0, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+        model.forward(&input, 0, &kv_store, "multi-decode").unwrap();
+
+        for step in 0..10 {
+            let decode = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
+            let out = model
+                .forward(&decode, 4 + step, &kv_store, "multi-decode")
+                .unwrap();
+            assert_eq!(out.dims(), &[1, 1, hidden_dim]);
+            let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+            assert!(flat.iter().all(|v| v.is_finite()), "Step {step} NaN/Inf");
+        }
+    }
+
+    #[test]
+    fn mlp_activation_silu_vs_gelu() {
+        // Verify SiLU and Gelu produce different outputs
+        let device = Device::Cpu;
+        let dim = 64;
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+
+        // Shared weights
+        let gate = make_qmatmul(dim, dim * 4);
+        let down = make_qmatmul(dim * 4, dim);
+        let up = make_qmatmul(dim, dim * 4);
+
+        let mlp_silu = Mlp {
+            ffn_gate: gate.clone(),
+            ffn_down: down.clone(),
+            ffn_up: up.clone(),
+            activation: Activation::SiLU,
+        };
+        let mlp_gelu = Mlp {
+            ffn_gate: gate,
+            ffn_down: down,
+            ffn_up: up,
+            activation: Activation::Gelu,
+        };
+
+        let input = Tensor::randn(0f32, 1.0, (1, 4, dim), &device).unwrap();
+        let out_silu = mlp_silu.forward(&input, None).unwrap();
+        let out_gelu = mlp_gelu.forward(&input, None).unwrap();
+
+        assert_eq!(out_silu.shape(), out_gelu.shape());
+        let diff = (&out_silu - &out_gelu).unwrap().abs().unwrap();
+        let max_diff: f32 = diff
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_vec0()
+            .unwrap();
+        assert!(
+            max_diff > 0.0,
+            "SiLU and Gelu should produce different outputs"
         );
     }
 }

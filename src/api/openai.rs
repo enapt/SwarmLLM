@@ -11,7 +11,9 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::inference::chat_template;
 use crate::inference::router::{RouterCommand, StreamingTokenEvent};
-use crate::types::{ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams};
+use crate::types::{
+    ChatMessage, ImageData, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams,
+};
 
 /// Timeout for peer-forwarded inference requests (seconds).
 const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
@@ -27,7 +29,7 @@ const COLD_START_WAIT_SECS: u32 = 10;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<ApiChatMessage>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_top_p")]
@@ -43,11 +45,147 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub presence_penalty: f32,
     /// Optional session ID for multi-turn KV-cache reuse.
-    /// When provided, the backend attempts to reuse cached KV state from
-    /// a previous turn sharing the same prompt prefix, skipping redundant prefill.
-    /// The response echoes the session_id back (or returns a newly generated one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Optional LoRA adapter ID for per-request fine-tuned inference (SwarmLLM extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_adapter: Option<String>,
+}
+
+/// API-layer chat message supporting OpenAI's multimodal content format.
+///
+/// The `content` field can be either:
+/// - A plain string: `"content": "Hello"`
+/// - An array of content parts: `"content": [{"type": "text", "text": "..."}, {"type": "image_url", ...}]`
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiChatMessage {
+    pub role: crate::types::Role,
+    #[serde(default)]
+    pub content: MessageContent,
+}
+
+/// OpenAI-compatible content field: either a plain string or an array of content parts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+/// A single content part in a multimodal message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlRef },
+}
+
+/// Image URL reference — supports base64 data URIs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlRef {
+    pub url: String,
+}
+
+/// Maximum allowed base64-encoded image size (20MB decoded).
+const MAX_IMAGE_BASE64_BYTES: usize = 20 * 1024 * 1024;
+
+impl ApiChatMessage {
+    /// Convert to the internal `ChatMessage` type, decoding any base64 images.
+    pub fn to_chat_message(&self) -> Result<ChatMessage, crate::error::SwarmError> {
+        let (text, images) = match &self.content {
+            MessageContent::Text(s) => (s.clone(), vec![]),
+            MessageContent::Parts(parts) => {
+                let mut text_parts = Vec::new();
+                let mut images = Vec::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => text_parts.push(text.clone()),
+                        ContentPart::ImageUrl { image_url } => {
+                            let img = decode_image_url(&image_url.url)?;
+                            images.push(img);
+                        }
+                    }
+                }
+                (text_parts.join("\n"), images)
+            }
+        };
+
+        Ok(ChatMessage {
+            role: self.role.clone(),
+            content: text,
+            images,
+        })
+    }
+}
+
+impl ChatCompletionRequest {
+    /// Convert API messages to internal ChatMessage format, decoding images.
+    pub fn to_internal_messages(&self) -> Result<Vec<ChatMessage>, crate::error::SwarmError> {
+        self.messages.iter().map(|m| m.to_chat_message()).collect()
+    }
+}
+
+/// Decode a base64 data URI image to raw RGB pixels.
+fn decode_image_url(url: &str) -> Result<ImageData, crate::error::SwarmError> {
+    let base64_data = if let Some(rest) = url.strip_prefix("data:") {
+        if let Some(comma_pos) = rest.find(',') {
+            let header = &rest[..comma_pos];
+            if !header.contains("base64") {
+                return Err(crate::error::SwarmError::Config(
+                    "Only base64 data URIs are supported for image_url".into(),
+                ));
+            }
+            &rest[comma_pos + 1..]
+        } else {
+            return Err(crate::error::SwarmError::Config(
+                "Invalid data URI format".into(),
+            ));
+        }
+    } else {
+        return Err(crate::error::SwarmError::Config(
+            "Only data: URIs are supported for image_url (not remote URLs)".into(),
+        ));
+    };
+
+    if base64_data.len() > MAX_IMAGE_BASE64_BYTES * 4 / 3 + 4 {
+        return Err(crate::error::SwarmError::Config(format!(
+            "Image too large (max {}MB)",
+            MAX_IMAGE_BASE64_BYTES / (1024 * 1024)
+        )));
+    }
+
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data)
+        .map_err(|e| crate::error::SwarmError::Config(format!("Invalid base64 image: {e}")))?;
+
+    if bytes.len() > MAX_IMAGE_BASE64_BYTES {
+        return Err(crate::error::SwarmError::Config(format!(
+            "Decoded image too large: {}MB (max {}MB)",
+            bytes.len() / (1024 * 1024),
+            MAX_IMAGE_BASE64_BYTES / (1024 * 1024)
+        )));
+    }
+
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| crate::error::SwarmError::Config(format!("Failed to decode image: {e}")))?;
+
+    let rgb = img.to_rgb8();
+    let (width, height) = (rgb.width(), rgb.height());
+
+    Ok(ImageData {
+        rgb_bytes: rgb.into_raw(),
+        width,
+        height,
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,6 +321,9 @@ pub async fn chat_completions(
         }
     }
 
+    // Convert API messages to internal format (decode base64 images if present)
+    let internal_messages = req.to_internal_messages().map_err(ApiError)?;
+
     let request_id = format!("swarm-{}", uuid::Uuid::new_v4().simple());
     let created = chrono::Utc::now().timestamp();
 
@@ -191,10 +332,12 @@ pub async fn chat_completions(
         stats.requests_made += 1;
     }
 
+    let image_count: usize = internal_messages.iter().map(|m| m.images.len()).sum();
     tracing::info!(
         request_id = %request_id,
         model = %req.model,
-        messages = req.messages.len(),
+        messages = internal_messages.len(),
+        images = image_count,
         stream = req.stream,
         "Chat completion request"
     );
@@ -229,12 +372,20 @@ pub async fn chat_completions(
                         router_tx.clone(),
                         &state,
                         &req,
+                        internal_messages.clone(),
                         request_id,
                         created,
                     )
                     .await;
                 } else {
-                    return router_inference(router_tx.clone(), &req, request_id, created).await;
+                    return router_inference(
+                        router_tx.clone(),
+                        &req,
+                        internal_messages.clone(),
+                        request_id,
+                        created,
+                    )
+                    .await;
                 }
             } else {
                 return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
@@ -273,13 +424,20 @@ pub async fn chat_completions(
                             router_tx.clone(),
                             &state,
                             &req,
+                            internal_messages.clone(),
                             request_id,
                             created,
                         )
                         .await;
                     } else {
-                        return router_inference(router_tx.clone(), &req, request_id, created)
-                            .await;
+                        return router_inference(
+                            router_tx.clone(),
+                            &req,
+                            internal_messages.clone(),
+                            request_id,
+                            created,
+                        )
+                        .await;
                     }
                 }
                 break;
@@ -315,12 +473,20 @@ pub async fn chat_completions(
                     router_tx.clone(),
                     &state,
                     &req,
+                    internal_messages.clone(),
                     request_id,
                     created,
                 )
                 .await;
             } else {
-                return router_inference(router_tx.clone(), &req, request_id, created).await;
+                return router_inference(
+                    router_tx.clone(),
+                    &req,
+                    internal_messages.clone(),
+                    request_id,
+                    created,
+                )
+                .await;
             }
         }
     }
@@ -337,7 +503,7 @@ pub async fn chat_completions(
             None => (None, String::new(), String::new()),
         }
     };
-    let prompt = chat_template::build_prompt(&req.messages, tmpl.as_deref(), &bos, &eos);
+    let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
     let params = req.to_sampling_params();
 
     if req.stream {
@@ -349,7 +515,14 @@ pub async fn chat_completions(
         )
     } else if let Some(router_tx) = &state.router_tx {
         // Non-streaming: route through InferenceRouter for priority queueing
-        router_inference(router_tx.clone(), &req, request_id, created).await
+        router_inference(
+            router_tx.clone(),
+            &req,
+            internal_messages,
+            request_id,
+            created,
+        )
+        .await
     } else {
         // Fallback: direct executor path
         Ok(
@@ -560,6 +733,7 @@ async fn forward_to_peer(
 async fn router_inference(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     req: &ChatCompletionRequest,
+    messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
@@ -568,13 +742,14 @@ async fn router_inference(
     let inference_req = InferenceRequest {
         id: uuid::Uuid::new_v4(),
         model_id: ModelId(req.model.clone()),
-        messages: req.messages.clone(),
+        messages,
         sampling_params: req.to_sampling_params(),
         stream: false,
         requester: NodeId([0u8; 32]), // Local API request
         priority: PriorityTier::Silver,
         created_at: chrono::Utc::now(),
         session_id: req.session_id.clone(),
+        lora_adapter: req.lora_adapter.clone(),
     };
 
     router_tx
@@ -628,6 +803,7 @@ async fn router_inference_stream(
     router_tx: tokio::sync::mpsc::Sender<RouterCommand>,
     _state: &AppState,
     req: &ChatCompletionRequest,
+    messages: Vec<ChatMessage>,
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
@@ -637,13 +813,14 @@ async fn router_inference_stream(
     let inference_req = InferenceRequest {
         id: uuid::Uuid::new_v4(),
         model_id: ModelId(req.model.clone()),
-        messages: req.messages.clone(),
+        messages,
         sampling_params: req.to_sampling_params(),
         stream: true,
         requester: NodeId([0u8; 32]),
         priority: PriorityTier::Silver,
         created_at: chrono::Utc::now(),
         session_id: req.session_id.clone(),
+        lora_adapter: req.lora_adapter.clone(),
     };
 
     router_tx

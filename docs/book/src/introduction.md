@@ -1,0 +1,62 @@
+# SwarmLLM
+
+**Decentralized peer-to-peer LLM inference network.**
+
+SwarmLLM is a single Rust binary that turns your computer into a node in a distributed AI inference network. Multiple nodes collaborate to run large language models that no single machine could handle alone.
+
+## Key Features
+
+- **Single Binary** — No Python, no Docker required. Download and run.
+- **OpenAI-Compatible API** — Drop-in replacement for `POST /v1/chat/completions`. Works with any tool that supports the OpenAI format.
+- **Shard-Only Operation** — Nodes only need small pieces (shards) of a model, not the full multi-gigabyte file.
+- **E2E Encryption** — All peer-to-peer communication is encrypted with X25519 + ChaCha20-Poly1305 with forward secrecy.
+- **Credit Incentives** — Earn credits by serving inference, hosting shards, and relaying traffic. Higher credits = higher priority.
+- **VRAM-Aware** — Automatic shard management based on available GPU memory.
+- **Zero-Config Networking** — LAN discovery via mDNS, peer exchange, persistent peer cache, invite codes.
+- **Web Dashboard** — Built-in admin UI and chat interface. No separate frontend server needed.
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Your Computer                       │
+│                                                     │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │  P2P     │  │  HTTP API    │  │  Admin UI    │  │
+│  │  Node    │  │  Server      │  │  (embedded)  │  │
+│  │  (QUIC)  │  │  (Axum)      │  │              │  │
+│  └──────────┘  └──────────────┘  └──────────────┘  │
+│                                                     │
+│         All running on a single port (8800)          │
+└─────────────────────────────────────────────────────┘
+```
+
+Each SwarmLLM node:
+1. Connects to the P2P network over QUIC/UDP
+2. Downloads and hosts shard files for popular models
+3. Participates in distributed inference pipelines
+4. Serves an OpenAI-compatible HTTP API on the same port
+5. Provides a web dashboard for monitoring and chat
+
+## Quick Start
+
+```bash
+# Download and run (Linux)
+tar xzf swarmllm-linux-x86_64.tar.gz
+cd swarmllm-linux-x86_64
+./swarmllm run
+
+# Open http://localhost:8800 in your browser
+```
+
+See the [Getting Started](./getting-started.md) chapter for full instructions.
+
+## Platform Support
+
+| Platform | Priority | GPU Support |
+|---|---|---|
+| Linux x86_64 | P0 | CUDA + ROCm |
+| macOS aarch64 (Apple Silicon) | P1 | Metal (via llama.cpp) |
+| Windows x86_64 | P1 | CUDA |
+| macOS x86_64 (Intel) | P2 | CPU only |
+| Linux aarch64 | P3 | CPU only |

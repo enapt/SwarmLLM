@@ -1,0 +1,29 @@
+# Prometheus configuration for SwarmLLM monitoring.
+#
+# Usage:
+#   prometheus --config.file=prometheus.yml
+#
+# SwarmLLM exposes metrics at GET /metrics (no auth required).
+# Default scrape interval of 15s matches the metric update cadence.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "swarmllm"
+    # Single node (default)
+    static_configs:
+      - targets: ["localhost:8800"]
+        labels:
+          instance: "node-1"
+
+    # For multiple nodes, add more targets:
+    # static_configs:
+    #   - targets: ["node1:8800", "node2:8800", "node3:8800"]
+
+    # Or use file-based service discovery for dynamic clusters:
+    # file_sd_configs:
+    #   - files:
+    #       - "swarmllm-targets.json"
+    #     refresh_interval: 30s

@@ -161,6 +161,16 @@ pub struct NetworkConfig {
     /// Set to a custom value (e.g. "my-private-net") for private networks.
     #[serde(default)]
     pub gossip_network_id: Option<String>,
+    /// Enable zstd compression for tensor payloads sent over the network.
+    /// Only payloads larger than `tensor_compress_threshold` bytes are compressed.
+    #[serde(default = "default_true")]
+    pub tensor_compression: bool,
+    /// Zstd compression level (1-22, default 1 for speed).
+    #[serde(default = "default_tensor_compress_level")]
+    pub tensor_compress_level: i32,
+    /// Minimum payload size in bytes before compression is applied (default 1024).
+    #[serde(default = "default_tensor_compress_threshold")]
+    pub tensor_compress_threshold: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -207,6 +217,12 @@ pub struct InferenceConfig {
     /// least-recently-used models are evicted. Default: None (unlimited).
     #[serde(default)]
     pub max_split_model_memory_mb: Option<u64>,
+    /// Maximum number of prefix cache entries for cross-request KV state sharing.
+    /// When multiple requests share the same system prompt, the KV-cache state
+    /// for the prefix is computed once and reused. Set to 0 to disable.
+    /// Default: 32.
+    #[serde(default = "default_prefix_cache_entries")]
+    pub prefix_cache_max_entries: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -279,6 +295,62 @@ fn default_keep_versions() -> u32 {
     3
 }
 
+/// Configurable credit earn/spend rates per pool or globally.
+/// All values are in credits per unit of work.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreditRateConfig {
+    /// Credits earned per layer per token for serving inference.
+    #[serde(default = "default_rate_inference_serve")]
+    pub inference_serve: i64,
+    /// Credits spent per layer per token for consuming inference.
+    #[serde(default = "default_rate_inference_consume")]
+    pub inference_consume: i64,
+    /// Credits earned per GB per hour for hosting shards.
+    #[serde(default = "default_rate_shard_hosting")]
+    pub shard_hosting: i64,
+    /// Credits earned per GB transferred for seeding shards.
+    #[serde(default = "default_rate_shard_seeding")]
+    pub shard_seeding: i64,
+    /// Credits earned per connection hour for relay service.
+    #[serde(default = "default_rate_relay_service")]
+    pub relay_service: i64,
+    /// Credits deducted as penalty for serve failures.
+    #[serde(default = "default_rate_penalty")]
+    pub penalty_serve_failure: i64,
+}
+
+impl Default for CreditRateConfig {
+    fn default() -> Self {
+        Self {
+            inference_serve: default_rate_inference_serve(),
+            inference_consume: default_rate_inference_consume(),
+            shard_hosting: default_rate_shard_hosting(),
+            shard_seeding: default_rate_shard_seeding(),
+            relay_service: default_rate_relay_service(),
+            penalty_serve_failure: default_rate_penalty(),
+        }
+    }
+}
+
+fn default_rate_inference_serve() -> i64 {
+    10
+}
+fn default_rate_inference_consume() -> i64 {
+    10
+}
+fn default_rate_shard_hosting() -> i64 {
+    1
+}
+fn default_rate_shard_seeding() -> i64 {
+    5
+}
+fn default_rate_relay_service() -> i64 {
+    2
+}
+fn default_rate_penalty() -> i64 {
+    50
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PoolConfig {
     #[serde(default = "default_max_pool_size")]
@@ -289,6 +361,9 @@ pub struct PoolConfig {
     pub rate_limit_per_hour: u32,
     #[serde(default = "default_pool_gossip_interval")]
     pub gossip_interval_secs: u64,
+    /// Global credit rate overrides. Pools can further override these per-pool.
+    #[serde(default)]
+    pub credit_rates: CreditRateConfig,
 }
 
 impl Default for PoolConfig {
@@ -298,6 +373,7 @@ impl Default for PoolConfig {
             invitation_ttl_hours: default_invitation_ttl_hours(),
             rate_limit_per_hour: default_pool_rate_limit(),
             gossip_interval_secs: default_pool_gossip_interval(),
+            credit_rates: CreditRateConfig::default(),
         }
     }
 }
@@ -524,6 +600,14 @@ fn default_max_peers() -> u32 {
     200
 }
 
+fn default_tensor_compress_level() -> i32 {
+    1
+}
+
+fn default_tensor_compress_threshold() -> usize {
+    1024
+}
+
 fn default_session_timeout() -> u64 {
     600
 }
@@ -550,6 +634,10 @@ fn default_max_batch_size() -> u32 {
 
 fn default_batch_timeout_ms() -> u64 {
     50
+}
+
+fn default_prefix_cache_entries() -> usize {
+    32
 }
 
 fn default_relay_circuit_duration() -> u64 {
@@ -627,6 +715,9 @@ impl Default for NetworkConfig {
             auto_relay: true,
             enable_mdns: true,
             gossip_network_id: None,
+            tensor_compression: true,
+            tensor_compress_level: default_tensor_compress_level(),
+            tensor_compress_threshold: default_tensor_compress_threshold(),
         }
     }
 }
@@ -648,6 +739,7 @@ impl Default for InferenceConfig {
             max_batch_size: default_max_batch_size(),
             batch_timeout_ms: default_batch_timeout_ms(),
             max_split_model_memory_mb: None,
+            prefix_cache_max_entries: default_prefix_cache_entries(),
         }
     }
 }

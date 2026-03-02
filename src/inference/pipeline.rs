@@ -646,7 +646,9 @@ impl PipelineExecutor {
 
         // Try batch path for decode steps (seq_num > 0) when batching is enabled
         // and this is NOT the first segment (which needs tokenization under the model lock).
-        let use_batch = batch_forwarder.is_some() && sequence_num > 0;
+        // LoRA adapters require per-request weight deltas, incompatible with batched MLP.
+        let use_batch =
+            batch_forwarder.is_some() && sequence_num > 0 && self.request.lora_adapter.is_none();
 
         if use_batch {
             let forwarder = batch_forwarder.unwrap();
@@ -736,23 +738,157 @@ impl PipelineExecutor {
         let is_first = split_model.layer_start == 0;
         let is_last = split_model.layer_end >= split_model.total_layers;
 
-        // Convert activation bytes to a candle Tensor
-        let input_tensor = if is_first {
+        // Convert activation bytes to a candle Tensor, with prefix cache support.
+        // For prefill (sequence_num==0, is_first): try to reuse cached KV state
+        // for the system prompt prefix, only computing the new (suffix) tokens.
+        let (input_tensor, effective_index_pos) = if is_first {
             if sequence_num == 0 {
                 // Prefill: activation_bytes contain the prompt text from execute_distributed.
-                // Tokenize directly from bytes — no need to rebuild the prompt.
                 let prompt = String::from_utf8_lossy(activation_bytes);
-                let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
+                let all_tokens: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
                     tokenizer.encode(&prompt)
                 } else {
                     prompt.bytes().map(|b| b as i64).collect()
                 };
-                candle_core::Tensor::from_vec(
-                    token_ids.clone(),
-                    &[1, token_ids.len()],
-                    &candle_core::Device::Cpu,
-                )
-                .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+
+                // Try prefix caching for system prompt
+                let model_key = format!(
+                    "{}-{}-{}",
+                    split_model.layer_start, split_model.layer_end, split_model.total_layers
+                );
+                let num_layers = split_model.num_layers();
+                let prefix_cache_max = self.shared_state.config.inference.prefix_cache_max_entries;
+
+                let prefix_result = if prefix_cache_max > 0 && split_model.tokenizer().is_some() {
+                    self.try_prefix_lookup(&split_model, &all_tokens)
+                } else {
+                    None
+                };
+
+                if let Some((prefix_hash, prefix_len)) = prefix_result {
+                    let mut cache_guard = self.shared_state.prefix_cache.lock().unwrap();
+
+                    if let Some((layer_kv, cached_prefix_len)) =
+                        cache_guard.get(&prefix_hash, &model_key)
+                    {
+                        // HIT: pre-populate KV cache store with cached prefix KV
+                        let prefix_len = cached_prefix_len;
+                        let layer_kv_cloned: Vec<(candle_core::Tensor, candle_core::Tensor)> =
+                            layer_kv
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                        drop(cache_guard);
+
+                        {
+                            let mut store_entry = self.shared_state.kv_cache_store.get_or_create(
+                                &model_key,
+                                &request_id_str,
+                                num_layers,
+                            );
+                            for (i, (cached_k, cached_v)) in layer_kv_cloned.iter().enumerate() {
+                                let mut kv =
+                                    candle_nn::kv_cache::KvCache::new(2, split_model.max_seq_len());
+                                let _ = kv.append(cached_k, cached_v).map_err(|e| {
+                                    SwarmError::Internal(format!("Prefix cache restore: {e}"))
+                                })?;
+                                store_entry.layers[i] = Some(kv);
+                            }
+                            store_entry.last_accessed = std::time::Instant::now();
+                        }
+
+                        tracing::info!(
+                            request_id = %self.request.id,
+                            prefix_len,
+                            suffix_len = all_tokens.len() - prefix_len,
+                            "Prefix cache HIT — skipping prefix prefill"
+                        );
+
+                        let suffix_tokens = all_tokens[prefix_len..].to_vec();
+                        let tensor = candle_core::Tensor::from_vec(
+                            suffix_tokens.clone(),
+                            &[1, suffix_tokens.len()],
+                            &candle_core::Device::Cpu,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
+                        (tensor, prefix_len)
+                    } else {
+                        drop(cache_guard);
+
+                        // MISS: process prefix first, cache KV, then process suffix
+                        let prefix_tokens = all_tokens[..prefix_len].to_vec();
+                        let suffix_tokens = all_tokens[prefix_len..].to_vec();
+
+                        let prefix_tensor = candle_core::Tensor::from_vec(
+                            prefix_tokens,
+                            &[1, prefix_len],
+                            &candle_core::Device::Cpu,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
+
+                        // Forward prefix through model (populates KV cache)
+                        let _prefix_out = split_model.forward(
+                            &prefix_tensor,
+                            0,
+                            &self.shared_state.kv_cache_store,
+                            &request_id_str,
+                        )?;
+
+                        // Extract and cache prefix KV state
+                        {
+                            let entry = self.shared_state.kv_cache_store.get_or_create(
+                                &model_key,
+                                &request_id_str,
+                                num_layers,
+                            );
+                            let layer_kv: Vec<(candle_core::Tensor, candle_core::Tensor)> = entry
+                                .layers
+                                .iter()
+                                .filter_map(|c: &Option<candle_nn::kv_cache::KvCache>| {
+                                    c.as_ref().and_then(|cache: &candle_nn::kv_cache::KvCache| {
+                                        let k = cache.k().ok()??;
+                                        let v = cache.v().ok()??;
+                                        Some((k.clone(), v.clone()))
+                                    })
+                                })
+                                .collect();
+
+                            if layer_kv.len() == num_layers {
+                                let mut cache_guard =
+                                    self.shared_state.prefix_cache.lock().unwrap();
+                                cache_guard.insert(
+                                    prefix_hash,
+                                    model_key.clone(),
+                                    layer_kv,
+                                    prefix_len,
+                                );
+                                tracing::info!(
+                                    request_id = %self.request.id,
+                                    prefix_len,
+                                    suffix_len = suffix_tokens.len(),
+                                    "Prefix cache MISS — cached for future reuse"
+                                );
+                            }
+                        }
+
+                        let tensor = candle_core::Tensor::from_vec(
+                            suffix_tokens.clone(),
+                            &[1, suffix_tokens.len()],
+                            &candle_core::Device::Cpu,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
+                        (tensor, prefix_len)
+                    }
+                } else {
+                    // No prefix-cacheable system prompt — normal path
+                    let tensor = candle_core::Tensor::from_vec(
+                        all_tokens.clone(),
+                        &[1, all_tokens.len()],
+                        &candle_core::Device::Cpu,
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?;
+                    (tensor, index_pos)
+                }
             } else {
                 // Decode step: activation_bytes contains a single i64 token ID (8 bytes LE)
                 let token_id = if activation_bytes.len() >= 8 {
@@ -760,20 +896,33 @@ impl PipelineExecutor {
                 } else {
                     0i64
                 };
-                candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
-                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
+                let tensor = candle_core::Tensor::from_vec(
+                    vec![token_id],
+                    &[1, 1],
+                    &candle_core::Device::Cpu,
+                )
+                .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?;
+                (tensor, index_pos)
             }
         } else {
             // Non-first segment: input is hidden states from previous segment
-            split::bytes_to_tensor(activation_bytes)?
+            (split::bytes_to_tensor(activation_bytes)?, index_pos)
         };
 
+        // Look up LoRA adapter if requested
+        let lora_adapter = self
+            .request
+            .lora_adapter
+            .as_ref()
+            .and_then(|id| self.shared_state.adapter_registry.get(id));
+
         // Run the forward pass with per-request KV-cache isolation
-        let output = split_model.forward(
+        let output = split_model.forward_with_lora(
             &input_tensor,
-            index_pos,
+            effective_index_pos,
             &self.shared_state.kv_cache_store,
             &request_id_str,
+            lora_adapter.as_deref(),
         )?;
 
         // Track local layer-forward participation and persist earned credits
@@ -827,6 +976,38 @@ impl PipelineExecutor {
                 activations: activation_bytes,
             })
         }
+    }
+
+    /// Try to identify a prefix-cacheable system prompt in the request.
+    ///
+    /// Returns `Some((blake3_hash, prefix_token_count))` if the request has system
+    /// messages whose tokens align with the start of the full prompt tokens.
+    fn try_prefix_lookup(
+        &self,
+        model: &crate::inference::split::SplitModel,
+        all_tokens: &[i64],
+    ) -> Option<([u8; 32], usize)> {
+        let prefix_text =
+            crate::inference::prefix_cache::build_system_prefix(&self.request.messages)?;
+
+        let tokenizer = model.tokenizer()?;
+        let prefix_tokens = tokenizer.encode(&prefix_text);
+        let prefix_len = prefix_tokens.len();
+
+        // Verify: prefix must be non-empty, shorter than full prompt, and tokens align
+        if prefix_len == 0 || prefix_len >= all_tokens.len() {
+            return None;
+        }
+        if all_tokens[..prefix_len] != prefix_tokens[..] {
+            tracing::debug!(
+                request_id = %self.request.id,
+                "Prefix cache: token alignment mismatch, skipping"
+            );
+            return None;
+        }
+
+        let hash = crate::inference::prefix_cache::hash_token_ids(&prefix_tokens);
+        Some((hash, prefix_len))
     }
 
     /// Wait for a remote segment to return its result via the oneshot channel.
@@ -1051,6 +1232,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: "hello".into(),
+                images: vec![],
             }],
             sampling_params: SamplingParams::default(),
             stream: false,
@@ -1058,6 +1240,7 @@ mod tests {
             priority: PriorityTier::Silver,
             created_at: chrono::Utc::now(),
             session_id: None,
+            lora_adapter: None,
         }
     }
 

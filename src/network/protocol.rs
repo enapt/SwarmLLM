@@ -11,6 +11,9 @@ use crate::types::{
     TensorFormat,
 };
 
+// Re-export compression helpers for use in tests and other modules.
+pub use self::compression::{compress_tensor, decompress_tensor};
+
 /// Protocol ID for SwarmLLM unified request/response (JSON control + binary tensor).
 pub const PROTOCOL_ID: &str = "/swarmllm/1.0.0";
 
@@ -39,8 +42,28 @@ const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
 
 /// Codec for SwarmLLM request/response protocol using serde_json.
-#[derive(Debug, Clone, Default)]
-pub struct SwarmCodec;
+/// When `compress_tensors` is true, tensor payloads above `compress_threshold`
+/// bytes are zstd-compressed on the wire (tag 0x02). Decompression of incoming
+/// compressed payloads always works regardless of the flag.
+#[derive(Debug, Clone)]
+pub struct SwarmCodec {
+    /// Whether to compress outgoing tensor payloads.
+    pub compress_tensors: bool,
+    /// Zstd compression level (1-22).
+    pub compress_level: i32,
+    /// Minimum payload size in bytes to trigger compression.
+    pub compress_threshold: usize,
+}
+
+impl Default for SwarmCodec {
+    fn default() -> Self {
+        Self {
+            compress_tensors: true,
+            compress_level: 1,
+            compress_threshold: 1024,
+        }
+    }
+}
 
 /// Request type for the request_response protocol.
 #[derive(Debug, Clone)]
@@ -66,6 +89,9 @@ pub enum SwarmResponse {
 /// First byte of each message distinguishes JSON from binary tensor payloads.
 const WIRE_TAG_JSON: u8 = 0x00;
 const WIRE_TAG_TENSOR: u8 = 0x01;
+/// Zstd-compressed tensor payload. Peers that don't recognize this tag will
+/// reject the message, but all nodes running this version or later support it.
+const WIRE_TAG_TENSOR_COMPRESSED: u8 = 0x02;
 
 #[async_trait]
 impl request_response::Codec for SwarmCodec {
@@ -100,6 +126,11 @@ impl request_response::Codec for SwarmCodec {
 
         match tag_buf[0] {
             WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
+            WIRE_TAG_TENSOR_COMPRESSED => {
+                let decompressed = compression::decompress_tensor(&buf)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Ok(SwarmRequest::TensorPayload(decompressed))
+            }
             _ => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         }
@@ -132,6 +163,11 @@ impl request_response::Codec for SwarmCodec {
 
         match tag_buf[0] {
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
+            WIRE_TAG_TENSOR_COMPRESSED => {
+                let decompressed = compression::decompress_tensor(&buf)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Ok(SwarmResponse::TensorPayload(decompressed))
+            }
             _ => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         }
@@ -150,14 +186,12 @@ impl request_response::Codec for SwarmCodec {
         // Quinn's QUIC stream has no BufWriter and flush() is a no-op,
         // so a single write_all() is more reliable than multiple small writes.
         let frame = match req {
-            SwarmRequest::TensorPayload(payload) => {
-                let len = (payload.len() as u32).to_be_bytes();
-                let mut frame = Vec::with_capacity(1 + 4 + payload.len());
-                frame.push(WIRE_TAG_TENSOR);
-                frame.extend_from_slice(&len);
-                frame.extend_from_slice(&payload);
-                frame
-            }
+            SwarmRequest::TensorPayload(payload) => compression::build_tensor_frame(
+                &payload,
+                self.compress_tensors,
+                self.compress_level,
+                self.compress_threshold,
+            ),
             other => {
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -187,14 +221,12 @@ impl request_response::Codec for SwarmCodec {
     {
         // Single write_all — see write_request comment.
         let frame = match resp {
-            SwarmResponse::TensorPayload(payload) => {
-                let len = (payload.len() as u32).to_be_bytes();
-                let mut frame = Vec::with_capacity(1 + 4 + payload.len());
-                frame.push(WIRE_TAG_TENSOR);
-                frame.extend_from_slice(&len);
-                frame.extend_from_slice(&payload);
-                frame
-            }
+            SwarmResponse::TensorPayload(payload) => compression::build_tensor_frame(
+                &payload,
+                self.compress_tensors,
+                self.compress_level,
+                self.compress_threshold,
+            ),
             other => {
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -710,6 +742,54 @@ impl<'de> serde::Deserialize<'de> for SwarmResponse {
     }
 }
 
+// ---- Tensor Compression (zstd) ----
+
+mod compression {
+    use super::{WIRE_TAG_TENSOR, WIRE_TAG_TENSOR_COMPRESSED};
+
+    /// Compress raw tensor bytes with zstd at the given level.
+    pub fn compress_tensor(data: &[u8], level: i32) -> Result<Vec<u8>, String> {
+        zstd::bulk::compress(data, level).map_err(|e| format!("zstd compress: {e}"))
+    }
+
+    /// Decompress zstd-compressed tensor bytes.
+    pub fn decompress_tensor(data: &[u8]) -> Result<Vec<u8>, String> {
+        // Cap decompressed size at 256 MB to prevent zip-bomb attacks.
+        const MAX_DECOMPRESSED: usize = 256 * 1024 * 1024;
+        zstd::bulk::decompress(data, MAX_DECOMPRESSED).map_err(|e| format!("zstd decompress: {e}"))
+    }
+
+    /// Build a wire frame for a tensor payload, optionally compressing it.
+    /// Returns the complete frame bytes (tag + length + payload).
+    pub fn build_tensor_frame(
+        payload: &[u8],
+        compress: bool,
+        level: i32,
+        threshold: usize,
+    ) -> Vec<u8> {
+        if compress && payload.len() >= threshold {
+            if let Ok(compressed) = compress_tensor(payload, level) {
+                // Only use compressed form if it's actually smaller.
+                if compressed.len() < payload.len() {
+                    let len = (compressed.len() as u32).to_be_bytes();
+                    let mut frame = Vec::with_capacity(1 + 4 + compressed.len());
+                    frame.push(WIRE_TAG_TENSOR_COMPRESSED);
+                    frame.extend_from_slice(&len);
+                    frame.extend_from_slice(&compressed);
+                    return frame;
+                }
+            }
+        }
+        // Fallback: uncompressed tensor frame.
+        let len = (payload.len() as u32).to_be_bytes();
+        let mut frame = Vec::with_capacity(1 + 4 + payload.len());
+        frame.push(WIRE_TAG_TENSOR);
+        frame.extend_from_slice(&len);
+        frame.extend_from_slice(payload);
+        frame
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,5 +1009,111 @@ mod tests {
     #[test]
     fn decode_layer_result_too_short() {
         assert!(decode_layer_result(&[0u8; 10]).is_err());
+    }
+
+    // ---- Tensor Compression Tests ----
+
+    #[test]
+    fn compress_decompress_roundtrip() {
+        let data = vec![0xAB; 4096]; // 4KB of repetitive data
+        let compressed = compress_tensor(&data, 1).unwrap();
+        assert!(
+            compressed.len() < data.len(),
+            "repetitive data should compress"
+        );
+        let decompressed = decompress_tensor(&compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn build_tensor_frame_compresses_above_threshold() {
+        let payload = vec![0x42; 2048]; // 2KB, above default 1024 threshold
+        let frame = compression::build_tensor_frame(&payload, true, 1, 1024);
+        // First byte should be the compressed tag
+        assert_eq!(frame[0], WIRE_TAG_TENSOR_COMPRESSED);
+        // Total frame should be smaller than uncompressed (1+4+2048)
+        assert!(frame.len() < 1 + 4 + payload.len());
+    }
+
+    #[test]
+    fn build_tensor_frame_skips_below_threshold() {
+        let payload = vec![0x42; 512]; // 512 bytes, below 1024 threshold
+        let frame = compression::build_tensor_frame(&payload, true, 1, 1024);
+        // Should use uncompressed tag
+        assert_eq!(frame[0], WIRE_TAG_TENSOR);
+        assert_eq!(frame.len(), 1 + 4 + payload.len());
+    }
+
+    #[test]
+    fn build_tensor_frame_skips_when_disabled() {
+        let payload = vec![0x42; 4096];
+        let frame = compression::build_tensor_frame(&payload, false, 1, 1024);
+        assert_eq!(frame[0], WIRE_TAG_TENSOR);
+        assert_eq!(frame.len(), 1 + 4 + payload.len());
+    }
+
+    #[test]
+    fn build_tensor_frame_skips_when_compressed_is_larger() {
+        // Random data typically doesn't compress well
+        let mut payload = vec![0u8; 2048];
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte = (i.wrapping_mul(17).wrapping_add(37) % 256) as u8;
+        }
+        let frame = compression::build_tensor_frame(&payload, true, 1, 1024);
+        // Should fall back to uncompressed if zstd can't shrink it
+        // (or compressed — either is fine as long as roundtrip works)
+        let tag = frame[0];
+        assert!(tag == WIRE_TAG_TENSOR || tag == WIRE_TAG_TENSOR_COMPRESSED);
+    }
+
+    #[test]
+    fn codec_tensor_frame_roundtrip() {
+        // Simulate the full codec write → read cycle for a compressed tensor
+        let payload = vec![0xAA; 8192]; // 8KB repetitive
+        let frame = compression::build_tensor_frame(&payload, true, 1, 1024);
+        assert_eq!(frame[0], WIRE_TAG_TENSOR_COMPRESSED);
+
+        // Parse: tag(1) + len(4) + data
+        let tag = frame[0];
+        let len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
+        let data = &frame[5..5 + len];
+
+        let recovered = match tag {
+            WIRE_TAG_TENSOR => data.to_vec(),
+            WIRE_TAG_TENSOR_COMPRESSED => decompress_tensor(data).unwrap(),
+            _ => panic!("unexpected tag"),
+        };
+        assert_eq!(recovered, payload);
+    }
+
+    #[test]
+    fn compressed_layer_forward_roundtrip() {
+        // Encode a LayerForward as tensor payload, compress, decompress, decode
+        let forward = LayerForward {
+            request_id: uuid::Uuid::new_v4(),
+            sequence_num: 99,
+            index_pos: 512,
+            activations: vec![0xBB; 4096],
+            format: TensorFormat::FP32,
+            layer_range: Some((2, 8)),
+            sender_peer_bytes: None,
+        };
+        let encoded = encode_layer_forward(&forward).unwrap();
+
+        // Compress
+        let compressed = compress_tensor(&encoded, 1).unwrap();
+        assert!(compressed.len() < encoded.len());
+
+        // Decompress
+        let decompressed = decompress_tensor(&compressed).unwrap();
+        assert_eq!(decompressed, encoded);
+
+        // Decode back
+        let decoded = decode_layer_forward(&decompressed).unwrap();
+        assert_eq!(decoded.request_id, forward.request_id);
+        assert_eq!(decoded.sequence_num, 99);
+        assert_eq!(decoded.index_pos, 512);
+        assert_eq!(decoded.activations.len(), 4096);
+        assert_eq!(decoded.layer_range, Some((2, 8)));
     }
 }

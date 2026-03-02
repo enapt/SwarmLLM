@@ -975,10 +975,12 @@ mod tests {
             ChatMessage {
                 role: Role::System,
                 content: "You are helpful.".into(),
+                images: vec![],
             },
             ChatMessage {
                 role: Role::User,
                 content: "Hi".into(),
+                images: vec![],
             },
         ];
         let prompt = build_chat_prompt(&messages);

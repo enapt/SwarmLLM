@@ -1,8 +1,9 @@
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 
 use crate::api::server::AppState;
+use crate::config::CreditRateConfig;
 use crate::error::ApiError;
 use crate::pool::types::PoolCommand;
 use crate::types::NodeId;
@@ -304,4 +305,123 @@ pub struct PoolAcceptRequest {
 #[derive(Debug, Deserialize)]
 pub struct PoolRemoveRequest {
     pub node_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolRatesRequest {
+    pub inference_serve: Option<i64>,
+    pub inference_consume: Option<i64>,
+    pub shard_hosting: Option<i64>,
+    pub shard_seeding: Option<i64>,
+    pub relay_service: Option<i64>,
+    pub penalty_serve_failure: Option<i64>,
+}
+
+/// GET /api/admin/pools/:id/rates — Get credit rates for a pool.
+pub async fn pool_rates_get(
+    State(state): State<AppState>,
+    Path(pool_id_hex): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pool_id = parse_node_id(&pool_id_hex)?;
+
+    let rates = state
+        .shared_state
+        .pool_credit_rates
+        .get(&pool_id)
+        .map(|r| r.value().clone())
+        .unwrap_or_else(|| state.config.pool.credit_rates.clone());
+
+    Ok(Json(serde_json::json!({
+        "pool_id": pool_id_hex,
+        "rates": {
+            "inference_serve": rates.inference_serve,
+            "inference_consume": rates.inference_consume,
+            "shard_hosting": rates.shard_hosting,
+            "shard_seeding": rates.shard_seeding,
+            "relay_service": rates.relay_service,
+            "penalty_serve_failure": rates.penalty_serve_failure,
+        }
+    })))
+}
+
+/// PUT /api/admin/pools/:id/rates — Set credit rates for a pool.
+pub async fn pool_rates_set(
+    State(state): State<AppState>,
+    Path(pool_id_hex): Path<String>,
+    Json(body): Json<PoolRatesRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pool_id = parse_node_id(&pool_id_hex)?;
+    let defaults = CreditRateConfig::default();
+
+    // Merge: use provided values or fall back to current/defaults
+    let current = state
+        .shared_state
+        .pool_credit_rates
+        .get(&pool_id)
+        .map(|r| r.value().clone())
+        .unwrap_or_else(|| state.config.pool.credit_rates.clone());
+
+    let new_rates = CreditRateConfig {
+        inference_serve: body.inference_serve.unwrap_or(current.inference_serve),
+        inference_consume: body.inference_consume.unwrap_or(current.inference_consume),
+        shard_hosting: body.shard_hosting.unwrap_or(current.shard_hosting),
+        shard_seeding: body.shard_seeding.unwrap_or(current.shard_seeding),
+        relay_service: body.relay_service.unwrap_or(current.relay_service),
+        penalty_serve_failure: body
+            .penalty_serve_failure
+            .unwrap_or(current.penalty_serve_failure),
+    };
+
+    // Validate: all rates must be positive
+    let all_rates = [
+        ("inference_serve", new_rates.inference_serve),
+        ("inference_consume", new_rates.inference_consume),
+        ("shard_hosting", new_rates.shard_hosting),
+        ("shard_seeding", new_rates.shard_seeding),
+        ("relay_service", new_rates.relay_service),
+        ("penalty_serve_failure", new_rates.penalty_serve_failure),
+    ];
+    for (name, value) in &all_rates {
+        if *value <= 0 {
+            return Err(ApiError(crate::error::SwarmError::Config(format!(
+                "{name} must be positive (got {value})"
+            ))));
+        }
+    }
+
+    // Validate: no rate exceeds 10x the default to prevent abuse
+    let default_rates = [
+        ("inference_serve", defaults.inference_serve),
+        ("inference_consume", defaults.inference_consume),
+        ("shard_hosting", defaults.shard_hosting),
+        ("shard_seeding", defaults.shard_seeding),
+        ("relay_service", defaults.relay_service),
+        ("penalty_serve_failure", defaults.penalty_serve_failure),
+    ];
+    for ((name, value), (_, default_val)) in all_rates.iter().zip(default_rates.iter()) {
+        if *value > default_val * 10 {
+            return Err(ApiError(crate::error::SwarmError::Config(format!(
+                "{name} cannot exceed 10x the default ({}) — got {value}",
+                default_val * 10
+            ))));
+        }
+    }
+
+    state
+        .shared_state
+        .pool_credit_rates
+        .insert(pool_id, new_rates.clone());
+
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "pool_id": pool_id_hex,
+        "rates": {
+            "inference_serve": new_rates.inference_serve,
+            "inference_consume": new_rates.inference_consume,
+            "shard_hosting": new_rates.shard_hosting,
+            "shard_seeding": new_rates.shard_seeding,
+            "relay_service": new_rates.relay_service,
+            "penalty_serve_failure": new_rates.penalty_serve_failure,
+        }
+    })))
 }

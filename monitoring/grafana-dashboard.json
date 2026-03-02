@@ -1,0 +1,562 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus data source for SwarmLLM metrics",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "histogram",
+      "name": "Histogram",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "SwarmLLM node monitoring dashboard — inference, network, storage, credits, and resources.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Node Overview",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 3 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "title": "Connected Peers",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_peers_connected",
+          "legendFormat": "Peers",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "title": "Inference Requests (Total)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_inference_requests_total",
+          "legendFormat": "Requests",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0 },
+              { "color": "green", "value": 100 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "title": "Credit Balance",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_credits_balance",
+          "legendFormat": "Credits",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "title": "Shards Hosted",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_shards_hosted",
+          "legendFormat": "Shards",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "title": "Inference",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "spanNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "axisCenteredZero": false,
+            "axisLabel": "req/s"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 5,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Inference Request Rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(swarmllm_inference_requests_total[5m])",
+          "legendFormat": "Requests/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "spanNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "axisCenteredZero": false,
+            "axisLabel": "seconds"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 6,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Inference Latency (p50 / p90 / p99)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.50, rate(swarmllm_inference_latency_seconds_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.90, rate(swarmllm_inference_latency_seconds_bucket[5m]))",
+          "legendFormat": "p90",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.99, rate(swarmllm_inference_latency_seconds_bucket[5m]))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "axisCenteredZero": false,
+            "axisLabel": "seconds"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 7,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Latency Distribution (Histogram)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(swarmllm_inference_latency_seconds_bucket[5m])",
+          "legendFormat": "le={{le}}",
+          "refId": "A",
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.5 },
+              { "color": "red", "value": 2 }
+            ]
+          },
+          "color": { "mode": "thresholds" },
+          "unit": "s",
+          "min": 0,
+          "max": 10
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 8,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "title": "Average Inference Latency",
+      "type": "gauge",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "rate(swarmllm_inference_latency_seconds_sum[5m]) / rate(swarmllm_inference_latency_seconds_count[5m])",
+          "legendFormat": "Avg Latency",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "id": 102,
+      "title": "Network & Peers",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "gradientMode": "scheme",
+            "spanNulls": false,
+            "showPoints": "never",
+            "axisCenteredZero": false,
+            "axisLabel": "peers"
+          },
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
+      "id": 9,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Connected Peers Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_peers_connected",
+          "legendFormat": "Peers",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 103,
+      "title": "Storage & Shards",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "gradientMode": "scheme",
+            "spanNulls": false,
+            "showPoints": "never",
+            "axisCenteredZero": false,
+            "axisLabel": "shards"
+          },
+          "color": { "fixedColor": "purple", "mode": "fixed" },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "id": 10,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Hosted Shards Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_shards_hosted",
+          "legendFormat": "Shards",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "id": 104,
+      "title": "Credits",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "spanNulls": false,
+            "showPoints": "never",
+            "axisCenteredZero": true,
+            "axisLabel": "credits"
+          },
+          "color": { "fixedColor": "green", "mode": "fixed" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 41 },
+      "id": 11,
+      "options": {
+        "tooltip": { "mode": "single", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "title": "Credit Balance Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "swarmllm_credits_balance",
+          "legendFormat": "Balance",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["swarmllm", "llm", "p2p", "inference"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SwarmLLM Node",
+  "uid": "swarmllm-node",
+  "version": 1
+}

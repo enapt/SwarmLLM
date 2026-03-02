@@ -1196,7 +1196,12 @@ impl AutoShardManager {
             .shared_state
             .model_request_counts
             .iter()
-            .map(|e| (e.key().clone(), e.value().load(std::sync::atomic::Ordering::Relaxed)))
+            .map(|e| {
+                (
+                    e.key().clone(),
+                    e.value().load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
             .collect();
 
         let pool_size = self.shared_state.peer_registry.len() + 1; // +1 for us
@@ -1236,7 +1241,8 @@ impl AutoShardManager {
             let target = self.target_replicas(request_count, config.min_replicas, pool_size);
 
             // Adjust target for resource pressure
-            let adjusted_target = self.pressure_adjusted_target(target, resource_pressure, config.min_replicas);
+            let adjusted_target =
+                self.pressure_adjusted_target(target, resource_pressure, config.min_replicas);
 
             for shard in &manifest.shards {
                 let shard_id = ShardId {
@@ -1275,7 +1281,11 @@ impl AutoShardManager {
                 }
 
                 // Load-aware: block if remaining holders are busy
-                if self.remaining_holders_busy(&holders, &local_node_id, config.max_holder_load_for_prune) {
+                if self.remaining_holders_busy(
+                    &holders,
+                    &local_node_id,
+                    config.max_holder_load_for_prune,
+                ) {
                     continue;
                 }
 
@@ -1294,9 +1304,11 @@ impl AutoShardManager {
                 let mut score = redundancy_ratio;
 
                 // Cold shard bonus (not loaded in VRAM)
-                let is_loaded = self.shared_state.split_models.iter().any(|entry| {
-                    entry.key().0 == manifest.id
-                });
+                let is_loaded = self
+                    .shared_state
+                    .split_models
+                    .iter()
+                    .any(|entry| entry.key().0 == manifest.id);
                 if !is_loaded {
                     score += 1.0;
                 }
@@ -1310,10 +1322,18 @@ impl AutoShardManager {
                 }
 
                 // Rarest shard penalty
-                let min_holders = manifest.shards.iter().map(|s| {
-                    let sid = ShardId { model_id: manifest.id.clone(), index: s.index };
-                    registry.shard_holders(&sid).len()
-                }).min().unwrap_or(0);
+                let min_holders = manifest
+                    .shards
+                    .iter()
+                    .map(|s| {
+                        let sid = ShardId {
+                            model_id: manifest.id.clone(),
+                            index: s.index,
+                        };
+                        registry.shard_holders(&sid).len()
+                    })
+                    .min()
+                    .unwrap_or(0);
                 if holder_count == min_holders {
                     score -= 0.3;
                 }
@@ -1353,7 +1373,10 @@ impl AutoShardManager {
         let max_per_model = if pressure_urgent { 2u32 } else { 1u32 };
 
         for candidate in &prune_candidates {
-            let count = pruned_per_model.get(&candidate.model_id).copied().unwrap_or(0);
+            let count = pruned_per_model
+                .get(&candidate.model_id)
+                .copied()
+                .unwrap_or(0);
             if count >= max_per_model {
                 continue;
             }
@@ -1383,13 +1406,21 @@ impl AutoShardManager {
             }
 
             // Count remaining local shards for this model
-            let remaining_local = registry.models().iter()
+            let remaining_local = registry
+                .models()
+                .iter()
                 .find(|m| m.id == candidate.model_id)
                 .map(|m| {
-                    m.shards.iter().filter(|s| {
-                        let sid = ShardId { model_id: m.id.clone(), index: s.index };
-                        registry.shard_holders(&sid).contains(&local_node_id)
-                    }).count() as u32
+                    m.shards
+                        .iter()
+                        .filter(|s| {
+                            let sid = ShardId {
+                                model_id: m.id.clone(),
+                                index: s.index,
+                            };
+                            registry.shard_holders(&sid).contains(&local_node_id)
+                        })
+                        .count() as u32
                 })
                 .unwrap_or(0);
 
@@ -1429,7 +1460,9 @@ impl AutoShardManager {
                 history.push_back(event);
             }
 
-            *pruned_per_model.entry(candidate.model_id.clone()).or_insert(0) += 1;
+            *pruned_per_model
+                .entry(candidate.model_id.clone())
+                .or_insert(0) += 1;
         }
     }
 
@@ -1480,7 +1513,12 @@ impl AutoShardManager {
                     model_id: manifest.id.clone(),
                     index: shard.index,
                 };
-                if self.shared_state.model_registry.shard_holders(&sid).contains(&local_node_id) {
+                if self
+                    .shared_state
+                    .model_registry
+                    .shard_holders(&sid)
+                    .contains(&local_node_id)
+                {
                     local_bytes += shard.size_bytes;
                 }
             }
@@ -1494,7 +1532,10 @@ impl AutoShardManager {
         // VRAM pressure
         let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
             if gpu.vram_total_mb > 0 {
-                let loaded_vram: u64 = self.shared_state.split_models.iter()
+                let loaded_vram: u64 = self
+                    .shared_state
+                    .split_models
+                    .iter()
                     .map(|e| e.value().estimated_vram_mb)
                     .sum();
                 loaded_vram as f64 / gpu.vram_total_mb as f64
@@ -1551,46 +1592,62 @@ impl AutoShardManager {
 
         if our_region.is_empty() {
             // No region data — fallback: ensure at least 2 holders with low latency
-            let low_latency_remaining = holders.iter().filter(|h| {
-                *h != local_node_id
-                    && self
-                        .shared_state
-                        .peer_registry
-                        .get(*h)
-                        .map(|p| p.latency_ms.unwrap_or(9999) < 200)
-                        .unwrap_or(false)
-            }).count();
+            let low_latency_remaining = holders
+                .iter()
+                .filter(|h| {
+                    *h != local_node_id
+                        && self
+                            .shared_state
+                            .peer_registry
+                            .get(*h)
+                            .map(|p| p.latency_ms.unwrap_or(9999) < 200)
+                            .unwrap_or(false)
+                })
+                .count();
             return low_latency_remaining < 2;
         }
 
         // Count remaining holders in our region (excluding us)
-        let same_region_remaining = holders.iter().filter(|h| {
-            if *h == local_node_id {
-                return false;
-            }
-            if let Some(peer) = self.shared_state.peer_registry.get(*h) {
-                peer.capability
-                    .as_ref()
-                    .and_then(|c| c.region.as_deref())
-                    .map(|r| r.eq_ignore_ascii_case(our_region))
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }).count();
+        let same_region_remaining = holders
+            .iter()
+            .filter(|h| {
+                if *h == local_node_id {
+                    return false;
+                }
+                if let Some(peer) = self.shared_state.peer_registry.get(*h) {
+                    peer.capability
+                        .as_ref()
+                        .and_then(|c| c.region.as_deref())
+                        .map(|r| r.eq_ignore_ascii_case(our_region))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            })
+            .count();
 
         same_region_remaining == 0
     }
 
     /// Check if remaining holders (excluding us) are too busy.
-    fn remaining_holders_busy(&self, holders: &[NodeId], local_node_id: &NodeId, max_load: u32) -> bool {
-        let remaining: Vec<u32> = holders.iter().filter_map(|h| {
-            if h == local_node_id {
-                return None;
-            }
-            self.shared_state.peer_registry.get(h)
-                .map(|p| p.active_request_count)
-        }).collect();
+    fn remaining_holders_busy(
+        &self,
+        holders: &[NodeId],
+        local_node_id: &NodeId,
+        max_load: u32,
+    ) -> bool {
+        let remaining: Vec<u32> = holders
+            .iter()
+            .filter_map(|h| {
+                if h == local_node_id {
+                    return None;
+                }
+                self.shared_state
+                    .peer_registry
+                    .get(h)
+                    .map(|p| p.active_request_count)
+            })
+            .collect();
 
         if remaining.is_empty() {
             return true; // No peers to offload to
@@ -1631,7 +1688,10 @@ impl AutoShardManager {
         // Check if healthy peers hold it (excluding us)
         let peer_holders = holders.iter().any(|h| {
             h != local_node_id
-                && self.shared_state.peer_registry.get(h)
+                && self
+                    .shared_state
+                    .peer_registry
+                    .get(h)
                     .map(|p| p.latency_ms.unwrap_or(9999) < 5000)
                     .unwrap_or(false)
         });

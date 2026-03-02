@@ -132,6 +132,19 @@ impl InferenceRouter {
         let max_batch_size = (shared_state.config.inference.max_batch_size as usize).max(1);
         let batch_timeout =
             std::time::Duration::from_millis(shared_state.config.inference.batch_timeout_ms);
+        let mut kv_cache = KvCacheManager::new(kv_cache_ttl);
+
+        // Restore persisted multi-turn sessions from previous run
+        match kv_cache.restore_from_db(&shared_state.db) {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "Restored KV-cache sessions from previous run");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to restore KV-cache sessions");
+            }
+            _ => {}
+        }
+
         Self {
             shared_state: shared_state.clone(),
             command_rx,
@@ -139,7 +152,7 @@ impl InferenceRouter {
             shutdown_rx,
             queue: BinaryHeap::new(),
             scheduler: PipelineScheduler::new(shared_state),
-            kv_cache: KvCacheManager::new(kv_cache_ttl),
+            kv_cache,
             max_concurrent,
             active_count: Arc::new(AtomicUsize::new(0)),
             queue_notify: Arc::new(tokio::sync::Notify::new()),
@@ -165,6 +178,15 @@ impl InferenceRouter {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
                         tracing::info!("InferenceRouter shutting down");
+                        // Persist multi-turn sessions for next startup
+                        match self.kv_cache.save_to_db(&self.shared_state.db) {
+                            Ok(count) => {
+                                tracing::info!(count, "Saved KV-cache sessions for next startup");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to persist KV-cache sessions");
+                            }
+                        }
                         break;
                     }
                 }
@@ -910,6 +932,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: "hello".into(),
+                images: vec![],
             }],
             sampling_params: SamplingParams::default(),
             stream: false,
@@ -917,6 +940,7 @@ mod tests {
             priority,
             created_at: chrono::Utc::now(),
             session_id: None,
+            lora_adapter: None,
         }
     }
 
@@ -927,6 +951,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: Role::User,
                 content: "hello".into(),
+                images: vec![],
             }],
             sampling_params: SamplingParams::default(),
             stream: false,
@@ -934,6 +959,7 @@ mod tests {
             priority,
             created_at: chrono::Utc::now(),
             session_id: None,
+            lora_adapter: None,
         }
     }
 
