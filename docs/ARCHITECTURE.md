@@ -89,7 +89,7 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
 3.  Load or create config (TOML + env + defaults + CLI overrides)
 4.  Ensure data directory exists
 5.  Load or generate Ed25519 identity
-6.  Open sled database
+6.  Open redb database (auto-migrates from sled if `migrate-sled` feature enabled)
 7.  Build Daemon { config, identity, db }
 8.  Initialize ModelExecutor (load GGUF model if --model provided)
 9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)
@@ -100,7 +100,7 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
     PoolManager, AutoShardManager)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
-15. Signal graceful shutdown via watch channel, save peer cache, flush sled database
+15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
 ```
 
 ## Peer Discovery
@@ -115,7 +115,7 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    Toggle-wrapped libp2p mdns — discovers peers on same      │
 │    network in seconds. Config: enable_mdns = true (default) │
 │                                                             │
-│  Layer 2: Persistent Peer Cache (sled)                       │
+│  Layer 2: Persistent Peer Cache (redb)                       │
 │    Saves up to 200 peer multiaddrs every 5 min + shutdown   │
 │    Loads on startup → fastest reconnect path                │
 │    File: src/network/peer_cache.rs                          │
@@ -178,7 +178,7 @@ libp2p Swarm
 │
 ├── request_response (unified protocol, /swarmllm/1.0.0, 300s timeout)
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
-│   └── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor)
+│   └── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
 │
 ├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
 ├── connection_limits (max 2/peer, 500 total)
@@ -227,12 +227,19 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 The SplitModel loader detects the model architecture from GGUF metadata
 (`general.architecture`) and applies architecture-specific behavior:
 
-| Feature | Llama | Qwen2 |
-|---------|-------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) |
-| QKV biases | None | `attn_q.bias`, `attn_k.bias`, `attn_v.bias` |
-| Context length | 4096 (default) | 32768 (from metadata) |
-| EOS tokens | 2 | 151643, 151645 |
+| Feature | Llama | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 |
+|---------|-------|-------|--------------|-------|---------|------------|
+| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous |
+| QKV biases | None | Yes | None | Yes | None | Yes |
+| Context length | 4096 (default) | 32768 | 8192 | 4096 | 32768 | 16384 |
+| EOS tokens | 2 | 151643, 151645 | Arch-specific | Arch-specific | Arch-specific | Arch-specific |
+
+### Vision Language Models (VLM)
+
+SwarmLLM supports multimodal inference via `src/inference/vision.rs`:
+- **LLaVA** — CLIP vision encoder + LLM backbone, image patches projected into token space
+- **Qwen2-VL** — Native vision-language architecture with dynamic resolution
+- Images are pre-processed and encoded into vision tokens that are concatenated with text tokens before the LLM forward pass
 
 ### BPE Tokenizer
 
@@ -252,6 +259,12 @@ Hidden states are serialized for network transmission:
 For a 7B model (hidden_dim=3584):
 - Prefill (14 tokens): 1×14×3584×4 = ~200KB
 - Decode (1 token): 1×1×3584×4 = ~14KB
+
+**Tensor Compression** — optional zstd compression for wire tensors (configurable):
+- `tensor_compression = true` — enable zstd compression on hidden-state payloads
+- `tensor_compress_level = 3` — zstd compression level (1-22, default 3)
+- `tensor_compress_threshold = 4096` — minimum payload bytes to trigger compression
+- Reduces bandwidth for prefill payloads by 30-60% with minimal latency overhead
 
 ### Pipeline Assembly Algorithm
 
@@ -275,6 +288,22 @@ For a 7B model (hidden_dim=3584):
 - KvCacheManager tracks sessions and wired to inference router for cache reuse
 - Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
 - Abandoned cache entries cleaned up after 10 minutes
+- Sessions persisted across node restarts via redb
+
+### Prefix Caching
+
+Cross-request prefix caching (`src/inference/prefix_cache.rs`) shares KV entries for common system prompts:
+- Trie-based prefix matching identifies shared token prefixes across requests
+- Matching entries skip redundant prefill computation (50-80% reduction for shared system prompts)
+- Configurable max entries via `prefix_cache_max_entries` (default 256)
+- LRU eviction when cache is full
+
+### Chunked Prefill
+
+Long prompts are split into chunks for overlapped prefill and decode:
+- Prevents head-of-line blocking from long-context requests
+- Decode steps for other requests can interleave between prefill chunks
+- Chunk size auto-tuned based on available VRAM
 
 ### Speculative Decoding
 
@@ -300,16 +329,24 @@ For a 7B model (hidden_dim=3584):
 - LRU eviction: least-recently-used models evicted when over budget
 - Active models (with in-flight pipelines) are never evicted
 
+### LoRA Adapter Support
+
+LoRA (Low-Rank Adaptation) adapters are supported via `src/model/lora.rs`:
+- Per-request adapter loading from safetensors files
+- Low-rank weight updates applied at inference time without modifying base model weights
+- Multiple adapters can be loaded simultaneously and selected per request
+- Adapter files stored alongside model shards in the model directory
+
 ## Credit System
 
 ```
-Earning:
+Earning (default rates, configurable per pool):
   +10 credits  per layer per token served
   +1  credit   per GB per hour hosting shards
   +5  credits  per GB seeding shard data
   +2  credits  per connection hour relay service
 
-Spending:
+Spending (default rates, configurable per pool):
   -8  credits  per layer per token requested
   -50 credits  per serve failure (timeout)
 
@@ -319,6 +356,8 @@ Tiers:
   Silver    (positive balance)  → 5-15s queue
   Bronze    (zero/negative)     → 30s+ queue
 ```
+
+Credit earn/spend rates are configurable per pool via the pool configuration API.
 
 ## Model Acquisition Security
 
@@ -373,7 +412,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 ~/.swarmllm/
 ├── config.toml          # User configuration
 ├── identity.key         # Ed25519 keypair (optionally encrypted)
-├── db/                  # sled database
+├── db.redb              # redb database (migrated from sled db/ directory)
 └── models/
     ├── llama3-70b-q4km/
     │   ├── manifest.json
@@ -384,9 +423,11 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
         └── ...
 ```
 
-## sled Database Trees
+## redb Database Tables
 
-| Tree | Key | Value |
+Storage backend is **redb** (pure-Rust, ACID, single-file). The legacy **sled** backend is available behind the `migrate-sled` feature flag for one-time migration.
+
+| Table | Key | Value |
 |---|---|---|
 | config | "config" | Config |
 | config | "api_key" | String (32-byte hex Bearer token) |
@@ -397,7 +438,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 | peer_cache | {multiaddr_string} | () (presence key) |
 | shard_meta | {model_id}/{shard_index} | ShardInfo + path |
 | model_meta | {model_id} | ModelManifest |
-| sessions | {session_id} | KV-cache metadata |
+| sessions | {session_id} | KV-cache metadata (persisted across restarts) |
 | nicknames | {node_id_hex} | NicknameRecord |
 | identity_prefs | "nickname" | Local nickname preference |
 | pool_state | "pool" | PoolState |
@@ -519,7 +560,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 - Timestamp freshness check: rejects records older than 1 hour or >5min in future
 - GossipSub topic `swarm/identity` for network-wide propagation
 - Collision handling: `nickname#ab12` suffix from node ID prefix
-- Sled trees: `"nicknames"`, `"identity_prefs"`
+- redb tables: `"nicknames"`, `"identity_prefs"`
 
 ## Device Pools
 
@@ -536,7 +577,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 - `TrustManager` in `src/credit/trust.rs` tracks per-peer trust scores (0.0–1.0, default 0.5)
 - Trust-affecting events: InferenceSuccess (+0.01), SpotCheckFail (-0.1), InvalidGossip (-0.05), ValidTransaction (+0.02), SignatureViolation (-0.2)
 - Decay toward 0.5 over time (1% per health ping cycle) — prevents permanent punishment
-- Persisted in sled `trust_scores` tree, hydrated on startup
+- Persisted in redb `trust_scores` table, hydrated on startup
 - Trust factors into pipeline scheduling and credit tier weighting
 
 ## Credit Escrow
@@ -544,7 +585,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 - `EscrowManager` in `src/credit/escrow.rs` holds credits for large requests (> threshold)
 - Lifecycle: `create_escrow()` → `release_escrow()` (success) or `refund_escrow()` (failure)
 - Entries expire after 10 minutes with automatic refund
-- Persisted in sled `escrow` tree
+- Persisted in redb `escrow` table
 
 ## Sybil Resistance
 
@@ -565,7 +606,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 ## API Authentication
 
 - Bearer token middleware in `src/api/middleware.rs`
-- Auto-generated 32-byte hex API key on first run, persisted in sled
+- Auto-generated 32-byte hex API key on first run, persisted in redb
 - **Protected paths**: `/v1/*` (inference), `/api/admin/config` (PUT), `/api/admin/shutdown`,
   `/api/admin/hf/*` (downloads), `/api/admin/api-key`
 - **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
@@ -593,7 +634,8 @@ allowing candle to parse the full tensor index while only loading assigned layer
 ## HTTP API Routes
 
 ### OpenAI-Compatible (Bearer auth required)
-- `POST /v1/chat/completions` — Chat completions (streaming + non-streaming)
+- `POST /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
+- `POST /v1/embeddings` — Text embeddings
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
 
@@ -608,6 +650,8 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
 - `GET     /api/admin/ws` — WebSocket for live updates
+- `GET     /api/admin/models/:id/gguf-meta` — GGUF metadata browser (context length, quantization, layers)
+- `GET     /api/admin/download-queue` — Download queue with priorities and progress
 
 ### HuggingFace Integration
 - `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models

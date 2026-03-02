@@ -39,4 +39,4 @@ Local inference (single-node) never costs credits.
 For large requests (above configurable threshold), credits are held in escrow:
 - `create_escrow()` → `release_escrow()` (success) or `refund_escrow()` (failure)
 - Entries expire after 10 minutes with automatic refund
-- Persisted in sled `escrow` tree
+- Persisted in redb `escrow` table

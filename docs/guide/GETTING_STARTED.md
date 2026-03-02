@@ -190,4 +190,47 @@ After connecting, your Dashboard should show "Connected Peers: 1" (or more). The
 ./swarmllm run -v               # Start with more detailed logging
 ./swarmllm status               # Check if the node is running
 ./swarmllm version              # Show version number
+./swarmllm chat                 # Interactive chat in the terminal
+./swarmllm bench                # Run inference benchmarks (tokens/sec)
+./swarmllm peers                # List connected peers and their status
 ```
+
+---
+
+## Using the Python SDK
+
+If you prefer Python, install the SwarmLLM client SDK:
+
+```bash
+pip install swarmllm-client
+```
+
+Then use it like the OpenAI SDK:
+
+```python
+from swarmllm_client import SwarmLLMClient
+
+client = SwarmLLMClient(base_url="http://localhost:8800", api_key="YOUR_API_KEY")
+response = client.chat.completions.create(
+    model="your-model-name",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)
+```
+
+The SDK supports auto-discovery of local nodes, streaming, embeddings, and tool calls. See the `python/` directory in the repository for full documentation.
+
+---
+
+## Monitoring Stack (Optional)
+
+For production deployments, SwarmLLM ships a ready-to-use Grafana + Prometheus monitoring stack:
+
+```bash
+cd monitoring/
+docker compose up -d
+```
+
+This starts Prometheus (scrapes `/metrics` from your node) and Grafana (pre-configured dashboards for inference latency, peer count, credit balance, VRAM usage, and more). Open Grafana at `http://localhost:3000`.
+
+See `monitoring/README.md` for configuration details.

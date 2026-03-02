@@ -332,6 +332,10 @@ Below is every configuration option, organized by section.
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step (speculative decoding). |
 | `draft_model_path` | path | none | Path to a small draft model for speculative decoding. |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for cached split-inference models. |
+| `tensor_compression` | boolean | `false` | Enable zstd compression for tensor wire payloads. |
+| `tensor_compress_level` | integer | `3` | Zstd compression level (1-22). Higher = smaller but slower. |
+| `tensor_compress_threshold` | integer | `4096` | Minimum payload size in bytes to trigger compression. |
+| `prefix_cache_max_entries` | integer | `256` | Maximum entries in the cross-request prefix cache. |
 
 ### `[logging]` — Log Output
 
@@ -382,6 +386,8 @@ Below is every configuration option, organized by section.
 | `invitation_ttl_hours` | integer | `24` | How long a pool invitation stays valid. |
 | `rate_limit_per_hour` | integer | `3` | Max pool join/leave/invite operations per hour. |
 | `gossip_interval_secs` | integer | `600` | How often to share pool state with peers (10 min). |
+| `credit_earn_rate` | float | `1.0` | Multiplier for credit earning rates within this pool. |
+| `credit_spend_rate` | float | `1.0` | Multiplier for credit spending rates within this pool. |
 
 ### `[updates]` — Auto-Update
 

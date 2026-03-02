@@ -42,11 +42,11 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 | Component | Library |
 |---|---|
 | Async runtime | Tokio (multi-threaded) |
-| P2P networking | libp2p 0.54 (Kademlia, GossipSub, QUIC) |
+| P2P networking | libp2p 0.55 (Kademlia, GossipSub, QUIC) |
 | HTTP server | Axum 0.7 |
 | Tensor compute | candle-core/candle-transformers |
 | GGUF inference | llama-cpp-2 (optional backend) |
 | Cryptography | ed25519-dalek, x25519-dalek, chacha20poly1305 |
 | Content hashing | BLAKE3 |
-| Database | sled 0.34 |
+| Database | redb (pure-Rust, ACID; sled migration via `migrate-sled` feature) |
 | Concurrent maps | DashMap 6 |

@@ -7,7 +7,7 @@
 ├── config.toml          # User configuration
 ├── identity.key         # Ed25519 keypair
 ├── api_key              # Bearer token (auto-generated)
-├── db/                  # sled database
+├── db.redb              # redb database (migrated from sled db/ directory)
 └── models/
     ├── qwen2.5-coder-7b/
     │   ├── manifest.json
@@ -18,9 +18,9 @@
         └── ...
 ```
 
-## Database Trees
+## Database Tables (redb)
 
-| Tree | Key | Value |
+| Table | Key | Value |
 |---|---|---|
 | config | `"config"` | Config |
 | config | `"api_key"` | Bearer token string |

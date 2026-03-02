@@ -253,14 +253,16 @@ The number of models you can run depends on your disk space and VRAM. Models are
    ```
    The error message usually tells you exactly what went wrong.
 
-2. **Database corrupted?** If you see errors about sled or the database, you can reset it:
+2. **Database corrupted?** If you see errors about redb or the database, you can reset it:
    ```bash
    # Back up first, just in case:
    cp -r ~/.local/share/swarmllm ~/.local/share/swarmllm-backup
    # Then delete the database:
-   rm -rf ~/.local/share/swarmllm/db
+   rm -f ~/.local/share/swarmllm/db.redb
    ```
    SwarmLLM will recreate the database on next start. Your models and config are preserved.
+
+   **Migrating from sled:** If you are upgrading from an older version that used sled (the `db/` directory), build with the `migrate-sled` feature flag. On first startup, SwarmLLM will automatically migrate all data from the sled `db/` directory into the new `db.redb` file. After verifying the migration succeeded, you can safely delete the old `db/` directory.
 
 3. **Out of memory?** If SwarmLLM crashes during inference, you may need a smaller model or lower `gpu_layers`.
 
@@ -268,6 +270,23 @@ The number of models you can run depends on your disk space and VRAM. Models are
    ```bash
    chmod +x swarmllm
    ```
+
+---
+
+## Common Error Messages
+
+SwarmLLM provides actionable error messages with hints. Here are the most common ones:
+
+| Error Message | Meaning | Fix |
+|---|---|---|
+| `model not found: <name>` | The requested model is not downloaded on this node. | Download it from the HuggingFace browser in the Dashboard, or use `POST /api/admin/hf/download-shards`. |
+| `no peers hosting shard <N>` | The network has no nodes with the required shard for distributed inference. | Wait for more peers to come online, or download the missing shard yourself. |
+| `VRAM insufficient: need <X>MB, available <Y>MB` | The model requires more GPU memory than is available. | Use a smaller quantization (Q4 instead of Q8), reduce `gpu_layers`, or free VRAM by closing other GPU applications. |
+| `authentication required` | The API endpoint requires a Bearer token. | Include `-H "Authorization: Bearer YOUR_API_KEY"` in your request. Find your key in Dashboard > Settings. |
+| `rate limit exceeded` | Too many requests in a short time window. | Wait a moment and retry. Adjust `max_concurrent_requests` in config if needed. |
+| `redb migration needed` | An old sled database was detected but the `migrate-sled` feature is not enabled. | Rebuild with `--features migrate-sled` to enable automatic migration, or delete the old `db/` directory to start fresh. |
+| `channel backpressure: <subsystem>` | An internal message channel is full, indicating the subsystem is overloaded. | This is usually transient. If persistent, check Prometheus metrics for the bottleneck subsystem. |
+| `tensor decompression failed` | A compressed tensor payload could not be decoded. | Ensure both nodes are running the same SwarmLLM version. Check for network corruption. |
 
 ---
 
