@@ -135,9 +135,8 @@ impl TrustManager {
     /// For peers already in the registry, overrides the default trust_score
     /// with the persisted value.
     pub fn hydrate_from_db(&self, peer_registry: &DashMap<NodeId, crate::types::PeerInfo>) {
-        if let Ok(tree) = self.db.tree(TREE_TRUST_SCORES) {
-            for entry in tree.iter().flatten() {
-                let (key_bytes, val_bytes) = entry;
+        if let Ok(entries) = self.db.iter_raw(TREE_TRUST_SCORES) {
+            for (key_bytes, val_bytes) in entries {
                 let key_str = match std::str::from_utf8(&key_bytes) {
                     Ok(s) => s,
                     Err(_) => continue,

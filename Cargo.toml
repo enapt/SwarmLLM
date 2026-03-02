@@ -20,7 +20,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 
 # P2P Networking
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.55", features = [
     "tokio",
     "quic",
     "kad",
@@ -75,7 +75,8 @@ candle-flash-attn = { version = "0.9", optional = true }
 candle-paged-attention = { path = "vendor/candle-paged-attention", optional = true }
 
 # Database
-sled = "0.34"
+redb = "2"
+sled = { version = "0.34", optional = true }
 
 # Concurrent state
 dashmap = "6"
@@ -102,8 +103,15 @@ fancy-regex = "0.14"
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
+# Compression
+zstd = "0.13"
+
+# Image processing (for VLM vision encoder)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
 [features]
 default = []
+migrate-sled = ["sled"]
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]

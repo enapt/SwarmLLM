@@ -128,9 +128,7 @@ impl NicknameStore {
     /// Remove a nickname record from the database.
     pub fn remove_record(&self, node_id: &NodeId) -> Result<(), SwarmError> {
         let key = hex::encode(node_id.0);
-        let tree = self.db.tree(TREE_NICKNAMES)?;
-        tree.remove(key)?;
-        Ok(())
+        self.db.remove(TREE_NICKNAMES, &key)
     }
 
     /// Load all persisted nickname records.

@@ -95,6 +95,8 @@ pub struct SharedState {
     pub pool_registry: DashMap<crate::pool::types::PoolId, crate::pool::types::PoolState>,
     /// Channel to send commands to the PoolManager task.
     pub pool_tx: RwLock<Option<mpsc::Sender<crate::pool::types::PoolCommand>>>,
+    /// Per-pool credit rate overrides. Key is the pool_id (PoolId == NodeId).
+    pub pool_credit_rates: DashMap<NodeId, crate::config::CreditRateConfig>,
     /// API Bearer token for authentication.
     pub api_key: String,
     /// Lock-free flag indicating a model is loaded in the llama-cpp executor.
@@ -162,6 +164,12 @@ pub struct SharedState {
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Per-shard lock/pin flags — locked shards are never auto-pruned.
     pub locked_shards: DashMap<crate::types::ShardId, bool>,
+    /// LoRA adapter registry for per-request fine-tuned inference.
+    pub adapter_registry: Arc<crate::model::lora::AdapterRegistry>,
+    /// Cross-request prefix cache for sharing KV state across requests with
+    /// identical system prompts. Protected by std::sync::Mutex since operations
+    /// are fast (hash lookup, tensor clone) and never held across await points.
+    pub prefix_cache: std::sync::Mutex<crate::inference::prefix_cache::PrefixCache>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -222,11 +230,11 @@ impl SharedState {
             .to_vec();
         let gossip_sealer = Arc::new(crate::crypto::GossipSealer::new(&gossip_network_id));
 
-        // Load persisted HF sources from sled
+        // Load persisted HF sources from database
         let hf_sources = {
             let map = DashMap::new();
-            if let Ok(tree) = db.tree("hf_sources") {
-                for (key, value) in tree.iter().flatten() {
+            if let Ok(entries) = db.iter_raw("hf_sources") {
+                for (key, value) in entries {
                     if let (Ok(model_id_str), Ok(source)) = (
                         std::str::from_utf8(&key),
                         serde_json::from_slice::<HfSource>(&value),
@@ -245,11 +253,11 @@ impl SharedState {
         let (config_watch_tx, _config_watch_rx) = watch::channel(initial_ops);
         let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
 
-        // Hydrate per-model auto-manage policies from sled + config
+        // Hydrate per-model auto-manage policies from database + config
         let model_auto_manage_policies = {
             let map = DashMap::new();
-            if let Ok(tree) = db.tree("model_auto_manage_policies") {
-                for (key, value) in tree.iter().flatten() {
+            if let Ok(entries) = db.iter_raw("model_auto_manage_policies") {
+                for (key, value) in entries {
                     if let (Ok(model_id_str), Ok(policy)) = (
                         std::str::from_utf8(&key),
                         serde_json::from_slice::<crate::config::ModelAutoManagePolicy>(&value),
@@ -300,6 +308,7 @@ impl SharedState {
             pool_state: RwLock::new(None),
             pool_registry: DashMap::new(),
             pool_tx: RwLock::new(None),
+            pool_credit_rates: DashMap::new(),
             api_key,
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
@@ -327,15 +336,26 @@ impl SharedState {
             prune_history: RwLock::new(VecDeque::new()),
             locked_shards: {
                 let map = DashMap::new();
-                if let Ok(tree) = db.tree("locked_shards") {
-                    for (key, _value) in tree.iter().flatten() {
-                        if let Ok(shard_json) = serde_json::from_slice::<crate::types::ShardId>(&key) {
-                            map.insert(shard_json, true);
+                if let Ok(entries) = db.iter_raw("locked_shards") {
+                    for (key, _value) in entries {
+                        // Keys are stored as JSON strings of ShardId
+                        if let Ok(key_str) = std::str::from_utf8(&key) {
+                            if let Ok(shard_id) =
+                                serde_json::from_str::<crate::types::ShardId>(key_str)
+                            {
+                                map.insert(shard_id, true);
+                            }
                         }
                     }
                 }
                 map
             },
+            adapter_registry: Arc::new(crate::model::lora::AdapterRegistry::new(
+                &config.node.data_dir,
+            )),
+            prefix_cache: std::sync::Mutex::new(crate::inference::prefix_cache::PrefixCache::new(
+                config.inference.prefix_cache_max_entries,
+            )),
             shutdown_tx,
         });
 
@@ -1692,6 +1712,11 @@ async fn dispatch_network_messages(
                                         crate::types::PoolMessage::Invitation(inv) => {
                                             Some(crate::pool::types::PoolCommand::InboundInvitation {
                                                 invitation: inv,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::BlindedInvitation(blinded) => {
+                                            Some(crate::pool::types::PoolCommand::InboundBlindedInvitation {
+                                                blinded,
                                             })
                                         }
                                         crate::types::PoolMessage::Acceptance(acc) => {

@@ -1,14 +1,21 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+
+use redb::{ReadableTable, TableDefinition};
 
 use crate::error::SwarmError;
 
-/// Current database schema version. Increment when making breaking changes
-/// to the sled storage format.
-pub const DB_SCHEMA_VERSION: u32 = 1;
+/// Current database schema version. Increment when making breaking changes.
+/// Version 2: migrated from sled to redb.
+pub const DB_SCHEMA_VERSION: u32 = 2;
 
-/// Critical sled trees to check during integrity verification.
+/// Critical trees to check during integrity verification.
 const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];
+
+/// Single redb table storing all logical trees via composite keys.
+/// Key format: "{tree_name}\0{key}" (NUL separator).
+const DATA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("data");
 
 /// Per-tree integrity status.
 #[derive(Debug, Clone)]
@@ -25,61 +32,102 @@ pub struct IntegrityReport {
     pub total_corrupt: usize,
 }
 
-/// Wrapper around sled embedded database.
+/// Build a composite key: "{tree}\0{key}".
+fn make_key(tree: &str, key: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(tree.len() + 1 + key.len());
+    k.extend_from_slice(tree.as_bytes());
+    k.push(0);
+    k.extend_from_slice(key.as_bytes());
+    k
+}
+
+/// Build the start of a tree prefix range (inclusive): "{tree}\0".
+fn tree_range_start(tree: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(tree.len() + 1);
+    k.extend_from_slice(tree.as_bytes());
+    k.push(0);
+    k
+}
+
+/// Build the end of a tree prefix range (exclusive): "{tree}\x01".
+fn tree_range_end(tree: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(tree.len() + 1);
+    k.extend_from_slice(tree.as_bytes());
+    k.push(1);
+    k
+}
+
+/// Extract the sub-key from a composite key (everything after the first NUL byte).
+fn extract_subkey(composite: &[u8]) -> Option<&[u8]> {
+    composite
+        .iter()
+        .position(|&b| b == 0)
+        .map(|pos| &composite[pos + 1..])
+}
+
+/// Wrapper around redb embedded database.
 ///
-/// In Phase 1 this only stores persisted config. Later phases add
-/// credit balances, peer trust, shard metadata, etc.
+/// Uses a single redb table with composite keys ("{tree}\0{key}") to emulate
+/// sled's named trees. All values are stored as raw bytes (typically JSON).
 #[derive(Clone)]
 pub struct Database {
-    inner: sled::Db,
+    inner: Arc<redb::Database>,
+    /// Holds the temp directory alive for `open_temp()` databases.
+    _temp_dir: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Database {
-    /// Open (or create) the sled database at `data_dir/db`.
+    /// Open (or create) the redb database at `data_dir/db.redb`.
     pub fn open(data_dir: &Path) -> Result<Self, SwarmError> {
-        let db_path = data_dir.join("db");
-        let inner = sled::open(&db_path)?;
+        let db_path = data_dir.join("db.redb");
+        let inner = redb::Database::create(&db_path)
+            .map_err(|e| SwarmError::Database(format!("Failed to open {}: {e}", db_path.display())))?;
         tracing::info!(path = %db_path.display(), "Opened database");
 
-        let db = Self { inner };
+        let db = Self {
+            inner: Arc::new(inner),
+            _temp_dir: None,
+        };
         db.check_schema_version()?;
         Ok(db)
     }
 
     /// Check and store the DB schema version. Warn on mismatch.
     fn check_schema_version(&self) -> Result<(), SwarmError> {
-        let tree = self.tree("meta")?;
-        match tree.get("schema_version")? {
-            Some(bytes) => {
-                if bytes.len() == 4 {
-                    let stored = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-                    if stored != DB_SCHEMA_VERSION {
-                        tracing::warn!(
-                            stored_version = stored,
-                            current_version = DB_SCHEMA_VERSION,
-                            "Database schema version mismatch — data may need migration"
-                        );
-                    }
+        match self.get_json::<u32>("meta", "schema_version")? {
+            Some(stored) => {
+                if stored != DB_SCHEMA_VERSION {
+                    tracing::warn!(
+                        stored_version = stored,
+                        current_version = DB_SCHEMA_VERSION,
+                        "Database schema version mismatch — data may need migration"
+                    );
                 }
             }
             None => {
                 // First run — store the current version
-                tree.insert("schema_version", &DB_SCHEMA_VERSION.to_le_bytes())?;
+                self.put_json("meta", "schema_version", &DB_SCHEMA_VERSION)?;
             }
         }
         Ok(())
     }
 
-    /// Open a temporary in-memory database (for testing).
+    /// Open a temporary database (for testing).
+    ///
+    /// Creates a uniquely-named database in the system temp directory.
+    /// The file is not auto-deleted; callers should use `tempfile::tempdir()`
+    /// + `Database::open()` if cleanup is needed.
     pub fn open_temp() -> Result<Self, SwarmError> {
-        let config = sled::Config::new().temporary(true);
-        let inner = config.open()?;
-        Ok(Self { inner })
-    }
-
-    /// Get a named tree (logical keyspace).
-    pub fn tree(&self, name: &str) -> Result<sled::Tree, SwarmError> {
-        Ok(self.inner.open_tree(name)?)
+        let temp_path = std::env::temp_dir().join(format!(
+            "swarmllm_test_{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+        let inner = redb::Database::create(&temp_path)
+            .map_err(|e| SwarmError::Database(format!("Failed to create temp db: {e}")))?;
+        Ok(Self {
+            inner: Arc::new(inner),
+            _temp_dir: None,
+        })
     }
 
     /// Store a JSON-serializable value.
@@ -89,9 +137,18 @@ impl Database {
         key: &str,
         value: &T,
     ) -> Result<(), SwarmError> {
-        let tree = self.tree(tree_name)?;
+        let k = make_key(tree_name, key);
         let bytes = serde_json::to_vec(value)?;
-        tree.insert(key, bytes)?;
+        let write_txn = self.inner.begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        {
+            let mut table = write_txn.open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            table.insert(k.as_slice(), bytes.as_slice())
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        }
+        write_txn.commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -101,10 +158,19 @@ impl Database {
         tree_name: &str,
         key: &str,
     ) -> Result<Option<T>, SwarmError> {
-        let tree = self.tree(tree_name)?;
-        match tree.get(key)? {
-            Some(bytes) => {
-                let val = serde_json::from_slice(&bytes)?;
+        let k = make_key(tree_name, key);
+        let read_txn = self.inner.begin_read()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let table = match read_txn.open_table(DATA_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(SwarmError::Database(e.to_string())),
+        };
+        match table.get(k.as_slice())
+            .map_err(|e| SwarmError::Database(e.to_string()))?
+        {
+            Some(guard) => {
+                let val = serde_json::from_slice(guard.value())?;
                 Ok(Some(val))
             }
             None => Ok(None),
@@ -116,17 +182,32 @@ impl Database {
         &self,
         tree_name: &str,
     ) -> Result<Vec<T>, SwarmError> {
-        let tree = self.tree(tree_name)?;
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let read_txn = self.inner.begin_read()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let table = match read_txn.open_table(DATA_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(SwarmError::Database(e.to_string())),
+        };
+
         let mut results = Vec::new();
-        for entry in tree.iter() {
-            let (key, bytes) = entry?;
-            match serde_json::from_slice(&bytes) {
+        let range = table.range(start.as_slice()..end.as_slice())
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+
+        for entry in range {
+            let (key_guard, val_guard) = entry
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            match serde_json::from_slice(val_guard.value()) {
                 Ok(val) => results.push(val),
                 Err(e) => {
-                    let key_str = std::str::from_utf8(&key).unwrap_or("<non-utf8>");
+                    let subkey = extract_subkey(key_guard.value())
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .unwrap_or("<non-utf8>");
                     tracing::warn!(
                         tree = tree_name,
-                        key = key_str,
+                        key = subkey,
                         error = %e,
                         "Failed to deserialize entry in iter_json, skipping"
                     );
@@ -136,16 +217,109 @@ impl Database {
         Ok(results)
     }
 
+    /// Iterate all raw key-value pairs in a named tree.
+    /// Returns (sub_key_bytes, value_bytes) pairs.
+    #[allow(clippy::type_complexity)]
+    pub fn iter_raw(
+        &self,
+        tree_name: &str,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SwarmError> {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let read_txn = self.inner.begin_read()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let table = match read_txn.open_table(DATA_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(SwarmError::Database(e.to_string())),
+        };
+
+        let mut results = Vec::new();
+        let range = table.range(start.as_slice()..end.as_slice())
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+
+        for entry in range {
+            let (key_guard, val_guard) = entry
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            let subkey = extract_subkey(key_guard.value())
+                .unwrap_or_default()
+                .to_vec();
+            results.push((subkey, val_guard.value().to_vec()));
+        }
+        Ok(results)
+    }
+
+    /// Insert a raw byte value into a named tree.
+    pub fn insert_raw(
+        &self,
+        tree_name: &str,
+        key: &str,
+        value: &[u8],
+    ) -> Result<(), SwarmError> {
+        let k = make_key(tree_name, key);
+        let write_txn = self.inner.begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        {
+            let mut table = write_txn.open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            table.insert(k.as_slice(), value)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        }
+        write_txn.commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     /// Remove a key from a named tree.
     pub fn remove(&self, tree_name: &str, key: &str) -> Result<(), SwarmError> {
-        let tree = self.tree(tree_name)?;
-        tree.remove(key)?;
+        let k = make_key(tree_name, key);
+        let write_txn = self.inner.begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        {
+            let mut table = write_txn.open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            table.remove(k.as_slice())
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+        }
+        write_txn.commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
 
     /// Flush all pending writes to disk.
+    /// With redb, writes are durable on commit, so this is a no-op.
     pub fn flush(&self) -> Result<(), SwarmError> {
-        self.inner.flush()?;
+        Ok(())
+    }
+
+    /// Clear all entries from a named tree.
+    pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let write_txn = self.inner.begin_write()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        {
+            let mut table = write_txn.open_table(DATA_TABLE)
+                .map_err(|e| SwarmError::Database(e.to_string()))?;
+            // Collect keys to remove (can't mutate while iterating)
+            let keys: Vec<Vec<u8>> = {
+                let range = table.range(start.as_slice()..end.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+                let mut ks = Vec::new();
+                for entry in range {
+                    let (key_guard, _) = entry
+                        .map_err(|e| SwarmError::Database(e.to_string()))?;
+                    ks.push(key_guard.value().to_vec());
+                }
+                ks
+            };
+            for key in &keys {
+                table.remove(key.as_slice())
+                    .map_err(|e| SwarmError::Database(e.to_string()))?;
+            }
+        }
+        write_txn.commit()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -159,20 +333,20 @@ impl Database {
         self.get_json("config", "shard_range")
     }
 
-    /// Check integrity of critical sled trees.
+    /// Check integrity of critical trees.
     ///
     /// Scans manifests, credits, identity, and nicknames trees.
-    /// For each tree: opens it, iterates entries, attempts JSON deserialization.
-    /// Logs warnings for any corrupt entries (includes key, skips value).
+    /// For each tree: iterates entries, attempts JSON deserialization.
+    /// Logs warnings for any corrupt entries.
     pub fn check_integrity(&self) -> IntegrityReport {
         let mut trees = HashMap::new();
         let mut total_corrupt = 0;
 
         for &tree_name in CRITICAL_TREES {
-            let tree = match self.tree(tree_name) {
-                Ok(t) => t,
+            let entries = match self.iter_raw(tree_name) {
+                Ok(e) => e,
                 Err(e) => {
-                    tracing::warn!(tree = tree_name, error = %e, "Failed to open tree during integrity check");
+                    tracing::warn!(tree = tree_name, error = %e, "Failed to read tree during integrity check");
                     trees.insert(
                         tree_name.to_string(),
                         TreeStatus {
@@ -189,32 +363,18 @@ impl Database {
             let mut valid = 0;
             let mut corrupt = 0;
 
-            for entry in tree.iter() {
-                match entry {
-                    Ok((key, value)) => {
-                        total += 1;
-                        // Attempt JSON deserialization as generic Value
-                        if serde_json::from_slice::<serde_json::Value>(&value).is_ok() {
-                            valid += 1;
-                        } else {
-                            corrupt += 1;
-                            let key_str = std::str::from_utf8(&key).unwrap_or("<non-utf8>");
-                            tracing::warn!(
-                                tree = tree_name,
-                                key = key_str,
-                                "Corrupt entry detected during integrity check"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        total += 1;
-                        corrupt += 1;
-                        tracing::warn!(
-                            tree = tree_name,
-                            error = %e,
-                            "Failed to read entry during integrity check"
-                        );
-                    }
+            for (key_bytes, value) in &entries {
+                total += 1;
+                if serde_json::from_slice::<serde_json::Value>(value).is_ok() {
+                    valid += 1;
+                } else {
+                    corrupt += 1;
+                    let key_str = std::str::from_utf8(key_bytes).unwrap_or("<non-utf8>");
+                    tracing::warn!(
+                        tree = tree_name,
+                        key = key_str,
+                        "Corrupt entry detected during integrity check"
+                    );
                 }
             }
 
@@ -251,8 +411,7 @@ mod tests {
 
     #[test]
     fn put_and_get_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(dir.path()).unwrap();
+        let db = Database::open_temp().unwrap();
 
         db.put_json("test_tree", "key1", &serde_json::json!({"hello": "world"}))
             .unwrap();
@@ -263,8 +422,7 @@ mod tests {
 
     #[test]
     fn get_missing_key_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(dir.path()).unwrap();
+        let db = Database::open_temp().unwrap();
 
         let val: Option<serde_json::Value> = db.get_json("test_tree", "missing").unwrap();
         assert!(val.is_none());
@@ -306,9 +464,8 @@ mod tests {
         // Insert a valid JSON entry
         db.put_json("manifests", "good", &serde_json::json!({"ok": true}))
             .unwrap();
-        // Insert raw invalid bytes directly into the tree
-        let tree = db.tree("manifests").unwrap();
-        tree.insert("corrupt_key", b"not valid json {{{" as &[u8])
+        // Insert raw invalid bytes directly
+        db.insert_raw("manifests", "corrupt_key", b"not valid json {{{")
             .unwrap();
 
         let report = db.check_integrity();
@@ -342,5 +499,45 @@ mod tests {
         db.save_shard_range(5, 8).unwrap();
         let loaded = db.load_shard_range().unwrap();
         assert_eq!(loaded, Some((5, 8)));
+    }
+
+    #[test]
+    fn iter_raw_roundtrip() {
+        let db = Database::open_temp().unwrap();
+        db.insert_raw("raw_tree", "key1", b"value1").unwrap();
+        db.insert_raw("raw_tree", "key2", b"value2").unwrap();
+
+        let entries = db.iter_raw("raw_tree").unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn clear_tree_removes_all() {
+        let db = Database::open_temp().unwrap();
+        db.put_json("to_clear", "a", &1).unwrap();
+        db.put_json("to_clear", "b", &2).unwrap();
+        db.put_json("other", "c", &3).unwrap();
+
+        db.clear_tree("to_clear").unwrap();
+
+        let cleared: Vec<serde_json::Value> = db.iter_json("to_clear").unwrap();
+        assert!(cleared.is_empty());
+
+        // Other tree should be unaffected
+        let other: Option<serde_json::Value> = db.get_json("other", "c").unwrap();
+        assert!(other.is_some());
+    }
+
+    #[test]
+    fn open_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        db.put_json("test", "k", &42u32).unwrap();
+        drop(db);
+
+        // Reopen and verify data persists
+        let db2 = Database::open(dir.path()).unwrap();
+        let val: Option<u32> = db2.get_json("test", "k").unwrap();
+        assert_eq!(val, Some(42));
     }
 }

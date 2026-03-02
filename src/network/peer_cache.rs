@@ -1,35 +1,26 @@
 use crate::storage::db::Database;
 
-/// Sled tree name for cached peer addresses.
+/// Database tree name for cached peer addresses.
 const TREE_PEER_CACHE: &str = "peer_cache";
 
 /// Maximum number of peers to persist in the cache.
 const MAX_CACHED_PEERS: usize = 200;
 
-/// Save known peer multiaddrs to sled for reconnection on restart.
+/// Save known peer multiaddrs to the database for reconnection on restart.
 ///
-/// Stores up to `MAX_CACHED_PEERS` addresses keyed by multiaddr string.
+/// Stores up to `MAX_CACHED_PEERS` addresses keyed by sequential index.
 pub fn save_peer_cache(db: &Database, addrs: &[String]) {
-    let tree = match db.tree(TREE_PEER_CACHE) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to open peer cache tree");
-            return;
-        }
-    };
-
     // Clear old entries and write the current set
-    tree.clear().ok();
+    if let Err(e) = db.clear_tree(TREE_PEER_CACHE) {
+        tracing::warn!(error = %e, "Failed to clear peer cache");
+        return;
+    }
 
     for (i, addr) in addrs.iter().take(MAX_CACHED_PEERS).enumerate() {
         let key = format!("peer_{i:04}");
-        if let Err(e) = tree.insert(key.as_bytes(), addr.as_bytes()) {
+        if let Err(e) = db.insert_raw(TREE_PEER_CACHE, &key, addr.as_bytes()) {
             tracing::warn!(error = %e, addr, "Failed to cache peer address");
         }
-    }
-
-    if let Err(e) = tree.flush() {
-        tracing::warn!(error = %e, "Failed to flush peer cache");
     }
 
     tracing::debug!(
@@ -38,21 +29,20 @@ pub fn save_peer_cache(db: &Database, addrs: &[String]) {
     );
 }
 
-/// Load cached peer multiaddrs from sled.
+/// Load cached peer multiaddrs from the database.
 ///
 /// Returns addresses from the last session for immediate reconnection.
 pub fn load_peer_cache(db: &Database) -> Vec<String> {
-    let tree = match db.tree(TREE_PEER_CACHE) {
-        Ok(t) => t,
+    let entries = match db.iter_raw(TREE_PEER_CACHE) {
+        Ok(e) => e,
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to open peer cache tree");
+            tracing::warn!(error = %e, "Failed to read peer cache");
             return Vec::new();
         }
     };
 
     let mut addrs = Vec::new();
-    for entry in tree.iter().flatten() {
-        let (_key, value) = entry;
+    for (_key, value) in entries {
         if let Ok(addr) = std::str::from_utf8(&value) {
             addrs.push(addr.to_string());
         }

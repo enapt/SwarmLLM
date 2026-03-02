@@ -2442,12 +2442,11 @@ pub async fn set_model_auto_manage(
         .model_auto_manage_policies
         .insert(mid.clone(), policy.clone());
 
-    // Persist to sled
-    if let Ok(tree) = state.shared_state.db.tree("model_auto_manage_policies") {
-        if let Ok(bytes) = serde_json::to_vec(&policy) {
-            let _ = tree.insert(model_id.as_bytes(), bytes);
-        }
-    }
+    // Persist to database
+    let _ = state
+        .shared_state
+        .db
+        .put_json("model_auto_manage_policies", &model_id, &policy);
 
     // Wake auto-manage to re-evaluate
     state.shared_state.auto_manage_notify.notify_one();
@@ -2627,6 +2626,260 @@ pub struct JoinNetworkRequest {
     pub code: String,
 }
 
+// ---- GGUF Metadata Browser API ----
+
+/// GET /api/admin/models/:id/metadata — Return parsed GGUF metadata for a model.
+///
+/// Reads the gguf_header.bin file from the model directory and returns structured
+/// metadata including architecture, context length, quantization info, vocab size,
+/// layer count, and other hyperparameters.
+pub async fn model_metadata(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let safe_id = crate::model::shard::sanitize_path_component(&model_id);
+    let model_dir = state.config.node.data_dir.join("models").join(&safe_id);
+    let header_path = model_dir.join("gguf_header.bin");
+
+    if !header_path.exists() {
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "No GGUF header found for model '{}'",
+            model_id
+        ))));
+    }
+
+    let header_bytes =
+        std::fs::read(&header_path).map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
+    let mut cursor = std::io::Cursor::new(&header_bytes);
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to parse GGUF header: {e}"
+        )))
+    })?;
+
+    let get_str = |key: &str| -> Option<String> {
+        ct.metadata
+            .get(key)
+            .and_then(|v| v.to_string().ok().cloned())
+    };
+    let get_u32 = |key: &str| -> Option<u32> { ct.metadata.get(key).and_then(|v| v.to_u32().ok()) };
+    let get_f32 = |key: &str| -> Option<f32> { ct.metadata.get(key).and_then(|v| v.to_f32().ok()) };
+
+    let arch = get_str("general.architecture").unwrap_or_default();
+    let arch_get_u32 = |suffix: &str| -> Option<u32> { get_u32(&format!("{arch}.{suffix}")) };
+    let arch_get_f32 = |suffix: &str| -> Option<f32> { get_f32(&format!("{arch}.{suffix}")) };
+
+    let vocab_size = ct.metadata.get("tokenizer.ggml.tokens").and_then(|v| {
+        if let candle_core::quantized::gguf_file::Value::Array(arr) = v {
+            Some(arr.len() as u32)
+        } else {
+            None
+        }
+    });
+
+    let tensor_count = ct.tensor_infos.len();
+
+    let file_type = get_u32("general.file_type");
+    let quant_str = file_type.map(|ft| match ft {
+        0 => "F32",
+        1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
+        7 => "Q8_0",
+        8 => "Q8_1",
+        10 => "Q4_K_S",
+        11 => "Q4_K_M",
+        12 => "Q5_K_S",
+        13 => "Q5_K_M",
+        14 => "Q6_K",
+        15 => "Q2_K",
+        16 => "Q3_K_S",
+        17 => "Q3_K_M",
+        18 => "Q3_K_L",
+        _ => "Unknown",
+    });
+
+    // Collect all metadata keys for the raw section (exclude large tokenizer arrays)
+    let mut raw_metadata: Vec<serde_json::Value> = ct
+        .metadata
+        .iter()
+        .filter(|(k, _)| {
+            !k.starts_with("tokenizer.ggml.tokens")
+                && !k.starts_with("tokenizer.ggml.merges")
+                && !k.starts_with("tokenizer.ggml.scores")
+                && !k.starts_with("tokenizer.ggml.token_type")
+        })
+        .map(|(k, v)| {
+            let val_str = match v {
+                candle_core::quantized::gguf_file::Value::U8(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::I8(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::U16(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::I16(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::U32(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::I32(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::U64(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::I64(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::F32(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::F64(n) => format!("{n}"),
+                candle_core::quantized::gguf_file::Value::Bool(b) => format!("{b}"),
+                candle_core::quantized::gguf_file::Value::String(s) => {
+                    if s.len() > 200 {
+                        format!("{}...", &s[..200])
+                    } else {
+                        s.clone()
+                    }
+                }
+                candle_core::quantized::gguf_file::Value::Array(arr) => {
+                    format!("[array of {} items]", arr.len())
+                }
+            };
+            serde_json::json!({ "key": k, "value": val_str })
+        })
+        .collect();
+    raw_metadata.sort_by(|a, b| {
+        a["key"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["key"].as_str().unwrap_or(""))
+    });
+
+    Ok(Json(serde_json::json!({
+        "model_id": model_id,
+        "general": {
+            "name": get_str("general.name"),
+            "architecture": arch,
+            "file_type": file_type,
+            "quantization": quant_str,
+        },
+        "model": {
+            "context_length": arch_get_u32("context_length"),
+            "block_count": arch_get_u32("block_count"),
+            "embedding_length": arch_get_u32("embedding_length"),
+            "head_count": arch_get_u32("attention.head_count"),
+            "head_count_kv": arch_get_u32("attention.head_count_kv"),
+            "rope_dimension_count": arch_get_u32("rope.dimension_count"),
+            "rope_freq_base": arch_get_f32("rope.freq_base"),
+            "layer_norm_rms_epsilon": arch_get_f32("attention.layer_norm_rms_epsilon"),
+            "vocab_size": vocab_size,
+        },
+        "tokenizer": {
+            "model": get_str("tokenizer.ggml.model"),
+            "pre": get_str("tokenizer.ggml.pre"),
+            "eos_token_id": get_u32("tokenizer.ggml.eos_token_id"),
+            "bos_token_id": get_u32("tokenizer.ggml.bos_token_id"),
+            "padding_token_id": get_u32("tokenizer.ggml.padding_token_id"),
+        },
+        "tensors": {
+            "count": tensor_count,
+            "data_offset": ct.tensor_data_offset,
+        },
+        "raw": raw_metadata,
+    })))
+}
+
+// ---- Download Queue API ----
+
+/// GET /api/admin/downloads — Return all active and recent downloads with full detail.
+pub async fn download_queue(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let mut downloads: Vec<serde_json::Value> = Vec::new();
+
+    for entry in state.shared_state.acquisition_progress.iter() {
+        let status = entry.value();
+        let model_id = &status.model_id;
+
+        let source = if state.shared_state.hf_sources.contains_key(model_id) {
+            "huggingface"
+        } else {
+            "network"
+        };
+
+        let eta_secs =
+            if status.speed_bytes_per_sec > 0 && status.total_bytes > status.downloaded_bytes {
+                Some((status.total_bytes - status.downloaded_bytes) / status.speed_bytes_per_sec)
+            } else {
+                None
+            };
+
+        let shard_details: Vec<serde_json::Value> = status
+            .shard_progress
+            .iter()
+            .map(|(idx, sp)| {
+                let pct = if sp.total_bytes > 0 {
+                    ((sp.downloaded_bytes as f64 / sp.total_bytes as f64) * 100.0) as u32
+                } else {
+                    0
+                };
+                serde_json::json!({
+                    "index": idx,
+                    "state": serde_json::to_value(&sp.state).unwrap_or_default(),
+                    "progress_pct": pct,
+                    "downloaded_bytes": sp.downloaded_bytes,
+                    "total_bytes": sp.total_bytes,
+                })
+            })
+            .collect();
+
+        let overall_pct = if status.total_bytes > 0 {
+            ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
+        } else {
+            0
+        };
+
+        let model_name = state
+            .shared_state
+            .model_registry
+            .get_manifest(model_id)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| model_id.0.clone());
+
+        let cancellable = matches!(
+            status.state,
+            crate::model::acquisition::AcquisitionState::Downloading
+                | crate::model::acquisition::AcquisitionState::AwaitingManifest
+        );
+
+        downloads.push(serde_json::json!({
+            "model_id": model_id.0,
+            "model_name": model_name,
+            "state": serde_json::to_value(&status.state).unwrap_or_default(),
+            "source": source,
+            "total_shards": status.total_shards,
+            "downloaded_shards": status.downloaded_shards,
+            "verified_shards": status.verified_shards,
+            "failed_shards": status.failed_shards,
+            "total_bytes": status.total_bytes,
+            "downloaded_bytes": status.downloaded_bytes,
+            "overall_pct": overall_pct,
+            "speed_bytes_per_sec": status.speed_bytes_per_sec,
+            "eta_secs": eta_secs,
+            "started_at": status.started_at,
+            "shard_details": shard_details,
+            "cancellable": cancellable,
+            "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
+        }));
+    }
+
+    // Sort: downloading first, then awaiting, then failed, then complete
+    downloads.sort_by(|a, b| {
+        let state_order = |v: &serde_json::Value| -> u8 {
+            let s = v["state"].as_str().unwrap_or("");
+            match s {
+                "downloading" => 0,
+                "awaiting_manifest" => 1,
+                _ if s.contains("failed") || v["state"].is_object() => 3,
+                "complete" => 4,
+                _ => 2,
+            }
+        };
+        state_order(a).cmp(&state_order(b))
+    });
+
+    Json(serde_json::json!({
+        "downloads": downloads,
+        "total": downloads.len(),
+    }))
+}
+
 // ---- Resource Schedule API ----
 
 /// GET /api/admin/schedule — Get current resource schedule.
@@ -2763,18 +3016,17 @@ pub async fn lock_shard(
             .shared_state
             .locked_shards
             .insert(shard_id.clone(), true);
-        // Persist to sled
-        if let Ok(tree) = state.shared_state.db.tree("locked_shards") {
-            if let Ok(key) = serde_json::to_vec(&shard_id) {
-                let _ = tree.insert(key, b"1");
-            }
+        // Persist to database
+        if let Ok(key_str) = serde_json::to_string(&shard_id) {
+            let _ = state
+                .shared_state
+                .db
+                .insert_raw("locked_shards", &key_str, b"1");
         }
     } else {
         state.shared_state.locked_shards.remove(&shard_id);
-        if let Ok(tree) = state.shared_state.db.tree("locked_shards") {
-            if let Ok(key) = serde_json::to_vec(&shard_id) {
-                let _ = tree.remove(key);
-            }
+        if let Ok(key_str) = serde_json::to_string(&shard_id) {
+            let _ = state.shared_state.db.remove("locked_shards", &key_str);
         }
     }
 
@@ -2791,4 +3043,86 @@ pub async fn lock_shard(
         "shard_index": index,
         "locked": body.locked,
     })))
+}
+
+// ── LoRA Adapter Management ──
+
+#[derive(Deserialize)]
+pub struct RegisterAdapterRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub base_model: String,
+    pub rank: usize,
+    pub alpha: f32,
+    /// Path to the safetensors file (relative to data_dir/adapters or absolute).
+    pub path: String,
+}
+
+/// POST /api/admin/adapters — Register a LoRA adapter.
+pub async fn register_adapter(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterAdapterRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let adapter_id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let path = std::path::PathBuf::from(&body.path);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        state
+            .shared_state
+            .adapter_registry
+            .adapter_dir()
+            .join(&path)
+    };
+
+    if !resolved.exists() {
+        return Err(ApiError(crate::error::SwarmError::Internal(format!(
+            "Adapter file not found: {}",
+            resolved.display()
+        ))));
+    }
+
+    let device = candle_core::Device::Cpu;
+    let metadata = state.shared_state.adapter_registry.register(
+        &adapter_id,
+        &body.name,
+        &body.base_model,
+        body.rank,
+        body.alpha,
+        &resolved,
+        &device,
+    )?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "adapter": metadata,
+    })))
+}
+
+/// GET /api/admin/adapters — List all registered adapters.
+pub async fn list_adapters(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let adapters = state.shared_state.adapter_registry.list();
+    Ok(Json(serde_json::json!({
+        "adapters": adapters,
+    })))
+}
+
+/// DELETE /api/admin/adapters/:id — Remove a registered adapter.
+pub async fn delete_adapter(
+    State(state): State<AppState>,
+    Path(adapter_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.shared_state.adapter_registry.remove(&adapter_id) {
+        Ok(Json(serde_json::json!({
+            "status": "ok",
+            "message": format!("Adapter '{adapter_id}' removed"),
+        })))
+    } else {
+        Err(ApiError(crate::error::SwarmError::Internal(format!(
+            "Adapter '{adapter_id}' not found"
+        ))))
+    }
 }

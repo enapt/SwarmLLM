@@ -110,9 +110,8 @@ impl ModelRegistry {
         let registry = Self::new();
 
         // Load model manifests from the "model_meta" tree
-        let tree = db.tree("model_meta")?;
-        for item in tree.iter() {
-            let (_, value) = item.map_err(SwarmError::Database)?;
+        let entries = db.iter_raw("model_meta")?;
+        for (_key, value) in entries {
             match serde_json::from_slice::<ModelManifest>(&value) {
                 Ok(manifest) => {
                     registry.manifests.insert(manifest.id.clone(), manifest);
