@@ -66,7 +66,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 | Layer | How it works | When it kicks in |
 |-------|-------------|------------------|
 | **mDNS** | Automatically discovers peers on the same LAN/Wi-Fi | Instantly on startup |
-| **Peer Cache** | Remembers peers from previous sessions (sled-backed, max 200) | On restart |
+| **Peer Cache** | Remembers peers from previous sessions (redb-backed, max 200) | On restart |
 | **Invite Codes** | Share a `swarm://...` code with a friend to connect directly | First time joining |
 | **Peer Exchange** | Connected peers share their known peer lists with you | On each new connection |
 | **Kademlia DHT** | Distributed hash table for network-wide peer routing | Continuously |
@@ -83,16 +83,21 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ### Inference
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Mistral, etc.) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
-- **OpenAI-Compatible API** — `POST /v1/chat/completions` and `/v1/completions` with streaming support, works with Open WebUI, SillyTavern, LangChain, etc.
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
+- **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
+- **Multi-Provider Gateway** — Route requests to cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq) when the model isn't available locally. Native Anthropic Messages API at `/v1/messages`. Model prefix routing or explicit `provider:model` syntax
+- **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
+- **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers on the same subnet, complementing pipeline parallelism for WAN
+- **Vision & Adapters** — VLM support (LLaVA, Qwen2-VL) and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
-- **Multi-turn KV-cache** — Session-aware cache reuse skips redundant prefill across chat messages
+- **Multi-turn KV-cache** — Session-aware cache reuse, cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool)
 
 ### Networking & Security
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy), pipeline sealing, and authenticated sealed gossip
+- **Hidden States API** — `/v1/internal/hidden-states` exposes per-layer activations for research (adapter insertion, activation inspection)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy
 
@@ -106,6 +111,8 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API
+- **Auto-Updater** — Checks GitHub releases for new versions, downloads and replaces binary with restart prompt
+- **Python SDK** — `pip install swarmllm-client` for programmatic access
 
 ## Architecture
 
@@ -162,13 +169,18 @@ Credits determine your priority tier:
 
 ## Supported Models
 
-SwarmLLM targets decoder-only transformer architectures with GGUF quantization:
+SwarmLLM supports 8 transformer architectures via native candle inference with GGUF quantization:
 
-- Llama 2/3, CodeLlama
-- Mistral, Mixtral (MoE)
-- Qwen/Qwen2
-- DeepSeek (including MoE variants)
-- Phi-family
+| Architecture | Examples | Special Features |
+|-------------|----------|-----------------|
+| **Llama** | Llama 2/3, CodeLlama, TinyLlama | Interleaved RoPE, GQA |
+| **Qwen2** | Qwen2.5-Coder-7B/32B | QKV biases, 32k context |
+| **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
+| **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Contiguous RoPE |
+| **Phi-3** | Phi-3-mini, Phi-3-medium | Su/YaRN RoPE, biases |
+| **Mistral** | Mistral 7B, Mistral Nemo | GQA, interleaved RoPE |
+| **Starcoder2** | Starcoder2 3B/7B/15B | Code-optimized, biases |
+| **Mixtral** | Mixtral 8x7B, 8x22B | MoE (via llama.cpp) |
 
 Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
 
@@ -215,6 +227,9 @@ swarmllm <COMMAND>
 Commands:
   run         Start the SwarmLLM daemon (default if omitted)
   status      Show node status (queries running daemon)
+  chat        Interactive terminal chat with a running node
+  bench       Run inference benchmarks (tokens/sec, latency)
+  peers       List connected peers with latency and trust
   test-split  Test split inference locally (single-node diagnostic)
   version     Print version information
 
@@ -249,6 +264,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
+| `[providers]` | `openai_api_key`, `anthropic_api_key`, `deepseek_api_key`, `mistral_api_key`, `groq_api_key`, custom providers |
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start`, `theme` |
 
@@ -270,12 +286,34 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 |-------|-----------|
 | Language | Rust (2021 edition) |
 | Async Runtime | Tokio |
-| Networking | libp2p 0.54 (QUIC + mDNS + Kademlia + GossipSub) |
-| Serialization | Cap'n Proto (tensors), serde_json (API) |
+| Networking | libp2p 0.55 (QUIC + mDNS + Kademlia + GossipSub) |
+| Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
 | HTTP Server | Axum 0.7 |
-| Inference | candle (split/distributed, CUDA), llama.cpp (single-node) |
-| Database | sled (embedded) |
+| Inference | candle (split/distributed, CUDA, flash/paged attention), llama.cpp (single-node) |
+| Database | redb (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
+| Monitoring | Prometheus + Grafana |
+| SDK | Python (`swarmllm-client`) |
+
+## How SwarmLLM Compares
+
+| Feature | SwarmLLM | Petals | Exo | Bittensor |
+|---------|----------|--------|-----|-----------|
+| **Language** | Rust (single binary) | Python | Python | Python + Substrate |
+| **Deployment** | Download & run | pip install | pip install | pip + blockchain setup |
+| **Scale** | Internet-scale (NAT traversal, DHT, relay) | Internet (volunteer) | LAN only | Internet (blockchain) |
+| **E2E Encryption** | X25519 + ChaCha20 + forward secrecy | None | None | Minimal |
+| **Incentives** | Credit tiers (no token) | None | None | TAO token (real money) |
+| **Parallelism** | Pipeline + tensor (LAN) | Pipeline | Tensor + pipeline | Subnet routing |
+| **Model Architectures** | 8 (incl. DeepSeek MoE+MLA) | 4 | 6+ | Any |
+| **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
+| **Multi-Provider Gateway** | Yes (OpenAI, Anthropic, etc.) | No | No | No |
+| **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
+| **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
+| **Auto-Update** | Built-in version check + self-update | No | No | No |
+| **Test Suite** | 511 tests | Limited | Limited | Varies |
+
+See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 
 ## Documentation
 
