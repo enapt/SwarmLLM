@@ -154,6 +154,54 @@
         <label>Max Auto-Manage Storage (MB, 0 = 50% of disk limit)</label>
         <input type="number" id="settings-auto-manage-storage" value="0" min="0">
       </div>
+      <details class="settings-providers" id="settings-providers-section">
+        <summary>Cloud Providers</summary>
+        <div class="mt-2" style="font-size:0.8rem">
+          <span class="text-muted">Configure API keys to proxy requests to cloud providers when no local model is available.</span>
+        </div>
+        <div id="provider-cards" class="mt-2">
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">Anthropic</strong>
+              <span class="badge" id="provider-status-anthropic" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" onclick="settings.testProvider('anthropic')">Test</button>
+          </div>
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">OpenAI</strong>
+              <span class="badge" id="provider-status-openai" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-openai" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" onclick="settings.testProvider('openai')">Test</button>
+          </div>
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">DeepSeek</strong>
+              <span class="badge" id="provider-status-deepseek" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-deepseek" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" onclick="settings.testProvider('deepseek')">Test</button>
+          </div>
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">Mistral</strong>
+              <span class="badge" id="provider-status-mistral" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-mistral" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" onclick="settings.testProvider('mistral')">Test</button>
+          </div>
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">Groq</strong>
+              <span class="badge" id="provider-status-groq" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-groq" placeholder="gsk_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" onclick="settings.testProvider('groq')">Test</button>
+          </div>
+        </div>
+      </details>
       <details class="settings-advanced">
         <summary>Advanced Settings</summary>
         <div class="mt-2">

@@ -70,6 +70,8 @@ pub struct Config {
     pub model: ModelConfig,
     #[serde(default)]
     pub identity: IdentityConfig,
+    #[serde(default)]
+    pub providers: ProvidersConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -555,6 +557,39 @@ impl ModelConfig {
         }
         Ok(())
     }
+}
+
+/// Cloud provider configuration for multi-provider API gateway.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProvidersConfig {
+    #[serde(default)]
+    pub anthropic: Option<ProviderEntry>,
+    #[serde(default)]
+    pub openai: Option<ProviderEntry>,
+    #[serde(default)]
+    pub deepseek: Option<ProviderEntry>,
+    #[serde(default)]
+    pub mistral: Option<ProviderEntry>,
+    #[serde(default)]
+    pub groq: Option<ProviderEntry>,
+    #[serde(default)]
+    pub custom: Vec<CustomProvider>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    pub api_key: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CustomProvider {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
 }
 
 /// Identity configuration (voluntary self-reported metadata).

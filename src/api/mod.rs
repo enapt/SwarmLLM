@@ -1,9 +1,11 @@
 pub mod admin;
+pub mod anthropic;
 pub mod identity;
 pub mod internal;
 pub mod metrics;
 pub mod middleware;
 pub mod openai;
 pub mod pool;
+pub mod providers;
 pub mod server;
 pub mod websocket;

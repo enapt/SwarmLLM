@@ -6,7 +6,9 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tokio::sync::mpsc;
 
-use crate::api::{admin, identity, internal, metrics, middleware, openai, pool, websocket};
+use crate::api::{
+    admin, anthropic, identity, internal, metrics, middleware, openai, pool, providers, websocket,
+};
 use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
@@ -38,6 +40,10 @@ pub fn build_router(state: AppState) -> Router {
         // OpenAI-compatible API
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
+        // Anthropic Messages API
+        .route("/v1/messages", post(anthropic::messages))
+        // Provider listing
+        .route("/v1/providers", get(providers::list_providers))
         // SwarmLLM extensions
         .route("/v1/status", get(openai::status))
         // Internal research API (gated by api.expose_hidden_states config)
@@ -109,6 +115,11 @@ pub fn build_router(state: AppState) -> Router {
             get(admin::list_adapters).post(admin::register_adapter),
         )
         .route("/api/admin/adapters/:id", delete(admin::delete_adapter))
+        // Cloud provider configuration
+        .route(
+            "/api/admin/providers",
+            get(admin::get_providers).put(admin::update_providers),
+        )
         // Version & Updates
         .route("/api/admin/version", get(admin::version_info))
         .route("/api/admin/update/check", post(admin::check_update))

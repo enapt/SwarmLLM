@@ -1137,8 +1137,9 @@ var SwarmLLM = (function() {
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) settings.loadStorageInfo();
       } catch (e) {}
-      // Load API key
+      // Load API key and provider status
       settings.loadApiKey();
+      settings.loadProviders();
     },
 
     _apiKeyFull: '',
@@ -1241,6 +1242,105 @@ var SwarmLLM = (function() {
       } catch (e) {}
     },
 
+    loadProviders: async function() {
+      try {
+        var resp = await fetch('/api/admin/providers');
+        var data = await resp.json();
+        if (data.providers) {
+          data.providers.forEach(function(p) {
+            var badge = document.getElementById('provider-status-' + p.name);
+            if (badge) {
+              if (p.configured) {
+                badge.textContent = 'Configured';
+                badge.style.color = 'var(--green)';
+              } else {
+                badge.textContent = 'Not set';
+                badge.style.color = '';
+              }
+            }
+          });
+        }
+      } catch (e) {}
+    },
+
+    saveProviders: async function() {
+      var keys = {};
+      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq'].forEach(function(name) {
+        var input = document.getElementById('provider-key-' + name);
+        if (input && input.value) {
+          keys[name + '_key'] = input.value;
+        }
+      });
+      if (Object.keys(keys).length === 0) return;
+      try {
+        await authFetch('/api/admin/providers', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(keys),
+        });
+        // Clear inputs after save and refresh status
+        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq'].forEach(function(name) {
+          var input = document.getElementById('provider-key-' + name);
+          if (input) input.value = '';
+        });
+        settings.loadProviders();
+      } catch (e) {}
+    },
+
+    testProvider: async function(name) {
+      var input = document.getElementById('provider-key-' + name);
+      var badge = document.getElementById('provider-status-' + name);
+      if (!input) return;
+      var key = input.value;
+      if (!key) {
+        ui.showBanner('error', 'Enter an API key first');
+        return;
+      }
+      badge.textContent = 'Testing...';
+      badge.style.color = 'var(--text-muted)';
+      try {
+        // Save the key first, then test
+        var saveBody = {};
+        saveBody[name + '_key'] = key;
+        await authFetch('/api/admin/providers', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(saveBody),
+        });
+        // Test by making a minimal request
+        var testResp;
+        if (name === 'anthropic') {
+          testResp = await authFetch('/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          });
+        } else {
+          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant' };
+          testResp = await authFetch('/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelMap[name] || name + '-test', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          });
+        }
+        if (testResp.ok) {
+          badge.textContent = 'Configured';
+          badge.style.color = 'var(--green)';
+          ui.showBanner('success', name + ' API key verified');
+        } else {
+          var err = await testResp.text();
+          badge.textContent = 'Error';
+          badge.style.color = 'var(--red)';
+          ui.showBanner('error', name + ' test failed: ' + (err || testResp.status));
+        }
+        input.value = '';
+      } catch (e) {
+        badge.textContent = 'Error';
+        badge.style.color = 'var(--red)';
+        ui.showBanner('error', name + ' test failed: ' + e.message);
+      }
+    },
+
     save: async function() {
       var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
       var config = {
@@ -1270,6 +1370,8 @@ var SwarmLLM = (function() {
 
       // Save nickname if provided
       await identity.saveNickname();
+      // Save provider keys if any were entered
+      await settings.saveProviders();
     }
   };
 

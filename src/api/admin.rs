@@ -3128,6 +3128,96 @@ pub async fn delete_adapter(
     }
 }
 
+// ── Cloud Provider Management ──
+
+/// GET /api/admin/providers — List configured provider status (no keys exposed).
+pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let config = state.shared_state.providers_config.read().await;
+
+    let providers = vec![
+        serde_json::json!({
+            "name": "anthropic",
+            "configured": config.anthropic.is_some(),
+        }),
+        serde_json::json!({
+            "name": "openai",
+            "configured": config.openai.is_some(),
+        }),
+        serde_json::json!({
+            "name": "deepseek",
+            "configured": config.deepseek.is_some(),
+        }),
+        serde_json::json!({
+            "name": "mistral",
+            "configured": config.mistral.is_some(),
+        }),
+        serde_json::json!({
+            "name": "groq",
+            "configured": config.groq.is_some(),
+        }),
+    ];
+
+    Json(serde_json::json!({ "providers": providers }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProvidersUpdate {
+    #[serde(default)]
+    pub anthropic_key: Option<String>,
+    #[serde(default)]
+    pub openai_key: Option<String>,
+    #[serde(default)]
+    pub deepseek_key: Option<String>,
+    #[serde(default)]
+    pub mistral_key: Option<String>,
+    #[serde(default)]
+    pub groq_key: Option<String>,
+}
+
+/// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
+pub async fn update_providers(
+    State(state): State<AppState>,
+    Json(body): Json<ProvidersUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut config = state.shared_state.providers_config.write().await;
+
+    fn update_entry(entry: &mut Option<crate::config::ProviderEntry>, key: Option<String>) {
+        if let Some(k) = key {
+            if k.is_empty() {
+                *entry = None;
+            } else {
+                *entry = Some(crate::config::ProviderEntry {
+                    api_key: k,
+                    default_model: entry.as_ref().and_then(|e| e.default_model.clone()),
+                });
+            }
+        }
+    }
+
+    update_entry(&mut config.anthropic, body.anthropic_key);
+    update_entry(&mut config.openai, body.openai_key);
+    update_entry(&mut config.deepseek, body.deepseek_key);
+    update_entry(&mut config.mistral, body.mistral_key);
+    update_entry(&mut config.groq, body.groq_key);
+
+    // Persist to database
+    let _ = state
+        .shared_state
+        .db
+        .put_json("providers", "config", &*config);
+
+    tracing::info!("Cloud provider configuration updated");
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "anthropic": config.anthropic.is_some(),
+        "openai": config.openai.is_some(),
+        "deepseek": config.deepseek.is_some(),
+        "mistral": config.mistral.is_some(),
+        "groq": config.groq.is_some(),
+    })))
+}
+
 // ========================================================================
 // Update / Version Endpoints
 // ========================================================================

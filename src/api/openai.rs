@@ -456,6 +456,14 @@ pub async fn chat_completions(
             }
         }
 
+        // Cloud provider fallback: proxy to configured cloud provider if model matches
+        let body = serde_json::to_value(&req).unwrap_or_default();
+        if let Some(response) =
+            crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
+        {
+            return Ok(response);
+        }
+
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
     }
 
@@ -555,7 +563,7 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
 /// This does NOT require any single node to have all shards — it only requires that every
 /// shard has at least one holder somewhere in the network so the pipeline scheduler can
 /// assemble a complete pipeline across multiple nodes.
-fn all_shards_available(state: &AppState, model_name: &str) -> bool {
+pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     let model_id = ModelId(model_name.to_string());
 
     let manifest = match state.shared_state.model_registry.get_manifest(&model_id) {

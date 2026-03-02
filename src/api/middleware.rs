@@ -38,6 +38,8 @@ pub fn cors_layer(port: u16) -> CorsLayer {
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
+            axum::http::HeaderName::from_static("x-api-key"),
+            axum::http::HeaderName::from_static("anthropic-version"),
         ])
 }
 
@@ -114,6 +116,7 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
+                | "/api/admin/providers"
         ) || path.starts_with("/api/admin/hf/source/")
             || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
             || path.starts_with("/api/identity/")
@@ -174,13 +177,16 @@ pub async fn auth_middleware(
 
     let expected_key = &state.shared_state.api_key;
 
-    // Extract Bearer token from Authorization header
+    // Extract Bearer token from Authorization header, or fall back to x-api-key header
+    // (Anthropic SDK sends credentials via x-api-key instead of Authorization: Bearer)
     let auth_header = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
-    let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+    let token = auth_header
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .or_else(|| req.headers().get("x-api-key").and_then(|v| v.to_str().ok()));
 
     match token {
         Some(t) if constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => next.run(req).await,
