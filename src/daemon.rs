@@ -170,7 +170,57 @@ pub struct SharedState {
     /// identical system prompts. Protected by std::sync::Mutex since operations
     /// are fast (hash lookup, tensor clone) and never held across await points.
     pub prefix_cache: std::sync::Mutex<crate::inference::prefix_cache::PrefixCache>,
+    /// Per-channel backpressure metrics (capacity, sent, dropped).
+    pub channel_metrics: ChannelMetricsSet,
     shutdown_tx: watch::Sender<bool>,
+}
+
+/// Atomic counters for a single mpsc channel.
+pub struct ChannelCounters {
+    pub capacity: u32,
+    pub sent: AtomicU64,
+    pub dropped: AtomicU64,
+}
+
+impl ChannelCounters {
+    pub fn new(capacity: u32) -> Self {
+        Self {
+            capacity,
+            sent: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_sent(&self) {
+        self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn record_dropped(&self) {
+        self.dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Backpressure metrics for all daemon mpsc channels.
+pub struct ChannelMetricsSet {
+    pub network_cmd: Arc<ChannelCounters>,
+    pub network_out: Arc<ChannelCounters>,
+    pub router_cmd: Arc<ChannelCounters>,
+    pub rebalance: Arc<ChannelCounters>,
+    pub acquisition: Arc<ChannelCounters>,
+    pub pool_cmd: Arc<ChannelCounters>,
+}
+
+impl ChannelMetricsSet {
+    fn new() -> Self {
+        Self {
+            network_cmd: Arc::new(ChannelCounters::new(1024)),
+            network_out: Arc::new(ChannelCounters::new(1024)),
+            router_cmd: Arc::new(ChannelCounters::new(256)),
+            rebalance: Arc::new(ChannelCounters::new(64)),
+            acquisition: Arc::new(ChannelCounters::new(64)),
+            pool_cmd: Arc::new(ChannelCounters::new(64)),
+        }
+    }
 }
 
 /// Tracks the HuggingFace origin of a model for re-downloading shards.
@@ -356,6 +406,7 @@ impl SharedState {
             prefix_cache: std::sync::Mutex::new(crate::inference::prefix_cache::PrefixCache::new(
                 config.inference.prefix_cache_max_entries,
             )),
+            channel_metrics: ChannelMetricsSet::new(),
             shutdown_tx,
         });
 

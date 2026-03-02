@@ -146,9 +146,17 @@ impl ShardRebalancer {
                     }
                 } else {
                     // We don't hold this shard — request acquisition to download it
-                    let _ = self.acquisition_tx.try_send(AcquisitionCommand::Acquire {
-                        model_id: shard_id.model_id.clone(),
-                    });
+                    if self
+                        .acquisition_tx
+                        .try_send(AcquisitionCommand::Acquire {
+                            model_id: shard_id.model_id.clone(),
+                        })
+                        .is_err()
+                    {
+                        self.shared_state.channel_metrics.acquisition.record_dropped();
+                    } else {
+                        self.shared_state.channel_metrics.acquisition.record_sent();
+                    }
                     tracing::info!(
                         model = %shard_id.model_id,
                         shard = shard_id.index,
@@ -224,9 +232,17 @@ impl ShardRebalancer {
                 let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
                 let _ = self.network_tx.send(msg).await;
             } else {
-                let _ = self.acquisition_tx.try_send(AcquisitionCommand::Acquire {
-                    model_id: shard_id.model_id.clone(),
-                });
+                if self
+                    .acquisition_tx
+                    .try_send(AcquisitionCommand::Acquire {
+                        model_id: shard_id.model_id.clone(),
+                    })
+                    .is_err()
+                {
+                    self.shared_state.channel_metrics.acquisition.record_dropped();
+                } else {
+                    self.shared_state.channel_metrics.acquisition.record_sent();
+                }
                 tracing::info!(
                     model = %shard_id.model_id,
                     shard = shard_id.index,

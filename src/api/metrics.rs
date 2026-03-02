@@ -57,6 +57,9 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     // swarmllm_inference_latency_seconds (histogram)
     write_latency_histogram(&mut buf, shared);
 
+    // Channel backpressure metrics
+    write_channel_metrics(&mut buf, shared);
+
     (
         [(
             header::CONTENT_TYPE,
@@ -155,6 +158,59 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     let _ = writeln!(buf, "{name}_bucket{{le=\"+Inf\"}} {}", samples_guard.len());
     let _ = writeln!(buf, "{name}_sum {sum}");
     let _ = writeln!(buf, "{name}_count {count}");
+}
+
+/// Write per-channel backpressure metrics (capacity, sent_total, dropped_total).
+fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let channels: &[(&str, &crate::daemon::ChannelCounters)] = &[
+        ("network_cmd", &shared.channel_metrics.network_cmd),
+        ("network_out", &shared.channel_metrics.network_out),
+        ("router_cmd", &shared.channel_metrics.router_cmd),
+        ("rebalance", &shared.channel_metrics.rebalance),
+        ("acquisition", &shared.channel_metrics.acquisition),
+        ("pool_cmd", &shared.channel_metrics.pool_cmd),
+    ];
+
+    let _ = writeln!(
+        buf,
+        "# HELP swarmllm_channel_capacity Channel buffer capacity"
+    );
+    let _ = writeln!(buf, "# TYPE swarmllm_channel_capacity gauge");
+    for (name, counters) in channels {
+        let _ = writeln!(
+            buf,
+            "swarmllm_channel_capacity{{channel=\"{name}\"}} {}",
+            counters.capacity
+        );
+    }
+
+    let _ = writeln!(
+        buf,
+        "# HELP swarmllm_channel_sent_total Messages sent through channel"
+    );
+    let _ = writeln!(buf, "# TYPE swarmllm_channel_sent_total counter");
+    for (name, counters) in channels {
+        let _ = writeln!(
+            buf,
+            "swarmllm_channel_sent_total{{channel=\"{name}\"}} {}",
+            counters.sent.load(Relaxed)
+        );
+    }
+
+    let _ = writeln!(
+        buf,
+        "# HELP swarmllm_channel_dropped_total Messages dropped due to backpressure"
+    );
+    let _ = writeln!(buf, "# TYPE swarmllm_channel_dropped_total counter");
+    for (name, counters) in channels {
+        let _ = writeln!(
+            buf,
+            "swarmllm_channel_dropped_total{{channel=\"{name}\"}} {}",
+            counters.dropped.load(Relaxed)
+        );
+    }
 }
 
 #[cfg(test)]

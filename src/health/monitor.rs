@@ -255,9 +255,15 @@ impl HealthMonitor {
             }
             tracing::info!(peer = %peer_id, "Removed stale peer (and shard registry entries)");
             // Signal the rebalancer that a peer has left
-            let _ = self
+            if self
                 .rebalance_tx
-                .try_send(RebalanceEvent::PeerLeft(peer_id));
+                .try_send(RebalanceEvent::PeerLeft(peer_id))
+                .is_err()
+            {
+                self.shared_state.channel_metrics.rebalance.record_dropped();
+            } else {
+                self.shared_state.channel_metrics.rebalance.record_sent();
+            }
         }
     }
 

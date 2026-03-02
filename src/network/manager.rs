@@ -94,6 +94,7 @@ impl NetworkManager {
                     relay_cfg.as_ref(),
                     enable_mdns,
                     known_peers,
+                    Some(&config.network),
                 )
                 .map_err(|e| {
                     Box::new(std::io::Error::other(e.to_string()))
@@ -297,7 +298,10 @@ impl NetworkManager {
                                 "Received GossipSub message"
                             );
                             if let Err(e) = self.outbound_tx.try_send(msg) {
+                                self.shared_state.channel_metrics.network_out.record_dropped();
                                 tracing::warn!(error = %e, "Dispatcher backpressured, dropping gossipsub message");
+                            } else {
+                                self.shared_state.channel_metrics.network_out.record_sent();
                             }
                         }
                     }
@@ -309,7 +313,7 @@ impl NetworkManager {
 
             // ── JSON request/response (control messages, shard transfers) ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-                request_response::Event::Message { peer, message },
+                request_response::Event::Message { peer, message, .. },
             )) => match message {
                 request_response::Message::Request {
                     request, channel, ..
@@ -343,6 +347,7 @@ impl NetworkManager {
                     peer,
                     request_id,
                     error,
+                    ..
                 },
             )) => {
                 tracing::warn!(%peer, ?request_id, %error, "Request outbound failure");
@@ -363,7 +368,9 @@ impl NetworkManager {
                 tracing::debug!(%peer, %error, "Request inbound failure");
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-                request_response::Event::ResponseSent { peer, request_id },
+                request_response::Event::ResponseSent {
+                    peer, request_id, ..
+                },
             )) => {
                 tracing::debug!(%peer, ?request_id, "Response sent to peer");
             }
@@ -763,7 +770,10 @@ impl NetworkManager {
                         // Forward all other messages to dispatcher
                         tracing::debug!(%peer, "Handling protocol message request");
                         if let Err(e) = self.outbound_tx.try_send(*msg) {
+                            self.shared_state.channel_metrics.network_out.record_dropped();
                             tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
+                        } else {
+                            self.shared_state.channel_metrics.network_out.record_sent();
                         }
                     }
                 }
@@ -833,7 +843,10 @@ impl NetworkManager {
                     return;
                 }
                 if let Err(e) = self.outbound_tx.try_send(*msg) {
+                    self.shared_state.channel_metrics.network_out.record_dropped();
                     tracing::warn!(%peer, error = %e, "Dispatcher backpressured, dropping response message");
+                } else {
+                    self.shared_state.channel_metrics.network_out.record_sent();
                 }
             }
             SwarmResponse::ShardData(data) => {
@@ -1127,7 +1140,10 @@ impl NetworkManager {
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.outbound_tx.try_send(msg) {
+                            self.shared_state.channel_metrics.network_out.record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
+                        } else {
+                            self.shared_state.channel_metrics.network_out.record_sent();
                         }
                     }
                     Err(e) => {
@@ -1148,7 +1164,10 @@ impl NetworkManager {
                         );
                         if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
                         {
+                            self.shared_state.channel_metrics.network_out.record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
+                        } else {
+                            self.shared_state.channel_metrics.network_out.record_sent();
                         }
                     }
                     Err(e) => {
@@ -1174,7 +1193,10 @@ impl NetworkManager {
                                         .outbound_tx
                                         .try_send(SwarmMessage::LayerForward(forward))
                                     {
+                                        self.shared_state.channel_metrics.network_out.record_dropped();
                                         tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
+                                    } else {
+                                        self.shared_state.channel_metrics.network_out.record_sent();
                                     }
                                 }
                                 Err(e) => {
