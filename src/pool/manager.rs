@@ -611,6 +611,18 @@ impl PoolManager {
             return;
         }
 
+        // Enforce max pool size to prevent Ed25519 verification DoS
+        let max_pool_size = self.shared_state.config.pool.max_pool_size;
+        if state.members.len() > max_pool_size as usize {
+            tracing::warn!(
+                pool_id = %state.pool_id,
+                members = state.members.len(),
+                max = max_pool_size,
+                "Rejecting pool state gossip: exceeds max pool size"
+            );
+            return;
+        }
+
         // SEC-C7: Verify acceptance_signature of each member
         for member in &state.members {
             // The pool owner's own membership uses the pool creation signature, skip it

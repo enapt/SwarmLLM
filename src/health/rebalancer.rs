@@ -186,15 +186,56 @@ impl ShardRebalancer {
         }
     }
 
-    async fn check_all_shards(&self) {
-        let departed = NodeId([0u8; 32]); // dummy — check all shards regardless
-        let underreplicated = self.find_underreplicated_shards(&departed);
+    async fn check_all_shards(&mut self) {
+        // Check all shards against MIN_REPLICATION without filtering by departed peer
+        let mut underreplicated = Vec::new();
+        for (shard_id, holders) in self.shared_state.model_registry.all_shard_entries() {
+            if holders.len() < MIN_REPLICATION {
+                underreplicated.push((shard_id, holders));
+            }
+        }
 
-        if !underreplicated.is_empty() {
-            tracing::info!(
-                count = underreplicated.len(),
-                "Found under-replicated shards during full check"
-            );
+        if underreplicated.is_empty() {
+            tracing::info!("All shards meet minimum replication");
+            return;
+        }
+
+        tracing::info!(
+            count = underreplicated.len(),
+            "Found under-replicated shards during full check"
+        );
+
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let now = Instant::now();
+
+        for (shard_id, holders) in &underreplicated {
+            if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
+                if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
+                    continue;
+                }
+            }
+
+            if holders.contains(&local_node_id) {
+                let announce = crate::types::ShardAnnounce {
+                    node_id: local_node_id.clone(),
+                    shards: vec![shard_id.clone()],
+                    timestamp: chrono::Utc::now(),
+                };
+                let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
+                let _ = self.network_tx.send(msg).await;
+            } else {
+                let _ = self.acquisition_tx.try_send(AcquisitionCommand::Acquire {
+                    model_id: shard_id.model_id.clone(),
+                });
+                tracing::info!(
+                    model = %shard_id.model_id,
+                    shard = shard_id.index,
+                    "Requesting acquisition of under-replicated shard"
+                );
+            }
+
+            self.last_rebalance_per_model
+                .insert(shard_id.model_id.clone(), now);
         }
     }
 

@@ -227,6 +227,8 @@ impl SessionManager {
 
     /// Open (decrypt) data from a specific peer.
     /// SEC-I5: Rejects replayed messages by enforcing monotonic nonce ordering.
+    /// Nonce state is only updated AFTER successful decryption to prevent DoS
+    /// via forged packets with high nonce values.
     pub fn open(&self, peer: &NodeId, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SwarmError> {
         if sealed.len() < 12 {
             return Err(SwarmError::DecryptionFailed);
@@ -236,35 +238,27 @@ impl SessionManager {
             .get(peer)
             .ok_or_else(|| SwarmError::NoSession(peer.clone()))?;
 
-        // Extract and check the nonce counter for replay protection.
-        // Atomic check-and-update: fetch_max atomically sets last_seen to
-        // max(last_seen, recv_nonce) and returns the previous value. If the
-        // previous value >= recv_nonce, this nonce was already accepted.
-        // This eliminates the TOCTOU race of separate load + check + store.
+        // Extract nonce counter for replay pre-check (read-only — state updated after decrypt).
         let mut nonce_counter_bytes = [0u8; 8];
         nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
 
-        // Handle nonce=0 specially (fetch_max(0) on a fresh 0 returns 0,
-        // which looks like "already seen" even though it's the first message).
+        // Pre-check: reject obviously replayed nonces without modifying state.
         if recv_nonce == 0 {
-            if session.nonce_zero_seen.swap(true, Ordering::SeqCst) {
+            if session.nonce_zero_seen.load(Ordering::SeqCst) {
                 tracing::warn!(peer = %peer, "Rejecting replayed nonce=0");
                 return Err(SwarmError::DecryptionFailed);
             }
         } else {
-            // For nonce > 0: atomically claim this nonce. If prev >= recv_nonce,
-            // this nonce was already processed (replay or out-of-order).
-            let prev = session
-                .last_seen_recv_nonce
-                .fetch_max(recv_nonce, Ordering::SeqCst);
-            if prev >= recv_nonce {
-                tracing::warn!(peer = %peer, recv_nonce, prev, "Rejecting replayed nonce");
+            let current = session.last_seen_recv_nonce.load(Ordering::SeqCst);
+            if current >= recv_nonce {
+                tracing::warn!(peer = %peer, recv_nonce, current, "Rejecting replayed nonce");
                 return Err(SwarmError::DecryptionFailed);
             }
         }
 
-        // Decrypt after replay check passes
+        // Decrypt BEFORE committing nonce state — a forged packet must not
+        // advance the nonce window (prevents DoS via injected high-nonce packets).
         let nonce = Nonce::from_slice(&sealed[..12]);
         let ciphertext = &sealed[12..];
 
@@ -278,6 +272,15 @@ impl SessionManager {
         let plaintext = cipher
             .decrypt(nonce, payload)
             .map_err(|_| SwarmError::DecryptionFailed)?;
+
+        // Decryption succeeded — now commit the nonce to prevent replay.
+        if recv_nonce == 0 {
+            session.nonce_zero_seen.store(true, Ordering::SeqCst);
+        } else {
+            session
+                .last_seen_recv_nonce
+                .fetch_max(recv_nonce, Ordering::SeqCst);
+        }
 
         Ok(plaintext)
     }

@@ -69,19 +69,17 @@ pub fn verify_transaction(
     tx: &CreditTransaction,
     from_key: &VerifyingKey,
     to_key: &VerifyingKey,
-    db: Option<&crate::storage::db::Database>,
+    db: &crate::storage::db::Database,
 ) -> Result<(), SwarmError> {
     // SEC-C3: Check for transaction replay via UUID deduplication
-    if let Some(db) = db {
-        if let Ok(Some(_)) = db.get_json::<CreditTransaction>(
-            crate::credit::ledger::TREE_TRANSACTIONS,
-            &tx.id.to_string(),
-        ) {
-            return Err(SwarmError::Internal(format!(
-                "Duplicate transaction: {}",
-                tx.id
-            )));
-        }
+    if let Ok(Some(_)) = db.get_json::<CreditTransaction>(
+        crate::credit::ledger::TREE_TRANSACTIONS,
+        &tx.id.to_string(),
+    ) {
+        return Err(SwarmError::Internal(format!(
+            "Duplicate transaction: {}",
+            tx.id
+        )));
     }
 
     verify_single_signature(tx, from_key, true)?;
@@ -179,7 +177,9 @@ mod tests {
 
         // Now both signatures should be valid
         assert!(!tx.signature_to.is_empty());
-        verify_transaction(&tx, &server.verifying_key(), &client.verifying_key(), None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = crate::storage::db::Database::open(tmp.path()).unwrap();
+        verify_transaction(&tx, &server.verifying_key(), &client.verifying_key(), &db).unwrap();
     }
 
     #[test]

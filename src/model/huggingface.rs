@@ -396,6 +396,9 @@ pub async fn download_gguf_header(
         .map_err(|e| e.to_string())?;
 
     let url = download_url(repo_id, filename);
+    if header_size == 0 {
+        return Err("header_size is 0 — invalid GGUF metadata".to_string());
+    }
     let range_end = header_size - 1;
 
     let resp = client

@@ -113,10 +113,14 @@ impl ModelManifest {
     }
 
     /// Get the path to a specific shard file within the data directory.
+    /// Sanitizes model_id to prevent path traversal attacks.
     pub fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf {
+        let safe_id = model_id
+            .replace(['/', '\\'], "_")
+            .replace("..", "_");
         data_dir
             .join("models")
-            .join(model_id)
+            .join(&safe_id)
             .join(format!("shard_{index:03}.bin"))
     }
 }

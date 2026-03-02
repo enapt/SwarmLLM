@@ -308,7 +308,7 @@ impl PipelineExecutor {
             request_id,
             content: generated_text,
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
-            completion_tokens: generated_tokens.len() as u32,
+            completion_tokens: clean_tokens.len() as u32,
             finish_reason,
             session_id: self.request.session_id.clone(),
         })
@@ -401,8 +401,9 @@ impl PipelineExecutor {
         let mut activations = initial_activations;
         let num_segments = self.assignment.segments.len();
 
-        for (idx, segment) in self.assignment.segments.iter().enumerate() {
+        for idx in 0..num_segments {
             let is_last = idx == num_segments - 1;
+            let segment = &self.assignment.segments[idx];
 
             // Send LayerForward to this segment's node
             let forward = LayerForward {
@@ -476,7 +477,7 @@ impl PipelineExecutor {
                         // Clean up the pending entry to prevent memory leak
                         self.shared_state.pending_layer_results.remove(&request_id);
                         // Attempt failover to standby
-                        return self
+                        let failover_result = self
                             .failover_segment(
                                 idx,
                                 request_id,
@@ -485,7 +486,12 @@ impl PipelineExecutor {
                                 &activations,
                                 is_last,
                             )
-                            .await;
+                            .await?;
+                        if is_last {
+                            return Ok(failover_result);
+                        }
+                        // Continue pipeline with the standby's activations
+                        activations = failover_result.activations;
                     }
                 }
             }

@@ -1034,12 +1034,20 @@ pub async fn hf_download(
         )));
     }
 
+    // Sanitize repo_id to prevent path traversal — reject ".." components
+    let sanitized_repo = repo_id.replace('/', "_");
+    if sanitized_repo.contains("..") || sanitized_repo.starts_with('.') {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Invalid repo_id: path traversal detected".into(),
+        )));
+    }
+
     let dest_dir = state
         .config
         .node
         .data_dir
         .join("models")
-        .join(repo_id.replace('/', "_"));
+        .join(&sanitized_repo);
 
     tracing::info!(repo = %repo_id, file = %filename, "Starting HuggingFace download");
 

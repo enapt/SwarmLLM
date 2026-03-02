@@ -222,11 +222,13 @@ var SwarmLLM = (function() {
       var startTime = performance.now();
 
       var model = document.getElementById('model-select').value || currentModel || 'local';
+      // Truncate chat history to last 50 messages to prevent context overflow
+      var recentMessages = session.messages.slice(-50).map(function(m) {
+        return { role: m.role, content: m.content };
+      });
       var body = {
         model: model,
-        messages: session.messages.map(function(m) {
-          return { role: m.role, content: m.content };
-        }),
+        messages: recentMessages,
         temperature: 0.7,
         max_tokens: 2048,
         stream: true,
@@ -736,7 +738,7 @@ var SwarmLLM = (function() {
                 shardDetails.forEach(function(sd, i) {
                   if (segs[sd.index]) {
                     var segFill = segs[sd.index].querySelector('.dl-seg-fill');
-                    var segPct = sd.local ? 100 : (sd.download ? (sd.download.progress_pct || 0) : 0);
+                    var segPct = sd.state === 'complete' ? 100 : (sd.progress_pct || 0);
                     if (segFill) segFill.style.width = segPct + '%';
                   }
                 });
@@ -870,7 +872,7 @@ var SwarmLLM = (function() {
         dashboard.renderAcquisitionPanel(modelId, status);
         if (status.state === 'complete') {
           setTimeout(function() { delete activeAcquisitions[modelId]; dashboard.loadInitial(); }, 3000);
-        } else if (status.state && status.state.failed) {
+        } else if (status.state === 'failed') {
           setTimeout(function() { delete activeAcquisitions[modelId]; }, 10000);
         }
       });
@@ -884,7 +886,7 @@ var SwarmLLM = (function() {
       var card = document.querySelector('[data-model-id="' + modelId + '"]');
       if (!card) return; // card not rendered yet — will show on next loadInitial
 
-      var stateName = typeof status.state === 'string' ? status.state : (status.state && status.state.failed ? 'failed' : 'unknown');
+      var stateName = typeof status.state === 'string' ? status.state : 'unknown';
 
       // If complete, refresh model list to pick up new shard state
       if (stateName === 'complete') {
@@ -1657,12 +1659,14 @@ var SwarmLLM = (function() {
   function renderSparkline(containerId, data) {
     var container = document.getElementById(containerId);
     if (!data || data.length === 0) return;
-    var max = Math.max.apply(null, data) || 1;
+    var min = Math.min.apply(null, data);
+    var max = Math.max.apply(null, data);
+    var range = (max - min) || 1;
     container.innerHTML = '';
     data.forEach(function(val) {
       var bar = document.createElement('div');
       bar.className = 'bar';
-      bar.style.height = Math.max(2, (val / max) * 36) + 'px';
+      bar.style.height = Math.max(2, ((val - min) / range) * 36) + 'px';
       container.appendChild(bar);
     });
   }
@@ -2113,6 +2117,16 @@ var SwarmLLM = (function() {
 
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
+
+    // Escape key closes open modals
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        var settingsModal = document.getElementById('settings-modal');
+        var modelModal = document.getElementById('model-browser-modal');
+        if (settingsModal && settingsModal.classList.contains('active')) { ui.closeSettings(); }
+        else if (modelModal && modelModal.classList.contains('active')) { ui.closeModelBrowser(); }
+      }
+    });
 
     // Delegated handlers for dynamically generated elements (CSP-safe)
     document.addEventListener('click', function(e) {

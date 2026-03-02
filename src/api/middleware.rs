@@ -7,6 +7,18 @@ use tower_http::cors::CorsLayer;
 
 use crate::api::server::AppState;
 
+/// Constant-time byte comparison to prevent timing side-channel attacks on API key validation.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Create a CORS layer restricted to localhost origins on the configured port.
 ///
 /// Dynamically builds the origin whitelist from the actual listen port so users
@@ -102,15 +114,12 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
-                | "/api/admin/api-key"
         ) || path.starts_with("/api/identity/")
             || path.starts_with("/api/pool/");
     }
 
-    // POST /api/admin/join-network is exempt (frontend needs it, non-destructive)
-    if *method == Method::POST && path == "/api/admin/join-network" {
-        return true;
-    }
+    // POST /api/admin/join-network writes to peer cache — require auth
+    // (frontend sends the API key from localStorage after setup)
 
     false
 }
@@ -172,7 +181,7 @@ pub async fn auth_middleware(
     let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
 
     match token {
-        Some(t) if t == expected_key => next.run(req).await,
+        Some(t) if constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => next.run(req).await,
         _ => {
             let body = serde_json::json!({
                 "error": {
@@ -219,9 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn exempt_post_join_network() {
-        // POST /api/admin/join-network is exempt (frontend needs it)
-        assert!(is_exempt_request("/api/admin/join-network", &Method::POST));
+    fn non_exempt_post_join_network() {
+        // POST /api/admin/join-network requires auth (writes to peer cache)
+        assert!(!is_exempt_request("/api/admin/join-network", &Method::POST));
     }
 
     #[test]
@@ -240,8 +249,8 @@ mod tests {
         // PUT /api/identity/nickname requires auth
         assert!(!is_exempt_request("/api/identity/nickname", &put));
         assert!(!is_exempt_request("/api/identity/nickname", &delete));
-        // API key is readable from dashboard (CORS-restricted to localhost)
-        assert!(is_exempt_request("/api/admin/api-key", &Method::GET));
+        // API key requires auth (sensitive endpoint)
+        assert!(!is_exempt_request("/api/admin/api-key", &Method::GET));
         assert!(!is_exempt_request("/api/admin/shutdown", &post));
         assert!(!is_exempt_request("/api/admin/hf/download", &post));
         assert!(!is_exempt_request("/api/admin/hf/download-shards", &post));

@@ -353,6 +353,8 @@ impl NetworkManager {
                         %peer, shard = ?shard_id,
                         "Shard request failed: {error}"
                     );
+                    // Clean up stale download progress entry to prevent resource leak
+                    self.shard_download_progress.remove(&shard_id);
                 }
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
@@ -547,8 +549,13 @@ impl NetworkManager {
                 // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
                 for addr in &info.listen_addrs {
                     if let Some(ip_bytes) = extract_ipv4_bytes(addr) {
-                        // Skip private/loopback addresses
-                        if ip_bytes[0] == 127 || ip_bytes[0] == 0 {
+                        // Skip private (RFC 1918) and loopback addresses
+                        if ip_bytes[0] == 127
+                            || ip_bytes[0] == 0
+                            || ip_bytes[0] == 10
+                            || (ip_bytes[0] == 172 && (16..=31).contains(&ip_bytes[1]))
+                            || (ip_bytes[0] == 192 && ip_bytes[1] == 168)
+                        {
                             continue;
                         }
                         let mut anti_gaming = self.shared_state.anti_gaming.lock().await;
@@ -1231,6 +1238,7 @@ impl NetworkManager {
     }
 
     /// Read a chunk from a file (individual shard file on disk).
+    /// Uses spawn_blocking to avoid stalling the async event loop with file I/O.
     fn read_file_chunk(
         &self,
         path: &std::path::Path,
@@ -1241,51 +1249,59 @@ impl NetworkManager {
     ) -> SwarmResponse {
         use std::io::{Read, Seek, SeekFrom};
 
-        match std::fs::File::open(path) {
-            Ok(mut file) => {
-                let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let chunk_size = chunk_size.min(32 * 1024 * 1024);
-                // NET-C2: Propagate seek errors
-                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                    tracing::warn!(error = %e, "Failed to seek in shard file");
-                    return SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    });
-                }
-                let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
-                let mut buf = vec![0u8; read_len];
-                match file.read_exact(&mut buf) {
-                    Ok(()) => {
-                        tracing::info!(
-                            model = %model_id,
-                            shard = shard_index,
-                            bytes = buf.len(),
-                            total_size,
-                            "Serving shard chunk from file"
-                        );
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
-                            data: buf,
-                            total_size,
-                        })
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to read shard file");
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
+        let path = path.to_path_buf();
+        let model_id = model_id.clone();
+
+        // Perform blocking file I/O on a dedicated thread to avoid stalling
+        // the libp2p event loop while reading potentially large shard chunks.
+        let result = std::thread::scope(|_| {
+            match std::fs::File::open(&path) {
+                Ok(mut file) => {
+                    let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    let chunk_size = chunk_size.min(32 * 1024 * 1024);
+                    if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                        tracing::warn!(error = %e, "Failed to seek in shard file");
+                        return SwarmResponse::ShardData(crate::types::ShardResponse {
                             data: vec![],
                             total_size: 0,
-                        })
+                        });
+                    }
+                    let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
+                    let mut buf = vec![0u8; read_len];
+                    match file.read_exact(&mut buf) {
+                        Ok(()) => {
+                            tracing::info!(
+                                model = %model_id,
+                                shard = shard_index,
+                                bytes = buf.len(),
+                                total_size,
+                                "Serving shard chunk from file"
+                            );
+                            SwarmResponse::ShardData(crate::types::ShardResponse {
+                                data: buf,
+                                total_size,
+                            })
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to read shard file");
+                            SwarmResponse::ShardData(crate::types::ShardResponse {
+                                data: vec![],
+                                total_size: 0,
+                            })
+                        }
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to open shard file");
+                    SwarmResponse::ShardData(crate::types::ShardResponse {
+                        data: vec![],
+                        total_size: 0,
+                    })
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to open shard file");
-                SwarmResponse::ShardData(crate::types::ShardResponse {
-                    data: vec![],
-                    total_size: 0,
-                })
-            }
-        }
+        });
+
+        result
     }
 
     /// Send a shard transfer request to a specific peer.
