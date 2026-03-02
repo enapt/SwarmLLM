@@ -681,8 +681,12 @@ pub enum ModelArch {
     Mistral,
     /// StarCoder2
     Starcoder2,
-    /// DeepSeek-V2/V3 — MoE + MLA, NOT supported for split inference
+    /// DeepSeek-V2/V3 — MoE + MLA
     DeepSeek2,
+    /// GLM-4 — partial RoPE (half head dims), QKV biases, extreme GQA (2 KV heads)
+    Glm4,
+    /// Llama 4 Scout/Maverick — iRoPE (NoPE every 4th layer) + MoE
+    Llama4,
     /// Architecture not recognized — falls back to Llama-like behavior
     Unknown(String),
 }
@@ -699,13 +703,18 @@ impl ModelArch {
             "mistral" => ModelArch::Mistral,
             "starcoder2" => ModelArch::Starcoder2,
             "deepseek2" => ModelArch::DeepSeek2,
+            "glm4" => ModelArch::Glm4,
+            "llama4" => ModelArch::Llama4,
             other => ModelArch::Unknown(other.to_string()),
         }
     }
 
     /// Whether this architecture uses contiguous RoPE (vs interleaved).
     pub fn use_rope_contiguous(&self) -> bool {
-        matches!(self, ModelArch::Qwen2 | ModelArch::DeepSeek2)
+        matches!(
+            self,
+            ModelArch::Qwen2 | ModelArch::DeepSeek2 | ModelArch::Glm4 | ModelArch::Llama4
+        )
     }
 
     /// Default activation function for this architecture's MLP.
@@ -738,6 +747,8 @@ impl std::fmt::Display for ModelArch {
             ModelArch::Mistral => write!(f, "mistral"),
             ModelArch::Starcoder2 => write!(f, "starcoder2"),
             ModelArch::DeepSeek2 => write!(f, "deepseek2"),
+            ModelArch::Glm4 => write!(f, "glm4"),
+            ModelArch::Llama4 => write!(f, "llama4"),
             ModelArch::Unknown(s) => write!(f, "{s}"),
         }
     }
@@ -1163,7 +1174,7 @@ enum LayerVariant {
     /// DeepSeek-V2/V3 layer with MLA attention + MoE or dense FFN
     DeepSeek {
         attention: MlaWeights,
-        ffn: DeepSeekFfn,
+        ffn: FfnVariant,
         attention_norm: RmsNorm,
         ffn_norm: RmsNorm,
     },
@@ -1171,7 +1182,7 @@ enum LayerVariant {
 
 /// FFN variant for DeepSeek layers — either dense or MoE.
 #[derive(Debug, Clone)]
-enum DeepSeekFfn {
+enum FfnVariant {
     Dense(Mlp),
     MoE(MoeFfn),
 }
@@ -1202,7 +1213,7 @@ struct LayerWeights {
     attention_bk: Option<Tensor>,
     attention_bv: Option<Tensor>,
     attention_norm: RmsNorm,
-    mlp: Mlp,
+    ffn: FfnVariant,
     ffn_norm: RmsNorm,
     n_head: usize,
     n_kv_head: usize,
@@ -1214,6 +1225,12 @@ struct LayerWeights {
     use_rope_contiguous: bool,
     /// Gemma 2 attention logit soft-capping: `tanh(logits / cap) * cap` before softmax.
     attn_logit_softcap: Option<f32>,
+    /// Number of head dimensions that receive RoPE. When < head_dim, only the first
+    /// `rope_dim` dimensions are rotated and the rest pass through unchanged (partial RoPE,
+    /// used by GLM-4). When == head_dim, standard full RoPE is applied.
+    rope_dim: usize,
+    /// If true, skip RoPE entirely for this layer (Llama 4 NoPE layers).
+    skip_rope: bool,
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: &Tensor) -> CandleResult<Tensor> {
@@ -1382,13 +1399,33 @@ fn run_attention(
 
 impl LayerWeights {
     fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
-        let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
+        // Llama 4 NoPE layers: skip RoPE entirely
+        if self.skip_rope {
+            return Ok(x.clone());
+        }
+
+        let (_b_sz, _n_head, seq_len, n_embd) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        if self.use_rope_contiguous {
-            candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
+
+        // Partial RoPE (GLM-4): only rotate the first rope_dim dimensions,
+        // pass the rest through unchanged.
+        if self.rope_dim < n_embd {
+            let x_rot = x.narrow(3, 0, self.rope_dim)?.contiguous()?;
+            let x_pass = x.narrow(3, self.rope_dim, n_embd - self.rope_dim)?;
+            let rotated = if self.use_rope_contiguous {
+                candle_nn::rotary_emb::rope(&x_rot, &cos, &sin)?
+            } else {
+                candle_nn::rotary_emb::rope_i(&x_rot, &cos, &sin)?
+            };
+            Tensor::cat(&[&rotated, &x_pass], 3)
         } else {
-            candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
+            // Full RoPE (standard path)
+            if self.use_rope_contiguous {
+                candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
+            } else {
+                candle_nn::rotary_emb::rope_i(&x.contiguous()?, &cos, &sin)
+            }
         }
     }
 
@@ -2491,7 +2528,7 @@ impl SplitModel {
                             .transpose()
                             .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
 
-                        DeepSeekFfn::MoE(MoeFfn {
+                        FfnVariant::MoE(MoeFfn {
                             gate: gate_inp_t,
                             gate_exps: gate_exps_t,
                             down_exps: down_exps_t,
@@ -2512,7 +2549,7 @@ impl SplitModel {
                         let ffn_up = ct
                             .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                        DeepSeekFfn::Dense(Mlp {
+                        FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -2587,7 +2624,7 @@ impl SplitModel {
                         attention_bk,
                         attention_bv,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                        mlp: Mlp {
+                        ffn: FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -2595,7 +2632,7 @@ impl SplitModel {
                             ffn_up: QMatMul::from_qtensor(ffn_up)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             activation: Activation::SiLU,
-                        },
+                        }),
                         ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
                         n_head: head_count,
                         n_kv_head: head_count_kv,
@@ -2605,11 +2642,206 @@ impl SplitModel {
                         neg_inf: neg_inf.clone(),
                         use_rope_contiguous,
                         attn_logit_softcap,
+                        rope_dim,
+                        skip_rope: false,
                     }));
                 }
             }
+        } else if matches!(model_arch, ModelArch::Llama4) {
+            // ── Llama 4 Scout/Maverick: iRoPE + MoE loading ──
+            // iRoPE pattern: every 4th layer (index % 4 == 3) is NoPE (no positional encoding)
+            // MoE: router selects top-k experts from stacked expert tensors
+
+            // Read Llama 4 MoE metadata
+            let n_experts = ct
+                .metadata
+                .get(&format!("{arch}.expert_count"))
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(0) as usize;
+            let n_experts_used = ct
+                .metadata
+                .get(&format!("{arch}.expert_used_count"))
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(1) as usize;
+
+            for layer_idx in layer_start..layer_end {
+                let prefix = format!("blk.{layer_idx}");
+                let is_nope = layer_idx % 4 == 3; // NoPE every 4th layer
+
+                let attention_wq = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_q.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q: {e}")))?;
+                let attention_wk = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_k.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
+                let attention_wv = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_v.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
+                let attention_wo = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_output.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
+                let attn_norm = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_norm.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
+                let ffn_norm = ct
+                    .tensor(&mut file, &format!("{prefix}.ffn_norm.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
+
+                // QKV biases (optional)
+                let attention_bq = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_q.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_q.bias: {e}")))?;
+                let attention_bk = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_k.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_k.bias: {e}")))?;
+                let attention_bv = ct
+                    .tensor(&mut file, &format!("{prefix}.attn_v.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_v.bias: {e}")))?;
+
+                // Check if this layer has MoE
+                let has_moe = ct
+                    .tensor_infos
+                    .contains_key(&format!("{prefix}.ffn_gate_exps.weight"));
+
+                let ffn = if has_moe && n_experts > 0 {
+                    let gate_inp = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
+                    let gate_exps = ct
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_gate_exps.weight"),
+                            &device,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
+                        })?;
+                    let down_exps = ct
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_down_exps.weight"),
+                            &device,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
+                        })?;
+                    let up_exps = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
+
+                    let gate_inp_t = gate_inp
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("gate_inp dequant: {e}")))?;
+                    let gate_exps_t = gate_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("gate_exps dequant: {e}")))?;
+                    let down_exps_t = down_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("down_exps dequant: {e}")))?;
+                    let up_exps_t = up_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("up_exps dequant: {e}")))?;
+
+                    // Shared experts (optional for Llama 4)
+                    let shared_gate = ct
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_gate_shexp.weight"),
+                            &device,
+                        )
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared gate: {e}")))?;
+                    let shared_down = ct
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_down_shexp.weight"),
+                            &device,
+                        )
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared down: {e}")))?;
+                    let shared_up = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
+
+                    FfnVariant::MoE(MoeFfn {
+                        gate: gate_inp_t,
+                        gate_exps: gate_exps_t,
+                        down_exps: down_exps_t,
+                        up_exps: up_exps_t,
+                        shared_gate,
+                        shared_down,
+                        shared_up,
+                        n_experts_used,
+                    })
+                } else {
+                    // Dense FFN
+                    let ffn_gate_t = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_gate.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
+                    let ffn_down_t = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_down.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
+                    let ffn_up_t = ct
+                        .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
+                    FfnVariant::Dense(Mlp {
+                        ffn_gate: QMatMul::from_qtensor(ffn_gate_t)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_down: QMatMul::from_qtensor(ffn_down_t)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_up: QMatMul::from_qtensor(ffn_up_t)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        activation: Activation::SiLU,
+                    })
+                };
+
+                // Both MoE and dense FFN layers use standard attention via LayerVariant::Dense.
+                // The FfnVariant enum handles MoE vs dense FFN dispatch in the forward pass.
+                layers.push(LayerVariant::Dense(LayerWeights {
+                    attention_wq: QMatMul::from_qtensor(attention_wq)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wk: QMatMul::from_qtensor(attention_wk)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wv: QMatMul::from_qtensor(attention_wv)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wo: QMatMul::from_qtensor(attention_wo)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_bq,
+                    attention_bk,
+                    attention_bv,
+                    attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                    ffn,
+                    ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                    n_head: head_count,
+                    n_kv_head: head_count_kv,
+                    head_dim,
+                    cos: cos.clone(),
+                    sin: sin.clone(),
+                    neg_inf: neg_inf.clone(),
+                    use_rope_contiguous,
+                    attn_logit_softcap,
+                    rope_dim,
+                    skip_rope: is_nope,
+                }));
+            }
         } else {
-            // ── Standard dense architecture loading (Llama, Qwen2, Gemma, etc.) ──
+            // ── Standard dense architecture loading (Llama, Qwen2, Gemma, GLM-4, etc.) ──
             for layer_idx in layer_start..layer_end {
                 let prefix = format!("blk.{layer_idx}");
 
@@ -2692,7 +2924,7 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                    mlp: Mlp {
+                    ffn: FfnVariant::Dense(Mlp {
                         ffn_gate: QMatMul::from_qtensor(ffn_gate)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -2700,7 +2932,7 @@ impl SplitModel {
                         ffn_up: QMatMul::from_qtensor(ffn_up)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         activation,
-                    },
+                    }),
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                     n_head: head_count,
                     n_kv_head: head_count_kv,
@@ -2710,6 +2942,8 @@ impl SplitModel {
                     neg_inf: neg_inf.clone(),
                     use_rope_contiguous,
                     attn_logit_softcap,
+                    rope_dim,
+                    skip_rope: false,
                 }));
             }
         }
@@ -3282,7 +3516,7 @@ impl SplitModel {
                             .transpose()
                             .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
-                        DeepSeekFfn::MoE(MoeFfn {
+                        FfnVariant::MoE(MoeFfn {
                             gate: gate_inp_t,
                             gate_exps: gate_exps_t,
                             down_exps: down_exps_t,
@@ -3302,7 +3536,7 @@ impl SplitModel {
                         let ffn_up = ct
                             .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                        DeepSeekFfn::Dense(Mlp {
+                        FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -3377,7 +3611,7 @@ impl SplitModel {
                         attention_bk,
                         attention_bv,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                        mlp: Mlp {
+                        ffn: FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -3385,7 +3619,7 @@ impl SplitModel {
                             ffn_up: QMatMul::from_qtensor(ffn_up)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             activation: Activation::SiLU,
-                        },
+                        }),
                         ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
                         n_head: head_count,
                         n_kv_head: head_count_kv,
@@ -3395,8 +3629,209 @@ impl SplitModel {
                         neg_inf: neg_inf.clone(),
                         use_rope_contiguous,
                         attn_logit_softcap,
+                        rope_dim,
+                        skip_rope: false,
                     }));
                 }
+            }
+        } else if matches!(model_arch, ModelArch::Llama4) {
+            // ── Llama 4 Scout/Maverick shard loading: iRoPE + MoE ──
+            let n_experts = ct
+                .metadata
+                .get(&format!("{arch}.expert_count"))
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(0) as usize;
+            let n_experts_used = ct
+                .metadata
+                .get(&format!("{arch}.expert_used_count"))
+                .and_then(|v| v.to_u32().ok())
+                .unwrap_or(1) as usize;
+
+            for layer_idx in layer_start..layer_end {
+                let prefix = format!("blk.{layer_idx}");
+                let is_nope = layer_idx % 4 == 3;
+
+                let attention_wq = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q: {e}")))?;
+                let attention_wk = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
+                let attention_wv = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
+                let attention_wo = ct
+                    .tensor(
+                        &mut reader,
+                        &format!("{prefix}.attn_output.weight"),
+                        &device,
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
+                let attn_norm = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
+                let ffn_norm = ct
+                    .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
+
+                let attention_bq = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_q.bias: {e}")))?;
+                let attention_bk = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_k.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_k.bias: {e}")))?;
+                let attention_bv = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_v.bias"), &device)
+                    .ok()
+                    .map(|t| t.dequantize(&device))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_v.bias: {e}")))?;
+
+                let has_moe = ct
+                    .tensor_infos
+                    .contains_key(&format!("{prefix}.ffn_gate_exps.weight"));
+
+                let ffn = if has_moe && n_experts > 0 {
+                    let gate_inp = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_gate_inp.weight"),
+                            &device,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
+                    let gate_exps = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_gate_exps.weight"),
+                            &device,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
+                        })?;
+                    let down_exps = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_down_exps.weight"),
+                            &device,
+                        )
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
+                        })?;
+                    let up_exps = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_up_exps.weight"),
+                            &device,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
+
+                    let gate_inp_t = gate_inp
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("gate_inp dequant: {e}")))?;
+                    let gate_exps_t = gate_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("gate_exps dequant: {e}")))?;
+                    let down_exps_t = down_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("down_exps dequant: {e}")))?;
+                    let up_exps_t = up_exps
+                        .dequantize(&device)
+                        .map_err(|e| SwarmError::Internal(format!("up_exps dequant: {e}")))?;
+
+                    let shared_gate = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_gate_shexp.weight"),
+                            &device,
+                        )
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared gate: {e}")))?;
+                    let shared_down = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_down_shexp.weight"),
+                            &device,
+                        )
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared down: {e}")))?;
+                    let shared_up = ct
+                        .tensor(
+                            &mut reader,
+                            &format!("{prefix}.ffn_up_shexp.weight"),
+                            &device,
+                        )
+                        .ok()
+                        .map(QMatMul::from_qtensor)
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
+
+                    FfnVariant::MoE(MoeFfn {
+                        gate: gate_inp_t,
+                        gate_exps: gate_exps_t,
+                        down_exps: down_exps_t,
+                        up_exps: up_exps_t,
+                        shared_gate,
+                        shared_down,
+                        shared_up,
+                        n_experts_used,
+                    })
+                } else {
+                    let ffn_gate = ct
+                        .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
+                    let ffn_down = ct
+                        .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
+                    let ffn_up = ct
+                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
+                    FfnVariant::Dense(Mlp {
+                        ffn_gate: QMatMul::from_qtensor(ffn_gate)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_down: QMatMul::from_qtensor(ffn_down)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_up: QMatMul::from_qtensor(ffn_up)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        activation: Activation::SiLU,
+                    })
+                };
+
+                layers.push(LayerVariant::Dense(LayerWeights {
+                    attention_wq: QMatMul::from_qtensor(attention_wq)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wk: QMatMul::from_qtensor(attention_wk)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wv: QMatMul::from_qtensor(attention_wv)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_wo: QMatMul::from_qtensor(attention_wo)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    attention_bq,
+                    attention_bk,
+                    attention_bv,
+                    attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                    ffn,
+                    ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                    n_head: head_count,
+                    n_kv_head: head_count_kv,
+                    head_dim,
+                    cos: cos.clone(),
+                    sin: sin.clone(),
+                    neg_inf: neg_inf.clone(),
+                    use_rope_contiguous,
+                    attn_logit_softcap,
+                    rope_dim,
+                    skip_rope: is_nope,
+                }));
             }
         } else {
             for layer_idx in layer_start..layer_end {
@@ -3485,7 +3920,7 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                    mlp: Mlp {
+                    ffn: FfnVariant::Dense(Mlp {
                         ffn_gate: QMatMul::from_qtensor(ffn_gate)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_down: QMatMul::from_qtensor(ffn_down)
@@ -3493,7 +3928,7 @@ impl SplitModel {
                         ffn_up: QMatMul::from_qtensor(ffn_up)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         activation,
-                    },
+                    }),
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                     n_head: head_count,
                     n_kv_head: head_count_kv,
@@ -3503,6 +3938,8 @@ impl SplitModel {
                     neg_inf: neg_inf.clone(),
                     use_rope_contiguous,
                     attn_logit_softcap,
+                    rope_dim,
+                    skip_rope: false,
                 }));
             }
         }
@@ -3819,10 +4256,14 @@ impl SplitModel {
                         .ffn_norm
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let x = lw
-                        .mlp
-                        .forward(&x, lora_param)
-                        .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
+                    let x = match &lw.ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&x, lora_param)
+                            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&x)
+                            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+                    };
                     layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
                 LayerVariant::DeepSeek {
@@ -3849,10 +4290,10 @@ impl SplitModel {
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
                     let ffn_out = match ffn {
-                        DeepSeekFfn::Dense(mlp) => mlp
+                        FfnVariant::Dense(mlp) => mlp
                             .forward(&normed, None)
                             .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
-                        DeepSeekFfn::MoE(moe) => moe
+                        FfnVariant::MoE(moe) => moe
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
                     };
@@ -4009,10 +4450,16 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
 
         // Column-parallel MLP: each TP node handles a fraction of the intermediate dimension
-        let mlp_partial = lw
-            .mlp
-            .forward_tp(&ffn_normed, tp_rank, tp_size)
-            .map_err(|e| SwarmError::Internal(format!("mlp_tp: {e}")))?;
+        let mlp_partial = match &lw.ffn {
+            FfnVariant::Dense(mlp) => mlp
+                .forward_tp(&ffn_normed, tp_rank, tp_size)
+                .map_err(|e| SwarmError::Internal(format!("mlp_tp: {e}")))?,
+            FfnVariant::MoE(_) => {
+                return Err(SwarmError::Internal(
+                    "Tensor parallelism not supported for MoE layers".to_string(),
+                ));
+            }
+        };
 
         // Return partial = attn_partial + mlp_partial
         // The coordinator will AllReduce this and add the residual (input)
@@ -4209,10 +4656,14 @@ impl SplitModel {
                         .ffn_norm
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let x = lw
-                        .mlp
-                        .forward(&x, None)
-                        .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?;
+                    let x = match &lw.ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&x, None)
+                            .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&x)
+                            .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
+                    };
                     batched = (&x + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
                 LayerVariant::DeepSeek {
@@ -4254,10 +4705,10 @@ impl SplitModel {
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ds_ffn_norm: {e}")))?;
                     let ffn_out = match ffn {
-                        DeepSeekFfn::Dense(mlp) => mlp
+                        FfnVariant::Dense(mlp) => mlp
                             .forward(&normed, None)
                             .map_err(|e| SwarmError::Internal(format!("ds_mlp: {e}")))?,
-                        DeepSeekFfn::MoE(moe) => moe
+                        FfnVariant::MoE(moe) => moe
                             .forward(&normed)
                             .map_err(|e| SwarmError::Internal(format!("moe_batch: {e}")))?,
                     };
@@ -5212,12 +5663,12 @@ mod tests {
                 attention_bk: None,
                 attention_bv: None,
                 attention_norm: make_rms_norm(&norm_w),
-                mlp: Mlp {
+                ffn: FfnVariant::Dense(Mlp {
                     ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                     ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                     ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
                     activation: Activation::SiLU,
-                },
+                }),
                 ffn_norm: make_rms_norm(&norm_w),
                 n_head,
                 n_kv_head,
@@ -5227,6 +5678,8 @@ mod tests {
                 neg_inf: neg_inf.clone(),
                 use_rope_contiguous: true,
                 attn_logit_softcap: None,
+                rope_dim,
+                skip_rope: false,
             }));
         }
 
@@ -5590,12 +6043,12 @@ mod tests {
                 attention_bk: None,
                 attention_bv: None,
                 attention_norm: make_rms_norm(&norm_w),
-                mlp: Mlp {
+                ffn: FfnVariant::Dense(Mlp {
                     ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                     ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                     ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
                     activation,
-                },
+                }),
                 ffn_norm: make_rms_norm(&norm_w),
                 n_head,
                 n_kv_head,
@@ -5605,6 +6058,8 @@ mod tests {
                 neg_inf: neg_inf.clone(),
                 use_rope_contiguous,
                 attn_logit_softcap,
+                rope_dim,
+                skip_rope: false,
             }));
         }
 
@@ -5975,12 +6430,12 @@ mod tests {
             attention_bk: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
             attention_bv: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
             attention_norm: make_rms_norm(&norm_w),
-            mlp: Mlp {
+            ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                 ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                 ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
                 activation: Activation::SiLU,
-            },
+            }),
             ffn_norm: make_rms_norm(&norm_w),
             n_head,
             n_kv_head,
@@ -5990,6 +6445,8 @@ mod tests {
             neg_inf,
             use_rope_contiguous: true,
             attn_logit_softcap: None,
+            rope_dim: head_dim,
+            skip_rope: false,
         };
 
         let mut model = SplitModel {
@@ -6597,12 +7054,12 @@ mod tests {
             attention_bk: None,
             attention_bv: None,
             attention_norm: make_rms_norm(hidden_dim),
-            mlp: Mlp {
+            ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(hidden_dim, intermediate),
                 ffn_down: make_qmatmul(intermediate, hidden_dim),
                 ffn_up: make_qmatmul(hidden_dim, intermediate),
                 activation: Activation::SiLU,
-            },
+            }),
             ffn_norm: make_rms_norm(hidden_dim),
             n_head,
             n_kv_head: n_head,
@@ -6612,6 +7069,8 @@ mod tests {
             neg_inf: neg_inf.clone(),
             use_rope_contiguous: true,
             attn_logit_softcap: None,
+            rope_dim: head_dim,
+            skip_rope: false,
         });
 
         // Layer 1: DeepSeek MLA + MoE
@@ -6649,7 +7108,7 @@ mod tests {
 
         let deepseek_layer = LayerVariant::DeepSeek {
             attention: mla,
-            ffn: DeepSeekFfn::MoE(moe),
+            ffn: FfnVariant::MoE(moe),
             attention_norm: make_rms_norm(hidden_dim),
             ffn_norm: make_rms_norm(hidden_dim),
         };
@@ -6701,6 +7160,348 @@ mod tests {
         assert!(
             flat.iter().all(|v| v.is_finite()),
             "DeepSeek decode NaN/Inf"
+        );
+    }
+
+    #[test]
+    fn test_glm4_arch_supported() {
+        assert!(ModelArch::Glm4.is_supported());
+        assert!(ModelArch::Glm4.use_rope_contiguous());
+        assert_eq!(ModelArch::Glm4.default_activation(), Activation::SiLU);
+        assert!(!ModelArch::Glm4.use_gemma_norm());
+        assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
+    }
+
+    #[test]
+    fn test_llama4_arch_supported() {
+        assert!(ModelArch::Llama4.is_supported());
+        assert!(ModelArch::Llama4.use_rope_contiguous());
+        assert_eq!(ModelArch::Llama4.default_activation(), Activation::SiLU);
+        assert!(!ModelArch::Llama4.use_gemma_norm());
+        assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
+    }
+
+    #[test]
+    fn test_partial_rope_glm4_style() {
+        // GLM-4 uses partial RoPE: only first half of head_dim gets rotated
+        let device = Device::Cpu;
+        let head_dim = 16;
+        let rope_dim = 8; // half of head_dim
+        let n_head = 2;
+        let seq_len = 4;
+        let max_seq_len = 32;
+
+        let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+        let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
+        let make_rms_norm = |w: &Tensor| {
+            let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+        };
+
+        let lw = LayerWeights {
+            attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_bq: None,
+            attention_bk: None,
+            attention_bv: None,
+            attention_norm: make_rms_norm(&norm_w),
+            ffn: FfnVariant::Dense(Mlp {
+                ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+                ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
+                ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+                activation: Activation::SiLU,
+            }),
+            ffn_norm: make_rms_norm(&norm_w),
+            n_head,
+            n_kv_head: n_head,
+            head_dim,
+            cos,
+            sin,
+            neg_inf,
+            use_rope_contiguous: true,
+            attn_logit_softcap: None,
+            rope_dim,
+            skip_rope: false,
+        };
+
+        // Test that apply_rotary_emb handles partial RoPE
+        let x = Tensor::randn(0f32, 0.1, (1, n_head, seq_len, head_dim), &device).unwrap();
+        let result = lw.apply_rotary_emb(&x, 0).unwrap();
+        assert_eq!(result.dims(), &[1, n_head, seq_len, head_dim]);
+
+        // Verify first rope_dim dims are different (rotated) and last dims unchanged
+        let x_pass = x.narrow(3, rope_dim, head_dim - rope_dim).unwrap();
+        let r_pass = result.narrow(3, rope_dim, head_dim - rope_dim).unwrap();
+        let diff: f32 = (&x_pass - &r_pass)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar()
+            .unwrap();
+        assert!(
+            diff < 1e-5,
+            "Non-rotated dims should be unchanged, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn test_nope_skip_rope() {
+        // Llama 4 iRoPE: every 4th layer skips RoPE entirely
+        let device = Device::Cpu;
+        let head_dim = 16;
+        let n_head = 2;
+        let seq_len = 4;
+
+        let (cos, sin) = precompute_freqs_cis(head_dim, 10000.0, 32, &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+        let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
+        let make_rms_norm = |w: &Tensor| {
+            let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
+            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+        };
+
+        let lw = LayerWeights {
+            attention_wq: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wk: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wv: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_wo: make_qmatmul(n_head * head_dim, n_head * head_dim),
+            attention_bq: None,
+            attention_bk: None,
+            attention_bv: None,
+            attention_norm: make_rms_norm(&norm_w),
+            ffn: FfnVariant::Dense(Mlp {
+                ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+                ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
+                ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+                activation: Activation::SiLU,
+            }),
+            ffn_norm: make_rms_norm(&norm_w),
+            n_head,
+            n_kv_head: n_head,
+            head_dim,
+            cos,
+            sin,
+            neg_inf,
+            use_rope_contiguous: true,
+            attn_logit_softcap: None,
+            rope_dim: head_dim,
+            skip_rope: true, // NoPE layer
+        };
+
+        let x = Tensor::randn(0f32, 0.1, (1, n_head, seq_len, head_dim), &device).unwrap();
+        let result = lw.apply_rotary_emb(&x, 0).unwrap();
+
+        // skip_rope=true means output == input (no rotation applied)
+        let diff: f32 = (&x - &result)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .to_scalar()
+            .unwrap();
+        assert!(
+            diff < 1e-6,
+            "NoPE layer should not modify input, diff={diff}"
+        );
+    }
+
+    #[test]
+    fn test_ffn_variant_moe_forward() {
+        // Test that FfnVariant::MoE dispatches through MoeFfn correctly
+        let device = Device::Cpu;
+        let hidden = 32;
+        let intermediate = 64;
+        let n_experts = 4;
+        let n_experts_used = 2;
+
+        // Build small MoE FFN
+        let gate = Tensor::randn(0f32, 0.1, (n_experts, hidden), &device).unwrap();
+        let gate_exps =
+            Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden), &device).unwrap();
+        let down_exps =
+            Tensor::randn(0f32, 0.02, (n_experts, hidden, intermediate), &device).unwrap();
+        let up_exps =
+            Tensor::randn(0f32, 0.02, (n_experts, intermediate, hidden), &device).unwrap();
+
+        let moe = MoeFfn {
+            gate,
+            gate_exps,
+            down_exps,
+            up_exps,
+            shared_gate: None,
+            shared_down: None,
+            shared_up: None,
+            n_experts_used,
+        };
+
+        let ffn = FfnVariant::MoE(moe);
+        let x = Tensor::randn(0f32, 0.1, (1, 4, hidden), &device).unwrap();
+
+        let out = match &ffn {
+            FfnVariant::Dense(mlp) => mlp.forward(&x, None).unwrap(),
+            FfnVariant::MoE(moe) => moe.forward(&x).unwrap(),
+        };
+        assert_eq!(out.dims(), &[1, 4, hidden]);
+        let flat: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(flat.iter().all(|v| v.is_finite()), "MoE output NaN/Inf");
+    }
+
+    #[test]
+    fn test_irope_nope_pattern() {
+        // Verify the iRoPE pattern: every 4th layer (index % 4 == 3) is NoPE
+        let nope_layers: Vec<bool> = (0..12).map(|i| i % 4 == 3).collect();
+        assert_eq!(
+            nope_layers,
+            vec![false, false, false, true, false, false, false, true, false, false, false, true]
+        );
+    }
+
+    #[test]
+    fn test_llama4_moe_layer_forward() {
+        // End-to-end test: model with MoE FFN layers via FfnVariant
+        let device = Device::Cpu;
+        let hidden_dim = 32;
+        let n_head = 4;
+        let head_dim = hidden_dim / n_head;
+        let n_kv_head = 2;
+        let n_experts = 4;
+        let n_experts_used = 2;
+        let intermediate = 64;
+        let max_seq_len = 32;
+        let rope_dim = head_dim;
+
+        let (cos, sin) = precompute_freqs_cis(rope_dim, 10000.0, max_seq_len, &device).unwrap();
+        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device).unwrap();
+
+        let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
+            let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            QMatMul::from_qtensor(qt).unwrap()
+        };
+        let make_rms_norm = |dim: usize| -> RmsNorm {
+            let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
+            let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
+            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+        };
+
+        let kv_dim = n_kv_head * head_dim;
+
+        // Build a mix of dense + MoE layers (like Llama 4)
+        let mut layers = Vec::new();
+        for layer_idx in 0..4 {
+            let is_nope = layer_idx % 4 == 3;
+
+            let ffn = if layer_idx % 2 == 1 {
+                // MoE layers on odd indices
+                FfnVariant::MoE(MoeFfn {
+                    gate: Tensor::randn(0f32, 0.1, (n_experts, hidden_dim), &device).unwrap(),
+                    gate_exps: Tensor::randn(
+                        0f32,
+                        0.02,
+                        (n_experts, intermediate, hidden_dim),
+                        &device,
+                    )
+                    .unwrap(),
+                    down_exps: Tensor::randn(
+                        0f32,
+                        0.02,
+                        (n_experts, hidden_dim, intermediate),
+                        &device,
+                    )
+                    .unwrap(),
+                    up_exps: Tensor::randn(
+                        0f32,
+                        0.02,
+                        (n_experts, intermediate, hidden_dim),
+                        &device,
+                    )
+                    .unwrap(),
+                    shared_gate: None,
+                    shared_down: None,
+                    shared_up: None,
+                    n_experts_used,
+                })
+            } else {
+                // Dense FFN on even indices
+                FfnVariant::Dense(Mlp {
+                    ffn_gate: make_qmatmul(hidden_dim, intermediate),
+                    ffn_down: make_qmatmul(intermediate, hidden_dim),
+                    ffn_up: make_qmatmul(hidden_dim, intermediate),
+                    activation: Activation::SiLU,
+                })
+            };
+
+            layers.push(LayerVariant::Dense(LayerWeights {
+                attention_wq: make_qmatmul(hidden_dim, hidden_dim),
+                attention_wk: make_qmatmul(hidden_dim, kv_dim),
+                attention_wv: make_qmatmul(hidden_dim, kv_dim),
+                attention_wo: make_qmatmul(hidden_dim, hidden_dim),
+                attention_bq: None,
+                attention_bk: None,
+                attention_bv: None,
+                attention_norm: make_rms_norm(hidden_dim),
+                ffn,
+                ffn_norm: make_rms_norm(hidden_dim),
+                n_head,
+                n_kv_head,
+                head_dim,
+                cos: cos.clone(),
+                sin: sin.clone(),
+                neg_inf: neg_inf.clone(),
+                use_rope_contiguous: true,
+                attn_logit_softcap: None,
+                rope_dim,
+                skip_rope: is_nope,
+            }));
+        }
+
+        let mut model = SplitModel {
+            tok_embeddings: None,
+            layers,
+            norm: None,
+            output: None,
+            masks: HashMap::new(),
+            layer_start: 0,
+            layer_end: 4,
+            total_layers: 8,
+            hidden_dim,
+            arch: ModelArch::Llama4,
+            device,
+            vocabulary: None,
+            tokenizer: None,
+            eos_tokens: vec![2],
+            chat_template: None,
+            bos_token: String::new(),
+            eos_token: String::new(),
+            max_seq_len,
+        };
+
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let input = Tensor::randn(0f32, 0.1, (1, 4, hidden_dim), &Device::Cpu).unwrap();
+        let output = model.forward(&input, 0, &kv_store, "llama4-test").unwrap();
+        assert_eq!(output.dims(), &[1, 4, hidden_dim]);
+        let flat: Vec<f32> = output.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            flat.iter().all(|v| v.is_finite()),
+            "Llama 4 MoE output NaN/Inf"
         );
     }
 }

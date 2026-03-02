@@ -91,6 +91,13 @@ pub enum ModelArchitecture {
     Qwen2VL {
         vision_config: VisionConfig,
     },
+    /// GLM-4: partial RoPE, extreme GQA (2 KV heads), QKV biases.
+    Glm4,
+    /// Llama 4 Scout/Maverick: iRoPE (NoPE every 4th layer) + MoE.
+    Llama4 {
+        num_experts: u32,
+        experts_per_token: u32,
+    },
 }
 
 /// Vision encoder configuration for multimodal models.
