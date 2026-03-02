@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -144,6 +144,12 @@ pub struct SharedState {
     pub paged_kv_pool: Option<Arc<crate::inference::paged_kv::PagedKvPool>>,
     /// Paged KV store: per-request block table tracking.
     pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
+    /// Per-model auto-manage policies (runtime-mutable, persisted to sled).
+    pub model_auto_manage_policies: DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
+    /// Global default cap on auto-managed shards per model (from config).
+    pub auto_manage_default_model_cap: AtomicU32,
+    /// Cache of HuggingFace probe results (populated when user probes a model).
+    pub hf_probe_cache: DashMap<crate::types::ModelId, HfProbeInfo>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -152,6 +158,16 @@ pub struct SharedState {
 pub struct HfSource {
     pub repo_id: String,
     pub filename: String,
+}
+
+/// Cached result from probing a HuggingFace GGUF file.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HfProbeInfo {
+    pub repo_id: String,
+    pub filename: String,
+    pub shard_count: u32,
+    pub total_size_bytes: u64,
+    pub probed_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl SharedState {
@@ -211,10 +227,31 @@ impl SharedState {
         };
 
         let auto_manage_enabled = config.auto_manage.enabled;
+        let default_model_shard_cap = config.auto_manage.default_model_shard_cap;
         let kv_cache_ttl_secs = config.inference.kv_cache_ttl_secs.unwrap_or(600);
         let initial_ops = crate::config::OperationalParams::from_config(&config);
         let (config_watch_tx, _config_watch_rx) = watch::channel(initial_ops);
         let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
+
+        // Hydrate per-model auto-manage policies from sled + config
+        let model_auto_manage_policies = {
+            let map = DashMap::new();
+            if let Ok(tree) = db.tree("model_auto_manage_policies") {
+                for (key, value) in tree.iter().flatten() {
+                    if let (Ok(model_id_str), Ok(policy)) = (
+                        std::str::from_utf8(&key),
+                        serde_json::from_slice::<crate::config::ModelAutoManagePolicy>(&value),
+                    ) {
+                        map.insert(crate::types::ModelId(model_id_str.to_string()), policy);
+                    }
+                }
+            }
+            for (model_id, policy) in &config.auto_manage.model_policies {
+                map.entry(crate::types::ModelId(model_id.clone()))
+                    .or_insert_with(|| policy.clone());
+            }
+            map
+        };
         let state = Arc::new(Self {
             config,
             identity,
@@ -269,6 +306,9 @@ impl SharedState {
             peer_credit_balances: DashMap::new(),
             paged_kv_pool: None,
             paged_kv_store: None,
+            model_auto_manage_policies,
+            auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
+            hf_probe_cache: DashMap::new(),
             shutdown_tx,
         });
 

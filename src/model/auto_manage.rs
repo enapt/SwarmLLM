@@ -276,14 +276,70 @@ impl AutoShardManager {
     /// - **rarity_bonus** (1-10x): fewer holders → higher priority
     /// - **popularity**: more unique holders across model → higher value
     /// - **vram_fitness** (0.1-1.0x): models that fit in global VRAM pool score higher
+    /// - **spread_bonus** (0.05-1.0x): deprioritizes models we already have many shards of
     fn gather_candidates(&self, local_node_id: &NodeId, pool_vram_mb: u64) -> Vec<ShardCandidate> {
         let mut candidates = Vec::new();
         let registry = &self.shared_state.model_registry;
         let shard_store =
             crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
         let configured_range = self.shared_state.config.inference.shard_range;
+        let default_cap = self
+            .shared_state
+            .auto_manage_default_model_cap
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         for manifest in registry.models() {
+            // ── Policy gate: skip models excluded from auto-manage ──
+            if let Some(policy) = self.shared_state.model_auto_manage_policies.get(&manifest.id) {
+                if !policy.enabled {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        "Skipping model — auto-manage disabled by policy"
+                    );
+                    continue;
+                }
+            }
+
+            // ── Per-model cap: count local shards, skip if at cap ──
+            let local_shard_count = manifest
+                .shards
+                .iter()
+                .filter(|s| {
+                    let sid = ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    };
+                    registry.shard_holders(&sid).contains(local_node_id)
+                })
+                .count() as u32;
+
+            let effective_cap = self
+                .shared_state
+                .model_auto_manage_policies
+                .get(&manifest.id)
+                .and_then(|p| if p.max_shards > 0 { Some(p.max_shards) } else { None })
+                .or(if default_cap > 0 { Some(default_cap) } else { None });
+
+            if let Some(cap) = effective_cap {
+                if local_shard_count >= cap {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        local = local_shard_count,
+                        cap = cap,
+                        "Skipping model — at per-model shard cap"
+                    );
+                    continue;
+                }
+            }
+
+            // ── Spread bonus: deprioritize models we already have many shards of ──
+            let local_fraction = if manifest.shard_count > 0 {
+                local_shard_count as f64 / manifest.shard_count as f64
+            } else {
+                0.0
+            };
+            let spread_bonus = (1.0 - local_fraction).max(0.05);
+
             // Model popularity: count total unique holders across all shards
             let mut all_holders = std::collections::HashSet::new();
             let mut shard_holder_counts: Vec<(u32, usize)> = Vec::new();
@@ -425,7 +481,7 @@ impl AutoShardManager {
                 };
 
                 let score =
-                    model_popularity * rarity_bonus * configured_bonus * vram_fitness + jitter;
+                    model_popularity * rarity_bonus * configured_bonus * vram_fitness * spread_bonus + jitter;
 
                 candidates.push(ShardCandidate {
                     model_id: manifest.id.clone(),
@@ -508,23 +564,47 @@ impl AutoShardManager {
             set
         };
 
+        // Round-robin interleaving: group candidates by model, take one per model
+        // in rotation instead of pure score-descending. This ensures shards from
+        // different models are downloaded in the same cycle when possible.
+        let mut by_model: std::collections::HashMap<String, Vec<ShardCandidate>> =
+            std::collections::HashMap::new();
+        let mut model_order: Vec<String> = Vec::new();
         for candidate in candidates {
-            if selected.len() >= max {
-                break;
-            }
-            if candidate.shard_size_bytes > budget_bytes {
-                continue;
-            }
             // Skip this specific shard if it's already being downloaded
             if downloading_shards.contains(&(candidate.model_id.0.clone(), candidate.shard_index)) {
                 continue;
             }
+            if !by_model.contains_key(&candidate.model_id.0) {
+                model_order.push(candidate.model_id.0.clone());
+            }
+            by_model
+                .entry(candidate.model_id.0.clone())
+                .or_default()
+                .push(candidate);
+        }
 
-            budget_bytes -= candidate.shard_size_bytes;
-            selected.push(candidate);
-
-            // Only download 1-2 shards per evaluation cycle to spread load
-            if selected.len() >= 2 {
+        // Round-robin: take one candidate from each model in order
+        let mut model_indices: Vec<usize> = vec![0; model_order.len()];
+        'outer: loop {
+            let mut any_taken = false;
+            for (mi, model_key) in model_order.iter().enumerate() {
+                if selected.len() >= max || selected.len() >= 2 {
+                    break 'outer;
+                }
+                let candidates_for_model = &by_model[model_key];
+                while model_indices[mi] < candidates_for_model.len() {
+                    let candidate = &candidates_for_model[model_indices[mi]];
+                    model_indices[mi] += 1;
+                    if candidate.shard_size_bytes <= budget_bytes {
+                        budget_bytes -= candidate.shard_size_bytes;
+                        selected.push(candidate.clone());
+                        any_taken = true;
+                        break; // move to next model
+                    }
+                }
+            }
+            if !any_taken {
                 break;
             }
         }
@@ -1385,6 +1465,8 @@ mod tests {
             max_shards: 0,
             interval_seconds: None,
             max_concurrent_downloads: 3,
+            default_model_shard_cap: 0,
+            model_policies: std::collections::HashMap::new(),
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }

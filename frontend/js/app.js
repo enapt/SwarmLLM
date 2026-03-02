@@ -557,7 +557,7 @@ var SwarmLLM = (function() {
             if (cls === 'downloading' || cls === 'peer-downloading') {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
-            shardHtml += '<div class="shard-cell ' + cls + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" title="' + title + '">' + label + '</div>';
+            shardHtml += '<div class="shard-cell ' + cls + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" title="' + title + '">' + label + '</div>';
           });
           shardHtml += '</div>';
 
@@ -634,11 +634,20 @@ var SwarmLLM = (function() {
           removeHtml = ' <button class="model-remove-btn" data-remove-model="' + escapeHtml(m.id) + '">Remove</button>';
         }
 
+        // Probed badge — show when HF metadata fetched but no shards downloaded yet
+        var probedBadge = '';
+        if (m.probed && hostedShards === 0 && !isDownloading) {
+          probedBadge = '<span class="badge-probed">Probed</span>';
+        }
+
+        // Gear icon for per-model auto-manage settings
+        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
+
         var name = m.name || m.id;
         card.innerHTML =
           '<div class="model-header">' +
-            '<span class="model-name">' + escapeHtml(name) + '</span>' +
-            '<span>' + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
+            '<span class="model-name">' + escapeHtml(name) + probedBadge + '</span>' +
+            '<span>' + gearHtml + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
           shardHtml + progressHtml;
@@ -1580,6 +1589,171 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Remove Model
   // ========================================================================
+  // ========================================================================
+  // Shard Context Menu
+  // ========================================================================
+  var shardMenu = {
+    menu: null,
+    currentModel: null,
+    currentIndex: null,
+    currentState: null,
+
+    init: function() {
+      this.menu = document.getElementById('shard-context-menu');
+    },
+
+    show: function(modelId, shardIndex, shardState, x, y) {
+      if (!this.menu) this.init();
+      this.currentModel = modelId;
+      this.currentIndex = shardIndex;
+      this.currentState = shardState;
+
+      var header = document.getElementById('shard-ctx-header');
+      var btn = document.getElementById('shard-ctx-action');
+      header.textContent = 'Shard ' + shardIndex;
+
+      if (shardState === 'local') {
+        btn.textContent = 'Remove this shard';
+        btn.className = 'shard-ctx-btn danger';
+      } else if (shardState === 'downloading') {
+        btn.textContent = 'Cancel download';
+        btn.className = 'shard-ctx-btn danger';
+      } else {
+        btn.textContent = 'Download this shard';
+        btn.className = 'shard-ctx-btn';
+      }
+
+      // Position menu at click, clamped to viewport
+      var mw = 180, mh = 70;
+      var left = Math.min(x, window.innerWidth - mw - 8);
+      var top = Math.min(y, window.innerHeight - mh - 8);
+      this.menu.style.left = left + 'px';
+      this.menu.style.top = top + 'px';
+      this.menu.style.display = '';
+    },
+
+    hide: function() {
+      if (this.menu) this.menu.style.display = 'none';
+    },
+
+    execute: async function() {
+      var modelId = this.currentModel;
+      var idx = this.currentIndex;
+      var state = this.currentState;
+      this.hide();
+
+      if (state === 'local') {
+        // Remove single shard
+        if (!confirm('Remove shard ' + idx + ' of ' + modelId + '?')) return;
+        try {
+          var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx, { method: 'DELETE' });
+          if (resp.ok) {
+            ui.showBanner('success', 'Shard ' + idx + ' removed');
+            loadModels();
+          } else {
+            var errData = await resp.json().catch(function() { return {}; });
+            ui.showBanner('error', errData.error ? errData.error.message : 'Failed to remove shard');
+          }
+        } catch (e) {
+          ui.showBanner('error', 'Remove failed: ' + e.message);
+        }
+      } else if (state === 'downloading') {
+        // Cancel download for this model
+        cancelDownload(modelId);
+      } else {
+        // Download single shard — look up HF source first
+        try {
+          var srcResp = await fetch('/api/admin/hf/source/' + encodeURIComponent(modelId));
+          if (!srcResp.ok) {
+            ui.showBanner('error', 'No HuggingFace source found for this model');
+            return;
+          }
+          var src = await srcResp.json();
+          var dlResp = await authFetch('/api/admin/hf/download-shards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: [idx], model_id: modelId }),
+          });
+          if (dlResp.ok) {
+            ui.showBanner('success', 'Downloading shard ' + idx);
+            loadModels();
+          } else {
+            var errData2 = await dlResp.json().catch(function() { return {}; });
+            ui.showBanner('error', errData2.error ? errData2.error.message : 'Download failed');
+          }
+        } catch (e) {
+          ui.showBanner('error', 'Download failed: ' + e.message);
+        }
+      }
+    }
+  };
+
+  // ========================================================================
+  // Per-Model Auto-Manage Panel
+  // ========================================================================
+  async function toggleAutoManagePanel(modelId) {
+    // Find model card
+    var card = document.querySelector('[data-model-id="' + modelId + '"]');
+    if (!card) return;
+
+    // If panel already open, close it
+    var existing = card.querySelector('.auto-manage-panel');
+    if (existing) { existing.remove(); return; }
+
+    // Fetch current policy
+    var policy = { enabled: true, max_shards: 0 };
+    try {
+      var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage');
+      if (resp.ok) policy = await resp.json();
+    } catch (e) {}
+
+    var panel = document.createElement('div');
+    panel.className = 'auto-manage-panel';
+    panel.innerHTML =
+      '<div class="am-row">' +
+        '<label><input type="checkbox" id="am-enabled-' + escapeHtml(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> Auto-manage enabled</label>' +
+      '</div>' +
+      '<div class="am-row">' +
+        '<label>Max shards:</label>' +
+        '<input type="number" id="am-max-' + escapeHtml(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
+        '<span class="text-muted" style="font-size:0.7rem">0 = unlimited</span>' +
+      '</div>' +
+      '<div class="am-row">' +
+        '<button class="btn btn-sm btn-primary" data-am-save="' + escapeHtml(modelId) + '">Save</button>' +
+      '</div>';
+    card.appendChild(panel);
+  }
+
+  async function saveAutoManagePolicy(modelId) {
+    var safeId = escapeHtml(modelId);
+    var enabledEl = document.getElementById('am-enabled-' + safeId);
+    var maxEl = document.getElementById('am-max-' + safeId);
+    if (!enabledEl || !maxEl) return;
+
+    try {
+      var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: enabledEl.checked,
+          max_shards: parseInt(maxEl.value, 10) || 0,
+        }),
+      });
+      if (resp.ok) {
+        ui.showBanner('success', 'Auto-manage policy saved');
+        // Close panel
+        var card = document.querySelector('[data-model-id="' + modelId + '"]');
+        var panel = card ? card.querySelector('.auto-manage-panel') : null;
+        if (panel) panel.remove();
+      } else {
+        var errData = await resp.json().catch(function() { return {}; });
+        ui.showBanner('error', errData.error ? errData.error.message : 'Save failed');
+      }
+    } catch (e) {
+      ui.showBanner('error', 'Save failed: ' + e.message);
+    }
+  }
+
   async function removeModel(modelId) {
     if (!confirm('Remove all local shards for ' + modelId + '? This cannot be undone.')) return;
     try {
@@ -2118,9 +2292,10 @@ var SwarmLLM = (function() {
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
 
-    // Escape key closes open modals
+    // Escape key closes open modals and shard context menu
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
+        shardMenu.hide();
         var settingsModal = document.getElementById('settings-modal');
         var modelModal = document.getElementById('model-browser-modal');
         if (settingsModal && settingsModal.classList.contains('active')) { ui.closeSettings(); }
@@ -2152,6 +2327,36 @@ var SwarmLLM = (function() {
       // HF download button
       var hfRepo = target.getAttribute('data-hf-download');
       if (hfRepo) { hf.download(hfRepo, target.getAttribute('data-hf-filename') || ''); return; }
+
+      // Shard cell click → open context menu
+      if (target.classList.contains('shard-cell')) {
+        var shardModel = target.getAttribute('data-shard-model');
+        var shardIdx = parseInt(target.getAttribute('data-shard-index'), 10);
+        if (shardModel != null && !isNaN(shardIdx)) {
+          var cls = target.className;
+          var state = 'missing';
+          if (cls.indexOf('local') !== -1) state = 'local';
+          else if (cls.indexOf('downloading') !== -1 && cls.indexOf('peer-downloading') === -1) state = 'downloading';
+          else if (cls.indexOf('peer') !== -1) state = 'peer';
+          shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY);
+          e.stopPropagation();
+          return;
+        }
+      }
+
+      // Shard context menu action button
+      if (target.id === 'shard-ctx-action') { shardMenu.execute(); return; }
+
+      // Auto-manage gear icon
+      var gearId = target.getAttribute('data-am-gear');
+      if (gearId) { toggleAutoManagePanel(gearId); return; }
+
+      // Auto-manage save button
+      var amSave = target.getAttribute('data-am-save');
+      if (amSave) { saveAutoManagePolicy(amSave); return; }
+
+      // Close shard context menu on any other click
+      shardMenu.hide();
     });
   }
 

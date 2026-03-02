@@ -73,6 +73,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/downloads/:model_id/cancel",
             post(admin::cancel_download),
         )
+        // Single-shard management
+        .route(
+            "/api/admin/models/:id/shards/:index",
+            delete(admin::delete_shard),
+        )
+        // Per-model auto-manage policy
+        .route(
+            "/api/admin/models/:id/auto-manage",
+            get(admin::get_model_auto_manage).put(admin::set_model_auto_manage),
+        )
+        // HF source lookup
+        .route("/api/admin/hf/source/:model_id", get(admin::hf_source))
         // Model management
         .route("/api/admin/models/:id", delete(admin::delete_model))
         // Shutdown

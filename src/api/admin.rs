@@ -504,6 +504,11 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             let has_manifest = model_dir.join("manifest.json").exists();
             let has_header = model_dir.join("gguf_header.bin").exists();
 
+            let probed = {
+                let mid_check = crate::types::ModelId(model_id.clone());
+                state.shared_state.hf_sources.contains_key(&mid_check)
+                    || state.shared_state.hf_probe_cache.contains_key(&mid_check)
+            };
             models.push(serde_json::json!({
                 "id": model_id,
                 "name": info.name,
@@ -520,6 +525,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "shards": shard_detail,
                 "has_manifest": has_manifest,
                 "has_header": has_header,
+                "probed": probed,
             }));
         } // else: stale loaded model, files deleted
     }
@@ -640,6 +646,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let has_manifest = model_dir.join("manifest.json").exists();
         let has_header = model_dir.join("gguf_header.bin").exists();
 
+        let probed = state.shared_state.hf_sources.contains_key(&m.id)
+            || state.shared_state.hf_probe_cache.contains_key(&m.id);
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
@@ -657,6 +665,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "estimated_vram_mb": estimated_vram,
             "has_manifest": has_manifest,
             "has_header": has_header,
+            "probed": probed,
             "acquisition": acq_state,
             "acquisition_progress": acq_progress,
         }));
@@ -1274,12 +1283,33 @@ pub async fn hf_probe(
 
     let shard_size = state.config.model.shard_size_bytes();
     match crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size).await {
-        Ok(info) => Ok(Json(serde_json::json!({
-            "status": "ok",
-            "total_size": info.total_size,
-            "header_size": info.header_size,
-            "shard_count": info.shard_count(),
-        }))),
+        Ok(info) => {
+            // Cache probe result so the frontend can look up HF source later
+            let model_id_str = filename
+                .trim_end_matches(".gguf")
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("-");
+            let mid = crate::types::ModelId(model_id_str);
+            let probe_info = crate::daemon::HfProbeInfo {
+                repo_id: repo_id.clone(),
+                filename: filename.clone(),
+                shard_count: info.shard_count(),
+                total_size_bytes: info.total_size,
+                probed_at: chrono::Utc::now(),
+            };
+            state.shared_state.hf_probe_cache.insert(mid, probe_info);
+
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "total_size": info.total_size,
+                "header_size": info.header_size,
+                "shard_count": info.shard_count(),
+            })))
+        }
         Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
     }
 }
@@ -2273,6 +2303,196 @@ pub async fn delete_model(
         "model_id": model_id,
         "files_removed": files_removed,
     })))
+}
+
+/// DELETE /api/admin/models/:model_id/shards/:shard_index — Remove a single shard.
+///
+/// Deletes the shard file from disk, removes self from shard_holders in model_registry,
+/// and broadcasts updated ShardAnnounce. Keeps manifest, header, and other shards intact.
+pub async fn delete_shard(
+    State(state): State<AppState>,
+    Path((model_id, shard_index)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+    let local_node_id = shared.identity.node_id().clone();
+
+    // Verify shard exists in registry
+    let shard_id = crate::types::ShardId {
+        model_id: mid.clone(),
+        index: shard_index,
+    };
+    let holders = shared.model_registry.shard_holders(&shard_id);
+    if !holders.contains(&local_node_id) {
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "Shard {} of model '{}' is not held locally",
+            shard_index, model_id
+        ))));
+    }
+
+    // Delete shard file from disk
+    let shard_path = state
+        .config
+        .node
+        .data_dir
+        .join("models")
+        .join(&safe_model_id)
+        .join(format!("shard_{:03}.bin", shard_index));
+
+    if shard_path.exists() {
+        std::fs::remove_file(&shard_path).map_err(|e| {
+            ApiError(crate::error::SwarmError::Io(e))
+        })?;
+    }
+
+    // Remove self from shard_holders
+    shared
+        .model_registry
+        .remove_shard_holder(&shard_id, &local_node_id);
+
+    // Also remove from shard_registry DashMap
+    if let Some(mut holders) = shared.shard_registry.get_mut(&shard_id) {
+        holders.retain(|n| n != &local_node_id);
+    }
+
+    // Evict any cached split model segments that included this shard
+    shared.split_models.retain(|key, _| key.0 != mid);
+
+    // Broadcast updated ShardAnnounce with remaining held shards
+    if let Some(ref ntx) = state.network_tx {
+        let remaining_shards: Vec<crate::types::ShardId> = shared
+            .model_registry
+            .all_shard_entries()
+            .iter()
+            .filter(|(sid, holders)| sid.model_id == mid && holders.contains(&local_node_id))
+            .map(|(sid, _)| sid.clone())
+            .collect();
+
+        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
+            node_id: local_node_id,
+            shards: remaining_shards,
+            timestamp: chrono::Utc::now(),
+        });
+        let _ = ntx
+            .send(crate::types::NetworkCommand::Broadcast(announce))
+            .await;
+    }
+
+    tracing::info!(model = %model_id, shard = shard_index, "Shard removed");
+
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "model_id": model_id,
+        "shard_index": shard_index,
+    })))
+}
+
+/// GET /api/admin/models/:model_id/auto-manage — Get per-model auto-manage policy.
+pub async fn get_model_auto_manage(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let default_cap = state
+        .shared_state
+        .auto_manage_default_model_cap
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    match state.shared_state.model_auto_manage_policies.get(&mid) {
+        Some(policy) => Json(serde_json::json!({
+            "model_id": model_id,
+            "enabled": policy.enabled,
+            "max_shards": policy.max_shards,
+        })),
+        None => Json(serde_json::json!({
+            "model_id": model_id,
+            "enabled": true,
+            "max_shards": default_cap,
+        })),
+    }
+}
+
+/// PUT /api/admin/models/:model_id/auto-manage — Set per-model auto-manage policy.
+#[derive(Debug, Deserialize)]
+pub struct ModelAutoManageUpdate {
+    pub enabled: Option<bool>,
+    pub max_shards: Option<u32>,
+}
+
+pub async fn set_model_auto_manage(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(body): Json<ModelAutoManageUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+
+    let policy = crate::config::ModelAutoManagePolicy {
+        enabled: body.enabled.unwrap_or(true),
+        max_shards: body.max_shards.unwrap_or(0),
+    };
+
+    // Update in-memory
+    state
+        .shared_state
+        .model_auto_manage_policies
+        .insert(mid.clone(), policy.clone());
+
+    // Persist to sled
+    if let Ok(tree) = state.shared_state.db.tree("model_auto_manage_policies") {
+        if let Ok(bytes) = serde_json::to_vec(&policy) {
+            let _ = tree.insert(model_id.as_bytes(), bytes);
+        }
+    }
+
+    // Wake auto-manage to re-evaluate
+    state.shared_state.auto_manage_notify.notify_one();
+
+    tracing::info!(
+        model = %model_id,
+        enabled = policy.enabled,
+        max_shards = policy.max_shards,
+        "Per-model auto-manage policy updated"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "enabled": policy.enabled,
+        "max_shards": policy.max_shards,
+    })))
+}
+
+/// GET /api/admin/hf/source/:model_id — Look up HuggingFace source for a model.
+///
+/// Returns the repo_id and filename needed to trigger per-shard downloads.
+/// Checks both hf_sources (downloaded models) and hf_probe_cache (probed models).
+pub async fn hf_source(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+
+    if let Some(src) = state.shared_state.hf_sources.get(&mid) {
+        return Ok(Json(serde_json::json!({
+            "model_id": model_id,
+            "repo_id": src.repo_id,
+            "filename": src.filename,
+        })));
+    }
+
+    if let Some(probe) = state.shared_state.hf_probe_cache.get(&mid) {
+        return Ok(Json(serde_json::json!({
+            "model_id": model_id,
+            "repo_id": probe.repo_id,
+            "filename": probe.filename,
+        })));
+    }
+
+    Err(ApiError(crate::error::SwarmError::Config(format!(
+        "No HuggingFace source found for model '{}'",
+        model_id
+    ))))
 }
 
 /// GET /api/admin/network-code — Return this node's network invite code.

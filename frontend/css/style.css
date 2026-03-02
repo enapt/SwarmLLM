@@ -1167,3 +1167,89 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--red);
   background: var(--red-dim);
 }
+
+/* ---- Shard context menu ---- */
+.shard-context-menu {
+  position: fixed;
+  z-index: 10000;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  min-width: 160px;
+  overflow: hidden;
+}
+.shard-ctx-header {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.shard-ctx-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.shard-ctx-btn:hover { background: var(--bg-tertiary); }
+.shard-ctx-btn.danger { color: var(--red); }
+.shard-ctx-btn.danger:hover { background: var(--red-dim); }
+
+/* ---- Shard cell clickable cursor ---- */
+.model-card .shard-cell { cursor: pointer; }
+
+/* ---- Probed badge ---- */
+.badge-probed {
+  display: inline-block;
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-weight: 500;
+}
+
+/* ---- Auto-manage gear button ---- */
+.model-gear-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 4px;
+  transition: color var(--transition);
+  line-height: 1;
+}
+.model-gear-btn:hover { color: var(--accent); }
+
+/* ---- Inline auto-manage settings panel ---- */
+.auto-manage-panel {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-top: 8px;
+  font-size: 0.8rem;
+}
+.auto-manage-panel .am-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.auto-manage-panel .am-row:last-child { margin-bottom: 0; }
+.auto-manage-panel label { margin: 0; font-weight: normal; }
+.auto-manage-panel input[type="number"] {
+  width: 60px;
+  padding: 3px 6px;
+  font-size: 0.8rem;
+}
+.auto-manage-panel .btn { font-size: 0.75rem; padding: 3px 10px; }

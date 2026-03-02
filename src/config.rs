@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::SwarmError;
@@ -346,6 +347,25 @@ pub struct AutoManageConfig {
     /// Maximum number of concurrent shard downloads (default 3).
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
+    /// Default cap on auto-managed shards per model (0 = unlimited).
+    /// Prevents auto-manage from downloading ALL shards of a single model.
+    #[serde(default)]
+    pub default_model_shard_cap: u32,
+    /// Per-model auto-manage overrides keyed by model ID.
+    #[serde(default)]
+    pub model_policies: HashMap<String, ModelAutoManagePolicy>,
+}
+
+/// Per-model auto-manage policy controlling whether a model participates
+/// in automatic shard downloads and how many shards to acquire.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelAutoManagePolicy {
+    /// Whether auto-manage may download shards for this model.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum shards auto-manage will acquire for this model (0 = unlimited / use global default).
+    #[serde(default)]
+    pub max_shards: u32,
 }
 
 impl Default for AutoManageConfig {
@@ -357,6 +377,8 @@ impl Default for AutoManageConfig {
             max_shards: 0,
             interval_seconds: None,
             max_concurrent_downloads: default_max_concurrent_downloads(),
+            default_model_shard_cap: 0,
+            model_policies: HashMap::new(),
         }
     }
 }

@@ -114,7 +114,9 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
-        ) || path.starts_with("/api/identity/")
+        ) || path.starts_with("/api/admin/hf/source/")
+            || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
+            || path.starts_with("/api/identity/")
             || path.starts_with("/api/pool/");
     }
 
@@ -258,5 +260,26 @@ mod tests {
         assert!(!is_exempt_request("/v1/models", &Method::GET));
         assert!(!is_exempt_request("/v1/chat/completions", &post));
         assert!(!is_exempt_request("/v1/completions", &post));
+        // PUT auto-manage and DELETE shard require auth
+        assert!(!is_exempt_request(
+            "/api/admin/models/test/auto-manage",
+            &put
+        ));
+        assert!(!is_exempt_request(
+            "/api/admin/models/test/shards/0",
+            &delete
+        ));
+    }
+
+    #[test]
+    fn exempt_new_read_only_endpoints() {
+        let get = Method::GET;
+        // GET /api/admin/hf/source/:id is exempt (read-only)
+        assert!(is_exempt_request("/api/admin/hf/source/test-model", &get));
+        // GET /api/admin/models/:id/auto-manage is exempt (read-only)
+        assert!(is_exempt_request(
+            "/api/admin/models/test-model/auto-manage",
+            &get
+        ));
     }
 }
