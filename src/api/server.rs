@@ -187,6 +187,7 @@ pub async fn run_server_with_state(
     network_tx: mpsc::Sender<NetworkCommand>,
 ) -> anyhow::Result<()> {
     let port = shared_state.config.node.listen_port;
+    let mut shutdown_rx = shared_state.shutdown_rx();
     let state = AppState {
         config: shared_state.config.clone(),
         db: shared_state.db.clone(),
@@ -207,6 +208,11 @@ pub async fn run_server_with_state(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        // Wait until the shutdown watch channel signals true
+        let _ = shutdown_rx.wait_for(|v| *v).await;
+        tracing::info!("API server shutting down gracefully");
+    })
     .await?;
 
     Ok(())

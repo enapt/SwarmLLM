@@ -290,7 +290,11 @@ impl AutoShardManager {
 
         for manifest in registry.models() {
             // ── Policy gate: skip models excluded from auto-manage ──
-            if let Some(policy) = self.shared_state.model_auto_manage_policies.get(&manifest.id) {
+            if let Some(policy) = self
+                .shared_state
+                .model_auto_manage_policies
+                .get(&manifest.id)
+            {
                 if !policy.enabled {
                     tracing::debug!(
                         model = %manifest.id,
@@ -317,8 +321,18 @@ impl AutoShardManager {
                 .shared_state
                 .model_auto_manage_policies
                 .get(&manifest.id)
-                .and_then(|p| if p.max_shards > 0 { Some(p.max_shards) } else { None })
-                .or(if default_cap > 0 { Some(default_cap) } else { None });
+                .and_then(|p| {
+                    if p.max_shards > 0 {
+                        Some(p.max_shards)
+                    } else {
+                        None
+                    }
+                })
+                .or(if default_cap > 0 {
+                    Some(default_cap)
+                } else {
+                    None
+                });
 
             if let Some(cap) = effective_cap {
                 if local_shard_count >= cap {
@@ -480,8 +494,12 @@ impl AutoShardManager {
                     hash.as_bytes()[0] as f64 / 2550.0 // 0.0–0.1 range
                 };
 
-                let score =
-                    model_popularity * rarity_bonus * configured_bonus * vram_fitness * spread_bonus + jitter;
+                let score = model_popularity
+                    * rarity_bonus
+                    * configured_bonus
+                    * vram_fitness
+                    * spread_bonus
+                    + jitter;
 
                 candidates.push(ShardCandidate {
                     model_id: manifest.id.clone(),

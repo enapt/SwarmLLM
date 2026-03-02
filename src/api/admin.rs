@@ -2341,9 +2341,7 @@ pub async fn delete_shard(
         .join(format!("shard_{:03}.bin", shard_index));
 
     if shard_path.exists() {
-        std::fs::remove_file(&shard_path).map_err(|e| {
-            ApiError(crate::error::SwarmError::Io(e))
-        })?;
+        std::fs::remove_file(&shard_path).map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
     }
 
     // Remove self from shard_holders

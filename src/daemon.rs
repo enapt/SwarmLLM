@@ -145,7 +145,8 @@ pub struct SharedState {
     /// Paged KV store: per-request block table tracking.
     pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
     /// Per-model auto-manage policies (runtime-mutable, persisted to sled).
-    pub model_auto_manage_policies: DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
+    pub model_auto_manage_policies:
+        DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
     /// Global default cap on auto-managed shards per model (from config).
     pub auto_manage_default_model_cap: AtomicU32,
     /// Cache of HuggingFace probe results (populated when user probes a model).
@@ -320,6 +321,11 @@ impl SharedState {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Get a receiver for the shutdown watch channel.
+    pub fn shutdown_rx(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
     /// Subscribe to config hot-reload notifications.
     pub fn config_watch_rx(&self) -> watch::Receiver<crate::config::OperationalParams> {
         self.config_watch_tx.subscribe()
@@ -477,7 +483,7 @@ impl Daemon {
         let executor = Arc::new(tokio::sync::Mutex::new(executor));
 
         // Create shared state
-        let (shared_state, shutdown_rx) = SharedState::new(
+        let (shared_state, mut shutdown_rx) = SharedState::new(
             self.config.clone(),
             self.identity.clone(),
             self.db.clone(),
@@ -1231,6 +1237,13 @@ impl Daemon {
                     }
                 } => {
                     break;
+                }
+                // Handle API-triggered shutdown (watch channel)
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        tracing::info!("Shutdown requested via API — draining subsystems");
+                        break;
+                    }
                 }
                 // Handle subsystem task exits
                 result = subsystems.join_next() => {
