@@ -238,7 +238,9 @@ async fn build_stats_message(
         None
     };
 
-    let lan_peers = state.lan_peer_count.load(std::sync::atomic::Ordering::Relaxed);
+    let lan_peers = state
+        .lan_peer_count
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let mut data = serde_json::json!({
         "peers": stats.peers_connected,

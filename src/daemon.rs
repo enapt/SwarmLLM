@@ -1104,11 +1104,7 @@ impl Daemon {
             );
             subsystems.spawn(async move {
                 checker.run(update_shutdown).await;
-                (
-                    "UpdateChecker",
-                    SubsystemCriticality::NonCritical,
-                    Ok(()),
-                )
+                ("UpdateChecker", SubsystemCriticality::NonCritical, Ok(()))
             });
         }
 

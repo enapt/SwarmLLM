@@ -89,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
     // Determine if update checking is disabled via CLI flag
     let no_update_check = matches!(
         &cli.command,
-        Some(Commands::Run { no_update_check: true })
+        Some(Commands::Run {
+            no_update_check: true
+        })
     );
     // Take command out of cli so we can move cli into run_daemon
     let command = cli.command.take().unwrap_or(Commands::Run {
@@ -206,25 +208,26 @@ async fn run_daemon(cli: Cli, no_update_check: bool) -> anyhow::Result<()> {
 }
 
 async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
-    use swarmllm::update::{UpdateChecker, UpdateState};
     use std::sync::Arc;
+    use swarmllm::update::{UpdateChecker, UpdateState};
     use tokio::sync::RwLock;
 
-    println!("SwarmLLM {} — checking for updates...", env!("CARGO_PKG_VERSION"));
+    println!(
+        "SwarmLLM {} — checking for updates...",
+        env!("CARGO_PKG_VERSION")
+    );
 
     let config = swarmllm::config::UpdateConfig::default();
     let state = Arc::new(RwLock::new(UpdateState::default()));
     let (update_tx, _) = tokio::sync::broadcast::channel(4);
-    let checker = UpdateChecker::new(
-        config,
-        "enapt/SwarmLLM".to_string(),
-        state,
-        update_tx,
-    );
+    let checker = UpdateChecker::new(config, "enapt/SwarmLLM".to_string(), state, update_tx);
 
     match checker.check_for_update().await {
         Ok(Some(info)) => {
-            println!("Update available: v{} -> v{}", info.current_version, info.latest_version);
+            println!(
+                "Update available: v{} -> v{}",
+                info.current_version, info.latest_version
+            );
             println!("Published: {}", info.published_at);
             if !info.changelog.is_empty() {
                 println!("\nChangelog:\n{}", info.changelog);
@@ -241,7 +244,10 @@ async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
                     println!("Applying update...");
                     match checker.apply_update(&tmp_path) {
                         Ok(()) => {
-                            println!("Update applied successfully! Restart SwarmLLM to use v{}.", info.latest_version);
+                            println!(
+                                "Update applied successfully! Restart SwarmLLM to use v{}.",
+                                info.latest_version
+                            );
                         }
                         Err(e) => {
                             eprintln!("Failed to apply update: {e}");
@@ -256,7 +262,10 @@ async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
             }
         }
         Ok(None) => {
-            println!("You are running the latest version (v{}).", env!("CARGO_PKG_VERSION"));
+            println!(
+                "You are running the latest version (v{}).",
+                env!("CARGO_PKG_VERSION")
+            );
         }
         Err(e) => {
             eprintln!("Failed to check for updates: {e}");

@@ -3133,9 +3133,7 @@ pub async fn delete_adapter(
 // ========================================================================
 
 /// GET /api/admin/version — Current and latest version info.
-pub async fn version_info(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     let update_state = state.shared_state.update_state.read().await;
     let current_version = env!("CARGO_PKG_VERSION");
 
@@ -3248,8 +3246,11 @@ pub async fn apply_update(
         tx,
     );
 
-    let binary_path = std::env::current_exe()
-        .map_err(|e| ApiError(crate::error::SwarmError::Internal(format!("Cannot determine binary path: {e}"))))?;
+    let binary_path = std::env::current_exe().map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Cannot determine binary path: {e}"
+        )))
+    })?;
     let tmp_path = binary_path.with_extension("update.tmp");
 
     if !tmp_path.exists() {
