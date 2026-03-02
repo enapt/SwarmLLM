@@ -4800,10 +4800,48 @@ impl SplitModel {
         &self.eos_token
     }
 
+    /// Whether this segment has the embedding table (first segment).
+    pub fn is_first(&self) -> bool {
+        self.tok_embeddings.is_some()
+    }
+
+    /// Whether this segment has the output projection (last segment).
+    pub fn is_last(&self) -> bool {
+        self.output.is_some()
+    }
+
     /// Tokenize a prompt string and return the embedded hidden states.
     ///
     /// Used by tensor-parallel execution where embedding happens before
     /// layer-by-layer forwarding. Only works on the first segment (has embeddings).
+    /// Tokenize a prompt and return (token_ids_tensor, num_tokens).
+    ///
+    /// Returns the token IDs as an I64 tensor with shape (1, seq_len),
+    /// suitable for passing directly to `forward()` which handles embedding.
+    pub fn tokenize(&self, prompt: &str) -> Result<(Tensor, usize), SwarmError> {
+        let token_ids: Vec<i64> = if let Some(ref tokenizer) = self.tokenizer {
+            tokenizer.encode(prompt)
+        } else {
+            prompt.bytes().map(|b| b as i64).collect()
+        };
+        let num_tokens = token_ids.len();
+        let input = Tensor::new(&token_ids[..], &self.device)
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
+            .unsqueeze(0)
+            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
+        Ok((input, num_tokens))
+    }
+
+    /// Create a single-token tensor for autoregressive decoding.
+    ///
+    /// Returns an I64 tensor with shape (1, 1), suitable for `forward()`.
+    pub fn token_tensor(&self, token_id: u32) -> Result<Tensor, SwarmError> {
+        Tensor::new(&[token_id as i64][..], &self.device)
+            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
+            .unsqueeze(0)
+            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))
+    }
+
     pub fn tokenize_and_embed(&self, prompt: &str) -> Result<Tensor, SwarmError> {
         let emb = self
             .tok_embeddings

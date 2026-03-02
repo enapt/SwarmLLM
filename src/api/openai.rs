@@ -514,9 +514,51 @@ pub async fn chat_completions(
 
     let model_name = model_name.unwrap();
 
-    // Prefer distributed inference whenever the network covers all layers.
-    // This spreads compute load across nodes instead of bottlenecking on one.
-    // Only fall through to the local executor for single-node operation.
+    // Build prompt using chat template from GGUF if available, else ChatML fallback.
+    let (tmpl, bos, eos) = {
+        let info = state.shared_state.loaded_model_info.read().await;
+        match info.as_ref() {
+            Some(i) => (
+                i.chat_template.clone(),
+                i.bos_token.clone(),
+                i.eos_token.clone(),
+            ),
+            None => (None, String::new(), String::new()),
+        }
+    };
+    let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
+    let params = req.to_sampling_params();
+
+    // Fast path: if we have a complete local split model (all layers), generate directly.
+    // This avoids the distributed pipeline overhead (per-token segment coordination,
+    // activation serialization, mutex per token). ~5-10x faster for local inference.
+    let has_local_split_model = {
+        let model_entry = state.shared_state.split_models.iter().next();
+        if let Some(entry) = model_entry {
+            let e = entry.value();
+            let m = e.model.lock().await;
+            m.is_first() && m.is_last()
+        } else {
+            false
+        }
+    };
+
+    if has_local_split_model {
+        if req.stream {
+            return Ok(split_stream_response(
+                state, request_id, created, model_name, prompt, params,
+            )
+            .await
+            .into_response());
+        } else {
+            return split_non_stream_response(
+                state, request_id, created, model_name, prompt, params,
+            )
+            .await;
+        }
+    }
+
+    // Distributed inference: network covers all layers across multiple nodes.
     let peers_have_shards = all_shards_available(&state, &req.model)
         || state.shared_state.config.inference.shard_range.is_some();
     if peers_have_shards {
@@ -543,21 +585,6 @@ pub async fn chat_completions(
             }
         }
     }
-
-    // Build prompt using chat template from GGUF if available, else ChatML fallback.
-    let (tmpl, bos, eos) = {
-        let info = state.shared_state.loaded_model_info.read().await;
-        match info.as_ref() {
-            Some(i) => (
-                i.chat_template.clone(),
-                i.bos_token.clone(),
-                i.eos_token.clone(),
-            ),
-            None => (None, String::new(), String::new()),
-        }
-    };
-    let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
-    let params = req.to_sampling_params();
 
     if req.stream {
         // Streaming: use direct executor path for real token-by-token SSE
@@ -657,6 +684,36 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
 /// Extract an HTTP base URL from a peer's known addresses.
 /// Multiaddrs look like `/ip4/127.0.0.1/udp/8800/quic-v1` — the peer runs
 /// HTTP on the same port as QUIC.
+/// Decode token IDs to text using the split model's tokenizer.
+///
+/// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
+/// encoding, SentencePiece byte fallbacks, etc).
+pub(crate) fn decode_split_tokens(
+    model: &crate::inference::split::SplitModel,
+    token_ids: &[u32],
+) -> String {
+    if let Some(vocab) = model.vocab() {
+        if let Some(tokenizer) = model.tokenizer() {
+            let mut bytes = Vec::new();
+            for &id in token_ids {
+                if let Some(token_str) = vocab.get(id as usize) {
+                    bytes.extend(tokenizer.decode_token(token_str));
+                }
+            }
+            return String::from_utf8_lossy(&bytes).to_string();
+        }
+        // Fallback: raw vocab concatenation
+        token_ids
+            .iter()
+            .filter_map(|&id| vocab.get(id as usize))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("")
+    } else {
+        String::new()
+    }
+}
+
 fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
     for addr in &peer.addresses {
         // Parse multiaddr: /ip4/<ip>/udp/<port>/quic-v1
@@ -1051,6 +1108,244 @@ async fn non_stream_response(
     };
 
     Ok(Json(response))
+}
+
+/// Direct split-model generation (non-streaming).
+///
+/// Bypasses the distributed pipeline executor and generates directly from
+/// the locally loaded SplitModel. Much faster for single-node inference
+/// because it avoids per-token pipeline coordination overhead.
+async fn split_non_stream_response(
+    state: AppState,
+    request_id: String,
+    created: i64,
+    model_name: String,
+    prompt: String,
+    params: SamplingParams,
+) -> Result<axum::response::Response, ApiError> {
+    use crate::inference::split::sample_token;
+
+    let model_entry = state.shared_state.split_models.iter().next();
+    let model_ref = match model_entry {
+        Some(entry) => entry,
+        None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
+    };
+    let entry = model_ref.value();
+    let kv_store = state.shared_state.kv_cache_store.clone();
+    let mut model = entry.model.lock().await;
+
+    // Tokenize the prompt — forward() handles embedding internally
+    let (input, prompt_tokens) = model.tokenize(&prompt)?;
+
+    // First forward pass (prefill) — process entire prompt at once
+    let logits = model.forward(&input, 0, &kv_store, &request_id)?;
+    // logits shape: (1, seq_len, vocab) — take last token's logits
+    let last_logits = logits
+        .narrow(1, prompt_tokens - 1, 1)
+        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e.to_string())))?;
+    let mut next_token = sample_token(&last_logits, params.temperature, params.top_p)?;
+
+    let eos = model.eos_tokens().to_vec();
+    let mut generated: Vec<u32> = Vec::new();
+    let mut index_pos = prompt_tokens;
+
+    for _ in 0..params.max_tokens {
+        if eos.contains(&next_token) {
+            break;
+        }
+        generated.push(next_token);
+
+        // Create single-token tensor — forward() handles embedding
+        let input = model.token_tensor(next_token)?;
+        let logits = model.forward(&input, index_pos, &kv_store, &request_id)?;
+        next_token = sample_token(&logits, params.temperature, params.top_p)?;
+        index_pos += 1;
+    }
+
+    let finish_reason = if eos.contains(&next_token) {
+        "stop"
+    } else {
+        "length"
+    };
+
+    // Decode tokens using BPE tokenizer for proper byte handling
+    let content = decode_split_tokens(&model, &generated);
+
+    let response = ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion",
+        created,
+        model: model_name,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatMessageResponse {
+                role: "assistant".into(),
+                content,
+            },
+            finish_reason: finish_reason.into(),
+        }],
+        usage: Usage {
+            prompt_tokens: prompt_tokens as u32,
+            completion_tokens: generated.len() as u32,
+            total_tokens: (prompt_tokens + generated.len()) as u32,
+        },
+        session_id: None,
+    };
+
+    Ok(Json(response).into_response())
+}
+
+/// Direct split-model streaming generation.
+///
+/// Same fast path as split_non_stream_response but streams tokens via SSE.
+async fn split_stream_response(
+    state: AppState,
+    request_id: String,
+    created: i64,
+    model_name: String,
+    prompt: String,
+    params: SamplingParams,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use crate::inference::split::sample_token;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
+    let request_id_inner = request_id.clone();
+
+    tokio::spawn(async move {
+        let request_id = request_id_inner;
+        // Send initial role delta
+        let _ = tx
+            .send(StreamEvent::Delta {
+                content: None,
+                role: Some("assistant".into()),
+                finish_reason: None,
+            })
+            .await;
+
+        let model_entry = state.shared_state.split_models.iter().next();
+        let model_ref = match model_entry {
+            Some(entry) => entry,
+            None => {
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
+        let entry = model_ref.value();
+        let kv_store = state.shared_state.kv_cache_store.clone();
+        let mut model = entry.model.lock().await;
+
+        // Tokenize — forward() handles embedding internally
+        let (input, prompt_tokens) = match model.tokenize(&prompt) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
+
+        // Prefill
+        let logits = match model.forward(&input, 0, &kv_store, &request_id) {
+            Ok(l) => l,
+            Err(_) => {
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
+        let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
+            Ok(l) => l,
+            Err(_) => {
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
+        let mut next_token = match sample_token(&last_logits, params.temperature, params.top_p) {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = tx.send(StreamEvent::Done).await;
+                return;
+            }
+        };
+
+        let eos = model.eos_tokens().to_vec();
+        let mut index_pos = prompt_tokens;
+        let mut finish = "length".to_string();
+
+        for _ in 0..params.max_tokens {
+            if eos.contains(&next_token) {
+                finish = "stop".to_string();
+                break;
+            }
+
+            // Decode and stream token
+            let text = decode_split_tokens(&model, &[next_token]);
+
+            if tx
+                .send(StreamEvent::Delta {
+                    content: Some(text),
+                    role: None,
+                    finish_reason: None,
+                })
+                .await
+                .is_err()
+            {
+                return; // Client disconnected
+            }
+
+            // Create single-token tensor — forward() handles embedding
+            let input = match model.token_tensor(next_token) {
+                Ok(h) => h,
+                Err(_) => break,
+            };
+            let logits = match model.forward(&input, index_pos, &kv_store, &request_id) {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            next_token = match sample_token(&logits, params.temperature, params.top_p) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            index_pos += 1;
+        }
+
+        // Send finish
+        let _ = tx
+            .send(StreamEvent::Delta {
+                content: None,
+                role: None,
+                finish_reason: Some(finish),
+            })
+            .await;
+        let _ = tx.send(StreamEvent::Done).await;
+    });
+
+    // Convert channel to SSE stream (reuse existing stream mapping)
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
+        StreamEvent::Delta {
+            content,
+            role,
+            finish_reason,
+        } => {
+            let chunk = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model_name.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: Delta { role, content },
+                    finish_reason,
+                }],
+            };
+            Ok(Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()))
+        }
+        StreamEvent::Done => Ok(Event::default().data("[DONE]")),
+    });
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text(""),
+    )
 }
 
 async fn stream_response(

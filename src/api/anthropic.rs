@@ -284,8 +284,50 @@ pub async fn messages(
     // Check if network has all shards for this model
     let network_available = crate::api::openai::all_shards_available(&state, &model);
 
+    // Fast path: if we have a complete local split model, generate directly.
+    let has_local_split_model = {
+        let model_entry = state.shared_state.split_models.iter().next();
+        if let Some(entry) = model_entry {
+            let e = entry.value();
+            let m = e.model.lock().await;
+            m.is_first() && m.is_last()
+        } else {
+            false
+        }
+    };
+
+    if has_local_split_model {
+        let (tmpl, bos, eos) = {
+            let info = state.shared_state.loaded_model_info.read().await;
+            match info.as_ref() {
+                Some(i) => (
+                    i.chat_template.clone(),
+                    i.bos_token.clone(),
+                    i.eos_token.clone(),
+                ),
+                None => (None, String::new(), String::new()),
+            }
+        };
+        let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
+
+        if req.stream {
+            return anthropic_split_stream(
+                &state,
+                internal_messages,
+                sampling_params,
+                request_id,
+                model,
+                prompt,
+            )
+            .await;
+        } else {
+            return anthropic_split_non_stream(&state, sampling_params, request_id, model, prompt)
+                .await;
+        }
+    }
+
     if model_name.is_some() || network_available {
-        // Local or distributed inference available
+        // Distributed inference available
         if let Some(router_tx) = &state.router_tx {
             if req.stream {
                 return anthropic_stream(
@@ -763,6 +805,245 @@ fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static str, String
             serde_json::json!({ "type": "message_stop" }).to_string(),
         ),
     }
+}
+
+/// Direct split-model non-streaming generation for Anthropic Messages API.
+///
+/// Bypasses the distributed pipeline and generates tokens directly via
+/// SplitModel.forward() for maximum local inference speed.
+async fn anthropic_split_non_stream(
+    state: &AppState,
+    params: SamplingParams,
+    request_id: String,
+    model: String,
+    prompt: String,
+) -> Result<axum::response::Response, ApiError> {
+    use crate::inference::split::sample_token;
+
+    let model_entry = state.shared_state.split_models.iter().next();
+    let model_ref = match model_entry {
+        Some(entry) => entry,
+        None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
+    };
+    let entry = model_ref.value();
+    let kv_store = state.shared_state.kv_cache_store.clone();
+    let mut split_model = entry.model.lock().await;
+
+    // Tokenize the prompt — forward() handles embedding internally
+    let (input, prompt_tokens) = split_model.tokenize(&prompt)?;
+
+    // First forward pass (prefill) — process entire prompt at once
+    let logits = split_model.forward(&input, 0, &kv_store, &request_id)?;
+    let last_logits = logits
+        .narrow(1, prompt_tokens - 1, 1)
+        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e.to_string())))?;
+    let mut next_token = sample_token(&last_logits, params.temperature, params.top_p)?;
+
+    let eos = split_model.eos_tokens().to_vec();
+    let mut generated: Vec<u32> = Vec::new();
+    let mut index_pos = prompt_tokens;
+
+    for _ in 0..params.max_tokens {
+        if eos.contains(&next_token) {
+            break;
+        }
+        generated.push(next_token);
+
+        // Create single-token tensor — forward() handles embedding
+        let input = split_model.token_tensor(next_token)?;
+        let logits = split_model.forward(&input, index_pos, &kv_store, &request_id)?;
+        next_token = sample_token(&logits, params.temperature, params.top_p)?;
+        index_pos += 1;
+    }
+
+    let stop_reason = if eos.contains(&next_token) {
+        "end_turn"
+    } else {
+        "max_tokens"
+    };
+
+    let content = crate::api::openai::decode_split_tokens(&split_model, &generated);
+
+    let response = MessagesResponse {
+        id: request_id,
+        response_type: "message",
+        role: "assistant",
+        content: vec![ResponseContentBlock {
+            block_type: "text",
+            text: content,
+        }],
+        model,
+        stop_reason: Some(stop_reason.into()),
+        stop_sequence: None,
+        usage: AnthropicUsage {
+            input_tokens: prompt_tokens as u32,
+            output_tokens: generated.len() as u32,
+        },
+    };
+
+    Ok(Json(response).into_response())
+}
+
+/// Direct split-model streaming generation for Anthropic Messages API.
+///
+/// Same fast path as anthropic_split_non_stream but streams tokens via SSE
+/// in Anthropic's streaming format.
+async fn anthropic_split_stream(
+    state: &AppState,
+    _messages: Vec<ChatMessage>,
+    params: SamplingParams,
+    request_id: String,
+    model: String,
+    prompt: String,
+) -> Result<axum::response::Response, ApiError> {
+    use crate::inference::split::sample_token;
+
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
+
+    let state_clone = state.clone();
+    let rid = request_id.clone();
+    let model_clone = model.clone();
+
+    tokio::spawn(async move {
+        // message_start
+        let _ = sse_tx
+            .send(AnthropicSseEvent::MessageStart {
+                id: rid.clone(),
+                model: model_clone,
+            })
+            .await;
+
+        // content_block_start
+        let _ = sse_tx
+            .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
+            .await;
+
+        let model_entry = state_clone.shared_state.split_models.iter().next();
+        let model_ref = match model_entry {
+            Some(entry) => entry,
+            None => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::MessageDelta {
+                        stop_reason: "end_turn".into(),
+                        output_tokens: 0,
+                    })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
+        let entry = model_ref.value();
+        let kv_store = state_clone.shared_state.kv_cache_store.clone();
+        let mut split_model = entry.model.lock().await;
+
+        // Tokenize — forward() handles embedding internally
+        let (input, prompt_tokens) = match split_model.tokenize(&prompt) {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
+
+        // Prefill
+        let logits = match split_model.forward(&input, 0, &kv_store, &rid) {
+            Ok(l) => l,
+            Err(_) => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
+        let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
+            Ok(l) => l,
+            Err(_) => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
+        let mut next_token = match sample_token(&last_logits, params.temperature, params.top_p) {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
+
+        let eos = split_model.eos_tokens().to_vec();
+        let mut index_pos = prompt_tokens;
+        let mut total_output_tokens = 0u32;
+        let mut stop_reason = "max_tokens".to_string();
+
+        for _ in 0..params.max_tokens {
+            if eos.contains(&next_token) {
+                stop_reason = "end_turn".to_string();
+                break;
+            }
+
+            total_output_tokens += 1;
+            let text = crate::api::openai::decode_split_tokens(&split_model, &[next_token]);
+
+            if sse_tx
+                .send(AnthropicSseEvent::ContentBlockDelta { index: 0, text })
+                .await
+                .is_err()
+            {
+                return; // Client disconnected
+            }
+
+            // Create single-token tensor — forward() handles embedding
+            let input = match split_model.token_tensor(next_token) {
+                Ok(h) => h,
+                Err(_) => break,
+            };
+            let logits = match split_model.forward(&input, index_pos, &kv_store, &rid) {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            next_token = match sample_token(&logits, params.temperature, params.top_p) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            index_pos += 1;
+        }
+
+        // content_block_stop + message_delta + message_stop
+        let _ = sse_tx
+            .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+            .await;
+        let _ = sse_tx
+            .send(AnthropicSseEvent::MessageDelta {
+                stop_reason,
+                output_tokens: total_output_tokens,
+            })
+            .await;
+        let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
+        let (event_type, data) = serialize_anthropic_event(&event);
+        Ok::<_, Infallible>(Event::default().event(event_type).data(data))
+    });
+
+    Ok(Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+        )
+        .into_response())
 }
 
 #[cfg(test)]
