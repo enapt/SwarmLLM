@@ -187,25 +187,32 @@ impl NetworkManager {
                 // Shutdown signal
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
-                        // Save peer cache on shutdown
                         self.save_peer_cache();
                         tracing::info!("NetworkManager shutting down");
                         break;
                     }
                 }
-                // Swarm events from the network
-                event = self.swarm.select_next_some() => {
-                    self.handle_swarm_event(event).await;
+                // Periodic discovery
+                _ = discovery_interval.tick() => {
+                    tracing::debug!("Discovery tick");
+                    let _ = discovery::trigger_bootstrap(&mut self.swarm);
+                    // Re-dial cached peers that we're not currently connected to.
+                    // This handles peers that went offline and came back.
+                    let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+                    if !cached.is_empty() {
+                        let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                    }
+                    self.update_peer_count();
+                }
+                // Periodic peer cache save
+                _ = peer_cache_interval.tick() => {
+                    self.save_peer_cache();
                 }
                 // Outbound commands from other daemon tasks
                 cmd = self.inbound_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
                             self.handle_outbound_command(cmd).await;
-                            // After handling commands that call send_request(),
-                            // drive the swarm to process pending behaviour events
-                            // before returning to select!. This ensures NotifyHandler
-                            // events are delivered to the connection task promptly.
                             self.drain_pending_swarm_events().await;
                         },
                         None => {
@@ -215,14 +222,9 @@ impl NetworkManager {
                         }
                     }
                 }
-                // Periodic discovery
-                _ = discovery_interval.tick() => {
-                    let _ = discovery::trigger_bootstrap(&mut self.swarm);
-                    self.update_peer_count().await;
-                }
-                // Periodic peer cache save
-                _ = peer_cache_interval.tick() => {
-                    self.save_peer_cache();
+                // Swarm events from the network
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event).await;
                 }
             }
         }
@@ -257,6 +259,7 @@ impl NetworkManager {
     }
 
     async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
+        tracing::trace!(event_type = %swarm_event_name(&event), "Processing swarm event");
         match event {
             // ── GossipSub messages ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -420,8 +423,9 @@ impl NetworkManager {
             )) => {
                 tracing::info!(?old, ?new, "AutoNAT status changed");
                 {
-                    let mut stats = self.shared_state.node_stats.write().await;
-                    stats.nat_status = Some(format!("{new:?}"));
+                    if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                        stats.nat_status = Some(format!("{new:?}"));
+                    }
                 }
                 // NET-M3: Auto-listen on relay when NAT is detected as Private
                 if matches!(new, libp2p::autonat::NatStatus::Private)
@@ -568,8 +572,11 @@ impl NetworkManager {
                         {
                             continue;
                         }
-                        let mut anti_gaming = self.shared_state.anti_gaming.lock().await;
-                        anti_gaming.register_subnet(&node_id, ip_bytes);
+                        // Use try_lock() to avoid blocking the event loop.
+                        // If contended, skip — next Identify event will catch it.
+                        if let Ok(mut anti_gaming) = self.shared_state.anti_gaming.try_lock() {
+                            anti_gaming.register_subnet(&node_id, ip_bytes);
+                        }
                         break; // One IP per peer is enough
                     }
                 }
@@ -597,9 +604,13 @@ impl NetworkManager {
                             %peer_id, %addr,
                             "LAN peer discovered automatically — no configuration needed"
                         );
+                        // Use Disconnected (not DisconnectedAndNotDialing) so mDNS
+                        // can override a failing bootstrap dial attempt. Without this,
+                        // a peer that restarts with a new identity can't reconnect
+                        // because the stale bootstrap dial blocks mDNS.
                         let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
                             .condition(
-                                libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                libp2p::swarm::dial_opts::PeerCondition::Disconnected,
                             )
                             .addresses(vec![addr])
                             .build();
@@ -661,7 +672,7 @@ impl NetworkManager {
                 ..
             } => {
                 tracing::info!(%peer_id, %connection_id, count = num_established, "Connection established");
-                self.update_peer_count().await;
+                self.update_peer_count();
 
                 // Layer 5: Peer Exchange — send PEX request on first connection only
                 if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
@@ -689,9 +700,9 @@ impl NetworkManager {
                     // Swarm still considers peer connected (race: another
                     // connection was just established) — skip cleanup.
                     tracing::debug!(%peer_id, "Peer still connected per swarm, skipping cleanup");
-                    self.update_peer_count().await;
+                    self.update_peer_count();
                 } else {
-                    self.update_peer_count().await;
+                    self.update_peer_count();
 
                     // NET-I1: Drain pending shard requests and download progress for this peer
                     let drained_ids: Vec<OutboundRequestId> = self
@@ -712,18 +723,22 @@ impl NetworkManager {
                         }
                     }
 
-                    // NET-I2: Remove peer from registry, but skip if in active pipelines
-                    if let Some(node_id) = self.peer_to_node.get(&peer_id) {
+                    // NET-I2: Remove peer from registry, but skip if in active pipelines.
+                    // Clone the NodeId and drop the DashMap Ref BEFORE calling remove(),
+                    // otherwise get() holds a read lock and remove() needs a write lock
+                    // on the same shard → synchronous deadlock that freezes the event loop.
+                    let node_id_opt = self.peer_to_node.get(&peer_id).map(|r| r.clone());
+                    if let Some(node_id) = node_id_opt {
                         let in_active_pipeline =
                             self.shared_state.active_pipelines.iter().any(|entry| {
                                 entry
                                     .value()
                                     .segments
                                     .iter()
-                                    .any(|seg| seg.node_id == *node_id)
+                                    .any(|seg| seg.node_id == node_id)
                             });
                         if !in_active_pipeline {
-                            self.shared_state.peer_registry.remove(&*node_id);
+                            self.shared_state.peer_registry.remove(&node_id);
                             self.peer_to_node.remove(&peer_id);
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
@@ -744,6 +759,27 @@ impl NetworkManager {
                     .behaviour_mut()
                     .kademlia
                     .set_mode(Some(libp2p::kad::Mode::Server));
+            }
+
+            SwarmEvent::OutgoingConnectionError {
+                peer_id,
+                error,
+                ..
+            } => {
+                tracing::debug!(
+                    ?peer_id, %error,
+                    "Outgoing connection failed"
+                );
+            }
+
+            SwarmEvent::IncomingConnectionError {
+                error,
+                ..
+            } => {
+                tracing::debug!(
+                    %error,
+                    "Incoming connection failed"
+                );
             }
 
             other => {
@@ -911,15 +947,14 @@ impl NetworkManager {
                     let chunk_len = data.data.len() as u64;
 
                     if let Some(ref acq_tx) = self.acquisition_tx {
-                        if let Err(e) = acq_tx
-                            .send(AcquisitionCommand::ShardDataReceived {
+                        if let Err(e) = acq_tx.try_send(
+                            AcquisitionCommand::ShardDataReceived {
                                 shard_id: shard_id.clone(),
                                 offset,
                                 data: data.data,
                                 total_size: data.total_size,
-                            })
-                            .await
-                        {
+                            },
+                        ) {
                             tracing::warn!(error = %e, "Failed to forward shard data to acquisition");
                         }
                     }
@@ -1429,11 +1464,20 @@ impl NetworkManager {
             .send_request(&peer_id, req);
     }
 
-    /// NET-I3: Use write().await instead of try_write() to avoid silently dropping updates.
-    async fn update_peer_count(&mut self) {
+    /// Update the peer count in shared state.
+    ///
+    /// Uses `try_write()` instead of `.write().await` to avoid deadlocking the
+    /// event loop. The WebSocket stats pusher holds a long-lived read lock on
+    /// `node_stats` (across DashMap iteration + JSON serialization), so a
+    /// `.write().await` here suspends the entire swarm event loop until that
+    /// read lock is released — causing the event loop to freeze and preventing
+    /// reconnection. With `try_write()`, a contended update is simply skipped;
+    /// the next connection event or discovery tick will correct it.
+    fn update_peer_count(&self) {
         let count = self.swarm.connected_peers().count() as u32;
-        let mut stats = self.shared_state.node_stats.write().await;
-        stats.peers_connected = count;
+        if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+            stats.peers_connected = count;
+        }
     }
 
     /// NET-C4: O(1) lookup of NodeId for a libp2p PeerId via reverse index.
@@ -1498,6 +1542,38 @@ impl NetworkManager {
         if dialed > 0 {
             tracing::info!(count = dialed, "PEX: dialed new peers");
         }
+    }
+}
+
+/// Get a human-readable name for a swarmEvent (for debug logging).
+fn swarm_event_name(event: &SwarmEvent<SwarmBehaviourEvent>) -> &'static str {
+    match event {
+        SwarmEvent::Behaviour(b) => match b {
+            SwarmBehaviourEvent::Gossipsub(_) => "Gossipsub",
+            SwarmBehaviourEvent::RequestResponse(_) => "RequestResponse",
+            SwarmBehaviourEvent::Kademlia(_) => "Kademlia",
+            SwarmBehaviourEvent::Identify(_) => "Identify",
+            SwarmBehaviourEvent::Autonat(_) => "AutoNAT",
+            SwarmBehaviourEvent::Dcutr(_) => "DCUtR",
+            SwarmBehaviourEvent::RelayClient(_) => "RelayClient",
+            SwarmBehaviourEvent::RelayServer(_) => "RelayServer",
+            SwarmBehaviourEvent::ConnectionLimits(_) => "ConnectionLimits",
+            SwarmBehaviourEvent::Mdns(_) => "mDNS",
+        },
+        SwarmEvent::ConnectionEstablished { .. } => "ConnectionEstablished",
+        SwarmEvent::ConnectionClosed { .. } => "ConnectionClosed",
+        SwarmEvent::IncomingConnection { .. } => "IncomingConnection",
+        SwarmEvent::IncomingConnectionError { .. } => "IncomingConnectionError",
+        SwarmEvent::OutgoingConnectionError { .. } => "OutgoingConnectionError",
+        SwarmEvent::NewListenAddr { .. } => "NewListenAddr",
+        SwarmEvent::ExpiredListenAddr { .. } => "ExpiredListenAddr",
+        SwarmEvent::ListenerClosed { .. } => "ListenerClosed",
+        SwarmEvent::ListenerError { .. } => "ListenerError",
+        SwarmEvent::Dialing { .. } => "Dialing",
+        SwarmEvent::NewExternalAddrCandidate { .. } => "NewExternalAddrCandidate",
+        SwarmEvent::ExternalAddrConfirmed { .. } => "ExternalAddrConfirmed",
+        SwarmEvent::ExternalAddrExpired { .. } => "ExternalAddrExpired",
+        _ => "Unknown",
     }
 }
 

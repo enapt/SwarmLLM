@@ -23,11 +23,23 @@ pub fn bootstrap_peers(
         match addr_str.parse::<Multiaddr>() {
             Ok(addr) => {
                 // Extract peer ID from the multiaddr if present
-                if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = addr.iter().last() {
+                let maybe_peer_id = addr.iter().find_map(|proto| {
+                    if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
+                        Some(pid)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(ref peer_id) = maybe_peer_id {
+                    // Skip if already connected to this peer
+                    if swarm.is_connected(peer_id) {
+                        continue;
+                    }
                     swarm
                         .behaviour_mut()
                         .kademlia
-                        .add_address(&peer_id, addr.clone());
+                        .add_address(peer_id, addr.clone());
                 }
 
                 match swarm.dial(addr.clone()) {
@@ -36,7 +48,7 @@ pub fn bootstrap_peers(
                         dialed += 1;
                     }
                     Err(e) => {
-                        tracing::warn!(addr = %addr, error = %e, "Failed to dial bootstrap peer");
+                        tracing::debug!(addr = %addr, error = %e, "Bootstrap dial skipped");
                     }
                 }
             }
