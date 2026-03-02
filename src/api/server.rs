@@ -6,7 +6,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tokio::sync::mpsc;
 
-use crate::api::{admin, identity, metrics, middleware, openai, pool, websocket};
+use crate::api::{admin, identity, internal, metrics, middleware, openai, pool, websocket};
 use crate::config::Config;
 use crate::daemon::SharedState;
 use crate::inference::executor::SharedExecutor;
@@ -40,6 +40,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/models", get(openai::list_models))
         // SwarmLLM extensions
         .route("/v1/status", get(openai::status))
+        // Internal research API (gated by api.expose_hidden_states config)
+        .route("/v1/internal/hidden-states", post(internal::hidden_states))
         // Admin API
         .route("/api/admin/stats", get(admin::stats))
         .route(
@@ -107,6 +109,10 @@ pub fn build_router(state: AppState) -> Router {
             get(admin::list_adapters).post(admin::register_adapter),
         )
         .route("/api/admin/adapters/:id", delete(admin::delete_adapter))
+        // Version & Updates
+        .route("/api/admin/version", get(admin::version_info))
+        .route("/api/admin/update/check", post(admin::check_update))
+        .route("/api/admin/update/apply", post(admin::apply_update))
         // Shutdown
         .route("/api/admin/shutdown", post(admin::shutdown_node))
         // API key (requires auth)

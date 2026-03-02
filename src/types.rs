@@ -722,6 +722,42 @@ pub struct PruneEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+// ---- Hidden States API ----
+
+/// Request body for POST /v1/internal/hidden-states.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HiddenStateRequest {
+    /// Model identifier (must match a locally loaded model).
+    pub model: String,
+    /// Input prompt to run through the model.
+    pub prompt: String,
+    /// Layer indices at which to capture hidden-state activations.
+    pub return_layers: Vec<usize>,
+    /// Maximum tokens to process (default: prompt length only, no generation).
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+/// Response body for POST /v1/internal/hidden-states.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HiddenStateResponse {
+    /// Map from layer index → tensor data.
+    pub hidden_states: std::collections::HashMap<usize, HiddenStateTensor>,
+    /// Number of prompt tokens processed.
+    pub tokens_processed: usize,
+}
+
+/// A single hidden-state tensor, base64-encoded for JSON transport.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HiddenStateTensor {
+    /// Tensor dimensions, e.g. [1, seq_len, hidden_dim].
+    pub shape: Vec<usize>,
+    /// Data type string, e.g. "f32".
+    pub dtype: String,
+    /// Raw tensor bytes encoded as base64.
+    pub data_base64: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,5 +930,49 @@ mod tests {
         m.schema_version = 0;
         m.stamp_version();
         assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn hidden_state_request_serde_roundtrip() {
+        let req = HiddenStateRequest {
+            model: "test-model".into(),
+            prompt: "Hello world".into(),
+            return_layers: vec![0, 5, 10],
+            max_tokens: Some(32),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: HiddenStateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.model, "test-model");
+        assert_eq!(parsed.return_layers, vec![0, 5, 10]);
+        assert_eq!(parsed.max_tokens, Some(32));
+    }
+
+    #[test]
+    fn hidden_state_request_max_tokens_optional() {
+        let json = r#"{"model":"m","prompt":"p","return_layers":[1]}"#;
+        let parsed: HiddenStateRequest = serde_json::from_str(json).unwrap();
+        assert!(parsed.max_tokens.is_none());
+    }
+
+    #[test]
+    fn hidden_state_response_serde_roundtrip() {
+        let mut hs = std::collections::HashMap::new();
+        hs.insert(
+            0,
+            HiddenStateTensor {
+                shape: vec![1, 4, 128],
+                dtype: "f32".into(),
+                data_base64: "AAAA".into(),
+            },
+        );
+        let resp = HiddenStateResponse {
+            hidden_states: hs,
+            tokens_processed: 4,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HiddenStateResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tokens_processed, 4);
+        assert!(parsed.hidden_states.contains_key(&0));
+        assert_eq!(parsed.hidden_states[&0].shape, vec![1, 4, 128]);
     }
 }

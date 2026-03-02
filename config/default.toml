@@ -42,6 +42,7 @@ keep_versions = 3
 
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
+expose_hidden_states = false      # Expose /v1/internal/hidden-states for research (requires auth)
 
 [model]
 shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)

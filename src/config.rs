@@ -399,6 +399,10 @@ pub struct ApiConfig {
     /// Bearer token for API authentication. If empty, one is auto-generated on first run.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Expose hidden state tensors at `/v1/internal/hidden-states` for research.
+    /// Disabled by default — enable only for trusted research environments.
+    #[serde(default)]
+    pub expose_hidden_states: bool,
 }
 
 /// Configuration for automatic shard management.
