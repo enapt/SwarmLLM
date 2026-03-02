@@ -366,6 +366,13 @@ fn build_tensor_meta_from_content(
         );
     }
 
+    // Read expert count for MoE models (DeepSeek-V2/V3)
+    let expert_count = ct
+        .metadata
+        .get(&format!("{arch}.expert_count"))
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(0) as usize;
+
     Ok(crate::inference::split::GgufTensorMeta {
         tensors,
         tensor_data_offset: ct.tensor_data_offset,
@@ -377,6 +384,7 @@ fn build_tensor_meta_from_content(
         rope_dim,
         rope_freq_base,
         rms_norm_eps,
+        expert_count,
     })
 }
 
