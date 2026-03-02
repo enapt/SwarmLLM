@@ -1,8 +1,9 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::JoinSet;
 
 use crate::config::Config;
@@ -151,6 +152,16 @@ pub struct SharedState {
     pub auto_manage_default_model_cap: AtomicU32,
     /// Cache of HuggingFace probe results (populated when user probes a model).
     pub hf_probe_cache: DashMap<crate::types::ModelId, HfProbeInfo>,
+    /// Per-model inference request counts (rolling window for popularity scoring).
+    pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
+    /// Runtime-mutable resource schedule (initialized from config, overridable via API).
+    pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
+    /// Broadcast channel for prune events (WebSocket push + history).
+    pub prune_events_tx: broadcast::Sender<crate::types::PruneEvent>,
+    /// Recent prune events (capped at 100) for the prune history API.
+    pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
+    /// Per-shard lock/pin flags — locked shards are never auto-pruned.
+    pub locked_shards: DashMap<crate::types::ShardId, bool>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -254,9 +265,9 @@ impl SharedState {
             map
         };
         let state = Arc::new(Self {
-            config,
+            config: config.clone(),
             identity,
-            db,
+            db: db.clone(),
             peer_registry: DashMap::new(),
             model_registry,
             shard_registry: DashMap::new(),
@@ -310,6 +321,21 @@ impl SharedState {
             model_auto_manage_policies,
             auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
             hf_probe_cache: DashMap::new(),
+            model_request_counts: DashMap::new(),
+            resource_schedule: RwLock::new(config.resources.schedule.clone()),
+            prune_events_tx: broadcast::channel(64).0,
+            prune_history: RwLock::new(VecDeque::new()),
+            locked_shards: {
+                let map = DashMap::new();
+                if let Ok(tree) = db.tree("locked_shards") {
+                    for (key, _value) in tree.iter().flatten() {
+                        if let Ok(shard_json) = serde_json::from_slice::<crate::types::ShardId>(&key) {
+                            map.insert(shard_json, true);
+                        }
+                    }
+                }
+                map
+            },
             shutdown_tx,
         });
 

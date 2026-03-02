@@ -52,6 +52,10 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 # interval_minutes = 5         # How often to check for new shards to download
 # max_shards = 0               # 0 = unlimited within disk budget
 # max_concurrent_downloads = 3 # Max simultaneous shard downloads
+# prune_enabled = true         # Auto-prune over-replicated shards (default: on)
+# min_replicas = 2             # Minimum shard replicas to maintain across network
+# prune_cooldown_secs = 300    # Seconds between prune actions on the same model
+# max_holder_load_for_prune = 3 # Block pruning if remaining holders avg load exceeds this
 
 [pool]
 max_pool_size = 10             # Maximum devices in a single pool

@@ -557,7 +557,8 @@ var SwarmLLM = (function() {
             if (cls === 'downloading' || cls === 'peer-downloading') {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
-            shardHtml += '<div class="shard-cell ' + cls + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" title="' + title + '">' + label + '</div>';
+            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
+            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + title + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
@@ -1453,6 +1454,13 @@ var SwarmLLM = (function() {
           if (msg.data.region_summary && activeTab === 'network-map') {
             networkMap.updateFromWs(msg.data.region_summary);
           }
+        } else if (msg.type === 'prune_event') {
+          var d = msg.data;
+          var freed = formatBytes(d.freed_bytes || 0);
+          var text = 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) +
+            ' \u2014 ' + d.holder_count_before + '\u2192' + d.holder_count_after + ' holders (freed ' + freed + ')';
+          showPruneToast(text);
+          loadModels();
         }
       } catch (e) {}
     };
@@ -1592,6 +1600,114 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Shard Context Menu
   // ========================================================================
+  // ========================================================================
+  // Prune Toast Notifications
+  // ========================================================================
+  function showPruneToast(text) {
+    var container = document.getElementById('prune-toast-container');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'prune-toast-container';
+      container.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;max-width:400px';
+      document.body.appendChild(container);
+    }
+    var toast = document.createElement('div');
+    toast.className = 'prune-toast';
+    toast.style.cssText = 'background:var(--card-bg,#1e1e2e);color:var(--text,#cdd6f4);border:1px solid var(--accent,#89b4fa);border-radius:8px;padding:0.75rem 1rem;font-size:0.8rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);opacity:0;transform:translateX(100%);transition:all 0.3s ease';
+    toast.textContent = text;
+    container.appendChild(toast);
+    requestAnimationFrame(function() {
+      toast.style.opacity = '1';
+      toast.style.transform = 'translateX(0)';
+    });
+    setTimeout(function() {
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateX(100%)';
+      setTimeout(function() { toast.remove(); }, 300);
+    }, 6000);
+  }
+
+  // ========================================================================
+  // Prune History Card
+  // ========================================================================
+  async function loadPruneHistory() {
+    try {
+      var resp = await authFetch('/api/admin/prune-history');
+      if (!resp.ok) return;
+      var data = await resp.json();
+      renderPruneHistory(data.events || []);
+    } catch (e) {}
+  }
+
+  function renderPruneHistory(events) {
+    var el = document.getElementById('prune-history-list');
+    if (!el) return;
+    if (events.length === 0) {
+      el.innerHTML = '<div class="text-muted" style="padding:0.5rem">No prune events yet</div>';
+      return;
+    }
+    var html = '';
+    events.slice(0, 20).forEach(function(e) {
+      var freed = formatBytes(e.freed_bytes || 0);
+      var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+      html += '<div class="prune-event-row" style="display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem">' +
+        '<span>' + escapeHtml(e.model_name || e.model_id) + ' shard ' + e.shard_index + '</span>' +
+        '<span class="text-muted">' + freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts + '</span>' +
+      '</div>';
+    });
+    el.innerHTML = html;
+  }
+
+  // ========================================================================
+  // Resource Schedule Card
+  // ========================================================================
+  async function loadSchedule() {
+    try {
+      var resp = await authFetch('/api/admin/schedule');
+      if (!resp.ok) return;
+      var s = await resp.json();
+      renderScheduleCard(s);
+    } catch (e) {}
+  }
+
+  function renderScheduleCard(s) {
+    var el = document.getElementById('schedule-form');
+    if (!el) return;
+    el.innerHTML =
+      '<div class="am-row"><label><input type="checkbox" id="sched-enabled"' + (s.enabled ? ' checked' : '') + '> Enable reduced hours</label></div>' +
+      '<div class="am-row"><label>Start hour (0-23):</label> <input type="number" id="sched-start" value="' + (s.reduced_hours_start || 22) + '" min="0" max="23" style="width:3rem"></div>' +
+      '<div class="am-row"><label>End hour (0-23):</label> <input type="number" id="sched-end" value="' + (s.reduced_hours_end || 8) + '" min="0" max="23" style="width:3rem"></div>' +
+      '<div class="am-row"><label>Contribution:</label> <select id="sched-contrib"><option value="minimal"' + (s.reduced_contribution === 'minimal' ? ' selected' : '') + '>Minimal</option><option value="moderate"' + (s.reduced_contribution === 'moderate' ? ' selected' : '') + '>Moderate</option></select></div>' +
+      '<div class="am-row"><label>Prune aggressiveness:</label> <select id="sched-prune-agg"><option value="conservative"' + (s.prune_aggressiveness === 'conservative' ? ' selected' : '') + '>Conservative</option><option value="normal"' + (s.prune_aggressiveness === 'normal' ? ' selected' : '') + '>Normal</option><option value="aggressive"' + (s.prune_aggressiveness === 'aggressive' ? ' selected' : '') + '>Aggressive</option></select></div>' +
+      '<div class="am-row"><button class="btn btn-sm btn-primary" id="sched-save-btn">Save Schedule</button></div>';
+    var saveBtn = document.getElementById('sched-save-btn');
+    if (saveBtn) saveBtn.addEventListener('click', saveSchedule);
+  }
+
+  async function saveSchedule() {
+    try {
+      var resp = await authFetch('/api/admin/schedule', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: document.getElementById('sched-enabled').checked,
+          reduced_hours_start: parseInt(document.getElementById('sched-start').value, 10) || 22,
+          reduced_hours_end: parseInt(document.getElementById('sched-end').value, 10) || 8,
+          reduced_contribution: document.getElementById('sched-contrib').value,
+          prune_aggressiveness: document.getElementById('sched-prune-agg').value,
+        }),
+      });
+      if (resp.ok) {
+        ui.showBanner('success', 'Resource schedule saved');
+      } else {
+        var err = await resp.json().catch(function() { return {}; });
+        ui.showBanner('error', err.error ? err.error.message : 'Save failed');
+      }
+    } catch (e) {
+      ui.showBanner('error', 'Save failed: ' + e.message);
+    }
+  }
+
   var shardMenu = {
     menu: null,
     currentModel: null,
@@ -1602,11 +1718,12 @@ var SwarmLLM = (function() {
       this.menu = document.getElementById('shard-context-menu');
     },
 
-    show: function(modelId, shardIndex, shardState, x, y) {
+    show: function(modelId, shardIndex, shardState, x, y, isLocked) {
       if (!this.menu) this.init();
       this.currentModel = modelId;
       this.currentIndex = shardIndex;
       this.currentState = shardState;
+      this.currentLocked = !!isLocked;
 
       var header = document.getElementById('shard-ctx-header');
       var btn = document.getElementById('shard-ctx-action');
@@ -1623,8 +1740,20 @@ var SwarmLLM = (function() {
         btn.className = 'shard-ctx-btn';
       }
 
+      // Lock/unlock button
+      var lockBtn = document.getElementById('shard-ctx-lock');
+      if (!lockBtn) {
+        lockBtn = document.createElement('button');
+        lockBtn.id = 'shard-ctx-lock';
+        lockBtn.className = 'shard-ctx-btn';
+        lockBtn.addEventListener('click', function() { shardMenu.toggleLock(); });
+        btn.parentNode.insertBefore(lockBtn, btn.nextSibling);
+      }
+      lockBtn.textContent = isLocked ? 'Unlock shard' : 'Lock shard (pin)';
+      lockBtn.style.display = (shardState === 'local') ? '' : 'none';
+
       // Position menu at click, clamped to viewport
-      var mw = 180, mh = 70;
+      var mw = 180, mh = 100;
       var left = Math.min(x, window.innerWidth - mw - 8);
       var top = Math.min(y, window.innerHeight - mh - 8);
       this.menu.style.left = left + 'px';
@@ -1685,6 +1814,28 @@ var SwarmLLM = (function() {
           ui.showBanner('error', 'Download failed: ' + e.message);
         }
       }
+    },
+
+    toggleLock: async function() {
+      var modelId = this.currentModel;
+      var idx = this.currentIndex;
+      var newLocked = !this.currentLocked;
+      this.hide();
+      try {
+        var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/lock', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ locked: newLocked }),
+        });
+        if (resp.ok) {
+          ui.showBanner('success', 'Shard ' + idx + (newLocked ? ' locked' : ' unlocked'));
+          loadModels();
+        } else {
+          ui.showBanner('error', 'Failed to update shard lock');
+        }
+      } catch (e) {
+        ui.showBanner('error', 'Lock update failed: ' + e.message);
+      }
     }
   };
 
@@ -1701,7 +1852,7 @@ var SwarmLLM = (function() {
     if (existing) { existing.remove(); return; }
 
     // Fetch current policy
-    var policy = { enabled: true, max_shards: 0 };
+    var policy = { enabled: true, max_shards: 0, prune_enabled: true };
     try {
       var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage');
       if (resp.ok) policy = await resp.json();
@@ -1712,6 +1863,9 @@ var SwarmLLM = (function() {
     panel.innerHTML =
       '<div class="am-row">' +
         '<label><input type="checkbox" id="am-enabled-' + escapeHtml(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> Auto-manage enabled</label>' +
+      '</div>' +
+      '<div class="am-row">' +
+        '<label><input type="checkbox" id="am-prune-' + escapeHtml(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> Auto-prune enabled</label>' +
       '</div>' +
       '<div class="am-row">' +
         '<label>Max shards:</label>' +
@@ -1728,6 +1882,7 @@ var SwarmLLM = (function() {
     var safeId = escapeHtml(modelId);
     var enabledEl = document.getElementById('am-enabled-' + safeId);
     var maxEl = document.getElementById('am-max-' + safeId);
+    var pruneEl = document.getElementById('am-prune-' + safeId);
     if (!enabledEl || !maxEl) return;
 
     try {
@@ -1737,6 +1892,7 @@ var SwarmLLM = (function() {
         body: JSON.stringify({
           enabled: enabledEl.checked,
           max_shards: parseInt(maxEl.value, 10) || 0,
+          prune_enabled: pruneEl ? pruneEl.checked : true,
         }),
       });
       if (resp.ok) {
@@ -2338,7 +2494,8 @@ var SwarmLLM = (function() {
           if (cls.indexOf('local') !== -1) state = 'local';
           else if (cls.indexOf('downloading') !== -1 && cls.indexOf('peer-downloading') === -1) state = 'downloading';
           else if (cls.indexOf('peer') !== -1) state = 'peer';
-          shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY);
+          var isLocked = target.getAttribute('data-shard-locked') === '1';
+          shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY, isLocked);
           e.stopPropagation();
           return;
         }
@@ -2378,6 +2535,8 @@ var SwarmLLM = (function() {
     settings.loadApiKey();
     dashboard.loadInitial();
     loadModels();
+    loadPruneHistory();
+    loadSchedule();
     connectWebSocket();
     identity.loadNickname();
 

@@ -241,6 +241,13 @@ impl InferenceRouter {
         let mut adjusted_request = request;
         adjusted_request.priority = priority;
 
+        // Track per-model request count for popularity-based prune scoring
+        self.shared_state
+            .model_request_counts
+            .entry(adjusted_request.model_id.clone())
+            .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         tracing::info!(
             request_id = %adjusted_request.id,
             model = %adjusted_request.model_id,

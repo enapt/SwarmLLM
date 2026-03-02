@@ -24,8 +24,9 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let last_pong = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
     let last_pong_push = last_pong.clone();
 
-    // Spawn a task to push stats every 2 seconds + ping every 30 seconds
+    // Spawn a task to push stats every 2 seconds + ping every 30 seconds + prune events
     let push_state = shared_state.clone();
+    let mut prune_rx = shared_state.prune_events_tx.subscribe();
     let push_task = tokio::spawn(async move {
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -55,6 +56,28 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     let ping_data = chrono::Utc::now().timestamp().to_le_bytes().to_vec();
                     if sender.send(Message::Ping(ping_data)).await.is_err() {
                         break;
+                    }
+                }
+                event = prune_rx.recv() => {
+                    if let Ok(event) = event {
+                        let msg = serde_json::json!({
+                            "type": "prune_event",
+                            "data": {
+                                "model_id": event.model_id.0,
+                                "model_name": event.model_name,
+                                "shard_index": event.shard_index,
+                                "reason": event.reason,
+                                "freed_bytes": event.freed_bytes,
+                                "remaining_local_shards": event.remaining_local_shards,
+                                "holder_count_before": event.holder_count_before,
+                                "holder_count_after": event.holder_count_after,
+                                "timestamp": event.timestamp.to_rfc3339(),
+                            }
+                        });
+                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }

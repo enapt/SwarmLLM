@@ -1253,3 +1253,49 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 0.8rem;
 }
 .auto-manage-panel .btn { font-size: 0.75rem; padding: 3px 10px; }
+
+/* Shard lock icon */
+.shard-lock-icon {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  font-size: 0.6rem;
+  line-height: 1;
+  opacity: 0.85;
+  pointer-events: none;
+}
+.shard-cell.locked {
+  outline: 1.5px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Prune toast notifications */
+.prune-toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.prune-toast {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  opacity: 0;
+  transform: translateX(30px);
+  transition: opacity 0.3s, transform 0.3s;
+  pointer-events: auto;
+  max-width: 380px;
+}
+.prune-toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}

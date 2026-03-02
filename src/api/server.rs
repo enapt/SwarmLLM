@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::response::Redirect;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tokio::sync::mpsc;
 
@@ -81,6 +81,18 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/admin/models/:id/auto-manage",
             get(admin::get_model_auto_manage).put(admin::set_model_auto_manage),
+        )
+        // Resource schedule
+        .route(
+            "/api/admin/schedule",
+            get(admin::get_schedule).put(admin::update_schedule),
+        )
+        // Prune history
+        .route("/api/admin/prune-history", get(admin::prune_history))
+        // Shard lock
+        .route(
+            "/api/admin/models/:id/shards/:index/lock",
+            put(admin::lock_shard),
         )
         // HF source lookup
         .route("/api/admin/hf/source/:model_id", get(admin::hf_source))

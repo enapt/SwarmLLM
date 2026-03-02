@@ -662,6 +662,21 @@ pub struct ShardResponse {
     pub total_size: u64,
 }
 
+// ---- Pruning Events ----
+/// Event emitted when auto-manage prunes (deletes) an over-replicated shard.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PruneEvent {
+    pub model_id: ModelId,
+    pub model_name: String,
+    pub shard_index: u32,
+    pub reason: String,
+    pub freed_bytes: u64,
+    pub remaining_local_shards: u32,
+    pub holder_count_before: usize,
+    pub holder_count_after: usize,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

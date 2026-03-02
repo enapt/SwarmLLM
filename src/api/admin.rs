@@ -899,11 +899,13 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                         peers
                     });
 
+            let locked = state.shared_state.locked_shards.contains_key(&shard_id);
             let mut shard_json = serde_json::json!({
                 "index": shard.index,
                 "size_bytes": shard.size_bytes,
                 "local": is_local,
                 "holders": holders.len(),
+                "locked": locked,
             });
             if let Some(dl) = download_state {
                 shard_json
@@ -2402,11 +2404,13 @@ pub async fn get_model_auto_manage(
             "model_id": model_id,
             "enabled": policy.enabled,
             "max_shards": policy.max_shards,
+            "prune_enabled": policy.prune_enabled,
         })),
         None => Json(serde_json::json!({
             "model_id": model_id,
             "enabled": true,
             "max_shards": default_cap,
+            "prune_enabled": true,
         })),
     }
 }
@@ -2416,6 +2420,7 @@ pub async fn get_model_auto_manage(
 pub struct ModelAutoManageUpdate {
     pub enabled: Option<bool>,
     pub max_shards: Option<u32>,
+    pub prune_enabled: Option<bool>,
 }
 
 pub async fn set_model_auto_manage(
@@ -2428,6 +2433,7 @@ pub async fn set_model_auto_manage(
     let policy = crate::config::ModelAutoManagePolicy {
         enabled: body.enabled.unwrap_or(true),
         max_shards: body.max_shards.unwrap_or(0),
+        prune_enabled: body.prune_enabled.unwrap_or(true),
     };
 
     // Update in-memory
@@ -2450,6 +2456,7 @@ pub async fn set_model_auto_manage(
         model = %model_id,
         enabled = policy.enabled,
         max_shards = policy.max_shards,
+        prune_enabled = policy.prune_enabled,
         "Per-model auto-manage policy updated"
     );
 
@@ -2458,6 +2465,7 @@ pub async fn set_model_auto_manage(
         "model_id": model_id,
         "enabled": policy.enabled,
         "max_shards": policy.max_shards,
+        "prune_enabled": policy.prune_enabled,
     })))
 }
 
@@ -2617,4 +2625,170 @@ pub async fn join_network(
 #[derive(Deserialize)]
 pub struct JoinNetworkRequest {
     pub code: String,
+}
+
+// ---- Resource Schedule API ----
+
+/// GET /api/admin/schedule — Get current resource schedule.
+pub async fn get_schedule(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let schedule = state.shared_state.resource_schedule.read().await;
+    Json(serde_json::json!({
+        "enabled": schedule.enabled,
+        "reduced_hours_start": schedule.reduced_hours_start,
+        "reduced_hours_end": schedule.reduced_hours_end,
+        "reduced_contribution": schedule.reduced_contribution,
+        "prune_aggressiveness": schedule.prune_aggressiveness,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScheduleUpdate {
+    pub enabled: Option<bool>,
+    pub reduced_hours_start: Option<u32>,
+    pub reduced_hours_end: Option<u32>,
+    pub reduced_contribution: Option<String>,
+    pub prune_aggressiveness: Option<String>,
+}
+
+/// PUT /api/admin/schedule — Update resource schedule at runtime (persisted to sled).
+pub async fn update_schedule(
+    State(state): State<AppState>,
+    Json(body): Json<ScheduleUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut schedule = state.shared_state.resource_schedule.write().await;
+
+    if let Some(enabled) = body.enabled {
+        schedule.enabled = enabled;
+    }
+    if let Some(start) = body.reduced_hours_start {
+        if start > 23 {
+            return Err(ApiError(crate::error::SwarmError::Config(
+                "reduced_hours_start must be 0-23".to_string(),
+            )));
+        }
+        schedule.reduced_hours_start = start;
+    }
+    if let Some(end) = body.reduced_hours_end {
+        if end > 23 {
+            return Err(ApiError(crate::error::SwarmError::Config(
+                "reduced_hours_end must be 0-23".to_string(),
+            )));
+        }
+        schedule.reduced_hours_end = end;
+    }
+    if let Some(ref contribution) = body.reduced_contribution {
+        schedule.reduced_contribution = contribution.clone();
+    }
+    if let Some(ref aggressiveness) = body.prune_aggressiveness {
+        match aggressiveness.as_str() {
+            "normal" | "aggressive" | "conservative" => {
+                schedule.prune_aggressiveness = aggressiveness.clone();
+            }
+            _ => {
+                return Err(ApiError(crate::error::SwarmError::Config(
+                    "prune_aggressiveness must be 'normal', 'aggressive', or 'conservative'"
+                        .to_string(),
+                )));
+            }
+        }
+    }
+
+    // Persist to sled
+    let _ = state
+        .shared_state
+        .db
+        .put_json("resource_schedule", "current", &*schedule);
+
+    let result = serde_json::json!({
+        "status": "ok",
+        "enabled": schedule.enabled,
+        "reduced_hours_start": schedule.reduced_hours_start,
+        "reduced_hours_end": schedule.reduced_hours_end,
+        "reduced_contribution": schedule.reduced_contribution,
+        "prune_aggressiveness": schedule.prune_aggressiveness,
+    });
+
+    Ok(Json(result))
+}
+
+// ---- Prune History API ----
+
+/// GET /api/admin/prune-history — Recent prune events.
+pub async fn prune_history(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let history = state.shared_state.prune_history.read().await;
+    let events: Vec<serde_json::Value> = history
+        .iter()
+        .rev()
+        .map(|e| {
+            serde_json::json!({
+                "model_id": e.model_id.0,
+                "model_name": e.model_name,
+                "shard_index": e.shard_index,
+                "reason": e.reason,
+                "freed_bytes": e.freed_bytes,
+                "remaining_local_shards": e.remaining_local_shards,
+                "holder_count_before": e.holder_count_before,
+                "holder_count_after": e.holder_count_after,
+                "timestamp": e.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "events": events,
+        "total": events.len(),
+    }))
+}
+
+// ---- Shard Lock API ----
+
+#[derive(Debug, Deserialize)]
+pub struct ShardLockUpdate {
+    pub locked: bool,
+}
+
+/// PUT /api/admin/models/:model_id/shards/:index/lock — Lock or unlock a shard.
+pub async fn lock_shard(
+    State(state): State<AppState>,
+    Path((model_id, index)): Path<(String, u32)>,
+    Json(body): Json<ShardLockUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let shard_id = crate::types::ShardId {
+        model_id: crate::types::ModelId(model_id.clone()),
+        index,
+    };
+
+    if body.locked {
+        state
+            .shared_state
+            .locked_shards
+            .insert(shard_id.clone(), true);
+        // Persist to sled
+        if let Ok(tree) = state.shared_state.db.tree("locked_shards") {
+            if let Ok(key) = serde_json::to_vec(&shard_id) {
+                let _ = tree.insert(key, b"1");
+            }
+        }
+    } else {
+        state.shared_state.locked_shards.remove(&shard_id);
+        if let Ok(tree) = state.shared_state.db.tree("locked_shards") {
+            if let Ok(key) = serde_json::to_vec(&shard_id) {
+                let _ = tree.remove(key);
+            }
+        }
+    }
+
+    tracing::info!(
+        model = %model_id,
+        shard = index,
+        locked = body.locked,
+        "Shard lock state updated"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "shard_index": index,
+        "locked": body.locked,
+    })))
 }

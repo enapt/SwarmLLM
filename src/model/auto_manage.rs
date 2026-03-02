@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Timelike;
 use tokio::sync::{mpsc, watch};
 
 use crate::daemon::SharedState;
@@ -89,6 +90,19 @@ struct ShardCandidate {
     score: f64,
 }
 
+/// A candidate shard identified for auto-pruning.
+#[derive(Debug, Clone)]
+struct PruneCandidate {
+    model_id: ModelId,
+    model_name: String,
+    shard_index: u32,
+    shard_size_bytes: u64,
+    holder_count: usize,
+    target_replicas: u32,
+    /// Score: higher = more prunable.
+    score: f64,
+}
+
 impl AutoShardManager {
     pub fn new(
         shared_state: Arc<SharedState>,
@@ -137,6 +151,11 @@ impl AutoShardManager {
             "AutoShardManager running"
         );
 
+        // Request count reset interval (10 minutes)
+        let mut request_reset_interval = tokio::time::interval(Duration::from_secs(600));
+        request_reset_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        request_reset_interval.tick().await; // skip first tick
+
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
@@ -149,6 +168,7 @@ impl AutoShardManager {
                     // Re-check enabled — admin API can toggle at runtime
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate_and_download().await;
+                        self.evaluate_and_prune().await;
                     }
                 }
                 _ = self.notify.notified() => {
@@ -158,7 +178,11 @@ impl AutoShardManager {
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         tracing::info!("AutoShardManager: triggered by new HF source or manifest");
                         self.evaluate_and_download().await;
+                        self.evaluate_and_prune().await;
                     }
+                }
+                _ = request_reset_interval.tick() => {
+                    self.reset_request_counts();
                 }
             }
         }
@@ -1148,6 +1172,495 @@ impl AutoShardManager {
         check_and_load_model(&self.shared_state, model_id).await;
     }
 
+    /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
+    async fn evaluate_and_prune(&self) {
+        let config = &self.shared_state.config.auto_manage;
+        if !config.prune_enabled {
+            return;
+        }
+
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let registry = &self.shared_state.model_registry;
+        let shard_store =
+            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+
+        // Compute resource pressure
+        let resource_pressure = self.compute_resource_pressure();
+        let pressure_urgent = resource_pressure > 0.95;
+
+        // Check if we're in reduced hours
+        let schedule_pressure = self.schedule_pressure_bonus().await;
+
+        // Gather per-model request counts for popularity
+        let request_counts: std::collections::HashMap<ModelId, u64> = self
+            .shared_state
+            .model_request_counts
+            .iter()
+            .map(|e| (e.key().clone(), e.value().load(std::sync::atomic::Ordering::Relaxed)))
+            .collect();
+
+        let pool_size = self.shared_state.peer_registry.len() + 1; // +1 for us
+
+        // Track how many shards pruned per model in this cycle
+        let mut pruned_per_model: std::collections::HashMap<ModelId, u32> =
+            std::collections::HashMap::new();
+
+        // Collect prune candidates across all models
+        let mut prune_candidates: Vec<PruneCandidate> = Vec::new();
+
+        for manifest in registry.models() {
+            // Check per-model prune policy
+            if let Some(policy) = self
+                .shared_state
+                .model_auto_manage_policies
+                .get(&manifest.id)
+            {
+                if !policy.prune_enabled {
+                    continue;
+                }
+            }
+
+            // Check cooldown
+            if let Some(last_prune) = self.last_prune_time(&manifest.id) {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(last_prune)
+                    .num_seconds()
+                    .max(0) as u64;
+                if elapsed < config.prune_cooldown_secs {
+                    continue;
+                }
+            }
+
+            // Compute target replicas for this model
+            let request_count = request_counts.get(&manifest.id).copied().unwrap_or(0);
+            let target = self.target_replicas(request_count, config.min_replicas, pool_size);
+
+            // Adjust target for resource pressure
+            let adjusted_target = self.pressure_adjusted_target(target, resource_pressure, config.min_replicas);
+
+            for shard in &manifest.shards {
+                let shard_id = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                };
+
+                // Only consider shards we hold locally
+                let holders = registry.shard_holders(&shard_id);
+                if !holders.contains(&local_node_id) {
+                    continue;
+                }
+
+                // Skip locked/pinned shards
+                if self.shared_state.locked_shards.contains_key(&shard_id) {
+                    continue;
+                }
+
+                // Skip if in configured --shards range
+                if let Some((start, end)) = self.shared_state.config.inference.shard_range {
+                    if shard.index >= start && shard.index <= end {
+                        continue;
+                    }
+                }
+
+                let holder_count = holders.len();
+
+                // Skip if at or below target
+                if holder_count <= adjusted_target as usize {
+                    continue;
+                }
+
+                // Region-aware: block if we'd eliminate last holder in our region
+                if self.would_eliminate_region(&shard_id, &local_node_id, &holders) {
+                    continue;
+                }
+
+                // Load-aware: block if remaining holders are busy
+                if self.remaining_holders_busy(&holders, &local_node_id, config.max_holder_load_for_prune) {
+                    continue;
+                }
+
+                // Skip if model actively loaded and used recently (unless pressure-urgent)
+                if !pressure_urgent && self.shard_recently_used(&manifest.id) {
+                    continue;
+                }
+
+                // Re-acquisition check: can we get it back?
+                if !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id) {
+                    continue;
+                }
+
+                // Compute prune score (higher = more prunable)
+                let redundancy_ratio = holder_count as f64 / adjusted_target.max(1) as f64;
+                let mut score = redundancy_ratio;
+
+                // Cold shard bonus (not loaded in VRAM)
+                let is_loaded = self.shared_state.split_models.iter().any(|entry| {
+                    entry.key().0 == manifest.id
+                });
+                if !is_loaded {
+                    score += 1.0;
+                }
+
+                // Resource pressure bonus
+                score += 0.5 * (resource_pressure + schedule_pressure);
+
+                // Pipeline completeness penalty
+                if shard.index == 0 || shard.index == manifest.shard_count.saturating_sub(1) {
+                    score -= 0.5;
+                }
+
+                // Rarest shard penalty
+                let min_holders = manifest.shards.iter().map(|s| {
+                    let sid = ShardId { model_id: manifest.id.clone(), index: s.index };
+                    registry.shard_holders(&sid).len()
+                }).min().unwrap_or(0);
+                if holder_count == min_holders {
+                    score -= 0.3;
+                }
+
+                // Recently acquired penalty (< 30 min)
+                // Use file modified time as proxy
+                let shard_path = shard_store.shard_path(&manifest.id, shard.index);
+                if let Ok(meta) = std::fs::metadata(&shard_path) {
+                    if let Ok(modified) = meta.modified() {
+                        let age = modified.elapsed().unwrap_or_default();
+                        if age < Duration::from_secs(1800) {
+                            score -= 0.2;
+                        }
+                    }
+                }
+
+                prune_candidates.push(PruneCandidate {
+                    model_id: manifest.id.clone(),
+                    model_name: manifest.name.clone(),
+                    shard_index: shard.index,
+                    shard_size_bytes: shard.size_bytes,
+                    holder_count,
+                    target_replicas: adjusted_target,
+                    score,
+                });
+            }
+        }
+
+        // Sort by score descending (most prunable first)
+        prune_candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Execute pruning with per-model limits
+        let max_per_model = if pressure_urgent { 2u32 } else { 1u32 };
+
+        for candidate in &prune_candidates {
+            let count = pruned_per_model.get(&candidate.model_id).copied().unwrap_or(0);
+            if count >= max_per_model {
+                continue;
+            }
+
+            // Actually delete the shard file
+            let shard_path = shard_store.shard_path(&candidate.model_id, candidate.shard_index);
+            if shard_path.exists() {
+                if let Err(e) = std::fs::remove_file(&shard_path) {
+                    tracing::warn!(
+                        model = %candidate.model_id,
+                        shard = candidate.shard_index,
+                        error = %e,
+                        "Failed to delete shard file during pruning"
+                    );
+                    continue;
+                }
+            }
+
+            // Unregister from shard registry
+            let shard_id = ShardId {
+                model_id: candidate.model_id.clone(),
+                index: candidate.shard_index,
+            };
+            registry.remove_shard_holder(&shard_id, &local_node_id);
+            if let Some(mut holders) = self.shared_state.shard_registry.get_mut(&shard_id) {
+                holders.retain(|n| n != &local_node_id);
+            }
+
+            // Count remaining local shards for this model
+            let remaining_local = registry.models().iter()
+                .find(|m| m.id == candidate.model_id)
+                .map(|m| {
+                    m.shards.iter().filter(|s| {
+                        let sid = ShardId { model_id: m.id.clone(), index: s.index };
+                        registry.shard_holders(&sid).contains(&local_node_id)
+                    }).count() as u32
+                })
+                .unwrap_or(0);
+
+            let event = crate::types::PruneEvent {
+                model_id: candidate.model_id.clone(),
+                model_name: candidate.model_name.clone(),
+                shard_index: candidate.shard_index,
+                reason: format!(
+                    "Over-replicated ({} holders, target {})",
+                    candidate.holder_count, candidate.target_replicas
+                ),
+                freed_bytes: candidate.shard_size_bytes,
+                remaining_local_shards: remaining_local,
+                holder_count_before: candidate.holder_count,
+                holder_count_after: candidate.holder_count - 1,
+                timestamp: chrono::Utc::now(),
+            };
+
+            tracing::info!(
+                model = %candidate.model_id,
+                shard = candidate.shard_index,
+                holders = candidate.holder_count,
+                target = candidate.target_replicas,
+                freed_mb = candidate.shard_size_bytes / (1024 * 1024),
+                "Pruning over-replicated shard"
+            );
+
+            // Emit prune event
+            let _ = self.shared_state.prune_events_tx.send(event.clone());
+
+            // Add to history
+            {
+                let mut history = self.shared_state.prune_history.write().await;
+                if history.len() >= 100 {
+                    history.pop_front();
+                }
+                history.push_back(event);
+            }
+
+            *pruned_per_model.entry(candidate.model_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// Compute target replicas based on popularity (request count in last window).
+    fn target_replicas(&self, request_count: u64, min_replicas: u32, pool_size: usize) -> u32 {
+        let base = min_replicas as f64;
+        let factor = match request_count {
+            0 => 1.0,
+            1..=10 => 1.5,
+            11..=50 => 2.0,
+            _ => 3.0,
+        };
+        let target = (base * factor).ceil() as u32;
+        target.clamp(min_replicas, pool_size as u32)
+    }
+
+    /// Adjust target based on resource pressure.
+    fn pressure_adjusted_target(&self, target: u32, pressure: f64, min_replicas: u32) -> u32 {
+        if pressure < 0.5 {
+            // Relaxed: keep extras
+            target + 1
+        } else if pressure < 0.8 {
+            target
+        } else if pressure < 0.95 {
+            // Eager
+            target.saturating_sub(1).max(min_replicas)
+        } else {
+            // Urgent
+            target.saturating_sub(2).max(min_replicas)
+        }
+    }
+
+    /// Compute resource pressure (0.0–1.0) based on VRAM and disk usage.
+    fn compute_resource_pressure(&self) -> f64 {
+        let config = &self.shared_state.config;
+        let local_node_id = self.shared_state.identity.node_id().clone();
+
+        // Disk pressure
+        let budget_mb = if config.auto_manage.max_storage_mb > 0 {
+            config.auto_manage.max_storage_mb
+        } else {
+            config.resources.max_disk_mb / 2
+        };
+        let mut local_bytes = 0u64;
+        for manifest in self.shared_state.model_registry.models() {
+            for shard in &manifest.shards {
+                let sid = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                };
+                if self.shared_state.model_registry.shard_holders(&sid).contains(&local_node_id) {
+                    local_bytes += shard.size_bytes;
+                }
+            }
+        }
+        let disk_pressure = if budget_mb > 0 {
+            local_bytes as f64 / (budget_mb as f64 * 1024.0 * 1024.0)
+        } else {
+            0.0
+        };
+
+        // VRAM pressure
+        let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
+            if gpu.vram_total_mb > 0 {
+                let loaded_vram: u64 = self.shared_state.split_models.iter()
+                    .map(|e| e.value().estimated_vram_mb)
+                    .sum();
+                loaded_vram as f64 / gpu.vram_total_mb as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        disk_pressure.max(vram_pressure).min(1.0)
+    }
+
+    /// Compute schedule-based pressure bonus during reduced hours.
+    async fn schedule_pressure_bonus(&self) -> f64 {
+        let schedule = self.shared_state.resource_schedule.read().await;
+        if !schedule.enabled {
+            return 0.0;
+        }
+
+        let now_hour = chrono::Utc::now().hour();
+        let in_reduced = if schedule.reduced_hours_start <= schedule.reduced_hours_end {
+            now_hour >= schedule.reduced_hours_start && now_hour < schedule.reduced_hours_end
+        } else {
+            // Wraps midnight (e.g., 22-8)
+            now_hour >= schedule.reduced_hours_start || now_hour < schedule.reduced_hours_end
+        };
+
+        if !in_reduced {
+            return 0.0;
+        }
+
+        match schedule.prune_aggressiveness.as_str() {
+            "aggressive" => 0.3,
+            "normal" => 0.15,
+            _ => 0.0, // "conservative"
+        }
+    }
+
+    /// Check if removing us as holder would eliminate the last holder in our region.
+    fn would_eliminate_region(
+        &self,
+        _shard_id: &ShardId,
+        local_node_id: &NodeId,
+        holders: &[NodeId],
+    ) -> bool {
+        let our_region = self
+            .shared_state
+            .config
+            .identity
+            .region
+            .as_deref()
+            .unwrap_or("");
+
+        if our_region.is_empty() {
+            // No region data — fallback: ensure at least 2 holders with low latency
+            let low_latency_remaining = holders.iter().filter(|h| {
+                *h != local_node_id
+                    && self
+                        .shared_state
+                        .peer_registry
+                        .get(*h)
+                        .map(|p| p.latency_ms.unwrap_or(9999) < 200)
+                        .unwrap_or(false)
+            }).count();
+            return low_latency_remaining < 2;
+        }
+
+        // Count remaining holders in our region (excluding us)
+        let same_region_remaining = holders.iter().filter(|h| {
+            if *h == local_node_id {
+                return false;
+            }
+            if let Some(peer) = self.shared_state.peer_registry.get(*h) {
+                peer.capability
+                    .as_ref()
+                    .and_then(|c| c.region.as_deref())
+                    .map(|r| r.eq_ignore_ascii_case(our_region))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }).count();
+
+        same_region_remaining == 0
+    }
+
+    /// Check if remaining holders (excluding us) are too busy.
+    fn remaining_holders_busy(&self, holders: &[NodeId], local_node_id: &NodeId, max_load: u32) -> bool {
+        let remaining: Vec<u32> = holders.iter().filter_map(|h| {
+            if h == local_node_id {
+                return None;
+            }
+            self.shared_state.peer_registry.get(h)
+                .map(|p| p.active_request_count)
+        }).collect();
+
+        if remaining.is_empty() {
+            return true; // No peers to offload to
+        }
+
+        let avg_load = remaining.iter().sum::<u32>() as f64 / remaining.len() as f64;
+        avg_load > max_load as f64
+    }
+
+    /// Check if this model's shards were used recently (last 5 min).
+    fn shard_recently_used(&self, model_id: &ModelId) -> bool {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.shared_state.split_models.iter().any(|entry| {
+            if entry.key().0 != *model_id {
+                return false;
+            }
+            let last = entry.value().last_used_secs();
+            now_secs.saturating_sub(last) < 300
+        })
+    }
+
+    /// Check if we can re-acquire this shard if needed later.
+    fn can_reacquire(
+        &self,
+        model_id: &ModelId,
+        _shard_id: &ShardId,
+        holders: &[NodeId],
+        local_node_id: &NodeId,
+    ) -> bool {
+        // Check HF source
+        if self.shared_state.hf_sources.contains_key(model_id) {
+            return true;
+        }
+
+        // Check if healthy peers hold it (excluding us)
+        let peer_holders = holders.iter().any(|h| {
+            h != local_node_id
+                && self.shared_state.peer_registry.get(h)
+                    .map(|p| p.latency_ms.unwrap_or(9999) < 5000)
+                    .unwrap_or(false)
+        });
+        peer_holders
+    }
+
+    /// Get last prune time for a model from prune history.
+    fn last_prune_time(&self, model_id: &ModelId) -> Option<chrono::DateTime<chrono::Utc>> {
+        // Check prune history (we need a sync read, so try_read)
+        if let Ok(history) = self.shared_state.prune_history.try_read() {
+            history.iter().rev().find_map(|e| {
+                if e.model_id == *model_id {
+                    Some(e.timestamp)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Reset model request counts (called periodically, e.g. every 10 min).
+    fn reset_request_counts(&self) {
+        for entry in self.shared_state.model_request_counts.iter() {
+            entry.value().store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Discover HF source metadata from `hf_source.json` files next to manifests.
     ///
     /// This allows seeding HF source info by placing a small JSON file:
@@ -1485,6 +1998,10 @@ mod tests {
             max_concurrent_downloads: 3,
             default_model_shard_cap: 0,
             model_policies: std::collections::HashMap::new(),
+            prune_enabled: true,
+            min_replicas: 2,
+            prune_cooldown_secs: 300,
+            max_holder_load_for_prune: 3,
         };
         assert_eq!(config.max_shards, 0); // unlimited
     }
@@ -1517,5 +2034,175 @@ mod tests {
         drop(p2);
         drop(_p3);
         assert_eq!(sem.available_permits(), 2);
+    }
+
+    // --- Pruning unit tests ---
+
+    /// Helper: compute target replicas using the same formula as AutoShardManager.
+    fn target_replicas_pure(request_count: u64, min_replicas: u32, pool_size: usize) -> u32 {
+        let base = min_replicas as f64;
+        let factor = match request_count {
+            0 => 1.0,
+            1..=10 => 1.5,
+            11..=50 => 2.0,
+            _ => 3.0,
+        };
+        let target = (base * factor).ceil() as u32;
+        target.clamp(min_replicas, pool_size as u32)
+    }
+
+    /// Helper: adjust target based on resource pressure.
+    fn pressure_adjusted_target_pure(target: u32, pressure: f64, min_replicas: u32) -> u32 {
+        if pressure < 0.5 {
+            target + 1
+        } else if pressure < 0.8 {
+            target
+        } else if pressure < 0.95 {
+            target.saturating_sub(1).max(min_replicas)
+        } else {
+            target.saturating_sub(2).max(min_replicas)
+        }
+    }
+
+    #[test]
+    fn popularity_tiers_zero_requests() {
+        assert_eq!(target_replicas_pure(0, 2, 10), 2);
+    }
+
+    #[test]
+    fn popularity_tiers_low_requests() {
+        // 1-10 requests → factor 1.5 → ceil(2*1.5) = 3
+        assert_eq!(target_replicas_pure(1, 2, 10), 3);
+        assert_eq!(target_replicas_pure(5, 2, 10), 3);
+        assert_eq!(target_replicas_pure(10, 2, 10), 3);
+    }
+
+    #[test]
+    fn popularity_tiers_medium_requests() {
+        // 11-50 requests → factor 2.0 → ceil(2*2.0) = 4
+        assert_eq!(target_replicas_pure(11, 2, 10), 4);
+        assert_eq!(target_replicas_pure(50, 2, 10), 4);
+    }
+
+    #[test]
+    fn popularity_tiers_high_requests() {
+        // 51+ requests → factor 3.0 → ceil(2*3.0) = 6
+        assert_eq!(target_replicas_pure(51, 2, 10), 6);
+        assert_eq!(target_replicas_pure(1000, 2, 10), 6);
+    }
+
+    #[test]
+    fn popularity_clamped_by_pool_size() {
+        // pool_size=3, 51+ requests → ceil(2*3.0)=6, clamped to 3
+        assert_eq!(target_replicas_pure(100, 2, 3), 3);
+        // pool_size=4, 0 requests → base=2, factor=1.0, target=2
+        assert_eq!(target_replicas_pure(0, 2, 4), 2);
+        // pool_size=2, 51+ requests → ceil(2*3.0)=6, clamped to 2
+        assert_eq!(target_replicas_pure(100, 2, 2), 2);
+    }
+
+    #[test]
+    fn pressure_relaxed_adds_one() {
+        // pressure < 0.5 → target + 1
+        assert_eq!(pressure_adjusted_target_pure(3, 0.3, 2), 4);
+    }
+
+    #[test]
+    fn pressure_normal_keeps_target() {
+        // 0.5 <= pressure < 0.8
+        assert_eq!(pressure_adjusted_target_pure(3, 0.6, 2), 3);
+    }
+
+    #[test]
+    fn pressure_eager_subtracts_one() {
+        // 0.8 <= pressure < 0.95
+        assert_eq!(pressure_adjusted_target_pure(4, 0.85, 2), 3);
+    }
+
+    #[test]
+    fn pressure_eager_respects_min() {
+        assert_eq!(pressure_adjusted_target_pure(2, 0.85, 2), 2);
+    }
+
+    #[test]
+    fn pressure_urgent_subtracts_two() {
+        // pressure >= 0.95
+        assert_eq!(pressure_adjusted_target_pure(5, 0.97, 2), 3);
+    }
+
+    #[test]
+    fn pressure_urgent_respects_min() {
+        assert_eq!(pressure_adjusted_target_pure(3, 0.98, 2), 2);
+        assert_eq!(pressure_adjusted_target_pure(2, 0.98, 2), 2);
+    }
+
+    #[test]
+    fn prune_event_serialization() {
+        let event = crate::types::PruneEvent {
+            model_id: crate::types::ModelId("test-model".to_string()),
+            model_name: "Test Model".to_string(),
+            shard_index: 1,
+            reason: "over-replicated".to_string(),
+            freed_bytes: 1024 * 1024,
+            remaining_local_shards: 2,
+            holder_count_before: 5,
+            holder_count_after: 4,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("test-model"));
+        assert!(json.contains("over-replicated"));
+
+        let deser: crate::types::PruneEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.model_id.0, "test-model");
+        assert_eq!(deser.shard_index, 1);
+        assert_eq!(deser.holder_count_before, 5);
+    }
+
+    #[test]
+    fn prune_config_defaults() {
+        let config = crate::config::AutoManageConfig::default();
+        assert!(config.prune_enabled);
+        assert_eq!(config.min_replicas, 2);
+        assert_eq!(config.prune_cooldown_secs, 300);
+        assert_eq!(config.max_holder_load_for_prune, 3);
+    }
+
+    #[test]
+    fn model_auto_manage_policy_prune_enabled_default() {
+        // prune_enabled defaults to true via serde
+        let json = r#"{"enabled": true, "max_shards": 0}"#;
+        let policy: crate::config::ModelAutoManagePolicy = serde_json::from_str(json).unwrap();
+        assert!(policy.prune_enabled);
+    }
+
+    #[test]
+    fn resource_schedule_default_prune_aggressiveness() {
+        let schedule = crate::config::ResourceSchedule::default();
+        assert_eq!(schedule.prune_aggressiveness, "normal");
+    }
+
+    #[test]
+    fn prune_candidate_score_ordering() {
+        // Higher score = more prunable
+        let cold_redundant = PruneCandidate {
+            model_id: crate::types::ModelId("m1".into()),
+            model_name: "M1".into(),
+            shard_index: 1,
+            shard_size_bytes: 1000,
+            holder_count: 6,
+            target_replicas: 2,
+            score: 3.0 + 1.0, // high redundancy + cold bonus
+        };
+        let warm_less_redundant = PruneCandidate {
+            model_id: crate::types::ModelId("m2".into()),
+            model_name: "M2".into(),
+            shard_index: 0,
+            shard_size_bytes: 1000,
+            holder_count: 3,
+            target_replicas: 2,
+            score: 1.5, // low redundancy, first shard penalty
+        };
+        assert!(cold_redundant.score > warm_less_redundant.score);
     }
 }

@@ -115,6 +115,9 @@ pub struct ResourceSchedule {
     pub reduced_hours_end: u32,
     #[serde(default = "default_reduced_contribution")]
     pub reduced_contribution: String,
+    /// Pruning aggressiveness during reduced hours: "normal", "aggressive", "conservative".
+    #[serde(default = "default_prune_aggressiveness")]
+    pub prune_aggressiveness: String,
 }
 
 impl Default for ResourceSchedule {
@@ -124,6 +127,7 @@ impl Default for ResourceSchedule {
             reduced_hours_start: default_reduced_hours_start(),
             reduced_hours_end: default_reduced_hours_end(),
             reduced_contribution: default_reduced_contribution(),
+            prune_aggressiveness: default_prune_aggressiveness(),
         }
     }
 }
@@ -354,6 +358,18 @@ pub struct AutoManageConfig {
     /// Per-model auto-manage overrides keyed by model ID.
     #[serde(default)]
     pub model_policies: HashMap<String, ModelAutoManagePolicy>,
+    /// Enable automatic shard pruning (removal of over-replicated shards).
+    #[serde(default = "default_true")]
+    pub prune_enabled: bool,
+    /// Minimum number of replicas to maintain per shard across the network.
+    #[serde(default = "default_min_replicas")]
+    pub min_replicas: u32,
+    /// Cooldown in seconds between prune actions on the same model.
+    #[serde(default = "default_prune_cooldown_secs")]
+    pub prune_cooldown_secs: u64,
+    /// Block pruning if remaining holders have avg load above this threshold.
+    #[serde(default = "default_max_holder_load_for_prune")]
+    pub max_holder_load_for_prune: u32,
 }
 
 /// Per-model auto-manage policy controlling whether a model participates
@@ -366,6 +382,9 @@ pub struct ModelAutoManagePolicy {
     /// Maximum shards auto-manage will acquire for this model (0 = unlimited / use global default).
     #[serde(default)]
     pub max_shards: u32,
+    /// Whether auto-manage may prune (delete) over-replicated shards for this model.
+    #[serde(default = "default_true")]
+    pub prune_enabled: bool,
 }
 
 impl Default for AutoManageConfig {
@@ -379,11 +398,27 @@ impl Default for AutoManageConfig {
             max_concurrent_downloads: default_max_concurrent_downloads(),
             default_model_shard_cap: 0,
             model_policies: HashMap::new(),
+            prune_enabled: true,
+            min_replicas: default_min_replicas(),
+            prune_cooldown_secs: default_prune_cooldown_secs(),
+            max_holder_load_for_prune: default_max_holder_load_for_prune(),
         }
     }
 }
 
 fn default_max_concurrent_downloads() -> usize {
+    3
+}
+
+fn default_min_replicas() -> u32 {
+    2
+}
+
+fn default_prune_cooldown_secs() -> u64 {
+    300
+}
+
+fn default_max_holder_load_for_prune() -> u32 {
     3
 }
 
@@ -535,6 +570,10 @@ fn default_reduced_hours_end() -> u32 {
 
 fn default_reduced_contribution() -> String {
     "minimal".into()
+}
+
+fn default_prune_aggressiveness() -> String {
+    "normal".into()
 }
 
 fn default_log_level() -> String {
