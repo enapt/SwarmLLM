@@ -148,6 +148,13 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // Exempt API key retrieval — loopback only.
+    // The dashboard needs the key to bootstrap auth for all other requests.
+    // Only accessible from localhost to prevent remote key theft.
+    if path == "/api/admin/api-key" && method == Method::GET && addr.ip().is_loopback() {
+        return next.run(req).await;
+    }
+
     // Exempt WebSocket upgrade requests at /api/admin/ws — loopback only
     if path == "/api/admin/ws"
         && addr.ip().is_loopback()
@@ -257,7 +264,7 @@ mod tests {
         // PUT /api/identity/nickname requires auth
         assert!(!is_exempt_request("/api/identity/nickname", &put));
         assert!(!is_exempt_request("/api/identity/nickname", &delete));
-        // API key requires auth (sensitive endpoint)
+        // API key not in general exempt list (loopback-only exemption in auth_middleware)
         assert!(!is_exempt_request("/api/admin/api-key", &Method::GET));
         assert!(!is_exempt_request("/api/admin/shutdown", &post));
         assert!(!is_exempt_request("/api/admin/hf/download", &post));
