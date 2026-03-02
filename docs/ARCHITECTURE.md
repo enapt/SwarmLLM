@@ -307,7 +307,7 @@ For a 7B model (hidden_dim=3584):
 
 ### KV-Cache Management
 
-- Per-request KV-cache isolation via `DashMap<(ModelKey, RequestId), Vec<(Tensor, Tensor)>>`
+- Per-request KV-cache isolation via `DashMap<String, KvCacheEntry>` (key: `"model_key\0request_id"`)
 - Each concurrent request gets its own cache — no corruption under concurrency
 - Multi-turn reuse: session_id tracks conversations, prefix matching skips redundant prefill
 - KV-cache is cleared when `sequence_num == 0` (start of new request)

@@ -313,7 +313,7 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 519 tests | Limited | Limited | Varies |
+| **Test Suite** | 488 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 
