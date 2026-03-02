@@ -368,13 +368,15 @@ var SwarmLLM = (function() {
         if (cfg.max_concurrent_requests) document.getElementById('settings-max-requests').value = cfg.max_concurrent_requests;
         if (cfg.max_bandwidth_mbps !== undefined) document.getElementById('settings-bandwidth').value = cfg.max_bandwidth_mbps;
         if (cfg.max_disk_mb) document.getElementById('settings-disk').value = cfg.max_disk_mb;
-      } catch (e) {}
+      } catch (e) { /* config is non-critical on initial load */ }
 
       try {
         var resp = await fetch('/api/admin/models');
         var models = await resp.json();
         dashboard.renderModels(models);
-      } catch (e) {}
+      } catch (e) {
+        ui.showBanner('error', 'Failed to load model list');
+      }
 
       dlQueue.load();
       dashboard.loadNetworkData();
@@ -463,6 +465,9 @@ var SwarmLLM = (function() {
       if (data.requests_made !== undefined) document.getElementById('stat-requests-made').textContent = data.requests_made;
       if (data.forwards_served !== undefined) document.getElementById('stat-forwards').textContent = data.forwards_served;
       if (data.active_requests !== undefined) document.getElementById('stat-active').textContent = data.active_requests;
+
+      // Update mode indicator on live stats changes
+      updateModeIndicator(data, _cachedProviderData);
     },
 
     renderModels: function(models) {
@@ -887,7 +892,10 @@ var SwarmLLM = (function() {
             list.appendChild(div);
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        var list = document.getElementById('peers-list');
+        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">Failed to load peer list</div>';
+      }
 
     },
 
@@ -1136,7 +1144,9 @@ var SwarmLLM = (function() {
         document.getElementById('settings-auto-manage-storage-group').style.display = isOn ? '' : 'none';
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) settings.loadStorageInfo();
-      } catch (e) {}
+      } catch (e) {
+        ui.showBanner('error', 'Failed to load settings: ' + (e.message || 'network error'));
+      }
       // Load API key and provider status
       settings.loadApiKey();
       settings.loadProviders();
@@ -1239,7 +1249,9 @@ var SwarmLLM = (function() {
         } else {
           modelsDiv.innerHTML = '<span class="text-muted">No models registered</span>';
         }
-      } catch (e) {}
+      } catch (e) {
+        ui.showBanner('error', 'Failed to load storage info');
+      }
     },
 
     loadProviders: async function() {
@@ -1260,7 +1272,9 @@ var SwarmLLM = (function() {
             }
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        ui.showBanner('error', 'Failed to load provider status');
+      }
     },
 
     saveProviders: async function() {
@@ -1284,7 +1298,10 @@ var SwarmLLM = (function() {
           if (input) input.value = '';
         });
         settings.loadProviders();
-      } catch (e) {}
+        ui.showBanner('success', 'Provider keys saved');
+      } catch (e) {
+        ui.showBanner('error', 'Failed to save provider keys: ' + (e.message || 'network error'));
+      }
     },
 
     testProvider: async function(name) {
@@ -1505,7 +1522,7 @@ var SwarmLLM = (function() {
       var level = levels[parseInt(document.getElementById('contribution-slider').value, 10)];
       var autoManage = document.getElementById('setup-auto-manage').checked;
       try {
-        await authFetch('/api/admin/config', {
+        var resp = await authFetch('/api/admin/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1513,7 +1530,14 @@ var SwarmLLM = (function() {
             auto_manage_shards: autoManage,
           }),
         });
-      } catch (e) {}
+        if (!resp.ok) {
+          ui.showBanner('error', 'Setup failed — could not save configuration');
+          return;
+        }
+      } catch (e) {
+        ui.showBanner('error', 'Setup failed: ' + (e.message || 'network error'));
+        return;
+      }
       localStorage.setItem(SETUP_DONE_KEY, 'true');
       // Also persist to server so other clients / restarts see setup as done
       try {
@@ -1522,8 +1546,9 @@ var SwarmLLM = (function() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ setup_done: true }),
         });
-      } catch (e) {}
+      } catch (e) { /* non-critical */ }
       document.getElementById('setup-modal').classList.add('hidden');
+      ui.showBanner('success', 'Setup complete! Welcome to SwarmLLM.');
     }
   };
 
@@ -1591,7 +1616,9 @@ var SwarmLLM = (function() {
           showPruneToast(text);
           loadModels();
         }
-      } catch (e) {}
+      } catch (e) {
+        // WS parse error — ignore malformed frames
+      }
     };
 
     ws.onclose = function() {
@@ -1652,7 +1679,10 @@ var SwarmLLM = (function() {
       } else {
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
-    } catch (e) {}
+      syncMobileModelSelect();
+    } catch (e) {
+      ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
+    }
   }
 
   async function requestModel(modelId) {
@@ -1856,7 +1886,10 @@ var SwarmLLM = (function() {
       if (!resp.ok) return;
       var data = await resp.json();
       renderPruneHistory(data.events || []);
-    } catch (e) {}
+    } catch (e) {
+      var el = document.getElementById('prune-history-list');
+      if (el) el.innerHTML = '<div class="text-muted" style="padding:0.5rem">Could not load prune history</div>';
+    }
   }
 
   function renderPruneHistory(events) {
@@ -1887,7 +1920,10 @@ var SwarmLLM = (function() {
       if (!resp.ok) return;
       var s = await resp.json();
       renderScheduleCard(s);
-    } catch (e) {}
+    } catch (e) {
+      var el = document.getElementById('schedule-form');
+      if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">Could not load schedule</div>';
+    }
   }
 
   function renderScheduleCard(s) {
@@ -2148,7 +2184,9 @@ var SwarmLLM = (function() {
         if (!resp.ok) return;
         var data = await resp.json();
         dlQueue.render(data.downloads || []);
-      } catch (e) {}
+      } catch (e) {
+        // Download queue is non-critical — silent
+      }
     },
 
     render: function(downloads) {
@@ -2314,7 +2352,9 @@ var SwarmLLM = (function() {
     try {
       var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage');
       if (resp.ok) policy = await resp.json();
-    } catch (e) {}
+    } catch (e) {
+      ui.showBanner('error', 'Could not load auto-manage policy');
+    }
 
     var panel = document.createElement('div');
     panel.className = 'auto-manage-panel';
@@ -2520,7 +2560,7 @@ var SwarmLLM = (function() {
         if (nickEl && data.nickname) nickEl.value = data.nickname;
         if (visEl && data.visibility) visEl.value = data.visibility;
       } catch (e) {
-        // ignore
+        // Nickname is non-critical — no banner
       }
     },
 
@@ -2689,7 +2729,7 @@ var SwarmLLM = (function() {
         networkMap.render(data);
         networkMap.populateModelFilter(data);
       } catch (e) {
-        // silent
+        // Network map is non-critical
       }
     },
 
@@ -2873,6 +2913,21 @@ var SwarmLLM = (function() {
     on('btn-copy-api-key', 'click', function() { settings.copyApiKey(); });
     on('btn-save-settings', 'click', function() { settings.save(); });
     on('btn-open-settings', 'click', function() { ui.openSettings(); });
+    on('btn-rerun-setup', 'click', function() {
+      localStorage.removeItem(SETUP_DONE_KEY);
+      ui.closeSettings();
+      setup.currentStep = 1;
+      setup.updateUI();
+      document.getElementById('setup-modal').classList.remove('hidden');
+      setup.detectHardware();
+    });
+
+    // Provider test buttons (CSP-safe — data attribute binding)
+    document.querySelectorAll('[data-test-provider]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        settings.testProvider(btn.getAttribute('data-test-provider'));
+      });
+    });
 
     // Model browser
     on('btn-close-model-browser', 'click', function() { ui.closeModelBrowser(); });
@@ -2912,8 +2967,8 @@ var SwarmLLM = (function() {
         shardMenu.hide();
         var settingsModal = document.getElementById('settings-modal');
         var modelModal = document.getElementById('model-browser-modal');
-        if (settingsModal && settingsModal.classList.contains('active')) { ui.closeSettings(); }
-        else if (modelModal && modelModal.classList.contains('active')) { ui.closeModelBrowser(); }
+        if (settingsModal && !settingsModal.classList.contains('hidden')) { ui.closeSettings(); }
+        else if (modelModal && !modelModal.classList.contains('hidden')) { ui.closeModelBrowser(); }
       }
     });
 
@@ -2991,8 +3046,155 @@ var SwarmLLM = (function() {
     });
   }
 
+  // ========================================================================
+  // Advanced Mode Toggle
+  // ========================================================================
+  function initAdvancedMode() {
+    var toggle = document.getElementById('advanced-mode-toggle');
+    if (!toggle) return;
+
+    // Restore from localStorage
+    var saved = localStorage.getItem('swarmllm_advanced_mode') === 'true';
+    toggle.checked = saved;
+    if (saved) document.body.classList.add('advanced-mode');
+
+    toggle.addEventListener('change', function() {
+      var on = toggle.checked;
+      document.body.classList.toggle('advanced-mode', on);
+      localStorage.setItem('swarmllm_advanced_mode', on ? 'true' : 'false');
+    });
+  }
+
+  // ========================================================================
+  // Collapsible Panels
+  // ========================================================================
+  function initCollapsiblePanels() {
+    document.querySelectorAll('.panel-header[data-collapse]').forEach(function(header) {
+      header.addEventListener('click', function() {
+        var targetId = header.getAttribute('data-collapse');
+        var body = document.getElementById(targetId);
+        if (!body) return;
+        body.classList.toggle('collapsed');
+        header.classList.toggle('collapsed');
+      });
+    });
+  }
+
+  // ========================================================================
+  // Mobile Model Selector Sync
+  // ========================================================================
+  function initMobileModelSync() {
+    var desktop = document.getElementById('model-select');
+    var mobile = document.getElementById('mobile-model-select');
+    var mobileBtn = document.getElementById('btn-mobile-browse');
+    if (!desktop || !mobile) return;
+
+    // Sync mobile → desktop on change
+    mobile.addEventListener('change', function() {
+      desktop.value = mobile.value;
+      currentModel = mobile.value;
+      try { localStorage.setItem('swarmllm_current_model', currentModel); } catch (e) {}
+    });
+
+    // Sync desktop → mobile on change
+    desktop.addEventListener('change', function() {
+      syncMobileModelSelect();
+      currentModel = desktop.value;
+      try { localStorage.setItem('swarmllm_current_model', currentModel); } catch (e) {}
+    });
+
+    // Mobile browse button opens model browser
+    if (mobileBtn) {
+      mobileBtn.addEventListener('click', function() {
+        ui.openModelBrowser();
+      });
+    }
+  }
+
+  function syncMobileModelSelect() {
+    var desktop = document.getElementById('model-select');
+    var mobile = document.getElementById('mobile-model-select');
+    if (!desktop || !mobile) return;
+    mobile.innerHTML = desktop.innerHTML;
+    mobile.value = desktop.value;
+  }
+
+  // ========================================================================
+  // Operation Mode Indicator
+  // ========================================================================
+  function updateModeIndicator(statsData, providerData) {
+    var dot = document.getElementById('mode-dot');
+    var label = document.getElementById('mode-label');
+    var detail = document.getElementById('mode-detail');
+    if (!dot || !label || !detail) return;
+
+    var peers = statsData ? (statsData.peers || 0) : 0;
+    var hasLocalModel = !!(statsData && statsData.hosted_shards && statsData.hosted_shards > 0);
+
+    // Determine configured cloud providers
+    var cloudProviders = [];
+    if (providerData && providerData.providers) {
+      providerData.providers.forEach(function(p) {
+        if (p.configured) cloudProviders.push(p.name);
+      });
+    }
+
+    if (peers > 0 && hasLocalModel) {
+      // Full swarm mode
+      dot.className = 'mode-dot swarm';
+      label.textContent = 'Swarm Mode';
+      detail.textContent = peers + ' peer' + (peers !== 1 ? 's' : '') + ' connected';
+    } else if (peers > 0 && !hasLocalModel) {
+      // Connected but no local model — using swarm for inference
+      dot.className = 'mode-dot swarm';
+      label.textContent = 'Swarm (remote)';
+      detail.textContent = 'No local shards — using ' + peers + ' peer' + (peers !== 1 ? 's' : '');
+    } else if (hasLocalModel && cloudProviders.length > 0) {
+      // Local model + cloud providers
+      dot.className = 'mode-dot swarm';
+      label.textContent = 'Hybrid Mode';
+      detail.textContent = 'Local + ' + cloudProviders.map(capitalize).join(', ');
+    } else if (hasLocalModel) {
+      // Local only, standalone
+      dot.className = 'mode-dot offline';
+      label.textContent = 'Standalone';
+      detail.textContent = 'Local inference only — no peers';
+    } else if (cloudProviders.length > 0) {
+      // Cloud gateway only
+      dot.className = 'mode-dot cloud';
+      label.textContent = 'Cloud Gateway';
+      detail.textContent = cloudProviders.map(capitalize).join(', ');
+    } else {
+      // Nothing configured
+      dot.className = 'mode-dot offline';
+      label.textContent = 'Not Ready';
+      detail.textContent = 'No models or providers configured';
+    }
+  }
+
+  // Cache provider data so we can update mode indicator on stats updates
+  var _cachedProviderData = null;
+
+  async function loadModeIndicator() {
+    var statsData = null;
+    var providerData = null;
+    try {
+      var resp = await fetch('/api/admin/stats');
+      if (resp.ok) statsData = await resp.json();
+    } catch (e) {}
+    try {
+      var resp2 = await fetch('/api/admin/providers');
+      if (resp2.ok) providerData = await resp2.json();
+      _cachedProviderData = providerData;
+    } catch (e) {}
+    updateModeIndicator(statsData, providerData);
+  }
+
   function init() {
     bindEvents();
+    initAdvancedMode();
+    initCollapsiblePanels();
+    initMobileModelSync();
 
     inputEl = document.getElementById('chat-input');
     if (inputEl) {
@@ -3011,6 +3213,7 @@ var SwarmLLM = (function() {
     loadModels();
     loadPruneHistory();
     loadSchedule();
+    loadModeIndicator();
     connectWebSocket();
     identity.loadNickname();
 
@@ -3049,7 +3252,9 @@ var SwarmLLM = (function() {
         var codeInput = document.getElementById('my-network-code');
         if (codeInput && data.code) codeInput.value = data.code;
       }
-    } catch (e) {}
+    } catch (e) {
+      // Network code is non-critical on startup — no banner needed
+    }
   }
 
   function copyNetworkCode() {
@@ -3057,6 +3262,8 @@ var SwarmLLM = (function() {
     if (input && input.value) {
       navigator.clipboard.writeText(input.value).then(function() {
         ui.showBanner('success', 'Network code copied to clipboard');
+      }).catch(function() {
+        ui.showBanner('error', 'Failed to copy — try selecting and copying manually');
       });
     }
   }

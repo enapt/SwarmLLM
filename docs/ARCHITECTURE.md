@@ -227,14 +227,14 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 The SplitModel loader detects the model architecture from GGUF metadata
 (`general.architecture`) and applies architecture-specific behavior:
 
-| Feature | Llama | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 |
-|---------|-------|-------|--------------|-------|---------|------------|----------------|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) |
-| QKV biases | None | Yes | None | Yes | None | Yes | None (MLA projections) |
-| Attention | Standard MHA/GQA | Standard MHA | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) |
-| FFN | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k experts) + shared experts |
-| Context length | 4096 (default) | 32768 | 8192 | 4096 | 32768 | 16384 | 163840 |
-| EOS tokens | 2 | 151643, 151645 | Arch-specific | Arch-specific | Arch-specific | Arch-specific | Arch-specific |
+| Feature | Llama | Llama 4 | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
+|---------|-------|---------|-------|--------------|-------|---------|------------|----------------|-------|
+| RoPE variant | Interleaved (`rope_i`) | Contiguous (iRoPE) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) | Contiguous (partial) |
+| QKV biases | None | None | Yes | None | Yes | None | Yes | None (MLA projections) | Yes |
+| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
+| FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
+| Context length | 4096 (default) | 131072 | 32768 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
+| Special | — | NoPE every 4th layer | — | Logit softcap | — | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
 
 ### DeepSeek-V2/V3 MoE + MLA Support
 

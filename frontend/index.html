@@ -166,7 +166,7 @@
               <span class="badge" id="provider-status-anthropic" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" onclick="settings.testProvider('anthropic')">Test</button>
+            <button class="btn btn-sm" data-test-provider="anthropic">Test</button>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -174,7 +174,7 @@
               <span class="badge" id="provider-status-openai" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-openai" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" onclick="settings.testProvider('openai')">Test</button>
+            <button class="btn btn-sm" data-test-provider="openai">Test</button>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -182,7 +182,7 @@
               <span class="badge" id="provider-status-deepseek" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-deepseek" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" onclick="settings.testProvider('deepseek')">Test</button>
+            <button class="btn btn-sm" data-test-provider="deepseek">Test</button>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -190,7 +190,7 @@
               <span class="badge" id="provider-status-mistral" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-mistral" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" onclick="settings.testProvider('mistral')">Test</button>
+            <button class="btn btn-sm" data-test-provider="mistral">Test</button>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -198,7 +198,7 @@
               <span class="badge" id="provider-status-groq" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-groq" placeholder="gsk_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" onclick="settings.testProvider('groq')">Test</button>
+            <button class="btn btn-sm" data-test-provider="groq">Test</button>
           </div>
         </div>
       </details>
@@ -215,8 +215,9 @@
           </div>
         </div>
       </details>
-      <div class="mt-2">
+      <div class="mt-2" style="display:flex;gap:8px;align-items:center">
         <button class="btn btn-primary" id="btn-save-settings">Save Settings</button>
+        <button class="btn btn-ghost btn-sm" id="btn-rerun-setup" title="Re-run the first-time setup wizard" style="margin-left:auto;font-size:0.75rem">Re-run Setup</button>
       </div>
     </div>
   </div>
@@ -267,8 +268,8 @@
     <div class="header-center">
       <button class="tab-btn" data-tab="chat">Chat</button>
       <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
-      <button class="tab-btn" data-tab="network-map">Network Map</button>
+      <button class="tab-btn" data-tab="leaderboard" data-advanced-tab="true">Leaderboard</button>
+      <button class="tab-btn" data-tab="network-map" data-advanced-tab="true">Network Map</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -277,6 +278,7 @@
         </select>
         <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models">+</button>
       </div>
+      <label class="advanced-toggle" title="Show advanced panels"><input type="checkbox" id="advanced-mode-toggle"><span>Advanced</span></label>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings">&#9881;</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
@@ -308,6 +310,10 @@
     <main class="content">
       <!-- Chat view -->
       <div class="view" id="view-chat" style="display:none">
+        <div class="mobile-model-bar">
+          <select id="mobile-model-select" title="Active model"><option value="">No model loaded</option></select>
+          <button class="btn btn-sm" id="btn-mobile-browse" title="Browse models">+</button>
+        </div>
         <div class="chat-container">
           <div class="chat-messages" id="chat-messages">
             <div class="chat-empty" id="chat-empty">
@@ -331,6 +337,13 @@
         <div class="container">
           <!-- Status banner -->
           <div id="status-banner"></div>
+
+          <!-- Operation mode indicator -->
+          <div class="mode-indicator mb-2" id="mode-indicator">
+            <div class="mode-dot offline" id="mode-dot"></div>
+            <span class="mode-label" id="mode-label">Initializing...</span>
+            <span class="text-muted" id="mode-detail"></span>
+          </div>
 
           <!-- Stat cards -->
           <div class="grid grid-3 mb-2" id="stats-row">
@@ -485,12 +498,12 @@
             </div>
           </div>
 
-          <!-- Network & Governance -->
-          <div class="grid grid-2 mt-2">
-            <div class="panel">
-              <div class="panel-header">
-                <h2>Network</h2>
-              </div>
+          <!-- Network -->
+          <div class="panel mt-2">
+            <div class="panel-header" data-collapse="network-body">
+              <h2>Network</h2>
+            </div>
+            <div class="panel-body" id="network-body">
               <div class="form-group">
                 <label>Connected Peers</label>
                 <div id="peers-list">
@@ -498,25 +511,28 @@
                 </div>
               </div>
             </div>
-
           </div>
 
-          <!-- Shard Pruning & Schedule -->
-          <div class="grid grid-2 mt-2">
+          <!-- Shard Pruning & Schedule (advanced) -->
+          <div class="grid grid-2 mt-2" data-advanced="true">
             <div class="panel">
-              <div class="panel-header">
+              <div class="panel-header" data-collapse="prune-body">
                 <h2>Prune History</h2>
               </div>
-              <div id="prune-history-list">
-                <div class="text-muted" style="font-size:0.85rem">No prune events yet</div>
+              <div class="panel-body" id="prune-body">
+                <div id="prune-history-list">
+                  <div class="text-muted" style="font-size:0.85rem">No prune events yet</div>
+                </div>
               </div>
             </div>
             <div class="panel">
-              <div class="panel-header">
+              <div class="panel-header" data-collapse="schedule-body">
                 <h2>Resource Schedule</h2>
               </div>
-              <div id="schedule-form">
-                <div class="text-muted" style="font-size:0.85rem">Loading...</div>
+              <div class="panel-body" id="schedule-body">
+                <div id="schedule-form">
+                  <div class="text-muted" style="font-size:0.85rem">Loading...</div>
+                </div>
               </div>
             </div>
           </div>

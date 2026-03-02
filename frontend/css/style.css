@@ -1370,3 +1370,45 @@ input[type="range"]::-webkit-slider-thumb {
   vertical-align: middle;
   letter-spacing: 0.02em;
 }
+
+/* ─── Collapsible panels ─── */
+.panel-header[data-collapse] { cursor: pointer; user-select: none; }
+.panel-header[data-collapse]::after {
+  content: '▾'; font-size: 0.75rem; color: var(--text-muted);
+  transition: transform var(--transition); margin-left: auto; padding-left: 8px;
+}
+.panel-header[data-collapse].collapsed::after { transform: rotate(-90deg); }
+.panel-body { transition: max-height 0.3s ease, opacity 0.2s ease; overflow: hidden; }
+.panel-body.collapsed { max-height: 0 !important; opacity: 0; padding: 0 !important; margin: 0 !important; }
+
+/* ─── Advanced mode toggle ─── */
+.advanced-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--text-muted); cursor: pointer; }
+.advanced-toggle input[type="checkbox"] { width: 14px; height: 14px; accent-color: var(--accent); }
+[data-advanced="true"] { display: none; }
+[data-advanced-tab="true"] { display: none; }
+body.advanced-mode [data-advanced="true"] { display: block; }
+body.advanced-mode .grid[data-advanced="true"] { display: grid; }
+body.advanced-mode [data-advanced-tab="true"] { display: inline-flex; }
+
+/* ─── Mobile model picker (inside chat view) ─── */
+.mobile-model-bar {
+  display: none; padding: 6px 12px; background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border); align-items: center; gap: 8px;
+}
+.mobile-model-bar select { flex: 1; min-width: 0; font-size: 0.8rem; }
+.mobile-model-bar .btn { flex-shrink: 0; }
+@media (max-width: 768px) { .mobile-model-bar { display: flex; } }
+
+/* ─── Mode indicator ─── */
+.mode-indicator {
+  display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+  background: var(--bg-tertiary); border-radius: var(--radius);
+  font-size: 0.75rem; color: var(--text-secondary); white-space: nowrap;
+}
+.mode-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.mode-dot.swarm { background: var(--green); }
+.mode-dot.cloud { background: var(--accent); }
+.mode-dot.offline { background: var(--text-muted); }
+.mode-label { font-weight: 600; }

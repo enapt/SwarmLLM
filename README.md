@@ -83,7 +83,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ### Inference
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Multi-Provider Gateway** — Route requests to cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq) when the model isn't available locally. Native Anthropic Messages API at `/v1/messages`. Model prefix routing or explicit `provider:model` syntax
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
@@ -169,13 +169,15 @@ Credits determine your priority tier:
 
 ## Supported Models
 
-SwarmLLM supports 8 transformer architectures via native candle inference with GGUF quantization:
+SwarmLLM supports 10 transformer architectures via native candle inference with GGUF quantization:
 
 | Architecture | Examples | Special Features |
 |-------------|----------|-----------------|
 | **Llama** | Llama 2/3, CodeLlama, TinyLlama | Interleaved RoPE, GQA |
+| **Llama 4** | Llama 4 Scout (17B), Maverick (400B) | iRoPE (NoPE every 4th layer), MoE |
 | **Qwen2** | Qwen2.5-Coder-7B/32B | QKV biases, 32k context |
 | **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
+| **GLM-4** | GLM-4-9B, GLM-4.7 MoE | Partial RoPE, extreme GQA (16:1) |
 | **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Contiguous RoPE |
 | **Phi-3** | Phi-3-mini, Phi-3-medium | Su/YaRN RoPE, biases |
 | **Mistral** | Mistral 7B, Mistral Nemo | GQA, interleaved RoPE |
