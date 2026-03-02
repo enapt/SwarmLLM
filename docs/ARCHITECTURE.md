@@ -253,8 +253,14 @@ DeepSeek models use two specialized mechanisms that differ from standard transfo
 - Expert tensors dequantized at load time for `index_select` compatibility
 
 **Per-layer type detection** — early DeepSeek layers (~1-3) use standard dense attention + dense FFN; subsequent layers use MLA + MoE. The `LayerVariant` enum handles both:
-- `LayerVariant::Dense(LayerWeights)` — standard transformer layer
-- `LayerVariant::DeepSeek { attention: MlaWeights, ffn: DeepSeekFfn, ... }` — MLA + MoE/dense FFN
+- `LayerVariant::Dense(LayerWeights)` — standard transformer layer (can use `FfnVariant::Dense` or `FfnVariant::MoE` for mixed models like Llama 4)
+- `LayerVariant::DeepSeek { attention: MlaWeights, ffn: FfnVariant, ... }` — MLA + MoE/dense FFN
+
+### Llama 4 Scout/Maverick Support
+
+Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`:
+- **iRoPE (interleaved RoPE)** — every 4th layer uses NoPE (no positional encoding), the rest use standard RoPE. This is handled by a per-layer flag in `LayerWeights`
+- **Mixed Dense+MoE FFN** — `FfnVariant` enum (`Dense(Mlp)` | `MoE(MoeFfn)`) allows individual layers to use either dense or MoE FFN within the same model. Top-k expert routing reuses the same `MoeFfn` struct as DeepSeek
 
 ### Vision Language Models (VLM)
 
