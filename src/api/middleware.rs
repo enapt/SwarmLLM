@@ -259,7 +259,6 @@ mod tests {
         // OpenAI API always requires auth
         assert!(!is_exempt_request("/v1/models", &Method::GET));
         assert!(!is_exempt_request("/v1/chat/completions", &post));
-        assert!(!is_exempt_request("/v1/completions", &post));
         // PUT auto-manage and DELETE shard require auth
         assert!(!is_exempt_request(
             "/api/admin/models/test/auto-manage",

@@ -1843,19 +1843,24 @@ async fn dispatch_network_messages(
 /// Resolve the API key: config > DB > generate new.
 /// Returns the key and persists it to the DB if newly generated.
 fn resolve_api_key(config: &Config, db: &Database) -> String {
+    let key;
+
     // 1. Explicit key in config takes priority
-    if let Some(ref key) = config.api.api_key {
-        if !key.is_empty() {
+    if let Some(ref k) = config.api.api_key {
+        if !k.is_empty() {
             tracing::info!("Using API key from configuration");
-            return key.clone();
+            key = k.clone();
+            write_api_key_file(&config.node.data_dir, &key);
+            return key;
         }
     }
 
     // 2. Check persisted key in database
-    if let Ok(Some(key)) = db.get_json::<String>("config", "api_key") {
-        if !key.is_empty() {
+    if let Ok(Some(k)) = db.get_json::<String>("config", "api_key") {
+        if !k.is_empty() {
             tracing::info!("Using persisted API key from database");
-            return key;
+            write_api_key_file(&config.node.data_dir, &k);
+            return k;
         }
     }
 
@@ -1864,17 +1869,34 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 32];
     rng.fill(&mut bytes);
-    let key = hex::encode(bytes);
+    key = hex::encode(bytes);
 
     // Persist to DB
     if let Err(e) = db.put_json("config", "api_key", &key) {
         tracing::warn!(error = %e, "Failed to persist API key to database");
     }
 
+    // Write to file so CLI `status` can read it without opening sled
+    write_api_key_file(&config.node.data_dir, &key);
+
     // Print API key to stderr only (not to tracing logs which may be persisted/shipped)
     eprintln!("Generated new API key (save this for API access): {key}");
 
     key
+}
+
+/// Write the API key to a plain file so the CLI can read it while the daemon holds the DB lock.
+fn write_api_key_file(data_dir: &std::path::Path, key: &str) {
+    let path = data_dir.join("api_key");
+    if let Err(e) = std::fs::write(&path, key) {
+        tracing::warn!(error = %e, "Failed to write api_key file");
+    }
+    // Restrict permissions on Unix (owner read/write only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
 }
 
 /// Generate a ModelManifest for a locally loaded GGUF file and register it.

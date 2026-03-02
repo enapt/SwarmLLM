@@ -437,14 +437,6 @@ impl PoolManager {
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
 
-            let my_id = self.shared_state.identity.node_id();
-
-            if ps.pool_id == *my_id {
-                return Err(SwarmError::Internal(
-                    "Owner cannot leave their own pool — delete it instead".into(),
-                ));
-            }
-
             if !self.rate_limiter.check_and_record() {
                 return Err(SwarmError::Internal("Rate limit exceeded".into()));
             }

@@ -953,7 +953,7 @@ var SwarmLLM = (function() {
       loading.classList.remove('hidden');
 
       try {
-        var resp = await fetch('/api/admin/hf/search?q=' + encodeURIComponent(query));
+        var resp = await fetch('/api/admin/hf/search?query=' + encodeURIComponent(query));
         loading.classList.add('hidden');
 
         if (!resp.ok) {

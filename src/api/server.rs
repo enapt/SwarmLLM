@@ -37,7 +37,6 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         // OpenAI-compatible API
         .route("/v1/chat/completions", post(openai::chat_completions))
-        .route("/v1/completions", post(openai::completions))
         .route("/v1/models", get(openai::list_models))
         // SwarmLLM extensions
         .route("/v1/status", get(openai::status))

@@ -84,7 +84,29 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => {
             let port = cli.port.unwrap_or(8800);
-            query_status(port).await
+            let data_dir = cli
+                .data_dir
+                .clone()
+                .or_else(|| {
+                    std::env::var("SWARMLLM_NODE_DATA_DIR")
+                        .ok()
+                        .map(PathBuf::from)
+                })
+                .unwrap_or_else(|| {
+                    dirs::data_dir()
+                        .unwrap_or_else(|| {
+                            #[cfg(unix)]
+                            {
+                                PathBuf::from("/var/lib/swarmllm")
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                PathBuf::from(".")
+                            }
+                        })
+                        .join("swarmllm")
+                });
+            query_status(port, &data_dir).await
         }
         Commands::TestSplit { max_tokens, prompt } => {
             test_split_inference(cli.model, *max_tokens, prompt).await
@@ -157,12 +179,29 @@ async fn run_daemon(cli: Cli) -> anyhow::Result<()> {
     daemon.run().await
 }
 
-async fn query_status(port: u16) -> anyhow::Result<()> {
+async fn query_status(port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
+    // Read the API key from the plain file written by the daemon
+    let key_path = data_dir.join("api_key");
+    let api_key = std::fs::read_to_string(&key_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if api_key.is_empty() {
+        eprintln!("Warning: no API key found at {}", key_path.display());
+        eprintln!("         (is the daemon running with this data directory?)");
+    }
+
     let url = format!("http://localhost:{port}/v1/status");
     println!("Querying daemon at {url}...");
 
     let client = reqwest::Client::new();
-    match client.get(&url).send().await {
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    match req.send().await {
         Ok(resp) => {
             let body = resp.text().await?;
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {

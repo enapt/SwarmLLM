@@ -1005,7 +1005,7 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 pub async fn hf_search(
     axum::extract::Query(params): axum::extract::Query<HfSearchParams>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let query = params.q.unwrap_or_default();
+    let query = params.query.unwrap_or_default();
     if query.is_empty() {
         return Ok(Json(vec![]));
     }
@@ -1242,7 +1242,7 @@ pub async fn shutdown_node(
 
 #[derive(Debug, Deserialize)]
 pub struct HfSearchParams {
-    pub q: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

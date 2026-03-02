@@ -255,23 +255,6 @@ async fn pool_state_returns_null_when_not_in_pool() {
 }
 
 #[tokio::test]
-async fn completions_without_model_returns_503() {
-    let (base, key) = spawn_test_server().await;
-    let client = auth_client(&key);
-    let resp = client
-        .post(format!("{base}/v1/completions"))
-        .json(&serde_json::json!({
-            "model": "test",
-            "prompt": "Hello"
-        }))
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), 503);
-}
-
-#[tokio::test]
 async fn unauthenticated_openai_endpoint_returns_401() {
     let (base, _key) = spawn_test_server().await;
     // No Bearer token — should get 401 on OpenAI-compatible endpoints
