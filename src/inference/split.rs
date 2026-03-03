@@ -1148,53 +1148,83 @@ fn topk_cpu(scores: &Tensor, k: usize) -> CandleResult<(Tensor, Tensor)> {
 }
 
 impl MoeFfn {
-    /// MoE forward pass for a single token position.
+    /// MoE forward pass with batched expert dispatch.
     ///
-    /// 1. Router: x.matmul(gate.t()) → softmax scores → topk
-    /// 2. For each selected expert: narrow stacked tensors, compute SiLU-gated FFN
-    /// 3. Weight and sum expert outputs
-    /// 4. Add shared expert output (if present)
+    /// 1. Router: x.matmul(gate.t()) → softmax scores → topk per token
+    /// 2. Group tokens by assigned expert
+    /// 3. For each expert: batched SiLU-gated FFN on all assigned tokens at once
+    /// 4. Scatter weighted results back to token positions
+    /// 5. Add shared expert output (if present)
     fn forward(&self, x: &Tensor) -> CandleResult<Tensor> {
         let (b_sz, seq_len, hidden) = x.dims3()?;
-        let x_flat = x.reshape((b_sz * seq_len, hidden))?;
+        let num_tokens = b_sz * seq_len;
+        let x_flat = x.reshape((num_tokens, hidden))?;
+        let device = x.device();
+        let dtype = x.dtype();
 
-        // Router scores: [b*s, n_experts]
+        // Router scores: [num_tokens, n_experts]
         let router_scores = x_flat.matmul(&self.gate.t()?)?;
+        let n_experts = self.gate.dim(0)?;
 
-        let mut output = Tensor::zeros((b_sz * seq_len, hidden), x.dtype(), x.device())?;
-
-        // Process each token position independently for expert routing
-        for pos in 0..(b_sz * seq_len) {
-            let token_scores = router_scores.get(pos)?; // [n_experts]
+        // Phase 1: Route all tokens — collect (token_position, weight) per expert
+        let mut expert_batches: Vec<Vec<(usize, f32)>> = vec![vec![]; n_experts];
+        for pos in 0..num_tokens {
+            let token_scores = router_scores.get(pos)?;
             let (indices, weights) = topk_cpu(&token_scores, self.n_experts_used)?;
             let indices_vec: Vec<i64> = indices.to_vec1()?;
             let weights_vec: Vec<f32> = weights.to_vec1()?;
-            let token_x = x_flat.get(pos)?; // [hidden]
-
-            let mut token_output = Tensor::zeros((hidden,), x.dtype(), x.device())?;
             for (i, &expert_idx) in indices_vec.iter().enumerate() {
-                let eidx = expert_idx as usize;
-                let w = weights_vec[i] as f64;
+                expert_batches[expert_idx as usize].push((pos, weights_vec[i]));
+            }
+        }
 
-                // Extract expert weights: narrow on dim 0 of stacked tensors
-                let gate_w = self.gate_exps.get(eidx)?; // [intermediate, hidden]
-                let up_w = self.up_exps.get(eidx)?; // [intermediate, hidden]
-                let down_w = self.down_exps.get(eidx)?; // [hidden, intermediate]
+        // Phase 2: Per-position accumulator for weighted expert outputs
+        let mut pos_accum: Vec<Option<Tensor>> = vec![None; num_tokens];
 
-                // SiLU-gated FFN: silu(x @ gate.t) * (x @ up.t) @ down.t
-                let gate_out = token_x.unsqueeze(0)?.matmul(&gate_w.t()?)?; // [1, inter]
-                let up_out = token_x.unsqueeze(0)?.matmul(&up_w.t()?)?; // [1, inter]
-                let activated = candle_nn::ops::silu(&gate_out)?;
-                let combined = (activated * up_out)?;
-                let expert_out = combined.matmul(&down_w.t()?)?.squeeze(0)?; // [hidden]
-
-                token_output = (token_output + (expert_out * w)?)?;
+        for (eidx, batch) in expert_batches.iter().enumerate() {
+            if batch.is_empty() {
+                continue;
             }
 
-            // Write token output into the batch output
-            output =
-                output.slice_assign(&[pos..pos + 1, 0..hidden], &token_output.unsqueeze(0)?)?;
+            // Gather all tokens assigned to this expert via index_select
+            let idx_vec: Vec<i64> = batch.iter().map(|&(pos, _)| pos as i64).collect();
+            let idx_tensor = Tensor::from_vec(idx_vec, (batch.len(),), device)?;
+            let batch_input = x_flat.index_select(&idx_tensor, 0)?; // [batch_tokens, hidden]
+
+            // Batched SiLU-gated FFN: silu(x @ gate.t) * (x @ up.t) @ down.t
+            let gate_w = self.gate_exps.get(eidx)?;
+            let up_w = self.up_exps.get(eidx)?;
+            let down_w = self.down_exps.get(eidx)?;
+
+            let gate_out = batch_input.matmul(&gate_w.t()?)?;
+            let up_out = batch_input.matmul(&up_w.t()?)?;
+            let activated = candle_nn::ops::silu(&gate_out)?;
+            let combined = (activated * up_out)?;
+            let expert_out = combined.matmul(&down_w.t()?)?; // [batch_tokens, hidden]
+
+            // Apply per-token weights
+            let weight_vec: Vec<f32> = batch.iter().map(|&(_, w)| w).collect();
+            let weight_tensor =
+                Tensor::from_vec(weight_vec, (batch.len(), 1), device)?.to_dtype(dtype)?;
+            let weighted = expert_out.broadcast_mul(&weight_tensor)?;
+
+            // Scatter weighted results back to position accumulators
+            for (local_idx, &(pos, _)) in batch.iter().enumerate() {
+                let contrib = weighted.narrow(0, local_idx, 1)?;
+                pos_accum[pos] = Some(match pos_accum[pos].take() {
+                    Some(existing) => (existing + contrib)?,
+                    None => contrib,
+                });
+            }
         }
+
+        // Assemble output: cat all position results
+        let zero = Tensor::zeros((1, hidden), dtype, device)?;
+        let slices: Vec<&Tensor> = pos_accum
+            .iter()
+            .map(|opt| opt.as_ref().unwrap_or(&zero))
+            .collect();
+        let mut output = Tensor::cat(&slices, 0)?;
 
         // Add shared expert output if present
         if let (Some(ref sg), Some(ref sd), Some(ref su)) =
@@ -1346,6 +1376,25 @@ fn run_attention(
 ) -> CandleResult<Tensor> {
     match q.device() {
         Device::Cpu => {
+            let seq_len = q.dim(2)?;
+
+            // Fast path for decode (seq_len=1): skip CPU flash attention's
+            // triple transpose+contiguous copies. Standard matmul is cheaper
+            // for a single query token against the KV cache.
+            if seq_len == 1 {
+                return standard_attention(
+                    q,
+                    k,
+                    v,
+                    mask,
+                    head_dim,
+                    n_head,
+                    n_kv_head,
+                    neg_inf,
+                    attn_logit_softcap,
+                );
+            }
+
             // CPU flash attention: input BSHD, output BHSD
             // Transpose Q/K/V from BHSD (b,h,s,d) to BSHD (b,s,h,d)
             let q_bshd = q.transpose(1, 2)?.contiguous()?;
@@ -1353,7 +1402,6 @@ fn run_attention(
             let v_bshd = v.transpose(1, 2)?.contiguous()?;
 
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-            let seq_len = q.dim(2)?;
 
             // Build float additive mask for prefill (decode has seq_len==1, no mask needed)
             let flash_mask = if seq_len > 1 {
@@ -1754,8 +1802,9 @@ pub struct SplitModel {
     norm: Option<RmsNorm>,
     /// LM head / output projection (only loaded by the last segment).
     output: Option<QMatMul>,
-    /// Causal attention masks cache.
-    masks: HashMap<usize, Tensor>,
+    /// Causal attention mask: pre-allocated at a ceiling size, narrowed for smaller sequences.
+    /// Tuple is (allocated_size, mask_tensor). `None` means no mask allocated yet.
+    masks: Option<(usize, Tensor)>,
     /// Layer range this model covers: [start, end) out of total_layers.
     pub layer_start: usize,
     pub layer_end: usize,
@@ -3141,7 +3190,7 @@ impl SplitModel {
             layers,
             norm,
             output,
-            masks: HashMap::new(),
+            masks: None,
             layer_start,
             layer_end,
             total_layers: block_count,
@@ -4125,7 +4174,7 @@ impl SplitModel {
             layers,
             norm,
             output,
-            masks: HashMap::new(),
+            masks: None,
             layer_start,
             layer_end,
             total_layers: block_count,
@@ -4144,23 +4193,30 @@ impl SplitModel {
     }
 
     /// Build a causal mask for the given sequence length.
-    /// Capped at 16 entries — evicts a random entry when full.
+    ///
+    /// Pre-allocates a single mask at a ceiling size (min of max_seq_len and 4096),
+    /// then uses `narrow()` to slice views for smaller sequences — zero-copy.
+    /// Only re-allocates if `t` exceeds the current ceiling.
     fn mask(&mut self, t: usize) -> CandleResult<Tensor> {
-        if let Some(mask) = self.masks.get(&t) {
-            return Ok(mask.clone());
-        }
-        let mask: Vec<_> = (0..t)
-            .flat_map(|i| (0..t).map(move |j| u8::from(j > i)))
-            .collect();
-        let mask = Tensor::from_slice(&mask, (t, t), &self.device)?;
-        // Evict an entry if at capacity (simple LRU approximation)
-        if self.masks.len() >= 16 {
-            if let Some(&key) = self.masks.keys().next() {
-                self.masks.remove(&key);
+        // Fast path: existing mask is large enough — narrow-slice a view (no copy)
+        if let Some((cached_size, ref mask)) = self.masks {
+            if t <= cached_size {
+                return mask.narrow(0, 0, t)?.narrow(1, 0, t);
             }
         }
-        self.masks.insert(t, mask.clone());
-        Ok(mask)
+        // Allocate at a reasonable ceiling to amortize future requests.
+        // Cap at 4096 to avoid excessive memory (4096^2 = 16MB for u8).
+        let alloc_size = t.max(self.max_seq_len.min(4096));
+        let mask_data: Vec<_> = (0..alloc_size)
+            .flat_map(|i| (0..alloc_size).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask_data, (alloc_size, alloc_size), &self.device)?;
+        self.masks = Some((alloc_size, mask.clone()));
+        if t < alloc_size {
+            mask.narrow(0, 0, t)?.narrow(1, 0, t)
+        } else {
+            Ok(mask)
+        }
     }
 
     /// Build a causal mask with KV offset for prefix-cached inference.
@@ -4648,14 +4704,15 @@ impl SplitModel {
         );
         let num_layers = self.layers.len();
 
-        // Extract all per-request KV-caches up front (drop DashMap guards immediately)
+        // Extract all per-request KV-caches up front (drop DashMap guards immediately).
+        // Use mem::take instead of clone to avoid deep-copying all KV tensors.
         let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = items
             .iter()
             .map(|item| {
                 let mut entry =
                     kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
                 entry.last_accessed = std::time::Instant::now();
-                entry.layers.clone()
+                std::mem::take(&mut entry.layers)
             })
             .collect();
 
@@ -4768,10 +4825,10 @@ impl SplitModel {
             }
         }
 
-        // Write updated KV-caches back
+        // Write updated KV-caches back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
             let mut entry = kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
-            entry.layers = all_kv_caches[req_idx].clone();
+            entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
             entry.last_accessed = std::time::Instant::now();
         }
 
@@ -5632,7 +5689,7 @@ mod tests {
             layers: Vec::new(),
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: 0,
             total_layers: 0,
@@ -5847,7 +5904,7 @@ mod tests {
             layers,
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: num_layers,
             total_layers: num_layers + 2, // Not last segment
@@ -6229,7 +6286,7 @@ mod tests {
             layers,
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: num_layers,
             total_layers: num_layers + 2,
@@ -6616,7 +6673,7 @@ mod tests {
             layers: vec![LayerVariant::Dense(layer)],
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: 1,
             total_layers: 3,
@@ -7281,7 +7338,7 @@ mod tests {
             layers: vec![dense_layer, deepseek_layer],
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: 2,
             total_layers: 4,
@@ -7642,7 +7699,7 @@ mod tests {
             layers,
             norm: None,
             output: None,
-            masks: HashMap::new(),
+            masks: None,
             layer_start: 0,
             layer_end: 4,
             total_layers: 8,
