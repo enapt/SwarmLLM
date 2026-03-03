@@ -59,7 +59,22 @@ Resource schedule management.
 ## HuggingFace Integration
 
 ### GET /api/admin/hf/search?q=...
-Search HuggingFace for GGUF models.
+Search HuggingFace for GGUF models. Returns results grouped by repository with quantization variants, recommended variant, and VRAM fitness indicator.
+
+Response format:
+```json
+[{
+  "repo_id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+  "downloads": 50000,
+  "likes": 120,
+  "variants": [
+    { "filename": "...Q4_K_M.gguf", "size_bytes": 668000000, "quant": "Q4_K_M" },
+    { "filename": "...Q8_0.gguf", "size_bytes": 1100000000, "quant": "Q8_0" }
+  ],
+  "recommended_variant": "Q4_K_M",
+  "fits_vram": true
+}]
+```
 
 ### GET /api/admin/hf/probe?repo_id=...&filename=...
 Probe a remote GGUF file (size, shard layout).
@@ -67,11 +82,13 @@ Probe a remote GGUF file (size, shard layout).
 ### POST /api/admin/hf/download-shards
 Download specific shard indices from HuggingFace. Bearer auth required.
 
+Supports `peer_fair_share: true` for smart distribution — the backend computes a deterministic fair share of shards using BLAKE3(node_id || model_id), and peers with auto-manage enabled auto-acquire the rest.
+
 ```bash
 curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"}'
+  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
 ```
 
 ### POST /api/admin/downloads/:model_id/cancel
@@ -93,4 +110,12 @@ Retrieve the API key. Bearer auth required.
 ## WebSocket
 
 ### GET /api/admin/ws
-WebSocket for live updates (peer count, shard changes, prune events, download progress).
+WebSocket for live updates. Pushes the following event types:
+
+| Event | Trigger | Data |
+|-------|---------|------|
+| `stats_update` | Every 2s | Peer count, credits, acquisitions, shard registry |
+| `prune_event` | Shard auto-pruned | Model ID, shard index, freed bytes, holder counts |
+| `models_changed` | Shard download/load/prune | (none — signals dashboard to refresh) |
+| `lan_peer_discovered` | mDNS peer found | Peer count |
+| `update_available` | New version detected | Version info, changelog |

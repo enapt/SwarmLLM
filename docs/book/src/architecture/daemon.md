@@ -42,6 +42,15 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | AutoShardManager | AcquisitionManager | AcquisitionCommand |
 | CreditLedger | NetworkManager | CreditGossip, CreditTransaction |
 
+### Broadcast Channels
+
+| Channel | Subscribers | Fired By |
+|---------|------------|----------|
+| `prune_events_tx` | WebSocket | AutoShardManager (after prune) |
+| `models_changed_tx` | WebSocket | Admin API (after shard download), AutoShardManager (after download/prune/discovery) |
+| `lan_discovery_tx` | WebSocket | NetworkManager (mDNS peer found) |
+| `update_tx` | WebSocket | UpdateChecker (new version detected) |
+
 ## Startup Sequence
 
 1. Parse CLI args (clap)

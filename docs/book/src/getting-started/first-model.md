@@ -7,16 +7,24 @@ You need at least one AI model before you can chat.
 1. Open the Dashboard at `http://localhost:8800`
 2. Click **Browse HuggingFace** in the Models section
 3. Search for a model (try `TinyLlama` for a small, fast model)
-4. Click **Download** — shards turn green as they complete
+4. Choose a quantization variant (Q4_K_M recommended for most hardware)
+5. Click **Download** — the node downloads its fair share of shards, and peers with auto-manage enabled auto-acquire the rest
+6. The dashboard auto-refreshes when downloads complete (no page reload needed)
 
 ## Download via CLI
 
 ```bash
-# Find your API key in the daemon startup logs
+# Smart distribution: node downloads its fair share, peers get the rest
 curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"}'
+  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
+
+# Or download specific shards manually:
+curl -X POST http://localhost:8800/api/admin/hf/download-shards \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "shards": [0, 1, 2]}'
 ```
 
 ## Recommended Models by Hardware

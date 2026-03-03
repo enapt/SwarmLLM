@@ -37,6 +37,7 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ModelId, AtomicU64>    — request counts     │  │
 │  │  RwLock<ResourceSchedule>       — resource schedule  │  │
 │  │  broadcast::Sender<PruneEvent>  — prune events       │  │
+│  │  broadcast::Sender<()>          — models changed      │  │
 │  │  RwLock<VecDeque<PruneEvent>>   — prune history      │  │
 │  │  DashMap<ShardId, bool>         — locked shards      │  │
 │  └────────────────────────────────────────────────────┘  │
@@ -690,10 +691,10 @@ When a requested model isn't available locally, requests are routed to cloud pro
 - `GET     /api/admin/download-queue` — Download queue with priorities and progress
 
 ### HuggingFace Integration
-- `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models
+- `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
 - `POST /api/admin/hf/download` — Download full GGUF model
-- `POST /api/admin/hf/download-shards` — Download specific shard indices
+- `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution)
 
 ### Identity API
 - `GET/PUT/DELETE /api/identity/nickname` — Manage local nickname

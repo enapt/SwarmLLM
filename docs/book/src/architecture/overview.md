@@ -25,6 +25,7 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 │  │  DashMap<ShardId, Vec<NodeId>>  — shard locations   │  │
 │  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
 │  │  TrustManager                   — peer trust scores │  │
+│  │  broadcast::Sender<()>          — models changed    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
