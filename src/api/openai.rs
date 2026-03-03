@@ -639,9 +639,8 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     // Short-lived cache (100ms TTL) to avoid repeated ModelId/ShardId allocations per API request
     use std::sync::OnceLock;
     static CACHE: OnceLock<std::sync::Mutex<(String, std::time::Instant, bool)>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        std::sync::Mutex::new((String::new(), std::time::Instant::now(), false))
-    });
+    let cache = CACHE
+        .get_or_init(|| std::sync::Mutex::new((String::new(), std::time::Instant::now(), false)));
     if let Ok(entry) = cache.lock() {
         if entry.0 == model_name && entry.1.elapsed() < std::time::Duration::from_millis(100) {
             return entry.2;

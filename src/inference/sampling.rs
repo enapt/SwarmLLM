@@ -30,9 +30,12 @@ impl SamplingContext {
         if self.keep_mask.len() < vocab_size {
             self.keep_mask.resize(vocab_size, false);
         }
-        self.indexed_logits.reserve(vocab_size.saturating_sub(self.indexed_logits.capacity()));
-        self.probs.reserve(vocab_size.saturating_sub(self.probs.capacity()));
-        self.indices.reserve(vocab_size.saturating_sub(self.indices.capacity()));
+        self.indexed_logits
+            .reserve(vocab_size.saturating_sub(self.indexed_logits.capacity()));
+        self.probs
+            .reserve(vocab_size.saturating_sub(self.probs.capacity()));
+        self.indices
+            .reserve(vocab_size.saturating_sub(self.indices.capacity()));
     }
 }
 
@@ -73,7 +76,8 @@ pub fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContex
 
     // Reuse indexed_logits buffer
     ctx.indexed_logits.clear();
-    ctx.indexed_logits.extend(logits.iter().copied().enumerate());
+    ctx.indexed_logits
+        .extend(logits.iter().copied().enumerate());
     ctx.indexed_logits.select_nth_unstable_by(k_usize, |a, b| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -120,7 +124,8 @@ pub fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContex
     // Convert to probabilities via softmax — reuse probs buffer
     let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     ctx.probs.clear();
-    ctx.probs.extend(logits.iter().map(|l| (l - max_logit).exp()));
+    ctx.probs
+        .extend(logits.iter().map(|l| (l - max_logit).exp()));
     let sum: f32 = ctx.probs.iter().sum();
     if sum <= 0.0 || !sum.is_finite() {
         return;
@@ -213,7 +218,8 @@ pub fn sample_token_with_ctx(
     // Softmax — reuse probs buffer
     let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     ctx.probs.clear();
-    ctx.probs.extend(logits.iter().map(|l| (l - max_logit).exp()));
+    ctx.probs
+        .extend(logits.iter().map(|l| (l - max_logit).exp()));
     let sum: f32 = ctx.probs.iter().sum();
 
     // Weighted random selection
