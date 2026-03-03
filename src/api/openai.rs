@@ -636,6 +636,31 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
 /// shard has at least one holder somewhere in the network so the pipeline scheduler can
 /// assemble a complete pipeline across multiple nodes.
 pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
+    // Short-lived cache (100ms TTL) to avoid repeated ModelId/ShardId allocations per API request
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::sync::Mutex<(String, std::time::Instant, bool)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((String::new(), std::time::Instant::now(), false))
+    });
+    if let Ok(entry) = cache.lock() {
+        if entry.0 == model_name && entry.1.elapsed() < std::time::Duration::from_millis(100) {
+            return entry.2;
+        }
+    }
+
+    let result = all_shards_available_inner(state, model_name);
+
+    if let Ok(mut entry) = cache.lock() {
+        entry.0.clear();
+        entry.0.push_str(model_name);
+        entry.1 = std::time::Instant::now();
+        entry.2 = result;
+    }
+
+    result
+}
+
+fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
     let model_id = ModelId(model_name.to_string());
 
     let manifest = match state.shared_state.model_registry.get_manifest(&model_id) {
@@ -671,7 +696,7 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
         covered += 1;
     }
 
-    tracing::info!(
+    tracing::debug!(
         model = %model_name,
         shards = total,
         covered,
@@ -1043,6 +1068,7 @@ async fn router_inference_stream(
         let _ = sse_tx.send(StreamEvent::Done).await;
     });
 
+    let mut json_buf: Vec<u8> = Vec::with_capacity(512);
     let stream =
         tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| match event {
             StreamEvent::Delta {
@@ -1067,7 +1093,13 @@ async fn router_inference_stream(
                     }],
                     session_id: sid,
                 };
-                let json = serde_json::to_string(&chunk).unwrap_or_default();
+                // Reuse pre-allocated buffer to avoid per-token growth reallocations
+                json_buf.clear();
+                let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
+                    String::from_utf8(json_buf.clone()).unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 Ok::<_, Infallible>(Event::default().data(json))
             }
             StreamEvent::Done => Ok(Event::default().data("[DONE]")),
@@ -1324,6 +1356,7 @@ async fn split_stream_response(
     });
 
     // Convert channel to SSE stream (reuse existing stream mapping)
+    let mut json_buf2: Vec<u8> = Vec::with_capacity(512);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
         StreamEvent::Delta {
             content,
@@ -1342,7 +1375,14 @@ async fn split_stream_response(
                 }],
                 session_id: None,
             };
-            Ok(Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()))
+            // Reuse pre-allocated buffer to avoid per-token growth reallocations
+            json_buf2.clear();
+            let json = if serde_json::to_writer(&mut json_buf2, &chunk).is_ok() {
+                String::from_utf8(json_buf2.clone()).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Ok(Event::default().data(json))
         }
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });

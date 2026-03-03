@@ -591,18 +591,7 @@ impl PipelineExecutor {
             }
 
             // Standard pipeline execution (no TP)
-            let forward = LayerForward {
-                request_id,
-                sequence_num,
-                index_pos: index_pos as u32,
-                activations: activations.clone(),
-                format: TensorFormat::FP32,
-                layer_range: Some(segment.layer_range),
-                sender_peer_bytes: None,
-                tp_meta: None,
-            };
-
-            // If this is the local node, process locally
+            // If this is the local node, process locally (no clone needed)
             if segment.node_id == *self.shared_state.identity.node_id() {
                 let result = self
                     .process_local_segment(segment, sequence_num, index_pos, &activations)
@@ -613,6 +602,18 @@ impl PipelineExecutor {
                 // Use hidden-state activations for the next segment
                 activations = result.activations;
             } else {
+                // Only clone activations when sending over the network
+                let forward = LayerForward {
+                    request_id,
+                    sequence_num,
+                    index_pos: index_pos as u32,
+                    activations: activations.clone(),
+                    format: TensorFormat::FP32,
+                    layer_range: Some(segment.layer_range),
+                    sender_peer_bytes: None,
+                    tp_meta: None,
+                };
+
                 // Register a response channel BEFORE sending the request
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 self.shared_state
