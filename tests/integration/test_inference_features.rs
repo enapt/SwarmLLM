@@ -39,7 +39,7 @@ fn test_speculative_decoding_identical_distributions_accept_all() {
     let draft_probs = vec![uniform.clone(); 4];
     let target_probs = vec![uniform.clone(); 5]; // gamma + 1 entries
 
-    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
 
     // All tokens accepted since distributions are identical
     assert_eq!(result.accepted_tokens, vec![0, 1, 2, 3]);
@@ -57,7 +57,7 @@ fn test_speculative_decoding_zero_prob_rejection() {
         vec![0.25, 0.25, 0.25, 0.25], // bonus
     ];
 
-    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
 
     // Token should be rejected since draft prob is 0
     assert!(result.accepted_tokens.is_empty());
@@ -78,7 +78,7 @@ fn test_speculative_decoding_high_rejection_rate() {
 
     let mut rejection_count = 0;
     for _ in 0..200 {
-        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
         if result.accepted_tokens.is_empty() {
             rejection_count += 1;
         }
@@ -103,7 +103,7 @@ fn test_speculative_decoding_always_has_bonus_token() {
         vec![0.5, 0.5], // Bonus position
     ];
 
-    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+    let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
     assert_eq!(result.accepted_tokens, vec![1]);
     assert!(
         result.bonus_token.is_some(),
