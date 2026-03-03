@@ -187,6 +187,10 @@ var SwarmLLM = (function() {
 
     send: async function() {
       if (isStreaming) return;
+      if (!currentModel) {
+        ui.showBanner('warning', 'No model available — download a model first');
+        return;
+      }
 
       var input = document.getElementById('chat-input');
       var text = input.value.trim();
@@ -923,7 +927,12 @@ var SwarmLLM = (function() {
       if (!status) return;
       var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
       var card = document.querySelector('[data-model-id="' + modelId + '"]');
-      if (!card) return; // card not rendered yet — will show on next loadInitial
+      if (!card) {
+        // Card doesn't exist yet — trigger a refresh to create it
+        loadModels();
+        dashboard.loadInitial();
+        return;
+      }
 
       var stateName = typeof status.state === 'string' ? status.state : 'unknown';
 
@@ -1000,55 +1009,44 @@ var SwarmLLM = (function() {
           return;
         }
 
-        // Fetch pool VRAM info for fitness display
-        var poolVram = 0;
-        try {
-          var storageResp = await fetch('/api/admin/shard-storage');
-          if (storageResp.ok) {
-            var storageData = await storageResp.json();
-            poolVram = storageData.pool_vram_mb || 0;
-          }
-        } catch (e2) {}
-
         results.innerHTML = '';
-        data.forEach(function(model) {
+        data.forEach(function(repo) {
           var card = document.createElement('div');
           card.className = 'hf-model-card';
-          var sizeStr = model.size_bytes ? formatBytes(model.size_bytes) : 'Unknown size';
-          var downloads = model.downloads ? model.downloads.toLocaleString() + ' downloads' : '';
+          var downloads = repo.downloads ? repo.downloads.toLocaleString() + ' downloads' : '';
+          var likes = repo.likes ? repo.likes.toLocaleString() + ' likes' : '';
+          var safeKey = (repo.repo_id || '').replace(/[^a-zA-Z0-9]/g, '_');
+          var variants = repo.variants || [];
+          var recommended = repo.recommended_variant || '';
 
-          // Estimate VRAM requirement (model size * 1.15 overhead)
-          var vramTag = '';
-          if (model.size_bytes && model.size_bytes > 0) {
-            var estVramMb = Math.ceil(model.size_bytes * 1.15 / (1024 * 1024));
-            var estStr = escapeHtml(formatMB(estVramMb));
-            var poolStr = escapeHtml(formatMB(poolVram));
-            if (poolVram > 0) {
-              if (estVramMb <= poolVram) {
-                vramTag = '<span style="color:var(--green)" title="Fits in network VRAM pool (' + poolStr + ')">' + estStr + ' VRAM</span>';
-              } else {
-                vramTag = '<span style="color:var(--red)" title="Exceeds network VRAM pool (' + poolStr + '). Can still download but won\'t run yet.">' + estStr + ' VRAM (exceeds pool)</span>';
-              }
-            } else {
-              vramTag = '<span class="text-muted">' + estStr + ' VRAM est.</span>';
-            }
+          // Build variant selector
+          var variantOptions = '';
+          variants.forEach(function(v) {
+            var sizeStr = v.size_bytes ? formatBytes(v.size_bytes) : '';
+            var label = v.quant + (sizeStr ? ' \u2014 ' + sizeStr : '');
+            if (v.quant === recommended) label += ' (Recommended)';
+            var selected = v.quant === recommended ? ' selected' : '';
+            variantOptions += '<option value="' + escapeHtml(v.filename) + '"' + selected + '>' + escapeHtml(label) + '</option>';
+          });
+
+          var fitsTag = '';
+          if (repo.fits_vram === true) {
+            fitsTag = '<span style="color:var(--green)" title="Fits in your GPU VRAM">Fits VRAM</span>';
+          } else if (repo.fits_vram === false && variants.length > 0) {
+            fitsTag = '<span style="color:var(--yellow)" title="Smallest variant may exceed your VRAM">Check VRAM</span>';
           }
 
           card.innerHTML = '<div class="hf-model-info">' +
-            '<div class="hf-model-name">' + escapeHtml(model.repo_id || model.id) + '</div>' +
+            '<div class="hf-model-name">' + escapeHtml(repo.repo_id) + '</div>' +
             '<div class="hf-model-meta">' +
-            (model.filename ? '<span class="mono">' + escapeHtml(model.filename) + '</span>' : '') +
-            '<span>' + sizeStr + '</span>' +
             (downloads ? '<span>' + downloads + '</span>' : '') +
-            (vramTag ? '<span>' + vramTag + '</span>' : '') +
+            (likes ? '<span>' + likes + '</span>' : '') +
+            (fitsTag ? '<span>' + fitsTag + '</span>' : '') +
             '</div>' +
             '</div>' +
             '<div class="hf-model-actions">' +
-            '<select class="hf-download-mode" id="dl-mode-' + escapeHtml(model.repo_id || model.id).replace(/[^a-zA-Z0-9]/g, '_') + '">' +
-            '<option value="shards">Download shards (rarest first)</option>' +
-            '<option value="full">Download full model</option>' +
-            '</select>' +
-            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(model.repo_id || model.id) + '" data-hf-filename="' + escapeHtml(model.filename || '') + '">Download</button>' +
+            (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +
+            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Download</button>' +
             '</div>';
           results.appendChild(card);
         });
@@ -1058,52 +1056,39 @@ var SwarmLLM = (function() {
       }
     },
 
-    download: async function(repoId, filename) {
+    download: async function(repoId, variantKey) {
       try {
-        var safeKey = (repoId || '').replace(/[^a-zA-Z0-9]/g, '_');
-        var modeEl = document.getElementById('dl-mode-' + safeKey);
-        var mode = modeEl ? modeEl.value : 'shards';
-
-        if (mode === 'full') {
-          // Full model download (single GGUF file) — user explicitly chose this
-          var resp = await authFetch('/api/admin/hf/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ repo_id: repoId, filename: filename }),
-          });
-          var data = await resp.json();
-          if (data.status === 'started' || data.status === 'acquiring') {
-            ui.showBanner('success', 'Full model download started');
-            ui.closeModelBrowser();
-          } else {
-            ui.showBanner('warning', data.message || 'Download could not be started');
+        // Get selected filename from variant selector or use first variant
+        var filename = '';
+        if (variantKey) {
+          var quantEl = document.getElementById('quant-' + variantKey);
+          if (quantEl) {
+            filename = quantEl.value;
           }
+        }
+        // Fallback: find the download button's associated filename
+        if (!filename) {
+          var btn = document.querySelector('[data-hf-download="' + repoId + '"]');
+          filename = btn ? (btn.getAttribute('data-hf-filename') || '') : '';
+        }
+        if (!filename) {
+          ui.showBanner('error', 'No model variant selected');
+          return;
+        }
+
+        // Use peer_fair_share: backend probes internally and computes fair share
+        ui.showBanner('info', 'Starting smart shard download...');
+        var resp = await authFetch('/api/admin/hf/download-shards', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_id: repoId, filename: filename, peer_fair_share: true }),
+        });
+        var data = await resp.json();
+        if (data.status === 'started') {
+          ui.showBanner('success', 'Downloading shards — peers will auto-acquire the rest');
+          ui.closeModelBrowser();
         } else {
-          // Default: shard-based download. Probe first to discover shard count,
-          // then download all shards. Other nodes auto-acquire via gossip.
-          ui.showBanner('info', 'Probing model...');
-          var probeResp = await fetch('/api/admin/hf/probe?repo_id=' + encodeURIComponent(repoId) + '&filename=' + encodeURIComponent(filename));
-          var probeData = await probeResp.json();
-          if (probeData.status !== 'ok' || !probeData.shard_count) {
-            ui.showBanner('error', probeData.message || 'Failed to probe model');
-            return;
-          }
-          // Build array of all shard indices [0, 1, 2, ...]
-          var shardIndices = [];
-          for (var i = 0; i < probeData.shard_count; i++) shardIndices.push(i);
-
-          var resp = await authFetch('/api/admin/hf/download-shards', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ repo_id: repoId, filename: filename, shards: shardIndices }),
-          });
-          var data = await resp.json();
-          if (data.status === 'started') {
-            ui.showBanner('success', 'Downloading ' + probeData.shard_count + ' shards from HuggingFace');
-            ui.closeModelBrowser();
-          } else {
-            ui.showBanner('warning', data.message || 'Download could not be started');
-          }
+          ui.showBanner('warning', data.message || 'Download could not be started');
         }
       } catch (e) {
         ui.showBanner('error', 'Download failed: ' + e.message);
@@ -1614,7 +1599,14 @@ var SwarmLLM = (function() {
           var text = 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) +
             ' \u2014 ' + d.holder_count_before + '\u2192' + d.holder_count_after + ' holders (freed ' + freed + ')';
           showPruneToast(text);
-          loadModels();
+          // models_changed event from prune will trigger refresh below
+        } else if (msg.type === 'models_changed') {
+          // Debounce: coalesce rapid model change events
+          if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
+          window._modelsChangedTimer = setTimeout(function() {
+            loadModels();
+            dashboard.loadInitial();
+          }, 1000);
         }
       } catch (e) {
         // WS parse error — ignore malformed frames
@@ -1670,16 +1662,21 @@ var SwarmLLM = (function() {
         readyModels.forEach(function(m) {
           var opt = document.createElement('option');
           opt.value = m.id;
-          opt.textContent = m.id.length > 30 ? m.id.substring(0, 30) + '...' : m.id;
+          var displayName = m.name || formatModelDisplayName(m.id);
+          opt.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '...' : displayName;
+          opt.title = m.id;
           sel.appendChild(opt);
         });
         sel.value = currentModel;
       } else if (adminModels.length > 0) {
+        currentModel = '';
         sel.innerHTML = '<option value="" disabled>No models ready</option>';
       } else {
+        currentModel = '';
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
       syncMobileModelSelect();
+      updateChatAvailability(readyModels.length > 0);
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
@@ -2995,7 +2992,7 @@ var SwarmLLM = (function() {
 
       // HF download button
       var hfRepo = target.getAttribute('data-hf-download');
-      if (hfRepo) { hf.download(hfRepo, target.getAttribute('data-hf-filename') || ''); return; }
+      if (hfRepo) { hf.download(hfRepo, target.getAttribute('data-hf-variant') || ''); return; }
 
       // Shard cell click → open context menu
       if (target.classList.contains('shard-cell')) {
@@ -3098,6 +3095,36 @@ var SwarmLLM = (function() {
     if (!desktop || !mobile) return;
     mobile.innerHTML = desktop.innerHTML;
     mobile.value = desktop.value;
+  }
+
+  // Format a raw model ID into a friendly display name
+  function formatModelDisplayName(id) {
+    if (!id) return 'Unknown';
+    // Strip common suffixes like -gguf, .gguf, -q4_k_m etc.
+    var name = id.replace(/\.gguf$/i, '').replace(/-gguf$/i, '');
+    // Capitalize first letter of each segment
+    return name.split(/[-_.]/).filter(Boolean).map(function(s) {
+      // Keep quant tags uppercase
+      if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return s.toUpperCase();
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    }).join(' ');
+  }
+
+  // Enable/disable the chat panel based on model availability
+  function updateChatAvailability(hasModels) {
+    var sendBtn = document.getElementById('send-btn');
+    var chatInput = document.getElementById('chat-input');
+    var emptyState = document.querySelector('#chat-messages .empty-state');
+
+    if (sendBtn) sendBtn.disabled = !hasModels;
+    if (chatInput) {
+      chatInput.disabled = !hasModels;
+      chatInput.placeholder = hasModels ? 'Type your message...' : 'No models available — download a model to start chatting';
+    }
+    if (emptyState && !hasModels) {
+      emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser to start chatting</p>' +
+        '<button class="btn btn-primary" onclick="SwarmLLM.openModelBrowser && SwarmLLM.openModelBrowser()">Browse Models</button>';
+    }
   }
 
   // ========================================================================
@@ -3290,5 +3317,6 @@ var SwarmLLM = (function() {
     shutdown: shutdown,
     copyNetworkCode: copyNetworkCode,
     joinNetwork: joinNetwork,
+    openModelBrowser: function() { ui.openModelBrowser(); },
   };
 })();

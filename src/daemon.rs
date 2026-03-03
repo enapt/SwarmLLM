@@ -182,6 +182,9 @@ pub struct SharedState {
     pub update_state: Arc<RwLock<crate::update::UpdateState>>,
     /// Broadcast channel for update availability notifications (WebSocket push).
     pub update_tx: broadcast::Sender<crate::update::UpdateInfo>,
+    /// Broadcast channel fired when models change (shard download, load, prune).
+    /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
+    pub models_changed_tx: broadcast::Sender<()>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -429,6 +432,7 @@ impl SharedState {
             }),
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
+            models_changed_tx: broadcast::channel(16).0,
             shutdown_tx,
         });
 

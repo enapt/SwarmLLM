@@ -1006,6 +1006,7 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 
 /// GET /api/admin/hf/search?q=... — Search HuggingFace for GGUF models.
 pub async fn hf_search(
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HfSearchParams>,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let query = params.query.unwrap_or_default();
@@ -1017,14 +1018,83 @@ pub async fn hf_search(
         .await
         .map_err(|e| ApiError(crate::error::SwarmError::Internal(e)))?;
 
-    let values: Vec<serde_json::Value> = results
+    // Available VRAM for fits_vram check (pool VRAM or local GPU)
+    let available_vram_bytes: u64 = state
+        .shared_state
+        .gpu_info
+        .as_ref()
+        .map(|g| g.vram_free_mb * 1024 * 1024)
+        .unwrap_or(0);
+
+    // Group results by repo_id with quant variants (preserve HF API order = by downloads)
+    let mut repo_order: Vec<String> = Vec::new();
+    let mut repo_map: std::collections::HashMap<
+        String,
+        Vec<crate::model::huggingface::HfModelResult>,
+    > = std::collections::HashMap::new();
+    for r in results {
+        if !repo_map.contains_key(&r.repo_id) {
+            repo_order.push(r.repo_id.clone());
+        }
+        repo_map.entry(r.repo_id.clone()).or_default().push(r);
+    }
+
+    let values: Vec<serde_json::Value> = repo_order
         .into_iter()
-        .map(|r| {
+        .filter_map(|repo_id| {
+            let files = repo_map.remove(&repo_id)?;
+            Some((repo_id, files))
+        })
+        .map(|(repo_id, files)| {
+            let downloads = files.first().map(|f| f.downloads).unwrap_or(0);
+            let likes = files.first().map(|f| f.likes).unwrap_or(0);
+
+            let variants: Vec<serde_json::Value> = files
+                .iter()
+                .map(|f| {
+                    let quant = crate::model::huggingface::extract_quant_tag(&f.filename)
+                        .unwrap_or_else(|| "unknown".into());
+                    serde_json::json!({
+                        "filename": f.filename,
+                        "size_bytes": f.size_bytes,
+                        "quant": quant,
+                    })
+                })
+                .collect();
+
+            // Recommended variant: prefer Q4_K_M, else smallest Q4+, else first
+            let recommended = files
+                .iter()
+                .find(|f| {
+                    crate::model::huggingface::extract_quant_tag(&f.filename)
+                        .is_some_and(|q| q == "Q4_K_M")
+                })
+                .or_else(|| {
+                    files
+                        .iter()
+                        .filter(|f| {
+                            crate::model::huggingface::extract_quant_tag(&f.filename)
+                                .is_some_and(|q| q.starts_with("Q4"))
+                        })
+                        .min_by_key(|f| f.size_bytes)
+                })
+                .or(files.first());
+
+            let recommended_variant = recommended
+                .and_then(|f| crate::model::huggingface::extract_quant_tag(&f.filename))
+                .unwrap_or_else(|| "unknown".into());
+
+            // fits_vram: check if smallest variant fits
+            let smallest_size = files.iter().map(|f| f.size_bytes).min().unwrap_or(u64::MAX);
+            let fits_vram = available_vram_bytes > 0 && smallest_size < available_vram_bytes;
+
             serde_json::json!({
-                "repo_id": r.repo_id,
-                "filename": r.filename,
-                "size_bytes": r.size_bytes,
-                "downloads": r.downloads,
+                "repo_id": repo_id,
+                "downloads": downloads,
+                "likes": likes,
+                "variants": variants,
+                "recommended_variant": recommended_variant,
+                "fits_vram": fits_vram,
             })
         })
         .collect();
@@ -1279,6 +1349,12 @@ pub struct HfShardDownloadRequest {
     /// If omitted, a new model_id is derived from the filename.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// When true AND `shards` is empty: compute a deterministic fair share of shards
+    /// based on the node's identity and peer count. Each node claims `ceil(shard_count / (peers + 1))`
+    /// shards, with assignment determined by BLAKE3(node_id || model_id) for consistency.
+    /// Peers with auto-manage enabled will auto-acquire the remaining shards.
+    #[serde(default)]
+    pub peer_fair_share: bool,
 }
 
 /// GET /api/admin/hf/probe — Probe a remote GGUF file to get shard info.
@@ -1346,6 +1422,7 @@ pub async fn hf_download_shards(
     let repo_id = body.repo_id;
     let filename = body.filename;
     let shard_indices = body.shards;
+    let peer_fair_share = body.peer_fair_share;
 
     if repo_id.is_empty() || filename.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Config(
@@ -1353,7 +1430,7 @@ pub async fn hf_download_shards(
         )));
     }
 
-    if shard_indices.is_empty() {
+    if shard_indices.is_empty() && !peer_fair_share {
         return Err(ApiError(crate::error::SwarmError::Config(
             "shards array is required (e.g. [0, 1, 2])".into(),
         )));
@@ -1364,6 +1441,15 @@ pub async fn hf_download_shards(
             "Too many shards requested (max 256)".into(),
         )));
     }
+
+    // peer_fair_share: compute shard assignment deterministically.
+    // Deferred until after probe (we need shard_count), so store the peer count now.
+    let fair_share_peer_count = if peer_fair_share && shard_indices.is_empty() {
+        Some(state.shared_state.peer_registry.len())
+    } else {
+        None
+    };
+    let fair_share_node_id = state.shared_state.identity.node_id().clone();
 
     // Use provided model_id if it matches an existing model, otherwise derive from filename.
     // Always sanitize to prevent path traversal.
@@ -1409,6 +1495,14 @@ pub async fn hf_download_shards(
 
     // Create initial acquisition progress entry with per-shard progress so that
     // auto-manage can detect these downloads are already in flight and skip them.
+    let log_msg = if peer_fair_share && shard_indices.is_empty() {
+        format!("Computing fair share of {} from HuggingFace...", filename)
+    } else {
+        format!(
+            "Downloading shards {:?} of {} from HuggingFace...",
+            shard_indices, filename
+        )
+    };
     let mut initial_shard_progress = std::collections::HashMap::new();
     for &idx in &shard_indices {
         initial_shard_progress.insert(
@@ -1433,10 +1527,7 @@ pub async fn hf_download_shards(
         shard_progress: initial_shard_progress,
         speed_bytes_per_sec: 0,
         started_at: Some(chrono::Utc::now()),
-        log: vec![format!(
-            "Downloading shards {:?} of {} from HuggingFace...",
-            shard_indices, filename
-        )],
+        log: vec![log_msg],
     };
     let shared = state.shared_state.clone();
     shared.acquisition_progress.insert(mid.clone(), status);
@@ -1481,6 +1572,64 @@ pub async fn hf_download_shards(
                 }
                 return;
             }
+        };
+
+        // peer_fair_share: compute deterministic shard assignment now that we know shard count.
+        let shard_indices = if let Some(peer_count) = fair_share_peer_count {
+            let total_shards = info.shard_count() as u32;
+            let node_count = (peer_count + 1) as u32; // include self
+            let my_share = total_shards.div_ceil(node_count);
+
+            // Deterministic assignment: hash(node_id || model_id) → starting offset
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(fair_share_node_id.0.as_ref());
+            hasher.update(model_id_str.as_bytes());
+            let hash = hasher.finalize();
+            let offset = u32::from_le_bytes([
+                hash.as_bytes()[0],
+                hash.as_bytes()[1],
+                hash.as_bytes()[2],
+                hash.as_bytes()[3],
+            ]) % total_shards;
+
+            let mut assigned: Vec<u32> = Vec::new();
+            for i in 0..my_share.min(total_shards) {
+                assigned.push((offset + i) % total_shards);
+            }
+            assigned.sort();
+            assigned.dedup();
+
+            tracing::info!(
+                total_shards,
+                peers = peer_count,
+                my_share = assigned.len(),
+                assigned = ?assigned,
+                "peer_fair_share: computed shard assignment"
+            );
+
+            // Update acquisition progress with the actual shard list
+            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                entry.total_shards = assigned.len() as u32;
+                entry.log.push(format!(
+                    "Fair share: downloading {}/{} shards (peers will auto-acquire the rest)",
+                    assigned.len(),
+                    total_shards
+                ));
+                for &idx in &assigned {
+                    entry.shard_progress.insert(
+                        idx,
+                        crate::model::acquisition::ShardProgress {
+                            index: idx,
+                            total_bytes: 0,
+                            downloaded_bytes: 0,
+                            state: crate::model::acquisition::ShardState::Downloading,
+                        },
+                    );
+                }
+            }
+            assigned
+        } else {
+            shard_indices
         };
 
         if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
@@ -1873,6 +2022,9 @@ pub async fn hf_download_shards(
             )
             .await;
 
+            // Notify dashboard that models have changed
+            let _ = download_shared.models_changed_tx.send(());
+
             // Wake auto-manage again to re-evaluate (maybe download more shards)
             download_shared.auto_manage_notify.notify_one();
 
@@ -1891,6 +2043,7 @@ pub async fn hf_download_shards(
         "status": "started",
         "model_id": response_model_id,
         "shards": response_shards,
+        "peer_fair_share": peer_fair_share,
     })))
 }
 

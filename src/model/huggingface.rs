@@ -13,6 +13,36 @@ pub struct HfModelResult {
     pub filename: String,
     pub size_bytes: u64,
     pub downloads: u64,
+    pub likes: u64,
+}
+
+/// Extract quantization tag from a GGUF filename (e.g. "Q4_K_M", "Q8_0", "F16", "IQ4_XS").
+pub fn extract_quant_tag(filename: &str) -> Option<String> {
+    // Common GGUF quant patterns: Q4_K_M, Q8_0, Q5_K_S, Q6_K, IQ4_XS, F16, F32, BF16
+    let stem = filename.trim_end_matches(".gguf");
+    // Split by common delimiters and look for known quant patterns
+    for part in stem.split(&['-', '.', '_'][..]) {
+        let up = part.to_uppercase();
+        // Match direct hits: F16, F32, BF16
+        if matches!(up.as_str(), "F16" | "F32" | "BF16") {
+            return Some(up);
+        }
+    }
+    // Try regex-like pattern matching for Q/IQ patterns with underscore-joined parts
+    // e.g. "model-Q4_K_M.gguf" or "model.Q8_0.gguf"
+    for segment in stem.split(&['-', '.'][..]) {
+        let up = segment.to_uppercase();
+        if (up.starts_with('Q') || up.starts_with("IQ"))
+            && up.len() >= 3
+            && up
+                .chars()
+                .nth(if up.starts_with("IQ") { 2 } else { 1 })
+                .is_some_and(|c| c.is_ascii_digit())
+        {
+            return Some(up);
+        }
+    }
+    None
 }
 
 /// Search HuggingFace for GGUF model files.
@@ -59,6 +89,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
                         filename: file.rfilename.clone(),
                         size_bytes: file.size.unwrap_or(0),
                         downloads: repo.downloads.unwrap_or(0),
+                        likes: repo.likes.unwrap_or(0),
                     });
                 }
             }
@@ -915,6 +946,7 @@ pub async fn download_shards_v2(
 struct HfRepoInfo {
     id: String,
     downloads: Option<u64>,
+    likes: Option<u64>,
 }
 
 #[derive(Deserialize)]

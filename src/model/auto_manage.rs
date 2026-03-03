@@ -1111,6 +1111,9 @@ impl AutoShardManager {
                         // Load whatever shards are now available for inference
                         check_and_load_model(&shared, &model_id).await;
 
+                        // Notify dashboard that models have changed
+                        let _ = shared.models_changed_tx.send(());
+
                         // Self-wake so we immediately re-evaluate and download
                         // more shards (libp2p gossipsub doesn't deliver our own
                         // broadcasts back to us, so we must notify ourselves).
@@ -1179,6 +1182,7 @@ impl AutoShardManager {
     /// in distributed inference for the layers it covers.
     async fn check_model_complete(&self, model_id: &ModelId) {
         check_and_load_model(&self.shared_state, model_id).await;
+        let _ = self.shared_state.models_changed_tx.send(());
     }
 
     /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
@@ -1459,6 +1463,7 @@ impl AutoShardManager {
 
             // Emit prune event
             let _ = self.shared_state.prune_events_tx.send(event.clone());
+            let _ = self.shared_state.models_changed_tx.send(());
 
             // Add to history
             {

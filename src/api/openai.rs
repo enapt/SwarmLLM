@@ -538,20 +538,6 @@ pub async fn chat_completions(
     }
 
     let model_name = model_name.unwrap();
-
-    // Build prompt using chat template from GGUF if available, else ChatML fallback.
-    let (tmpl, bos, eos) = {
-        let info = state.shared_state.loaded_model_info.read().await;
-        match info.as_ref() {
-            Some(i) => (
-                i.chat_template.clone(),
-                i.bos_token.clone(),
-                i.eos_token.clone(),
-            ),
-            None => (None, String::new(), String::new()),
-        }
-    };
-    let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
     let params = req.to_sampling_params();
 
     // Fast path: if we have a complete local split model (all layers), generate directly.
@@ -559,6 +545,9 @@ pub async fn chat_completions(
     // activation serialization, mutex per token). ~5-10x faster for local inference.
     // Uses the pre-computed is_complete flag — no model mutex needed.
     // Look up by the REQUESTED model ID, not just the first entry.
+    // NOTE: prompt is built inside split_*_response using the model's own chat template,
+    // avoiding template mismatch (e.g. `<|assistant|>` prefix leak) and the unnecessary
+    // loaded_model_info.read().await before the split path.
     let requested_mid = crate::types::ModelId(req.model.clone());
     let has_local_split_model = state
         .shared_state
@@ -573,7 +562,7 @@ pub async fn chat_completions(
                 request_id,
                 created,
                 model_name,
-                prompt,
+                internal_messages.clone(),
                 params,
                 requested_mid.clone(),
             )
@@ -585,13 +574,30 @@ pub async fn chat_completions(
                 request_id,
                 created,
                 model_name,
-                prompt,
+                internal_messages.clone(),
                 params,
                 requested_mid.clone(),
             )
             .await;
         }
     }
+
+    // Build prompt for non-split paths (distributed inference + direct executor).
+    // Uses loaded_model_info which holds the singleton llama-cpp model's template.
+    let prompt = {
+        let (tmpl, bos, eos) = {
+            let info = state.shared_state.loaded_model_info.read().await;
+            match info.as_ref() {
+                Some(i) => (
+                    i.chat_template.clone(),
+                    i.bos_token.clone(),
+                    i.eos_token.clone(),
+                ),
+                None => (None, String::new(), String::new()),
+            }
+        };
+        chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos)
+    };
 
     // Distributed inference: network covers all layers across multiple nodes.
     let peers_have_shards = all_shards_available(&state, &req.model)
@@ -1186,12 +1192,13 @@ async fn non_stream_response(
 /// Bypasses the distributed pipeline executor and generates directly from
 /// the locally loaded SplitModel. Much faster for single-node inference
 /// because it avoids per-token pipeline coordination overhead.
+/// Builds the prompt from the model's own chat template to avoid template mismatch.
 async fn split_non_stream_response(
     state: AppState,
     request_id: String,
     created: i64,
     model_name: String,
-    prompt: String,
+    messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
 ) -> Result<axum::response::Response, ApiError> {
@@ -1209,6 +1216,14 @@ async fn split_non_stream_response(
     let entry = model_ref.value();
     let kv_store = state.shared_state.kv_cache_store.clone();
     let mut model = entry.model.lock().await;
+
+    // Build prompt using the model's own chat template (not the singleton loaded_model_info)
+    let prompt = chat_template::build_prompt(
+        &messages,
+        model.chat_template(),
+        model.bos_token(),
+        model.eos_token_str(),
+    );
 
     // Tokenize the prompt — forward() handles embedding internally
     let (input, prompt_tokens) = model.tokenize(&prompt)?;
@@ -1274,12 +1289,13 @@ async fn split_non_stream_response(
 /// Direct split-model streaming generation.
 ///
 /// Same fast path as split_non_stream_response but streams tokens via SSE.
+/// Builds the prompt from the model's own chat template to avoid template mismatch.
 async fn split_stream_response(
     state: AppState,
     request_id: String,
     created: i64,
     model_name: String,
-    prompt: String,
+    messages: Vec<ChatMessage>,
     params: SamplingParams,
     model_id: crate::types::ModelId,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -1314,6 +1330,14 @@ async fn split_stream_response(
         let entry = model_ref.value();
         let kv_store = state.shared_state.kv_cache_store.clone();
         let mut model = entry.model.lock().await;
+
+        // Build prompt using the model's own chat template
+        let prompt = chat_template::build_prompt(
+            &messages,
+            model.chat_template(),
+            model.bos_token(),
+            model.eos_token_str(),
+        );
 
         // Tokenize — forward() handles embedding internally
         let (input, prompt_tokens) = match model.tokenize(&prompt) {
