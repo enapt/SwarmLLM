@@ -103,6 +103,9 @@ fancy-regex = "0.14"
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
+# Memory-mapped I/O for fast model loading
+memmap2 = "0.9"
+
 # Compression
 zstd = "0.13"
 
