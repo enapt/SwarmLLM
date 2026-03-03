@@ -1549,6 +1549,7 @@ pub async fn hf_download_shards(
             shard_count: info.shard_count(),
             shard_indices: &[],
             shared: &download_shared,
+            precomputed_layouts: Some(&info.layouts),
         });
 
         if let Err(e) = &manifest_result {
@@ -1854,6 +1855,7 @@ pub async fn hf_download_shards(
                 shard_count: info.shard_count(),
                 shard_indices: &shard_indices,
                 shared: &download_shared,
+                precomputed_layouts: Some(&info.layouts),
             });
 
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
@@ -1900,6 +1902,9 @@ struct ManifestGenParams<'a> {
     shard_count: u32,
     shard_indices: &'a [u32],
     shared: &'a std::sync::Arc<crate::daemon::SharedState>,
+    /// Pre-computed layouts from probe. When provided, these are used directly
+    /// instead of recomputing (avoids shard_count mismatch between probe and manifest).
+    precomputed_layouts: Option<&'a [crate::inference::split::LayerShardLayout]>,
 }
 
 /// Generate a manifest from a downloaded GGUF header and register shards.
@@ -1946,8 +1951,16 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         .parent()
         .ok_or_else(|| "GGUF header path has no parent directory".to_string())?;
 
-    let layouts = crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
-    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
+    let computed_layouts;
+    let layouts: &[crate::inference::split::LayerShardLayout] = if let Some(precomputed) =
+        params.precomputed_layouts
+    {
+        precomputed
+    } else {
+        computed_layouts = crate::inference::split::compute_layer_shard_layouts(&meta, shard_count);
+        &computed_layouts
+    };
+    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, layouts);
 
     let node_id = params.shared.identity.node_id().clone();
 

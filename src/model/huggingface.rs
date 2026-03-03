@@ -640,6 +640,16 @@ pub async fn download_shard_v2(
     // Coalesce nearby ranges (4MB gap tolerance) to reduce HTTP requests
     let coalesced = coalesce_byte_ranges(&tensor_ranges, 4 * 1024 * 1024);
     let total_download_bytes: u64 = coalesced.iter().map(|(s, e)| e - s).sum();
+    let expected_tensor_bytes: u64 = layout.tensors.iter().map(|(_, _, sz)| sz).sum();
+
+    tracing::info!(
+        shard = shard_index,
+        tensors = layout.tensors.len(),
+        ranges = coalesced.len(),
+        download_bytes = total_download_bytes,
+        tensor_bytes = expected_tensor_bytes,
+        "Starting shard download"
+    );
 
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::File::create(&tmp_path)
@@ -726,8 +736,47 @@ pub async fn download_shard_v2(
             }
         }
 
+        // Verify we received the expected number of bytes for this range
+        let expected_range_bytes = (*range_end - *range_start) as usize;
+        if range_buf.len() != expected_range_bytes {
+            tracing::warn!(
+                shard = shard_index,
+                expected = expected_range_bytes,
+                received = range_buf.len(),
+                range_start = range_start,
+                range_end = range_end,
+                "Coalesced range received incomplete data, retrying"
+            );
+            // Retry this range once
+            range_buf.clear();
+            let retry_resp = client
+                .get(&url)
+                .header("User-Agent", "SwarmLLM/0.1")
+                .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
+                .send()
+                .await
+                .map_err(|e| format!("Range retry failed: {e}"))?;
+            let mut stream = retry_resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let data = chunk.map_err(|e| format!("Stream error on retry: {e}"))?;
+                range_buf.extend_from_slice(&data);
+            }
+            if range_buf.len() != expected_range_bytes {
+                return Err(format!(
+                    "Shard {} range {}-{}: expected {} bytes but got {} after retry",
+                    shard_index,
+                    range_start,
+                    range_end,
+                    expected_range_bytes,
+                    range_buf.len()
+                ));
+            }
+        }
+
         // Extract only tensor data from the buffered range, skipping inter-tensor gaps
-        for (_, tensor_offset, tensor_size) in &layout.tensors {
+        let mut tensors_extracted = 0u32;
+        let mut bytes_written = 0u64;
+        for (name, tensor_offset, tensor_size) in &layout.tensors {
             if *tensor_offset >= *range_start && *tensor_offset + *tensor_size <= *range_end {
                 let buf_offset = (*tensor_offset - *range_start) as usize;
                 let buf_end = buf_offset + *tensor_size as usize;
@@ -735,14 +784,49 @@ pub async fn download_shard_v2(
                     file.write_all(&range_buf[buf_offset..buf_end])
                         .await
                         .map_err(|e| format!("Write error: {e}"))?;
+                    tensors_extracted += 1;
+                    bytes_written += *tensor_size;
+                } else {
+                    return Err(format!(
+                        "Shard {}: tensor {} buffer overflow (need {} bytes, have {})",
+                        shard_index,
+                        name,
+                        buf_end,
+                        range_buf.len()
+                    ));
                 }
             }
         }
+        tracing::debug!(
+            shard = shard_index,
+            tensors_extracted,
+            bytes_written,
+            "Range extraction complete"
+        );
     }
 
     file.flush()
         .await
         .map_err(|e| format!("Flush error: {e}"))?;
+    drop(file);
+
+    // Verify file size matches expected tensor data total
+    let expected_size: u64 = layout.tensors.iter().map(|(_, _, sz)| sz).sum();
+    let actual_size = tokio::fs::metadata(&tmp_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if actual_size != expected_size {
+        // Clean up the incomplete file
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Shard {} size mismatch: expected {} bytes (from {} tensors) but wrote {} bytes",
+            shard_index,
+            expected_size,
+            layout.tensors.len(),
+            actual_size
+        ));
+    }
 
     // Atomic rename .tmp → .bin
     std::fs::rename(&tmp_path, &dest_path)
@@ -750,7 +834,7 @@ pub async fn download_shard_v2(
 
     tracing::info!(
         shard = shard_index,
-        size = downloaded,
+        size = actual_size,
         path = %dest_path.display(),
         "Downloaded v2 layer-aligned shard from HuggingFace"
     );

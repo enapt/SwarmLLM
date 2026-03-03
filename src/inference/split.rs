@@ -5430,15 +5430,16 @@ pub fn compute_layer_shard_layouts(
         }];
     }
 
-    // Target bytes per shard (including prefix/suffix distributed to first/last)
-    let target_per_shard = total_bytes / shard_count as u64;
-
-    // Greedily assign layers to shards
+    // Greedily assign layers to shards using a dynamic target that adjusts
+    // as shards are emitted. This ensures the algorithm produces the exact
+    // requested number of shards instead of underproducing when large prefixes
+    // or uneven layer sizes cause the static target to be exceeded early.
     let mut layouts: Vec<LayerShardLayout> = Vec::new();
     let mut current_tensors: Vec<(String, u64, u64)> = Vec::new();
     let mut current_size: u64 = 0;
     let mut current_layer_start: Option<u32> = None;
     let mut current_layer_end: u32 = 0;
+    let mut emitted_bytes: u64 = 0;
 
     // Add prefix tensors to current (will be shard 0)
     current_tensors.extend(prefix_tensors.iter().cloned());
@@ -5460,10 +5461,13 @@ pub fn compute_layer_shard_layouts(
         let remaining_shards = shard_count as usize - layouts.len() - 1;
         let remaining_layers = layer_sizes.len() - i - 1;
 
-        // Emit shard when we've reached target size, OR when we must emit to ensure
-        // enough shards are created for remaining layers. Without the force-emit check,
-        // models where layers are large relative to target_per_shard produce fewer
-        // shards than requested (e.g., 28 layers / 8 shards → 7 shards).
+        // Dynamic target: distribute remaining bytes evenly across remaining shard slots.
+        // This naturally adjusts when earlier shards are larger (e.g., due to prefix),
+        // ensuring later shards are smaller to hit the total shard count.
+        let remaining_budget = total_bytes.saturating_sub(emitted_bytes);
+        let remaining_slots = (shard_count as usize - layouts.len()).max(1) as u64;
+        let dynamic_target = remaining_budget / remaining_slots;
+
         let should_emit = if is_last_layer || remaining_shards == 0 {
             // Last layer → handled after loop (final shard with suffix).
             // No remaining shards → keep accumulating for final shard.
@@ -5472,11 +5476,12 @@ pub fn compute_layer_shard_layouts(
             // Must emit now: more shards needed than layers remaining
             true
         } else {
-            current_size >= target_per_shard
+            current_size >= dynamic_target
         };
 
         if should_emit {
             current_tensors.sort_by_key(|(_, off, _)| *off);
+            emitted_bytes += current_size;
             layouts.push(LayerShardLayout {
                 index: layouts.len() as u32,
                 layer_start: current_layer_start.unwrap_or(0),

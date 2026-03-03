@@ -389,10 +389,33 @@ pub async fn chat_completions(
         "Chat completion request"
     );
 
-    // Get model name from lock-free cache
+    // Get model name — try loaded_model_info cache first, then manifest registry.
+    // loaded_model_info is a singleton that may hold a DIFFERENT model's info
+    // when multiple models are loaded, so always verify against the request.
     let model_name = {
         let info = state.shared_state.loaded_model_info.read().await;
-        info.as_ref().map(|i| i.name.clone())
+        let cached_name = info.as_ref().map(|i| i.name.clone());
+        // Check if the cached info matches the requested model
+        let matches_request = info.as_ref().is_some_and(|i| {
+            let slug = i
+                .name
+                .to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            slug == req.model || i.name == req.model
+        });
+        drop(info);
+        if matches_request {
+            cached_name
+        } else {
+            // Look up from manifest registry for the requested model
+            state
+                .shared_state
+                .model_registry
+                .get_manifest(&crate::types::ModelId(req.model.clone()))
+                .map(|m| m.name.clone())
+                .or(cached_name)
+        }
     };
 
     // No local full-model executor — use distributed inference or forward.
@@ -535,24 +558,36 @@ pub async fn chat_completions(
     // This avoids the distributed pipeline overhead (per-token segment coordination,
     // activation serialization, mutex per token). ~5-10x faster for local inference.
     // Uses the pre-computed is_complete flag — no model mutex needed.
+    // Look up by the REQUESTED model ID, not just the first entry.
+    let requested_mid = crate::types::ModelId(req.model.clone());
     let has_local_split_model = state
         .shared_state
         .split_models
         .iter()
-        .next()
-        .map(|e| e.value().is_complete)
-        .unwrap_or(false);
+        .any(|e| e.key().0 == requested_mid && e.value().is_complete);
 
     if has_local_split_model {
         if req.stream {
             return Ok(split_stream_response(
-                state, request_id, created, model_name, prompt, params,
+                state,
+                request_id,
+                created,
+                model_name,
+                prompt,
+                params,
+                requested_mid.clone(),
             )
             .await
             .into_response());
         } else {
             return split_non_stream_response(
-                state, request_id, created, model_name, prompt, params,
+                state,
+                request_id,
+                created,
+                model_name,
+                prompt,
+                params,
+                requested_mid.clone(),
             )
             .await;
         }
@@ -1158,10 +1193,15 @@ async fn split_non_stream_response(
     model_name: String,
     prompt: String,
     params: SamplingParams,
+    model_id: crate::types::ModelId,
 ) -> Result<axum::response::Response, ApiError> {
     use crate::inference::split::sample_token;
 
-    let model_entry = state.shared_state.split_models.iter().next();
+    let model_entry = state
+        .shared_state
+        .split_models
+        .iter()
+        .find(|e| e.key().0 == model_id);
     let model_ref = match model_entry {
         Some(entry) => entry,
         None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
@@ -1241,6 +1281,7 @@ async fn split_stream_response(
     model_name: String,
     prompt: String,
     params: SamplingParams,
+    model_id: crate::types::ModelId,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     use crate::inference::split::sample_token;
 
@@ -1258,7 +1299,11 @@ async fn split_stream_response(
             })
             .await;
 
-        let model_entry = state.shared_state.split_models.iter().next();
+        let model_entry = state
+            .shared_state
+            .split_models
+            .iter()
+            .find(|e| e.key().0 == model_id);
         let model_ref = match model_entry {
             Some(entry) => entry,
             None => {
