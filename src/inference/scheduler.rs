@@ -855,13 +855,9 @@ mod tests {
             .assemble_pipeline(&ModelId("tp-model".into()), &local_id)
             .unwrap();
 
-        // Pipeline should have 1 segment (local node wins) + 1 TP group with both nodes
+        // TP is disabled until AllReduce is implemented, so no TP groups formed
         assert_eq!(assignment.segments.len(), 1);
-        assert_eq!(assignment.tp_groups.len(), 1);
-        assert_eq!(assignment.tp_groups[0].tp_size(), 2);
-        assert!(assignment.tp_groups[0].nodes.contains(&local_id));
-        assert!(assignment.tp_groups[0].nodes.contains(&node_b));
-        assert_eq!(assignment.tp_groups[0].layer_range, (0, 32));
+        assert_eq!(assignment.tp_groups.len(), 0);
     }
 
     #[test]
