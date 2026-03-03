@@ -476,12 +476,13 @@ pub struct LayerForward {
     pub index_pos: u32,
     pub activations: Vec<u8>,
     pub format: TensorFormat,
+    /// The model this forward belongs to. Every LayerForward must identify
+    /// its model so the receiving node loads the correct weights.
+    pub model_id: ModelId,
     /// The layer range this forward should be processed over.
-    /// When present, the receiving node uses this to look up the correct cached
+    /// The receiving node uses this to look up the correct cached
     /// SplitModel segment (keyed by model_id + layer_start + layer_end).
-    /// `None` for backward compatibility with older peers.
-    #[serde(default)]
-    pub layer_range: Option<(u32, u32)>,
+    pub layer_range: (u32, u32),
     /// Tensor-parallel metadata. When present, the receiving node should process
     /// only the specified single layer using its TP rank/size for head and MLP slicing.
     #[serde(default, skip_serializing_if = "Option::is_none")]

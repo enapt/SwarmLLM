@@ -7,8 +7,8 @@ use libp2p::StreamProtocol;
 
 use crate::error::SwarmError;
 use crate::types::{
-    LayerForward, LayerResult, NetworkFinishReason, ShardRequest, ShardResponse, SwarmMessage,
-    TensorFormat,
+    LayerForward, LayerResult, ModelId, NetworkFinishReason, ShardRequest, ShardResponse,
+    SwarmMessage, TensorFormat,
 };
 
 // Re-export compression helpers for use in tests and other modules.
@@ -271,12 +271,28 @@ pub const TENSOR_TAG_RESULT: u8 = 0x02;
 /// Encrypted tensor message tag (activations encrypted, header fields are cleartext AAD).
 pub const TENSOR_TAG_ENCRYPTED: u8 = 0x10;
 
+// Binary layout for LayerForward envelope (v2 with model_id + required layer_range):
+//   [0]        tag = TENSOR_TAG_FORWARD (0x01)
+//   [1..17]    request_id (UUID, 16 bytes)
+//   [17..21]   sequence_num (u32 LE)
+//   [21..25]   index_pos (u32 LE)
+//   [25]       format tag: 0=FP16, 1=FP32, 2=INT8
+//   [26..30]   data_len (u32 LE)
+//   [30..30+N] activation data
+//   -- required trailer --
+//   [T]        marker = 0x01
+//   [T+1..T+5] layer_start (u32 LE)
+//   [T+5..T+9] layer_end (u32 LE)
+//   [T+9..T+11] model_id_len (u16 LE)
+//   [T+11..T+11+M] model_id (UTF-8 string)
+
 /// Encode a LayerForward into a binary tensor envelope.
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
     let data_len = forward.activations.len();
+    let model_id_bytes = forward.model_id.0.as_bytes();
     // Header: tag(1) + uuid(16) + seq(4) + index_pos(4) + fmt(1) + data_len(4) = 30
-    // Optional trailer: marker(1) + layer_start(4) + layer_end(4) = 9
-    let trailer_len = if forward.layer_range.is_some() { 9 } else { 0 };
+    // Trailer: marker(1) + layer_start(4) + layer_end(4) + model_id_len(2) + model_id(N)
+    let trailer_len = 1 + 4 + 4 + 2 + model_id_bytes.len();
     let total = 1 + 29 + data_len + trailer_len;
     let mut buf = Vec::with_capacity(total);
 
@@ -300,12 +316,14 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
     // activation data
     buf.extend_from_slice(&forward.activations);
 
-    // Optional layer_range trailer (backward compatible — old decoders stop at data end)
-    if let Some((layer_start, layer_end)) = forward.layer_range {
-        buf.push(0x01); // marker byte
-        buf.extend_from_slice(&layer_start.to_le_bytes());
-        buf.extend_from_slice(&layer_end.to_le_bytes());
-    }
+    // Required trailer: layer_range + model_id
+    let (layer_start, layer_end) = forward.layer_range;
+    buf.push(0x01); // marker byte
+    buf.extend_from_slice(&layer_start.to_le_bytes());
+    buf.extend_from_slice(&layer_end.to_le_bytes());
+    // model_id: 2-byte length prefix + UTF-8 string
+    buf.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(model_id_bytes);
 
     Ok(buf)
 }
@@ -366,23 +384,46 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
 
     let activations = data[29..29 + data_len].to_vec();
 
-    // Read optional layer_range trailer (backward compatible — absent on old peers)
+    // Read required trailer: marker(1) + layer_start(4) + layer_end(4) + model_id_len(2) + model_id(N)
     let trailer_start = 29 + data_len;
-    let layer_range = if data.len() >= trailer_start + 9 && data[trailer_start] == 0x01 {
-        let ls = u32::from_le_bytes(
-            data[trailer_start + 1..trailer_start + 5]
-                .try_into()
-                .map_err(|_| SwarmError::Network("Invalid layer_start".into()))?,
-        );
-        let le = u32::from_le_bytes(
-            data[trailer_start + 5..trailer_start + 9]
-                .try_into()
-                .map_err(|_| SwarmError::Network("Invalid layer_end".into()))?,
-        );
-        Some((ls, le))
-    } else {
-        None
-    };
+    if data.len() < trailer_start + 9 || data[trailer_start] != 0x01 {
+        return Err(SwarmError::Network(
+            "LayerForward missing required layer_range/model_id trailer".to_string(),
+        ));
+    }
+    let ls = u32::from_le_bytes(
+        data[trailer_start + 1..trailer_start + 5]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid layer_start".into()))?,
+    );
+    let le = u32::from_le_bytes(
+        data[trailer_start + 5..trailer_start + 9]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid layer_end".into()))?,
+    );
+    let layer_range = (ls, le);
+
+    // Read model_id: 2-byte length prefix + UTF-8 string
+    let mid_len_start = trailer_start + 9;
+    if data.len() < mid_len_start + 2 {
+        return Err(SwarmError::Network(
+            "LayerForward missing model_id length".to_string(),
+        ));
+    }
+    let mid_len = u16::from_le_bytes(
+        data[mid_len_start..mid_len_start + 2]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid model_id_len".into()))?,
+    ) as usize;
+    let mid_start = mid_len_start + 2;
+    if data.len() < mid_start + mid_len {
+        return Err(SwarmError::Network(
+            "LayerForward model_id truncated".to_string(),
+        ));
+    }
+    let model_id_str = std::str::from_utf8(&data[mid_start..mid_start + mid_len])
+        .map_err(|_| SwarmError::Network("Invalid model_id UTF-8".into()))?;
+    let model_id = ModelId(model_id_str.to_string());
 
     Ok(LayerForward {
         request_id,
@@ -390,6 +431,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         index_pos,
         activations,
         format,
+        model_id,
         layer_range,
         tp_meta: None,
         sender_peer_bytes: None,
@@ -560,10 +602,14 @@ pub fn encode_ack() -> Vec<u8> {
 //   [17..21]   sequence_num (u32 LE) — cleartext AAD
 //   [21..25]   index_pos (u32 LE) — cleartext AAD
 //   [25]       format tag (0=FP16, 1=FP32, 2=INT8) — cleartext AAD
-//   [26..30]   sealed_len (u32 LE)
-//   [30..]     sealed activations (nonce + ciphertext + AEAD tag)
+//   [26..30]   layer_start (u32 LE) — cleartext AAD
+//   [30..34]   layer_end (u32 LE) — cleartext AAD
+//   [34..36]   model_id_len (u16 LE) — cleartext AAD
+//   [36..36+M] model_id (UTF-8) — cleartext AAD
+//   [36+M..40+M] sealed_len (u32 LE)
+//   [40+M..]   sealed activations (nonce + ciphertext + AEAD tag)
 //
-// The AAD for the AEAD is the header bytes [1..26] (uuid+seq+idx+fmt).
+// The AAD for the AEAD is the header bytes [1..36+M].
 
 /// Encode a LayerForward with encrypted activations.
 /// The `sealed_activations` should already be encrypted by the SessionManager.
@@ -572,7 +618,8 @@ pub fn encode_layer_forward_encrypted(
     sealed_activations: Vec<u8>,
 ) -> Result<Vec<u8>, SwarmError> {
     let sealed_len = sealed_activations.len();
-    let total = 1 + 25 + 4 + sealed_len;
+    let model_id_bytes = forward.model_id.0.as_bytes();
+    let total = 1 + 25 + 8 + 2 + model_id_bytes.len() + 4 + sealed_len;
     let mut buf = Vec::with_capacity(total);
 
     buf.push(TENSOR_TAG_ENCRYPTED);
@@ -585,6 +632,14 @@ pub fn encode_layer_forward_encrypted(
         TensorFormat::INT8 => 2,
     };
     buf.push(fmt_tag);
+    // layer_range (required)
+    let (layer_start, layer_end) = forward.layer_range;
+    buf.extend_from_slice(&layer_start.to_le_bytes());
+    buf.extend_from_slice(&layer_end.to_le_bytes());
+    // model_id
+    buf.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
+    buf.extend_from_slice(model_id_bytes);
+    // sealed payload
     buf.extend_from_slice(&(sealed_len as u32).to_le_bytes());
     buf.extend_from_slice(&sealed_activations);
 
@@ -605,14 +660,12 @@ pub fn decode_layer_forward_encrypted(
         data
     };
 
-    // Header: uuid(16) + seq(4) + idx_pos(4) + fmt(1) + sealed_len(4) = 29
-    if data.len() < 29 {
+    // Header: uuid(16) + seq(4) + idx_pos(4) + fmt(1) + layer_start(4) + layer_end(4) + model_id_len(2) = 35
+    if data.len() < 35 {
         return Err(SwarmError::Network(
             "Encrypted tensor envelope too short".to_string(),
         ));
     }
-
-    let aad = data[..25].to_vec(); // uuid + seq + idx_pos + fmt
 
     let request_id = uuid::Uuid::from_bytes(
         data[0..16]
@@ -639,19 +692,51 @@ pub fn decode_layer_forward_encrypted(
             )))
         }
     };
-    let sealed_len = u32::from_le_bytes(
+    let layer_start = u32::from_le_bytes(
         data[25..29]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid layer_start".into()))?,
+    );
+    let layer_end = u32::from_le_bytes(
+        data[29..33]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid layer_end".into()))?,
+    );
+    let mid_len = u16::from_le_bytes(
+        data[33..35]
+            .try_into()
+            .map_err(|_| SwarmError::Network("Invalid model_id_len".into()))?,
+    ) as usize;
+
+    let mid_start = 35;
+    if data.len() < mid_start + mid_len + 4 {
+        return Err(SwarmError::Network(
+            "Encrypted tensor model_id/sealed truncated".to_string(),
+        ));
+    }
+    let model_id_str = std::str::from_utf8(&data[mid_start..mid_start + mid_len])
+        .map_err(|_| SwarmError::Network("Invalid model_id UTF-8".into()))?;
+    let model_id = ModelId(model_id_str.to_string());
+
+    // AAD is everything from uuid through model_id (before sealed_len)
+    let aad_end = mid_start + mid_len;
+    let aad = data[..aad_end].to_vec();
+
+    let sealed_len_start = aad_end;
+    let sealed_len = u32::from_le_bytes(
+        data[sealed_len_start..sealed_len_start + 4]
             .try_into()
             .map_err(|_| SwarmError::Network("Invalid sealed_len".into()))?,
     ) as usize;
 
-    if data.len() < 29 + sealed_len {
+    let sealed_start = sealed_len_start + 4;
+    if data.len() < sealed_start + sealed_len {
         return Err(SwarmError::Network(
             "Encrypted tensor data truncated".to_string(),
         ));
     }
 
-    let sealed = data[29..29 + sealed_len].to_vec();
+    let sealed = data[sealed_start..sealed_start + sealed_len].to_vec();
 
     let forward = LayerForward {
         request_id,
@@ -659,7 +744,8 @@ pub fn decode_layer_forward_encrypted(
         index_pos,
         activations: vec![], // Will be filled after decryption
         format,
-        layer_range: None, // Encrypted messages don't carry layer_range in AAD header
+        model_id,
+        layer_range: (layer_start, layer_end),
         tp_meta: None,
         sender_peer_bytes: None,
     };
@@ -842,6 +928,10 @@ mod tests {
         }
     }
 
+    fn test_model_id() -> ModelId {
+        ModelId("test-model".into())
+    }
+
     #[test]
     fn layer_forward_encode_decode_roundtrip() {
         let forward = LayerForward {
@@ -850,7 +940,8 @@ mod tests {
             index_pos: 0,
             activations: vec![1, 2, 3, 4, 5, 6, 7, 8],
             format: TensorFormat::FP16,
-            layer_range: None,
+            model_id: test_model_id(),
+            layer_range: (0, 4),
             tp_meta: None,
             sender_peer_bytes: None,
         };
@@ -862,7 +953,8 @@ mod tests {
         assert_eq!(decoded.sequence_num, 42);
         assert_eq!(decoded.activations, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(matches!(decoded.format, TensorFormat::FP16));
-        assert!(decoded.layer_range.is_none());
+        assert_eq!(decoded.layer_range, (0, 4));
+        assert_eq!(decoded.model_id, test_model_id());
     }
 
     #[test]
@@ -878,7 +970,8 @@ mod tests {
                 index_pos: 0,
                 activations: vec![],
                 format: fmt,
-                layer_range: None,
+                model_id: test_model_id(),
+                layer_range: (0, 2),
                 tp_meta: None,
                 sender_peer_bytes: None,
             };
@@ -903,7 +996,8 @@ mod tests {
             index_pos: 0,
             activations: data.clone(),
             format: TensorFormat::FP32,
-            layer_range: None,
+            model_id: test_model_id(),
+            layer_range: (0, 28),
             tp_meta: None,
             sender_peer_bytes: None,
         };
@@ -922,7 +1016,8 @@ mod tests {
             index_pos: 128,
             activations: vec![0xAA; 64],
             format: TensorFormat::FP32,
-            layer_range: Some((10, 14)),
+            model_id: test_model_id(),
+            layer_range: (10, 14),
             tp_meta: None,
             sender_peer_bytes: None,
         };
@@ -933,28 +1028,29 @@ mod tests {
         assert_eq!(decoded.request_id, forward.request_id);
         assert_eq!(decoded.sequence_num, 7);
         assert_eq!(decoded.index_pos, 128);
-        assert_eq!(decoded.layer_range, Some((10, 14)));
+        assert_eq!(decoded.layer_range, (10, 14));
+        assert_eq!(decoded.model_id, test_model_id());
     }
 
     #[test]
-    fn layer_forward_without_layer_range() {
-        // Messages without layer_range (e.g. encrypted) should decode with None
+    fn layer_forward_missing_trailer_rejected() {
+        // Messages without trailer should be rejected (no backward compat)
         let forward = LayerForward {
             request_id: uuid::Uuid::nil(),
             sequence_num: 0,
             index_pos: 0,
             activations: vec![1, 2, 3],
             format: TensorFormat::FP16,
-            layer_range: None,
+            model_id: test_model_id(),
+            layer_range: (0, 2),
             tp_meta: None,
             sender_peer_bytes: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
-        // Trim to remove any trailer — simulates an old encoder
+        // Trim to remove the trailer — simulates an old encoder
         let trimmed = &encoded[..1 + 29 + 3]; // tag + header + 3 bytes data
-        let decoded = decode_layer_forward(trimmed).unwrap();
-        assert!(decoded.layer_range.is_none());
-        assert_eq!(decoded.activations, vec![1, 2, 3]);
+        let result = decode_layer_forward(trimmed);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1102,7 +1198,8 @@ mod tests {
             index_pos: 512,
             activations: vec![0xBB; 4096],
             format: TensorFormat::FP32,
-            layer_range: Some((2, 8)),
+            model_id: test_model_id(),
+            layer_range: (2, 8),
             tp_meta: None,
             sender_peer_bytes: None,
         };
@@ -1122,6 +1219,7 @@ mod tests {
         assert_eq!(decoded.sequence_num, 99);
         assert_eq!(decoded.index_pos, 512);
         assert_eq!(decoded.activations.len(), 4096);
-        assert_eq!(decoded.layer_range, Some((2, 8)));
+        assert_eq!(decoded.layer_range, (2, 8));
+        assert_eq!(decoded.model_id, test_model_id());
     }
 }

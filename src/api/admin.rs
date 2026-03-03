@@ -286,14 +286,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let local_node_id = state.shared_state.identity.node_id().clone();
 
-    // Collect peer info for each model from shard_registry
+    // Collect peer info for each model from model_registry shard_holders
     let mut model_peers: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    for entry in state.shared_state.shard_registry.iter() {
-        let shard_id = entry.key();
-        let holders = entry.value();
+    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
         let model_name = shard_id.model_id.0.clone();
-        for holder in holders.iter() {
+        for holder in &holders {
             if *holder != local_node_id {
                 model_peers
                     .entry(model_name.clone())
@@ -1938,14 +1936,6 @@ pub async fn hf_download_shards(
                     download_shared
                         .model_registry
                         .record_shard_holder(shard_id.clone(), node_id.clone());
-                    let mut holders = download_shared
-                        .shard_registry
-                        .entry(shard_id.clone())
-                        .or_default();
-                    if !holders.contains(&node_id) {
-                        holders.push(node_id.clone());
-                    }
-                    drop(holders);
 
                     // Announce this individual shard to the network immediately
                     // so peers see partial progress and can start acquiring
@@ -2157,11 +2147,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         params
             .shared
             .model_registry
-            .record_shard_holder(shard_id.clone(), node_id.clone());
-        let mut holders = params.shared.shard_registry.entry(shard_id).or_default();
-        if !holders.contains(&node_id) {
-            holders.push(node_id.clone());
-        }
+            .record_shard_holder(shard_id, node_id.clone());
     }
 
     tracing::info!(
@@ -2263,11 +2249,10 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         let entry = regions.entry(code).or_insert_with(|| (0, HashMap::new()));
         entry.0 += 1;
         // Add our hosted models
-        for item in state.shared_state.shard_registry.iter() {
-            let model_id = &item.key().model_id.0;
-            let node_id = state.shared_state.identity.node_id();
-            if item.value().contains(node_id) {
-                *entry.1.entry(model_id.clone()).or_insert(0) += 1;
+        let node_id = state.shared_state.identity.node_id();
+        for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
+            if holders.contains(node_id) {
+                *entry.1.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
             }
         }
     }
@@ -2447,11 +2432,6 @@ pub async fn delete_model(
     shared.model_registry.remove_manifest(&mid);
     shared.model_registry.remove_all_model_shards(&mid);
 
-    // Remove from shard_registry DashMap
-    shared
-        .shard_registry
-        .retain(|shard_id, _| shard_id.model_id != mid);
-
     // Remove from acquisition_progress
     shared.acquisition_progress.remove(&mid);
 
@@ -2528,11 +2508,6 @@ pub async fn delete_shard(
     shared
         .model_registry
         .remove_shard_holder(&shard_id, &local_node_id);
-
-    // Also remove from shard_registry DashMap
-    if let Some(mut holders) = shared.shard_registry.get_mut(&shard_id) {
-        holders.retain(|n| n != &local_node_id);
-    }
 
     // Evict any cached split model segments that included this shard
     shared.split_models.retain(|key, _| key.0 != mid);

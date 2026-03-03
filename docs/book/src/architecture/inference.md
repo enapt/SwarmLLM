@@ -24,7 +24,7 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 ## Pipeline Assembly
 
 1. Fetch model manifest to determine layer ranges
-2. Query shard_registry for hosting nodes
+2. Query model_registry.shard_holders for hosting nodes
 3. Fetch node load/latency from peer_registry
 4. Sort candidates by (latency ASC, load ASC, trust DESC)
 5. Greedy assignment: widest contiguous layer range per node

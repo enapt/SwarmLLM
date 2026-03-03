@@ -43,7 +43,7 @@ impl PipelineScheduler {
     /// Algorithm (from spec):
     /// 1. Fetch model manifest from registry
     /// 2. Determine required layer ranges (0..num_layers)
-    /// 3. Query shard_registry for all nodes hosting shards of this model
+    /// 3. Query model_registry.shard_holders for all nodes hosting shards of this model
     /// 4. For each node, fetch current load and latency from peer_registry
     /// 5. Greedy assignment: sort candidates by (latency ASC, load ASC, trust DESC),
     ///    assign the best available node covering the widest contiguous layer range

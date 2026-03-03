@@ -600,15 +600,7 @@ impl AcquisitionManager {
                             // Register as shard holder
                             self.shared_state
                                 .model_registry
-                                .record_shard_holder(shard_id.clone(), node_id.clone());
-                            let mut holders = self
-                                .shared_state
-                                .shard_registry
-                                .entry(shard_id)
-                                .or_default();
-                            if !holders.contains(&node_id) {
-                                holders.push(node_id);
-                            }
+                                .record_shard_holder(shard_id, node_id);
                         }
                         Err(e) => {
                             job.status.failed_shards += 1;

@@ -10,7 +10,6 @@ use futures::{SinkExt, StreamExt};
 use crate::api::server::AppState;
 use crate::daemon::SharedState;
 use crate::model::acquisition::ShardState;
-use crate::types::ShardId;
 
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -207,9 +206,7 @@ async fn build_stats_message(
 
     // Build shard registry snapshot — only include if changed from previous tick
     let mut current_snapshot: HashMap<String, Vec<ShardSnapshot>> = HashMap::new();
-    for entry in state.shard_registry.iter() {
-        let shard_id: &ShardId = entry.key();
-        let holders = entry.value();
+    for (shard_id, holders) in state.model_registry.all_shard_entries() {
         let model_id = shard_id.model_id.0.clone();
         let local = holders.contains(&local_node_id);
         current_snapshot

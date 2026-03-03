@@ -18,7 +18,6 @@ Single Rust binary, three simultaneous functions:
 │  │              Shared State (Arc)                     │  │
 │  │  DashMap<NodeId, PeerInfo>      — peer registry     │  │
 │  │  ModelRegistry                  — models + shards   │  │
-│  │  DashMap<ShardId, Vec<NodeId>>  — shard locations   │  │
 │  │  DashMap<Uuid, PipelineAssignment> — pipelines      │  │
 │  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
 │  │  RwLock<NodeStats>              — node statistics    │  │
@@ -94,7 +93,7 @@ The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound
 7.  Build Daemon { config, identity, db }
 8.  Initialize ModelExecutor (load GGUF model if --model provided)
 9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)
-10. Scan local shards → register in model_registry + shard_registry (with disk existence verification)
+10. Scan local shards → register in model_registry (with disk existence verification)
 11. Create mpsc channels (network, router, rebalance, acquisition, pool)
 12. Spawn all tasks (10 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
@@ -298,7 +297,7 @@ For a 7B model (hidden_dim=3584):
 ### Pipeline Assembly Algorithm
 
 1. Fetch model manifest → determine layer ranges
-2. Query shard_registry for hosting nodes
+2. Query model_registry.shard_holders for hosting nodes
 3. Fetch node load/latency from peer_registry
 4. Sort candidates by (latency ASC, load ASC, trust DESC)
 5. Greedy assignment: widest contiguous layer range per node

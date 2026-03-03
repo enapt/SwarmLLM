@@ -97,6 +97,13 @@ impl ModelRegistry {
             .retain(|shard_id, _| &shard_id.model_id != model_id);
     }
 
+    /// Remove a peer from all shard holder entries (e.g., peer went offline).
+    pub fn remove_peer_from_all_shards(&self, node_id: &NodeId) {
+        for mut entry in self.shard_holders.iter_mut() {
+            entry.value_mut().remove(node_id);
+        }
+    }
+
     /// Iterate over all tracked shard entries (shard_id, holders).
     pub fn all_shard_entries(&self) -> Vec<(ShardId, Vec<NodeId>)> {
         self.shard_holders

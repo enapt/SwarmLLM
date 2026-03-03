@@ -249,10 +249,10 @@ impl HealthMonitor {
 
         for peer_id in stale_peers {
             self.shared_state.peer_registry.remove(&peer_id);
-            // Clean up stale peer from shard_registry to prevent phantom holder entries
-            for mut entry in self.shared_state.shard_registry.iter_mut() {
-                entry.value_mut().retain(|nid| nid != &peer_id);
-            }
+            // Clean up stale peer from model_registry shard holders
+            self.shared_state
+                .model_registry
+                .remove_peer_from_all_shards(&peer_id);
             tracing::info!(peer = %peer_id, "Removed stale peer (and shard registry entries)");
             // Signal the rebalancer that a peer has left
             if self

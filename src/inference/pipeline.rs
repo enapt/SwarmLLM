@@ -609,7 +609,8 @@ impl PipelineExecutor {
                     index_pos: index_pos as u32,
                     activations: activations.clone(),
                     format: TensorFormat::FP32,
-                    layer_range: Some(segment.layer_range),
+                    model_id: segment.shard_id.model_id.clone(),
+                    layer_range: segment.layer_range,
                     sender_peer_bytes: None,
                     tp_meta: None,
                 };
@@ -654,13 +655,46 @@ impl PipelineExecutor {
                 // Wait for response via the oneshot channel (with timeout)
                 match Self::wait_for_result(rx).await {
                     Ok(result) => {
-                        if is_last {
-                            return Ok(result);
+                        // Check if the remote node returned an error — if so, failover
+                        if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason
+                        {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                segment = idx,
+                                node = %segment.node_id,
+                                error = %err_msg,
+                                "Remote segment returned error, attempting failover"
+                            );
+                            let failover_result = self
+                                .failover_segment(
+                                    idx,
+                                    request_id,
+                                    sequence_num,
+                                    index_pos,
+                                    &activations,
+                                    is_last,
+                                )
+                                .await?;
+                            if is_last {
+                                return Ok(failover_result);
+                            }
+                            activations = failover_result.activations;
+                        } else {
+                            if is_last {
+                                return Ok(result);
+                            }
+                            // Use hidden-state activations for the next segment
+                            activations = result.activations;
                         }
-                        // Use hidden-state activations for the next segment
-                        activations = result.activations;
                     }
-                    Err(_e) => {
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            segment = idx,
+                            node = %segment.node_id,
+                            error = %e,
+                            "Segment timed out or failed, attempting failover"
+                        );
                         // Clean up the pending entry to prevent memory leak
                         self.shared_state.pending_layer_results.remove(&request_id);
                         // Attempt failover to standby
@@ -1228,7 +1262,8 @@ impl PipelineExecutor {
                     index_pos: index_pos as u32,
                     activations: activations.to_vec(),
                     format: TensorFormat::FP32,
-                    layer_range: Some(backup.layer_range),
+                    model_id: backup.shard_id.model_id.clone(),
+                    layer_range: backup.layer_range,
                     tp_meta: None,
                     sender_peer_bytes: None,
                 };

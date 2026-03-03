@@ -46,8 +46,6 @@ pub struct SharedState {
     pub db: Database,
     pub peer_registry: DashMap<NodeId, PeerInfo>,
     pub model_registry: ModelRegistry,
-    /// Which nodes have which shards — spec-required top-level field.
-    pub shard_registry: DashMap<ShardId, Vec<NodeId>>,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
     pub credit_balance: Arc<RwLock<CreditBalance>>,
     pub node_stats: RwLock<NodeStats>,
@@ -342,7 +340,6 @@ impl SharedState {
             db: db.clone(),
             peer_registry: DashMap::new(),
             model_registry,
-            shard_registry: DashMap::new(),
             active_pipelines: DashMap::new(),
             credit_balance: Arc::new(RwLock::new(CreditBalance {
                 node_id,
@@ -726,12 +723,7 @@ impl Daemon {
                             };
                             shared_state
                                 .model_registry
-                                .record_shard_holder(shard_id.clone(), node_id.clone());
-                            let mut holders =
-                                shared_state.shard_registry.entry(shard_id).or_default();
-                            if !holders.contains(&node_id) {
-                                holders.push(node_id.clone());
-                            }
+                                .record_shard_holder(shard_id, node_id.clone());
                         }
                     }
                     // Load GGUF metadata for the model if we have a source path
@@ -895,11 +887,7 @@ impl Daemon {
                     let node_id = shared_state.identity.node_id().clone();
                     shared_state
                         .model_registry
-                        .record_shard_holder(shard_id.clone(), node_id.clone());
-                    let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
-                    if !holders.contains(&node_id) {
-                        holders.push(node_id);
-                    }
+                        .record_shard_holder(shard_id, node_id);
                 }
             }
             Err(e) => {
@@ -1723,16 +1711,6 @@ async fn dispatch_network_messages(
                                     peer.last_seen = chrono::Utc::now();
                                 }
                                 for shard_id in &announce.shards {
-                                    {
-                                        let mut holders = shared_state.shard_registry
-                                            .entry(shard_id.clone())
-                                            .or_default();
-                                        if !holders.contains(&announce.node_id) {
-                                            holders.push(announce.node_id.clone());
-                                        }
-                                    }
-                                    // Also register in model_registry so auto-acquire
-                                    // can see shard coverage across the network
                                     shared_state.model_registry
                                         .record_shard_holder(shard_id.clone(), announce.node_id.clone());
                                 }
@@ -1909,14 +1887,6 @@ async fn dispatch_network_messages(
                                         // Register the peer as a shard holder now
                                         // (the ShardAnnounce gossip will also arrive,
                                         //  but this gives immediate consistency)
-                                        {
-                                            let mut holders = shared_state.shard_registry
-                                                .entry(progress.shard_id.clone())
-                                                .or_default();
-                                            if !holders.contains(&progress.node_id) {
-                                                holders.push(progress.node_id.clone());
-                                            }
-                                        }
                                         shared_state.model_registry
                                             .record_shard_holder(progress.shard_id.clone(), progress.node_id.clone());
                                         // Wake auto-manage — peer completed a download, rarity changed
@@ -2111,11 +2081,7 @@ pub fn generate_and_register_local_manifest(
                 };
                 shared_state
                     .model_registry
-                    .record_shard_holder(shard_id.clone(), node_id.clone());
-                let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
-                if !holders.contains(&node_id) {
-                    holders.push(node_id.clone());
-                }
+                    .record_shard_holder(shard_id, node_id.clone());
             }
         }
         // Also load GGUF metadata if not already cached
@@ -2306,11 +2272,7 @@ pub fn generate_and_register_local_manifest(
         };
         shared_state
             .model_registry
-            .record_shard_holder(shard_id.clone(), node_id.clone());
-        let mut holders = shared_state.shard_registry.entry(shard_id).or_default();
-        if !holders.contains(&node_id) {
-            holders.push(node_id.clone());
-        }
+            .record_shard_holder(shard_id, node_id.clone());
     }
     if let Some((s, e)) = shard_range {
         tracing::info!(
@@ -2520,30 +2482,7 @@ async fn handle_layer_forward(
         "Processing LayerForward locally"
     );
 
-    // Find which model we have shards for. For now, pick the first model with a split model
-    // or the first model we have local shards for.
-    let model_id = {
-        // Check if we already have a cached split model
-        if let Some(entry) = shared_state.split_models.iter().next() {
-            entry.key().0.clone()
-        } else {
-            // Find a model we have local shards for
-            match shared_state.shard_registry.iter().next() {
-                Some(entry) => entry.key().model_id.clone(),
-                None => {
-                    tracing::warn!(request_id = %request_id, "No local shards to process LayerForward");
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        "No local shards",
-                    )
-                    .await;
-                    return;
-                }
-            }
-        }
-    };
+    let model_id = forward.model_id.clone();
 
     // Determine our layer range from the manifest and local shards
     let manifest = match shared_state.model_registry.get_manifest(&model_id) {
@@ -2585,31 +2524,11 @@ async fn handle_layer_forward(
         return;
     }
 
-    // Determine layer range.  If the sender specified a layer_range in the forward
-    // message (new protocol), use that directly — it tells us exactly which segment
-    // to process.  Otherwise use manifest layer_range data (v2 manifests have
-    // accurate layer ranges from tensor metadata).
-    let (layer_start, layer_end, total_layers) = if let Some((ls, le)) = forward.layer_range {
+    // Layer range is required in the forward message — no guessing
+    let (layer_start, layer_end, total_layers) = {
+        let (ls, le) = forward.layer_range;
         let total = manifest.num_layers as usize;
         (ls as usize, le as usize, total)
-    } else if manifest.num_layers > 0 {
-        // Use manifest shard layer_range data (always accurate in v2)
-        let ranges = split::available_layer_ranges_from_manifest(&manifest, &local_shard_indices);
-        // Pick the longest contiguous range
-        let (ls, le) = ranges
-            .into_iter()
-            .max_by_key(|&(s, e)| e - s)
-            .unwrap_or((0, 0));
-        (ls, le, manifest.num_layers as usize)
-    } else {
-        send_error_result(
-            &network_tx,
-            &sender_peer_bytes,
-            request_id,
-            "Cannot determine layer range",
-        )
-        .await;
-        return;
     };
 
     if layer_start >= layer_end {

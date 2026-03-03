@@ -1066,12 +1066,6 @@ impl AutoShardManager {
                         shared
                             .model_registry
                             .record_shard_holder(sid.clone(), node_id.clone());
-                        {
-                            let mut holders = shared.shard_registry.entry(sid.clone()).or_default();
-                            if !holders.contains(&node_id) {
-                                holders.push(node_id.clone());
-                            }
-                        }
 
                         // Update progress
                         if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
@@ -1166,15 +1160,7 @@ impl AutoShardManager {
         };
         self.shared_state
             .model_registry
-            .record_shard_holder(shard_id.clone(), node_id.clone());
-        let mut holders = self
-            .shared_state
-            .shard_registry
-            .entry(shard_id)
-            .or_default();
-        if !holders.contains(&node_id) {
-            holders.push(node_id);
-        }
+            .record_shard_holder(shard_id, node_id);
     }
 
     /// Check if any local shards are available for this model and load them.
@@ -1414,9 +1400,6 @@ impl AutoShardManager {
                 index: candidate.shard_index,
             };
             registry.remove_shard_holder(&shard_id, &local_node_id);
-            if let Some(mut holders) = self.shared_state.shard_registry.get_mut(&shard_id) {
-                holders.retain(|n| n != &local_node_id);
-            }
 
             // Count remaining local shards for this model
             let remaining_local = registry
