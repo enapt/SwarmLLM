@@ -23,9 +23,15 @@ use crate::network::relay::RelayServerConfig;
 /// that cause silent message loss when mDNS creates duplicate connections.
 #[derive(NetworkBehaviour)]
 pub struct SwarmBehaviour {
+    /// request_response MUST be first: the NetworkBehaviour derive macro polls
+    /// sub-behaviours in field order, and Connection::poll returns immediately on
+    /// NotifyBehaviour events (exiting its handler-poll loop). If kademlia or
+    /// gossipsub are polled first, their continuous NotifyBehaviour events starve
+    /// request_response's OutboundSubstreamRequest — preventing tensor forwards
+    /// from ever reaching the codec.
+    pub request_response: request_response::Behaviour<SwarmCodec>,
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
-    pub request_response: request_response::Behaviour<SwarmCodec>,
     pub identify: identify::Behaviour,
     pub autonat: autonat::Behaviour,
     pub dcutr: dcutr::Behaviour,
@@ -153,14 +159,23 @@ pub fn build_behaviour(
     let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
 
     // NET-I5: Connection limits to prevent resource exhaustion.
-    // max_established_per_peer=4: When two nodes discover each other via mDNS on
-    // multiple LAN interfaces, both sides dial simultaneously, creating up to 4
-    // connection attempts. With max=2, the denied extras trigger ApplicationClose
-    // that cascades and closes ALL connections from that peer, leaving them
-    // permanently disconnected. 4 is sufficient for dual-interface simultaneous dial.
+    // max_established_per_peer=1: MUST be 1. With >1, libp2p request_response
+    // round-robins requests across connections via `request_id % connections.len()`.
+    // On multi-interface hosts (WSL2, Docker, dual-NIC), mDNS discovers the peer
+    // on multiple addresses, creating parallel connections. Some connections go
+    // through unreachable routes (e.g. 10.255.255.254 on WSL2) and silently fail:
+    // the connection closes immediately (ApplicationClosed error_code=0) but the
+    // behaviour's `connected` map retains a stale entry, causing every other
+    // send_request to be routed to a dead connection and silently dropped.
+    let max_per_peer = 1u32;
     let conn_limits = connection_limits::ConnectionLimits::default()
-        .with_max_established_per_peer(Some(4))
+        .with_max_established_per_peer(Some(max_per_peer))
         .with_max_established(Some(500));
+    tracing::info!(
+        max_per_peer,
+        max_total = 500,
+        "DIAG: connection limits configured"
+    );
     let connection_limits = connection_limits::Behaviour::new(conn_limits);
 
     // mDNS for automatic LAN peer discovery
@@ -176,9 +191,9 @@ pub fn build_behaviour(
     };
 
     Ok(SwarmBehaviour {
+        request_response,
         kademlia,
         gossipsub,
-        request_response,
         identify,
         autonat,
         dcutr,

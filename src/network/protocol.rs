@@ -107,12 +107,14 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        tracing::info!("DIAG: codec read_request waiting for tag");
         let mut tag_buf = [0u8; 1];
         io.read_exact(&mut tag_buf).await?;
 
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_request header");
 
         if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
@@ -127,8 +129,22 @@ impl request_response::Codec for SwarmCodec {
         match tag_buf[0] {
             WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
             WIRE_TAG_TENSOR_COMPRESSED => {
-                let decompressed = compression::decompress_tensor(&buf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
+                    tracing::error!(
+                        compressed_len = buf.len(),
+                        "DIAG: request tensor decompression failed: {e}"
+                    );
+                    io::Error::new(io::ErrorKind::InvalidData, e)
+                })?;
+                tracing::debug!(
+                    compressed_len = buf.len(),
+                    decompressed_len = decompressed.len(),
+                    ratio = format_args!(
+                        "{:.1}x",
+                        decompressed.len() as f64 / buf.len().max(1) as f64
+                    ),
+                    "DIAG: request tensor decompressed"
+                );
                 Ok(SwarmRequest::TensorPayload(decompressed))
             }
             _ => serde_json::from_slice(&buf)
@@ -144,12 +160,14 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
+        tracing::info!("DIAG: codec read_response waiting for tag");
         let mut tag_buf = [0u8; 1];
         io.read_exact(&mut tag_buf).await?;
 
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_response header");
 
         if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
@@ -160,12 +178,27 @@ impl request_response::Codec for SwarmCodec {
 
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
+        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_response done");
 
         match tag_buf[0] {
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
             WIRE_TAG_TENSOR_COMPRESSED => {
-                let decompressed = compression::decompress_tensor(&buf)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
+                    tracing::error!(
+                        compressed_len = buf.len(),
+                        "DIAG: response tensor decompression failed: {e}"
+                    );
+                    io::Error::new(io::ErrorKind::InvalidData, e)
+                })?;
+                tracing::debug!(
+                    compressed_len = buf.len(),
+                    decompressed_len = decompressed.len(),
+                    ratio = format_args!(
+                        "{:.1}x",
+                        decompressed.len() as f64 / buf.len().max(1) as f64
+                    ),
+                    "DIAG: response tensor decompressed"
+                );
                 Ok(SwarmResponse::TensorPayload(decompressed))
             }
             _ => serde_json::from_slice(&buf)
@@ -203,7 +236,10 @@ impl request_response::Codec for SwarmCodec {
                 frame
             }
         };
+        let frame_len = frame.len();
+        tracing::info!(frame_len, "DIAG: codec write_request start");
         io.write_all(&frame).await?;
+        tracing::info!(frame_len, "DIAG: codec write_request done");
         // Do NOT call io.close() here — the request_response handler manages stream
         // lifecycle (close + read_response). Closing in the codec corrupts the QUIC
         // stream state and silently prevents message delivery.
@@ -238,7 +274,10 @@ impl request_response::Codec for SwarmCodec {
                 frame
             }
         };
+        let frame_len = frame.len();
+        tracing::info!(frame_len, "DIAG: codec write_response start");
         io.write_all(&frame).await?;
+        tracing::info!(frame_len, "DIAG: codec write_response done");
         // Do NOT call io.close() here — the request_response handler manages stream
         // lifecycle. Closing in the codec corrupts QUIC stream state.
         Ok(())

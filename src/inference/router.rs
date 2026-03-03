@@ -523,6 +523,12 @@ impl InferenceRouter {
 
         tokio::spawn(async move {
             let request_start = std::time::Instant::now();
+            tracing::info!(
+                request_id = %request.id,
+                model = %request.model_id,
+                priority = ?request.priority,
+                "DIAG: dispatch_single starting inference"
+            );
             let output = execute_request(
                 shared_state.clone(),
                 network_tx,
@@ -532,14 +538,34 @@ impl InferenceRouter {
             )
             .await;
 
+            let elapsed = request_start.elapsed();
             // Record latency for Prometheus histogram
-            if output.is_ok() {
-                let latency_secs = request_start.elapsed().as_secs_f64();
-                if let Ok(mut samples) = shared_state.inference_latency_samples.write() {
-                    if samples.len() >= 1000 {
-                        samples.pop_front();
+            match &output {
+                Ok(ref result) => {
+                    let latency_secs = elapsed.as_secs_f64();
+                    tracing::info!(
+                        request_id = %request.id,
+                        model = %request.model_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        prompt_tokens = result.prompt_tokens,
+                        completion_tokens = result.completion_tokens,
+                        "DIAG: inference completed"
+                    );
+                    if let Ok(mut samples) = shared_state.inference_latency_samples.write() {
+                        if samples.len() >= 1000 {
+                            samples.pop_front();
+                        }
+                        samples.push_back(latency_secs);
                     }
-                    samples.push_back(latency_secs);
+                }
+                Err(ref e) => {
+                    tracing::error!(
+                        request_id = %request.id,
+                        model = %request.model_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        error = %e,
+                        "DIAG: inference FAILED"
+                    );
                 }
             }
 
@@ -551,7 +577,12 @@ impl InferenceRouter {
             // Decrement active count so new requests can be dispatched
             active_count.fetch_sub(1, Ordering::Relaxed);
 
-            let _ = result_tx.send(output);
+            if result_tx.send(output).is_err() {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "DIAG: result_tx receiver dropped — client disconnected before result"
+                );
+            }
         });
     }
 }
@@ -780,7 +811,12 @@ async fn execute_local_batch(
         finalize_request(&shared_state, &request, &output).await;
         shared_state.active_pipelines.remove(&request.id);
         cleanup.complete_one();
-        let _ = result_tx.send(output);
+        if result_tx.send(output).is_err() {
+            tracing::warn!(
+                request_id = %request.id,
+                "DIAG: batch result_tx receiver dropped"
+            );
+        }
     }
 
     tracing::debug!(batch_size, "Local batch complete");
@@ -822,7 +858,12 @@ async fn execute_distributed_batch(
             finalize_request(&shared_state, &request, &output).await;
             shared_state.active_pipelines.remove(&request.id);
             active_count.fetch_sub(1, Ordering::Relaxed);
-            let _ = result_tx.send(output);
+            if result_tx.send(output).is_err() {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "DIAG: distributed batch result_tx receiver dropped"
+                );
+            }
         }));
     }
 
@@ -896,7 +937,12 @@ async fn execute_request(
                 text: String::new(),
                 finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
             };
-            let _ = tx.try_send(done_event);
+            if tx.try_send(done_event).is_err() {
+                tracing::warn!(
+                    request_id = %request.id,
+                    "DIAG: streaming done_event send failed — receiver dropped"
+                );
+            }
             return Ok(InferenceOutput {
                 request_id: request.id,
                 content: accumulated,
@@ -920,6 +966,7 @@ async fn execute_request(
     }
 
     // Distributed inference path: assemble pipeline across nodes
+    let schedule_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request.id,
         model = %model_id,
@@ -927,15 +974,18 @@ async fn execute_request(
     );
 
     let assignment = scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?;
+    let schedule_ms = schedule_start.elapsed().as_millis() as u64;
 
     tracing::info!(
         request_id = %request.id,
         segments = assignment.segments.len(),
         standbys = assignment.standbys.len(),
-        "Pipeline assembled, starting execution"
+        schedule_ms,
+        "DIAG: pipeline assembled"
     );
     for (i, seg) in assignment.segments.iter().enumerate() {
         tracing::info!(
+            request_id = %request.id,
             segment = i,
             node = %seg.node_id,
             layer_start = seg.layer_range.0,
@@ -950,6 +1000,7 @@ async fn execute_request(
         .insert(request.id, assignment.clone());
 
     // Execute the distributed pipeline
+    let execute_start = std::time::Instant::now();
     let mut pipeline = PipelineExecutor::new(
         shared_state.clone(),
         network_tx,
@@ -957,7 +1008,31 @@ async fn execute_request(
         assignment,
     );
 
-    pipeline.execute(token_tx).await
+    let result = pipeline.execute(token_tx).await;
+    let execute_ms = execute_start.elapsed().as_millis() as u64;
+    match &result {
+        Ok(output) => {
+            tracing::info!(
+                request_id = %request.id,
+                schedule_ms,
+                execute_ms,
+                total_ms = schedule_ms + execute_ms,
+                prompt_tokens = output.prompt_tokens,
+                completion_tokens = output.completion_tokens,
+                finish_reason = %output.finish_reason,
+                "DIAG: execute_request completed successfully"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                request_id = %request.id,
+                schedule_ms,
+                execute_ms,
+                "DIAG: execute_request failed: {e}"
+            );
+        }
+    }
+    result
 }
 
 #[cfg(test)]

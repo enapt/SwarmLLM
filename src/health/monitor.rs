@@ -178,17 +178,22 @@ impl HealthMonitor {
         };
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));
-        let _ = self.network_tx.send(msg).await;
+        if let Err(e) = self.network_tx.send(msg).await {
+            tracing::warn!(error = %e, "DIAG: failed to broadcast capability update");
+        }
 
         // Also broadcast shard announcements for our hosted models
         if !hosted_shards.is_empty() {
+            let shard_count = hosted_shards.len();
             let announce = crate::types::ShardAnnounce {
                 node_id,
                 shards: hosted_shards,
                 timestamp: chrono::Utc::now(),
             };
             let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-            let _ = self.network_tx.send(msg).await;
+            if let Err(e) = self.network_tx.send(msg).await {
+                tracing::warn!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
+            }
         }
     }
 
@@ -201,7 +206,9 @@ impl HealthMonitor {
                 continue;
             }
             let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest.clone()));
-            let _ = self.network_tx.send(msg).await;
+            if let Err(e) = self.network_tx.send(msg).await {
+                tracing::warn!(error = %e, model = %manifest.id, "DIAG: failed to broadcast manifest");
+            }
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source
             if let Some(hf_source) = self.shared_state.hf_sources.get(&manifest.id) {
@@ -212,7 +219,9 @@ impl HealthMonitor {
                     publisher: our_id.clone(),
                 };
                 let msg = NetworkCommand::Broadcast(SwarmMessage::HfSourceGossip(gossip));
-                let _ = self.network_tx.send(msg).await;
+                if let Err(e) = self.network_tx.send(msg).await {
+                    tracing::warn!(error = %e, model = %manifest.id, "DIAG: failed to broadcast HF source");
+                }
             }
         }
     }
@@ -247,6 +256,14 @@ impl HealthMonitor {
             }
         }
 
+        if !stale_peers.is_empty() {
+            tracing::warn!(
+                stale_count = stale_peers.len(),
+                total_peers = self.shared_state.peer_registry.len(),
+                active_pipelines = self.shared_state.active_pipelines.len(),
+                "DIAG: removing stale peers"
+            );
+        }
         for peer_id in stale_peers {
             self.shared_state.peer_registry.remove(&peer_id);
             // Clean up stale peer from model_registry shard holders
@@ -279,9 +296,11 @@ impl HealthMonitor {
             .map(|entry| *entry.key())
             .collect();
         if !stale_layer.is_empty() {
-            tracing::debug!(
+            tracing::info!(
                 count = stale_layer.len(),
-                "Cleaning up stale pending_layer_results"
+                total_pending = self.shared_state.pending_layer_results.len(),
+                request_ids = ?stale_layer.iter().take(5).map(|u| u.to_string()).collect::<Vec<_>>(),
+                "DIAG: cleaning up stale pending_layer_results"
             );
             for key in stale_layer {
                 self.shared_state.pending_layer_results.remove(&key);
@@ -297,9 +316,10 @@ impl HealthMonitor {
             .map(|entry| *entry.key())
             .collect();
         if !stale_stream.is_empty() {
-            tracing::debug!(
+            tracing::info!(
                 count = stale_stream.len(),
-                "Cleaning up stale streaming_token_txs"
+                total_streaming = self.shared_state.streaming_token_txs.len(),
+                "DIAG: cleaning up stale streaming_token_txs"
             );
             for key in stale_stream {
                 self.shared_state.streaming_token_txs.remove(&key);

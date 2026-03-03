@@ -583,7 +583,8 @@ pub async fn chat_completions(
     }
 
     // Build prompt for non-split paths (distributed inference + direct executor).
-    // Uses loaded_model_info which holds the singleton llama-cpp model's template.
+    // Uses loaded_model_info first; falls back to GGUF header on disk for
+    // distributed-only nodes that have no local model but do have the probe.
     let prompt = {
         let (tmpl, bos, eos) = {
             let info = state.shared_state.loaded_model_info.read().await;
@@ -593,7 +594,26 @@ pub async fn chat_completions(
                     i.bos_token.clone(),
                     i.eos_token.clone(),
                 ),
-                None => (None, String::new(), String::new()),
+                None => {
+                    // Try loading template from GGUF header on disk
+                    let safe_id = req.model.replace(['/', '\\'], "_").replace("..", "_");
+                    let header_path = state
+                        .shared_state
+                        .config
+                        .node
+                        .data_dir
+                        .join("models")
+                        .join(&safe_id)
+                        .join("gguf_header.bin");
+                    if header_path.exists() {
+                        match crate::inference::pipeline::template_from_header(&header_path) {
+                            Some((t, b, e)) => (t, b, e),
+                            None => (None, String::new(), String::new()),
+                        }
+                    } else {
+                        (None, String::new(), String::new())
+                    }
+                }
             }
         };
         chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos)
@@ -1017,14 +1037,24 @@ async fn router_inference_stream(
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
 
     tokio::spawn(async move {
+        let stream_start = std::time::Instant::now();
+        let mut token_count: u64 = 0;
+
         // Send initial role delta
-        let _ = sse_tx
+        if sse_tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: Some("assistant".into()),
                 finish_reason: None,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "DIAG: SSE role delta send failed — client disconnected before stream started"
+            );
+            return;
+        }
 
         // Read tokens from the pipeline as they arrive
         let mut got_finish = false;
@@ -1032,25 +1062,38 @@ async fn router_inference_stream(
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
                 if !event.text.is_empty() {
-                    let _ = sse_tx
+                    token_count += 1;
+                    if sse_tx
                         .send(StreamEvent::Delta {
                             content: Some(event.text),
                             role: None,
                             finish_reason: None,
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            token_count,
+                            "DIAG: SSE final text delta send failed — client disconnected"
+                        );
+                    }
                 }
-                let _ = sse_tx
+                if sse_tx
                     .send(StreamEvent::Delta {
                         content: None,
                         role: None,
                         finish_reason: Some(reason.clone()),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(token_count, finish_reason = %reason, "DIAG: SSE finish delta send failed — client disconnected");
+                }
                 break;
             }
-            if !event.text.is_empty()
-                && sse_tx
+            if !event.text.is_empty() {
+                token_count += 1;
+                if sse_tx
                     .send(StreamEvent::Delta {
                         content: Some(event.text),
                         role: None,
@@ -1058,54 +1101,91 @@ async fn router_inference_stream(
                     })
                     .await
                     .is_err()
-            {
-                break;
+                {
+                    tracing::warn!(
+                        token_count,
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "DIAG: SSE token delta send failed — client disconnected mid-stream"
+                    );
+                    break;
+                }
             }
         }
 
         // Fallback: if pipeline finished without sending streaming events
         // (e.g., local-only path or error), read the final result.
         if !got_finish {
+            tracing::debug!(
+                token_count,
+                "DIAG: SSE stream no finish event from pipeline, reading result_rx fallback"
+            );
             match result_rx.await {
                 Ok(Ok(output)) => {
-                    if !output.content.is_empty() {
-                        let _ = sse_tx
+                    if !output.content.is_empty()
+                        && sse_tx
                             .send(StreamEvent::Delta {
                                 content: Some(output.content),
                                 role: None,
                                 finish_reason: None,
                             })
-                            .await;
+                            .await
+                            .is_err()
+                    {
+                        tracing::warn!(
+                            "DIAG: SSE fallback content send failed — client disconnected"
+                        );
                     }
-                    let _ = sse_tx
+                    if sse_tx
                         .send(StreamEvent::Delta {
                             content: None,
                             role: None,
-                            finish_reason: Some(output.finish_reason),
+                            finish_reason: Some(output.finish_reason.clone()),
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(finish_reason = %output.finish_reason, "DIAG: SSE fallback finish send failed");
+                    }
                 }
                 Ok(Err(e)) => {
-                    let _ = sse_tx
+                    tracing::warn!("DIAG: SSE fallback got pipeline error: {e}");
+                    if sse_tx
                         .send(StreamEvent::Delta {
                             content: Some(format!("Error: {e}")),
                             role: None,
                             finish_reason: Some("stop".into()),
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("DIAG: SSE error delta send failed — client disconnected");
+                    }
                 }
                 Err(_) => {
-                    let _ = sse_tx
+                    tracing::warn!("DIAG: SSE result_rx channel dropped — pipeline task died without sending result");
+                    if sse_tx
                         .send(StreamEvent::Delta {
                             content: None,
                             role: None,
                             finish_reason: Some("stop".into()),
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("DIAG: SSE channel-drop finish send also failed");
+                    }
                 }
             }
         }
-        let _ = sse_tx.send(StreamEvent::Done).await;
+        if sse_tx.send(StreamEvent::Done).await.is_err() {
+            tracing::debug!("DIAG: SSE Done send failed — client already disconnected");
+        }
+        let elapsed = stream_start.elapsed();
+        tracing::info!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            token_count,
+            "DIAG: SSE distributed stream completed"
+        );
     });
 
     let mut json_buf: Vec<u8> = Vec::with_capacity(512);
@@ -1225,6 +1305,13 @@ async fn split_non_stream_response(
         model.eos_token_str(),
     );
 
+    tracing::debug!(
+        request_id = %request_id,
+        prompt_len = prompt.len(),
+        prompt_preview = &prompt[..prompt.len().min(200)],
+        "DIAG: non-stream built prompt"
+    );
+
     // Tokenize the prompt — forward() handles embedding internally
     let (input, prompt_tokens) = model.tokenize(&prompt)?;
 
@@ -1237,6 +1324,14 @@ async fn split_non_stream_response(
     let mut next_token = sample_token(&last_logits, params.temperature, params.top_p)?;
 
     let eos = model.eos_tokens().to_vec();
+    tracing::debug!(
+        request_id = %request_id,
+        first_token = next_token,
+        is_eos = eos.contains(&next_token),
+        eos_tokens = ?eos,
+        prompt_tokens,
+        "DIAG: non-stream first sampled token"
+    );
     let mut generated: Vec<u32> = Vec::new();
     let mut index_pos = prompt_tokens;
 
@@ -1307,13 +1402,21 @@ async fn split_stream_response(
     tokio::spawn(async move {
         let request_id = request_id_inner;
         // Send initial role delta
-        let _ = tx
+        let stream_start = std::time::Instant::now();
+        let mut token_count: u64 = 0;
+
+        if tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: Some("assistant".into()),
                 finish_reason: None,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::warn!("DIAG: split stream role delta send failed — client disconnected");
+            return;
+        }
 
         let model_entry = state
             .shared_state
@@ -1323,6 +1426,7 @@ async fn split_stream_response(
         let model_ref = match model_entry {
             Some(entry) => entry,
             None => {
+                tracing::warn!(model_id = %model_id, "DIAG: split stream model not found");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
@@ -1342,30 +1446,41 @@ async fn split_stream_response(
         // Tokenize — forward() handles embedding internally
         let (input, prompt_tokens) = match model.tokenize(&prompt) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
+                tracing::error!(model_id = %model_id, "DIAG: split stream tokenize failed: {e}");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
         };
 
         // Prefill
+        let prefill_start = std::time::Instant::now();
         let logits = match model.forward(&input, 0, &kv_store, &request_id) {
             Ok(l) => l,
-            Err(_) => {
+            Err(e) => {
+                tracing::error!(model_id = %model_id, prompt_tokens, "DIAG: split stream prefill failed: {e}");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
         };
+        let prefill_ms = prefill_start.elapsed().as_millis() as u64;
+        tracing::info!(model_id = %model_id, prompt_tokens, prefill_ms, "DIAG: split stream prefill complete");
+
         let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
             Ok(l) => l,
-            Err(_) => {
+            Err(e) => {
+                tracing::error!(
+                    prompt_tokens,
+                    "DIAG: split stream logits narrow failed: {e}"
+                );
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
         };
         let mut next_token = match sample_token(&last_logits, params.temperature, params.top_p) {
             Ok(t) => t,
-            Err(_) => {
+            Err(e) => {
+                tracing::error!("DIAG: split stream initial sample failed: {e}");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
@@ -1374,12 +1489,15 @@ async fn split_stream_response(
         let eos = model.eos_tokens().to_vec();
         let mut index_pos = prompt_tokens;
         let mut finish = "length".to_string();
+        let decode_start = std::time::Instant::now();
 
         for _ in 0..params.max_tokens {
             if eos.contains(&next_token) {
                 finish = "stop".to_string();
                 break;
             }
+
+            token_count += 1;
 
             // Decode and stream token
             let text = decode_split_tokens(&model, &[next_token]);
@@ -1393,34 +1511,80 @@ async fn split_stream_response(
                 .await
                 .is_err()
             {
+                tracing::warn!(
+                    token_count,
+                    elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                    "DIAG: split stream client disconnected mid-decode"
+                );
                 return; // Client disconnected
             }
 
             // Create single-token tensor — forward() handles embedding
             let input = match model.token_tensor(next_token) {
                 Ok(h) => h,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::error!(token_count, "DIAG: split stream token_tensor failed: {e}");
+                    break;
+                }
             };
             let logits = match model.forward(&input, index_pos, &kv_store, &request_id) {
                 Ok(l) => l,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::error!(
+                        token_count,
+                        index_pos,
+                        "DIAG: split stream decode forward failed: {e}"
+                    );
+                    break;
+                }
             };
             next_token = match sample_token(&logits, params.temperature, params.top_p) {
                 Ok(t) => t,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::error!(token_count, "DIAG: split stream sample failed: {e}");
+                    break;
+                }
             };
             index_pos += 1;
         }
 
+        let decode_ms = decode_start.elapsed().as_millis() as u64;
+        let tok_per_sec = if decode_ms > 0 {
+            token_count * 1000 / decode_ms
+        } else {
+            0
+        };
+        tracing::info!(
+            model_id = %model_id,
+            token_count,
+            decode_ms,
+            prefill_ms,
+            tok_per_sec,
+            finish = %finish,
+            "DIAG: split stream decode loop complete"
+        );
+
         // Send finish
-        let _ = tx
+        if tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: None,
                 finish_reason: Some(finish),
             })
-            .await;
-        let _ = tx.send(StreamEvent::Done).await;
+            .await
+            .is_err()
+        {
+            tracing::warn!(token_count, "DIAG: split stream finish delta send failed");
+        }
+        if tx.send(StreamEvent::Done).await.is_err() {
+            tracing::debug!("DIAG: split stream Done send failed — client disconnected");
+        }
+        let elapsed = stream_start.elapsed();
+        tracing::info!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            token_count,
+            "DIAG: split stream completed"
+        );
     });
 
     // Convert channel to SSE stream (reuse existing stream mapping)
@@ -1474,38 +1638,68 @@ async fn stream_response(
 
     // Spawn generation in background
     tokio::spawn(async move {
+        let stream_start = std::time::Instant::now();
+        let mut token_count: u64 = 0;
+
         // Send initial role delta
-        let _ = tx
+        if tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: Some("assistant".into()),
                 finish_reason: None,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            tracing::warn!("DIAG: local stream role delta send failed — client disconnected");
+            return;
+        }
 
         let mut executor = state.executor.lock().await;
         let result = executor.generate_stream(&prompt, &params, |token| {
+            token_count += 1;
             let send_result = tx.try_send(StreamEvent::Delta {
                 content: Some(token.to_string()),
                 role: None,
                 finish_reason: None,
             });
+            if send_result.is_err() {
+                tracing::warn!(
+                    token_count,
+                    "DIAG: local stream token send failed — channel full or client disconnected"
+                );
+            }
             send_result.is_ok()
         });
 
         // Send finish reason
         let finish = match result {
             Ok(r) => r.finish_reason.as_str().to_string(),
-            Err(_) => "error".to_string(),
+            Err(ref e) => {
+                tracing::error!("DIAG: local stream generate_stream error: {e}");
+                "error".to_string()
+            }
         };
-        let _ = tx
+        if tx
             .send(StreamEvent::Delta {
                 content: None,
                 role: None,
-                finish_reason: Some(finish),
+                finish_reason: Some(finish.clone()),
             })
-            .await;
-        let _ = tx.send(StreamEvent::Done).await;
+            .await
+            .is_err()
+        {
+            tracing::warn!(token_count, finish_reason = %finish, "DIAG: local stream finish send failed");
+        }
+        if tx.send(StreamEvent::Done).await.is_err() {
+            tracing::debug!("DIAG: local stream Done send failed — client disconnected");
+        }
+        let elapsed = stream_start.elapsed();
+        tracing::info!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            token_count,
+            "DIAG: local stream completed"
+        );
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {

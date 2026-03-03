@@ -13,6 +13,50 @@ use crate::types::{
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
 };
 
+/// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
+/// Used by distributed-only nodes that have the probe but no loaded model.
+pub fn template_from_header(
+    header_path: &std::path::Path,
+) -> Option<(Option<String>, String, String)> {
+    use candle_core::quantized::gguf_file;
+
+    let header_bytes = std::fs::read(header_path).ok()?;
+    let mut cursor = std::io::Cursor::new(&header_bytes);
+    let ct = gguf_file::Content::read(&mut cursor).ok()?;
+
+    let chat_template = ct
+        .metadata
+        .get("tokenizer.chat_template")
+        .and_then(|v| v.to_string().ok().cloned());
+
+    let vocab: Vec<String> = ct
+        .metadata
+        .get("tokenizer.ggml.tokens")
+        .and_then(|v| v.to_vec().ok())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.to_string().ok().cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let bos_id = ct
+        .metadata
+        .get("tokenizer.ggml.bos_token_id")
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(1) as usize;
+    let eos_id = ct
+        .metadata
+        .get("tokenizer.ggml.eos_token_id")
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(2) as usize;
+
+    let bos = vocab.get(bos_id).cloned().unwrap_or_default();
+    let eos = vocab.get(eos_id).cloned().unwrap_or_default();
+
+    Some((chat_template, bos, eos))
+}
+
 /// Cached vocabulary and tokenizer state for lock-free token decoding during streaming.
 /// Extracted once from the model under the mutex, then used for all subsequent decoding
 /// without re-acquiring the lock.
@@ -279,12 +323,31 @@ impl PipelineExecutor {
                 last_token.to_le_bytes().to_vec()
             };
 
+            tracing::info!(
+                request_id = %request_id,
+                seq_num,
+                index_pos,
+                activation_bytes = activations.len(),
+                generated_so_far = generated_tokens.len(),
+                "DIAG: starting forward_through_segments"
+            );
+
             // Forward through each segment
+            let fwd_start = std::time::Instant::now();
             match self
                 .forward_through_segments(request_id, seq_num, index_pos, activations)
                 .await
             {
                 Ok(result) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        seq_num,
+                        fwd_ms = fwd_start.elapsed().as_millis() as u64,
+                        tokens = result.token_ids.len(),
+                        activations_bytes = result.activations.len(),
+                        finish = ?result.finish_reason,
+                        "DIAG: forward_through_segments returned OK"
+                    );
                     // After the first forward pass, extract everything we need from the model
                     // in a SINGLE lock acquisition: prompt token count, EOS tokens, and
                     // cached decoder for lock-free per-token decoding.
@@ -518,19 +581,148 @@ impl PipelineExecutor {
 
             (ptc, eos, decoder)
         } else {
-            // No model loaded — use fallbacks
-            let ptc = prompt.chars().count() / 4;
-            (
-                ptc,
-                vec![2],
-                CachedDecoder {
-                    vocab: Vec::new(),
-                    byte_decoder: HashMap::new(),
-                    is_sentencepiece: false,
-                    has_tokenizer: false,
-                },
-            )
+            // No model loaded — try loading vocab from GGUF header on disk.
+            // The header is always available from the probe/manifest exchange.
+            let header_path = self
+                .shared_state
+                .config
+                .node
+                .data_dir
+                .join("models")
+                .join(model_id.0.as_str())
+                .join("gguf_header.bin");
+            if header_path.exists() {
+                match Self::decoder_from_header(&header_path) {
+                    Some((eos, decoder, tokenizer_opt)) => {
+                        let ptc = if let Some(ref tok) = tokenizer_opt {
+                            tok.encode(prompt).len()
+                        } else {
+                            prompt.chars().count() / 4
+                        };
+                        tracing::debug!(
+                            model = %model_id,
+                            vocab_size = decoder.vocab.len(),
+                            eos_count = eos.len(),
+                            "Built decoder from GGUF header (no local model)"
+                        );
+                        (ptc, eos, decoder)
+                    }
+                    None => {
+                        let ptc = prompt.chars().count() / 4;
+                        (
+                            ptc,
+                            vec![2],
+                            CachedDecoder {
+                                vocab: Vec::new(),
+                                byte_decoder: HashMap::new(),
+                                is_sentencepiece: false,
+                                has_tokenizer: false,
+                            },
+                        )
+                    }
+                }
+            } else {
+                let ptc = prompt.chars().count() / 4;
+                (
+                    ptc,
+                    vec![2],
+                    CachedDecoder {
+                        vocab: Vec::new(),
+                        byte_decoder: HashMap::new(),
+                        is_sentencepiece: false,
+                        has_tokenizer: false,
+                    },
+                )
+            }
         }
+    }
+
+    /// Build a CachedDecoder + EOS tokens from a GGUF header file on disk.
+    /// Used when the node has probe data but no loaded model.
+    fn decoder_from_header(
+        header_path: &std::path::Path,
+    ) -> Option<(
+        Vec<u32>,
+        CachedDecoder,
+        Option<crate::inference::split::BpeTokenizer>,
+    )> {
+        use candle_core::quantized::gguf_file;
+
+        let header_bytes = std::fs::read(header_path).ok()?;
+        let mut cursor = std::io::Cursor::new(&header_bytes);
+        let ct = gguf_file::Content::read(&mut cursor).ok()?;
+
+        // Extract vocabulary
+        let vocab: Vec<String> = ct
+            .metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect()
+            })?;
+
+        // Extract EOS tokens
+        let mut eos_tokens = Vec::new();
+        if let Some(eos_id) = ct
+            .metadata
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok())
+        {
+            eos_tokens.push(eos_id);
+        }
+
+        // Build BPE tokenizer if merges available
+        let merges_raw = ct
+            .metadata
+            .get("tokenizer.ggml.merges")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        let pre_type = ct
+            .metadata
+            .get("tokenizer.ggml.pre")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "gpt2".to_string());
+        let tokenizer_model = ct
+            .metadata
+            .get("tokenizer.ggml.model")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "gpt2".to_string());
+
+        let tokenizer = if !merges_raw.is_empty() {
+            Some(crate::inference::split::BpeTokenizer::from_gguf(
+                &vocab,
+                &merges_raw,
+                &pre_type,
+                &tokenizer_model,
+            ))
+        } else {
+            None
+        };
+
+        let decoder = if let Some(ref tok) = tokenizer {
+            CachedDecoder {
+                vocab: vocab.clone(),
+                byte_decoder: tok.byte_decoder().clone(),
+                is_sentencepiece: tok.is_sentencepiece(),
+                has_tokenizer: true,
+            }
+        } else {
+            CachedDecoder {
+                vocab,
+                byte_decoder: HashMap::new(),
+                is_sentencepiece: false,
+                has_tokenizer: false,
+            }
+        };
+
+        Some((eos_tokens, decoder, tokenizer))
     }
 
     /// Forward activation data through all pipeline segments in order.
@@ -547,6 +739,7 @@ impl PipelineExecutor {
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
         let num_segments = self.assignment.segments.len();
+        let pipeline_start = std::time::Instant::now();
 
         for idx in 0..num_segments {
             let is_last = idx == num_segments - 1;
@@ -591,12 +784,26 @@ impl PipelineExecutor {
             }
 
             // Standard pipeline execution (no TP)
+            let segment_start = std::time::Instant::now();
             // If this is the local node, process locally (no clone needed)
             if segment.node_id == *self.shared_state.identity.node_id() {
                 let result = self
                     .process_local_segment(segment, sequence_num, index_pos, &activations)
                     .await?;
+                tracing::debug!(
+                    request_id = %request_id,
+                    segment = idx,
+                    segment_ms = segment_start.elapsed().as_millis() as u64,
+                    activation_bytes = result.activations.len(),
+                    "DIAG: local segment complete"
+                );
                 if is_last {
+                    tracing::info!(
+                        request_id = %request_id,
+                        num_segments,
+                        pipeline_ms = pipeline_start.elapsed().as_millis() as u64,
+                        "DIAG: forward_through_segments completed (last segment local)"
+                    );
                     return Ok(result);
                 }
                 // Use hidden-state activations for the next segment
@@ -615,12 +822,6 @@ impl PipelineExecutor {
                     tp_meta: None,
                 };
 
-                // Register a response channel BEFORE sending the request
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                self.shared_state
-                    .pending_layer_results
-                    .insert(request_id, tx);
-
                 // Look up the peer's libp2p PeerId bytes from the peer registry.
                 // NodeId (Ed25519 key) != PeerId (libp2p identity), so we need the mapping.
                 let target_peer_bytes = self
@@ -635,25 +836,40 @@ impl PipelineExecutor {
                         ))
                     })?;
 
-                // Send to remote node via directed tensor protocol
+                // Register the result channel BEFORE sending so we never miss
+                // a fast response.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.shared_state
+                    .pending_layer_results
+                    .insert(request_id, tx);
+
+                tracing::info!(
+                    request_id = %request_id,
+                    seq = sequence_num,
+                    segment = idx,
+                    node = %segment.node_id,
+                    activation_bytes = activations.len(),
+                    "Sending LayerForward to remote segment"
+                );
+
                 if self
                     .network_tx
                     .send(NetworkCommand::SendTensor {
-                        target_peer_bytes,
+                        target_peer_bytes: target_peer_bytes.clone(),
                         forward,
                     })
                     .await
                     .is_err()
                 {
-                    // Clean up the pending entry to prevent memory leak
                     self.shared_state.pending_layer_results.remove(&request_id);
                     return Err(SwarmError::Network(
                         "Failed to send LayerForward".to_string(),
                     ));
                 }
 
-                // Wait for response via the oneshot channel (with timeout)
-                match Self::wait_for_result(rx).await {
+                let result = Self::wait_for_result(rx, request_id, idx, &segment.node_id).await;
+
+                match result {
                     Ok(result) => {
                         // Check if the remote node returned an error — if so, failover
                         if let Some(NetworkFinishReason::Error(ref err_msg)) = result.finish_reason
@@ -680,24 +896,37 @@ impl PipelineExecutor {
                             }
                             activations = failover_result.activations;
                         } else {
+                            tracing::debug!(
+                                request_id = %request_id,
+                                segment = idx,
+                                segment_ms = segment_start.elapsed().as_millis() as u64,
+                                activation_bytes = result.activations.len(),
+                                "DIAG: remote segment complete"
+                            );
                             if is_last {
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    num_segments,
+                                    pipeline_ms = pipeline_start.elapsed().as_millis() as u64,
+                                    "DIAG: forward_through_segments completed (last segment remote)"
+                                );
                                 return Ok(result);
                             }
-                            // Use hidden-state activations for the next segment
                             activations = result.activations;
                         }
                     }
                     Err(e) => {
+                        // Timeout or channel drop — remove stale entry and failover
+                        self.shared_state.pending_layer_results.remove(&request_id);
                         tracing::warn!(
                             request_id = %request_id,
                             segment = idx,
                             node = %segment.node_id,
                             error = %e,
-                            "Segment timed out or failed, attempting failover"
+                            seq = sequence_num,
+                            segment_ms = segment_start.elapsed().as_millis() as u64,
+                            "Remote segment timed out, attempting failover"
                         );
-                        // Clean up the pending entry to prevent memory leak
-                        self.shared_state.pending_layer_results.remove(&request_id);
-                        // Attempt failover to standby
                         let failover_result = self
                             .failover_segment(
                                 idx,
@@ -711,7 +940,6 @@ impl PipelineExecutor {
                         if is_last {
                             return Ok(failover_result);
                         }
-                        // Continue pipeline with the standby's activations
                         activations = failover_result.activations;
                     }
                 }
@@ -1206,13 +1434,49 @@ impl PipelineExecutor {
     /// Wait for a remote segment to return its result via the oneshot channel.
     async fn wait_for_result(
         rx: tokio::sync::oneshot::Receiver<LayerResult>,
+        request_id: uuid::Uuid,
+        segment_idx: usize,
+        node_id: &crate::types::NodeId,
     ) -> Result<LayerResult, SwarmError> {
+        let send_time = std::time::Instant::now();
         match tokio::time::timeout(Duration::from_secs(30), rx).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(_)) => Err(SwarmError::PipelineError("Response channel dropped".into())),
-            Err(_) => Err(SwarmError::PipelineError(
-                "Timed out waiting for segment result".into(),
-            )),
+            Ok(Ok(result)) => {
+                let elapsed = send_time.elapsed();
+                tracing::info!(
+                    request_id = %request_id,
+                    segment = segment_idx,
+                    node = %node_id,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    tokens = result.token_ids.len(),
+                    activations_bytes = result.activations.len(),
+                    finish = ?result.finish_reason,
+                    "DIAG: segment result received"
+                );
+                Ok(result)
+            }
+            Ok(Err(_)) => {
+                let elapsed = send_time.elapsed();
+                tracing::error!(
+                    request_id = %request_id,
+                    segment = segment_idx,
+                    node = %node_id,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "DIAG: response channel DROPPED — sender gone before result"
+                );
+                Err(SwarmError::PipelineError("Response channel dropped".into()))
+            }
+            Err(_) => {
+                tracing::error!(
+                    request_id = %request_id,
+                    segment = segment_idx,
+                    node = %node_id,
+                    timeout_secs = 30,
+                    "DIAG: segment TIMED OUT after 30s — no result received"
+                );
+                Err(SwarmError::PipelineError(
+                    "Timed out waiting for segment result".into(),
+                ))
+            }
         }
     }
 
@@ -1242,11 +1506,16 @@ impl PipelineExecutor {
 
         match standby {
             Some(backup) => {
-                tracing::info!(
+                tracing::warn!(
                     request_id = %request_id,
                     failed_node = %failed_segment.node_id,
                     backup_node = %backup.node_id,
-                    "Failing over to standby node"
+                    failed_layer_range = ?failed_segment.layer_range,
+                    backup_layer_range = ?backup.layer_range,
+                    segment = failed_idx,
+                    total_segments = self.assignment.segments.len(),
+                    total_standbys = self.assignment.standbys.len(),
+                    "DIAG: failing over to standby node"
                 );
 
                 // Register a response channel BEFORE sending the request
@@ -1299,7 +1568,8 @@ impl PipelineExecutor {
                 }
 
                 // Wait for standby response via the oneshot channel
-                let result = Self::wait_for_result(rx).await?;
+                let result =
+                    Self::wait_for_result(rx, request_id, failed_idx, &backup.node_id).await?;
 
                 // Update the assignment so subsequent tokens use the standby
                 // directly, avoiding repeated failover + 30s timeout per token.
@@ -1311,8 +1581,12 @@ impl PipelineExecutor {
             None => {
                 tracing::error!(
                     request_id = %request_id,
-                    segment = failed_idx,
-                    "No standby available for failed segment"
+                    failed_segment = failed_idx,
+                    failed_node = %failed_segment.node_id,
+                    failed_layer_range = ?failed_segment.layer_range,
+                    total_standbys = self.assignment.standbys.len(),
+                    standby_nodes = ?self.assignment.standbys.iter().map(|s| format!("{}[{:?}]", s.node_id, s.layer_range)).collect::<Vec<_>>(),
+                    "DIAG: NO standby available for failed segment — pipeline will fail"
                 );
                 Err(SwarmError::PipelineError(format!(
                     "Segment {failed_idx} failed with no standby available"

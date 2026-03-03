@@ -163,7 +163,7 @@ mod tests {
     fn register_and_retrieve_manifest() {
         let registry = ModelRegistry::new();
         let manifest = ModelManifest {
-            schema_version: 1,
+            schema_version: 2,
             id: ModelId("test".into()),
             name: "Test".into(),
             architecture: ModelArchitecture::Llama,
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(registry.model_count(), 0);
 
         registry.register_manifest(ModelManifest {
-            schema_version: 1,
+            schema_version: 2,
             id: ModelId("a".into()),
             name: "A".into(),
             architecture: ModelArchitecture::Llama,

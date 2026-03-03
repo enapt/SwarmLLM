@@ -58,10 +58,16 @@ impl CreditLedger {
     ) -> Self {
         // Restore persisted balance synchronously to avoid race condition.
         // sled reads are fast (in-memory B-tree), so this is safe in constructor.
-        let restored = db
-            .get_json::<CreditBalance>(TREE_CREDITS, KEY_BALANCE)
-            .ok()
-            .flatten();
+        let restored = match db.get_json::<CreditBalance>(TREE_CREDITS, KEY_BALANCE) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "DIAG: failed to read credit balance from database — starting at zero"
+                );
+                None
+            }
+        };
 
         if let Some(restored_balance) = restored {
             if restored_balance.node_id == node_id {

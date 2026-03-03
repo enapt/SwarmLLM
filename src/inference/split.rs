@@ -113,7 +113,16 @@ impl KvCacheStore {
         let before = self.caches.len();
         self.caches
             .retain(|_, entry| entry.last_accessed.elapsed() <= ttl);
-        before - self.caches.len()
+        let removed = before - self.caches.len();
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                remaining = self.caches.len(),
+                ttl_secs = ttl.as_secs(),
+                "DIAG: KV-cache store cleanup — expired entries removed"
+            );
+        }
+        removed
     }
 
     /// Remove all cache entries for a given request_id (across all models).
@@ -432,7 +441,7 @@ pub struct BpeTokenizer {
 impl BpeTokenizer {
     /// Build a BPE tokenizer from GGUF vocabulary tokens, merge rules,
     /// pre-tokenizer type, and tokenizer model type.
-    fn from_gguf(
+    pub(crate) fn from_gguf(
         tokens: &[String],
         merges_raw: &[String],
         pre_type: &str,
@@ -3232,11 +3241,13 @@ impl SplitModel {
             .and_then(|id| vocab_ref.get(id as usize).cloned())
             .unwrap_or_default();
 
-        if chat_template.is_some() {
+        if let Some(ref tmpl) = chat_template {
             tracing::info!(
                 bos = %bos_token,
                 eos = %eos_token,
-                "Loaded chat template from GGUF"
+                template_len = tmpl.len(),
+                template_preview = &tmpl[..tmpl.len().min(200)],
+                "Loaded chat template from GGUF header"
             );
         }
 
@@ -4338,6 +4349,7 @@ impl SplitModel {
         request_id: &str,
         lora_adapter: Option<&LoraAdapter>,
     ) -> Result<Tensor, SwarmError> {
+        let forward_start = std::time::Instant::now();
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
         let is_last = self.output.is_some();
@@ -4487,7 +4499,7 @@ impl SplitModel {
             entry.last_accessed = std::time::Instant::now();
         }
 
-        if is_last {
+        let result = if is_last {
             // Last segment: apply final norm, extract last token, project to logits
             let norm = self
                 .norm
@@ -4511,7 +4523,22 @@ impl SplitModel {
         } else {
             // Intermediate segment: return hidden states for next segment
             Ok(layer_in)
-        }
+        };
+
+        let forward_ms = forward_start.elapsed().as_millis() as u64;
+        tracing::debug!(
+            request_id,
+            index_pos,
+            seq_len,
+            num_layers,
+            is_first,
+            is_last,
+            kv_offset,
+            forward_ms,
+            "DIAG: SplitModel forward pass complete"
+        );
+
+        result
     }
 
     /// Tensor-parallel forward pass for a single layer.

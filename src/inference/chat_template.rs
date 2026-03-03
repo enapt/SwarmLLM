@@ -389,6 +389,21 @@ fn eval_expr(expr: &str, state: &EvalState, bos_token: &str, eos_token: &str) ->
 fn eval_condition(condition: &str, state: &EvalState, add_generation_prompt: bool) -> bool {
     let condition = condition.trim();
 
+    // Compound conditions: `A and B`, `A or B`
+    // Split on ` and ` / ` or ` (space-delimited to avoid matching inside strings)
+    if let Some(pos) = condition.find(" and ") {
+        let left = &condition[..pos];
+        let right = &condition[pos + 5..];
+        return eval_condition(left, state, add_generation_prompt)
+            && eval_condition(right, state, add_generation_prompt);
+    }
+    if let Some(pos) = condition.find(" or ") {
+        let left = &condition[..pos];
+        let right = &condition[pos + 4..];
+        return eval_condition(left, state, add_generation_prompt)
+            || eval_condition(right, state, add_generation_prompt);
+    }
+
     // add_generation_prompt
     if condition == "add_generation_prompt" {
         return add_generation_prompt;
@@ -680,6 +695,50 @@ mod tests {
         }];
         let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
         assert_eq!(result, "<s>Hi</s>");
+    }
+
+    #[test]
+    fn zephyr_tinyllama_template() {
+        // TinyLlama / Zephyr uses `loop.last and add_generation_prompt`
+        let template = r#"{% for message in messages %}{% if message['role'] == 'user' %}{{ '<|user|>
+' + message['content'] + eos_token }}{% elif message['role'] == 'system' %}{{ '<|system|>
+' + message['content'] + eos_token }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>
+' + message['content'] + eos_token }}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}{% endfor %}"#;
+        let msgs = vec![ChatMessage {
+            role: Role::User,
+            content: "Hello".into(),
+            images: vec![],
+        }];
+        let result = apply_chat_template(template, &msgs, "<s>", "</s>", true).unwrap();
+        assert!(result.contains("<|user|>\nHello</s>"));
+        assert!(
+            result.ends_with("<|assistant|>"),
+            "Expected prompt to end with <|assistant|>, got: {:?}",
+            &result[result.len().saturating_sub(30)..]
+        );
+    }
+
+    #[test]
+    fn compound_and_condition() {
+        // Verify `and` compound conditions work
+        let template = "{% for message in messages %}{{ message.content }}{% if loop.last and add_generation_prompt %}ASSIST{% endif %}{% endfor %}";
+        let msgs = vec![
+            ChatMessage {
+                role: Role::User,
+                content: "A".into(),
+                images: vec![],
+            },
+            ChatMessage {
+                role: Role::User,
+                content: "B".into(),
+                images: vec![],
+            },
+        ];
+        let result = apply_chat_template(template, &msgs, "", "", true).unwrap();
+        assert_eq!(result, "ABASSIST");
+        // Without generation prompt, ASSIST should NOT appear
+        let result2 = apply_chat_template(template, &msgs, "", "", false).unwrap();
+        assert_eq!(result2, "AB");
     }
 
     #[test]

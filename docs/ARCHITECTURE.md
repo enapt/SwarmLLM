@@ -11,7 +11,7 @@ Single Rust binary, three simultaneous functions:
 │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │  P2P     │  │  HTTP API    │  │  Admin UI    │       │
 │  │  Node    │  │  Server      │  │  (embedded)  │       │
-│  │  (QUIC)  │  │  (Axum)      │  │              │       │
+│  │(TCP+QUIC)│  │  (Axum)      │  │              │       │
 │  └────┬─────┘  └──────┬───────┘  └──────┬───────┘       │
 │       │               │                 │                │
 │  ┌────┴───────────────┴─────────────────┴─────────────┐  │
@@ -146,8 +146,8 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 ### Discovery Startup Sequence
 
 ```
-1. Listen on QUIC + TCP (unchanged)
-2. Subscribe to GossipSub topics (unchanged)
+1. Listen on TCP (port+10, Noise+Yamux) and QUIC (port)
+2. Subscribe to GossipSub topics
 3. mDNS starts immediately (discovers LAN peers in seconds)
 4. Dial cached peers from last session (fastest reconnect)
 5. Dial user-configured --bootstrap peers and invite codes (if any)
@@ -180,8 +180,10 @@ libp2p Swarm
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
 │   └── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
 │
+├── TCP transport (Noise + Yamux, nodelay=true, port+10)
+├── QUIC transport (port, fallback for NAT traversal)
 ├── mDNS (optional, LAN peer discovery — conditional dial, not added to Kademlia)
-├── connection_limits (max 2/peer, 500 total)
+├── connection_limits (max 1/peer, 500 total)
 ├── Identify (protocol identification + peer_to_node reverse map)
 ├── AutoNAT (NAT detection → Kademlia Mode::Client/Server switch)
 ├── DCUtR (hole punching)

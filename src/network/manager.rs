@@ -44,6 +44,19 @@ pub struct NetworkManager {
     buffered_gossip: Vec<(String, Vec<u8>)>,
     /// Whether relay listen has been activated for this session (at most once).
     relay_activated: bool,
+    /// Maps OutboundRequestId → inference UUID for tensor forwards.
+    /// Used to notify the pipeline on OutboundFailure instead of silent 30s timeout.
+    pending_tensor_outbound: HashMap<OutboundRequestId, uuid::Uuid>,
+    /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
+    /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
+    /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
+    /// we send the result as the response on the original channel — single substream per token.
+    pending_tensor_channels: HashMap<uuid::Uuid, request_response::ResponseChannel<SwarmResponse>>,
+    /// Maps ConnectionId → remote Multiaddr for each established connection.
+    /// Used by the Identify handler to add only the *connected* address to Kademlia,
+    /// not all listen_addrs (which causes redundant connections to the same peer on
+    /// different addresses, leading to request_response round-robin routing failures).
+    connection_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -84,6 +97,12 @@ impl NetworkManager {
             + config.network.bootstrap_peers.len();
         let swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default().nodelay(true),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
             .with_quic()
             .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
@@ -103,7 +122,10 @@ impl NetworkManager {
             })
             .map_err(|e| SwarmError::Network(format!("Behaviour error: {e}")))?
             .with_swarm_config(|c| {
-                c.with_idle_connection_timeout(std::time::Duration::from_secs(60))
+                c.with_idle_connection_timeout(std::time::Duration::from_secs(120))
+                    .with_notify_handler_buffer_size(
+                        std::num::NonZeroUsize::new(256).expect("256 > 0"),
+                    )
             })
             .build();
 
@@ -121,6 +143,9 @@ impl NetworkManager {
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
+            pending_tensor_outbound: HashMap::new(),
+            pending_tensor_channels: HashMap::new(),
+            connection_addrs: HashMap::new(),
             shutdown_rx,
         })
     }
@@ -131,10 +156,12 @@ impl NetworkManager {
         let port = config.node.listen_port;
 
         // Listen on QUIC and TCP
+        // TCP P2P uses port+10 to avoid conflicting with the HTTP API server on the same TCP port.
         let quic_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1")
             .parse()
             .map_err(|e| SwarmError::Network(format!("Invalid QUIC address: {e}")))?;
-        let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}")
+        let tcp_port = port + 10;
+        let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{tcp_port}")
             .parse()
             .map_err(|e| SwarmError::Network(format!("Invalid TCP address: {e}")))?;
 
@@ -180,6 +207,16 @@ impl NetworkManager {
         let mut peer_cache_interval = tokio::time::interval(discovery::PEER_CACHE_SAVE_INTERVAL);
         peer_cache_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Periodic send_request health check.
+        // IMPORTANT: Interval must be high enough that pings don't flood the
+        // request_response handler's outbound queue. On QUIC (especially WSL2),
+        // each substream opening can take 14-25 seconds. At 5s intervals, 4-5
+        // pings queue up per substream, starving tensor forwards of their slot.
+        // 120s keeps the queue nearly empty so tensor forwards get immediate service.
+        let mut rr_ping_interval = tokio::time::interval(std::time::Duration::from_secs(120));
+        rr_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut rr_ping_seq: u64 = 0;
+
         tracing::info!("NetworkManager running");
 
         loop {
@@ -208,12 +245,42 @@ impl NetworkManager {
                 _ = peer_cache_interval.tick() => {
                     self.save_peer_cache();
                 }
+                // Periodic request_response health ping.
+                // Skip when tensor forwards are pending — each ping consumes a substream
+                // slot that could carry a tensor forward, and on slow QUIC transports the
+                // queue backlog can exceed the pipeline timeout (30s).
+                _ = rr_ping_interval.tick() => {
+                    if !self.pending_tensor_outbound.is_empty() {
+                        tracing::debug!(
+                            pending = self.pending_tensor_outbound.len(),
+                            "Skipping health ping — tensor forwards pending"
+                        );
+                    } else {
+                        let peers: Vec<libp2p::PeerId> = self.swarm.connected_peers().cloned().collect();
+                        if !peers.is_empty() {
+                            rr_ping_seq += 1;
+                            for peer_id in &peers {
+                                let rr_connected = self.swarm.behaviour().request_response.is_connected(peer_id);
+                                let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
+                                let outbound_id = self.swarm.behaviour_mut().request_response.send_request(peer_id, req);
+                                tracing::info!(
+                                    %peer_id,
+                                    ?outbound_id,
+                                    seq = rr_ping_seq,
+                                    rr_connected,
+                                    total_peers = peers.len(),
+                                    pending_tensor_out = self.pending_tensor_outbound.len(),
+                                    "DIAG: rr_ping sent (health check)"
+                                );
+                            }
+                        }
+                    }
+                }
                 // Outbound commands from other daemon tasks
                 cmd = self.inbound_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
                             self.handle_outbound_command(cmd).await;
-                            self.drain_pending_swarm_events().await;
                         },
                         None => {
                             self.save_peer_cache();
@@ -232,34 +299,8 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// Drive the swarm to process any pending behaviour events (e.g. from send_request()).
-    ///
-    /// After calling methods like `behaviour_mut().request_response.send_request()`, the
-    /// behaviour has internal pending events (NotifyHandler) that need to be delivered
-    /// to the connection task. Without explicitly driving the swarm, these events wait
-    /// until the next `select!` iteration polls the swarm future. This method ensures
-    /// they are processed immediately.
-    async fn drain_pending_swarm_events(&mut self) {
-        use futures::StreamExt;
-        use std::task::Poll;
-        let mut drained = 0u32;
-        // Poll the swarm in a non-blocking loop until it returns Pending.
-        while let Some(event) = std::future::poll_fn(|cx| match self.swarm.poll_next_unpin(cx) {
-            Poll::Ready(Some(event)) => Poll::Ready(Some(event)),
-            Poll::Pending | Poll::Ready(None) => Poll::Ready(None),
-        })
-        .await
-        {
-            drained += 1;
-            self.handle_swarm_event(event).await;
-        }
-        if drained > 0 {
-            tracing::trace!(drained, "Drained pending swarm events after command");
-        }
-    }
-
     async fn handle_swarm_event(&mut self, event: SwarmEvent<SwarmBehaviourEvent>) {
-        tracing::trace!(event_type = %swarm_event_name(&event), "Processing swarm event");
+        tracing::debug!(event_type = %swarm_event_name(&event), "DIAG: processing swarm event");
         match event {
             // ── GossipSub messages ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -270,14 +311,29 @@ impl NetworkManager {
                 // Try to unseal gossip (encrypted), then try plaintext JSON decode.
                 // This handles key mismatches between bootstrap and joining nodes
                 // as well as pre-encryption upgrade nodes.
-                let decoded = self
+                let seal_result = self
                     .shared_state
                     .gossip_sealer
                     .open(&message.data)
                     .and_then(|plaintext| {
                         protocol::decode_message(&plaintext).map_err(|e| e.into())
-                    })
-                    .or_else(|_| protocol::decode_message(&message.data));
+                    });
+                let decoded = match seal_result {
+                    Ok(msg) => Ok(msg),
+                    Err(ref seal_err) => {
+                        let fallback = protocol::decode_message(&message.data);
+                        if fallback.is_ok() {
+                            tracing::debug!(
+                                seal_error = %seal_err,
+                                topic = %message.topic,
+                                source = ?message.source,
+                                data_len = message.data.len(),
+                                "DIAG: gossip decryption failed, plaintext fallback succeeded"
+                            );
+                        }
+                        fallback
+                    }
+                };
 
                 match decoded {
                     Ok(msg) => {
@@ -348,7 +404,17 @@ impl NetworkManager {
                         SwarmResponse::Ack => "ack",
                         SwarmResponse::TensorPayload(_) => "tensor",
                     };
-                    tracing::info!(%peer, kind, "Received response");
+                    let was_tensor = self.pending_tensor_outbound.contains_key(&request_id);
+                    tracing::info!(
+                        %peer,
+                        kind,
+                        ?request_id,
+                        was_tensor_forward = was_tensor,
+                        pending_tensor_out = self.pending_tensor_outbound.len(),
+                        "DIAG: received response"
+                    );
+                    // Clean up tensor outbound tracking (response received = not a failure)
+                    self.pending_tensor_outbound.remove(&request_id);
                     self.handle_response(peer, request_id, response).await;
                 }
             },
@@ -362,29 +428,81 @@ impl NetworkManager {
                     ..
                 },
             )) => {
-                tracing::warn!(%peer, ?request_id, %error, "Request outbound failure");
+                tracing::warn!(
+                    %peer,
+                    ?request_id,
+                    %error,
+                    is_connected = self.swarm.is_connected(&peer),
+                    pending_tensor_out = self.pending_tensor_outbound.len(),
+                    pending_channels = self.pending_tensor_channels.len(),
+                    "DIAG: OutboundFailure"
+                );
+                // Check if this was a pending tensor forward — notify the pipeline
+                if let Some(inference_uuid) = self.pending_tensor_outbound.remove(&request_id) {
+                    tracing::error!(
+                        %peer,
+                        inference_request_id = %inference_uuid,
+                        %error,
+                        "Tensor forward OutboundFailure — notifying pipeline"
+                    );
+                    // Send an error LayerResult so the pipeline can failover immediately
+                    let error_result = crate::types::LayerResult {
+                        request_id: inference_uuid,
+                        token_ids: vec![],
+                        finish_reason: Some(crate::types::NetworkFinishReason::Error(format!(
+                            "OutboundFailure: {error}"
+                        ))),
+                        activations: vec![],
+                    };
+                    if let Err(e) = self
+                        .outbound_tx
+                        .try_send(SwarmMessage::LayerResult(error_result))
+                    {
+                        tracing::warn!(error = %e, "Failed to send OutboundFailure to pipeline");
+                    }
+                }
                 // Check if this was a pending shard download request
                 if let Some((_peer_id, shard_id)) = self.pending_shard_requests.remove(&request_id)
                 {
+                    let progress = self
+                        .shard_download_progress
+                        .get(&shard_id)
+                        .copied()
+                        .unwrap_or(0);
                     tracing::error!(
-                        %peer, shard = ?shard_id,
-                        "Shard request failed: {error}"
+                        %peer,
+                        model = %shard_id.model_id,
+                        shard_index = shard_id.index,
+                        %error,
+                        bytes_downloaded = progress,
+                        "DIAG: shard download OutboundFailure"
                     );
                     // Clean up stale download progress entry to prevent resource leak
                     self.shard_download_progress.remove(&shard_id);
                 }
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
-                request_response::Event::InboundFailure { peer, error, .. },
+                request_response::Event::InboundFailure {
+                    peer,
+                    request_id,
+                    error,
+                    ..
+                },
             )) => {
-                tracing::debug!(%peer, %error, "Request inbound failure");
+                tracing::warn!(
+                    %peer,
+                    ?request_id,
+                    %error,
+                    pending_channels = self.pending_tensor_channels.len(),
+                    "DIAG: InboundFailure — response send may have failed"
+                );
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent {
                     peer, request_id, ..
                 },
             )) => {
-                tracing::debug!(%peer, ?request_id, "Response sent to peer");
+                tracing::info!(%peer, ?request_id, "DIAG: ResponseSent event — response written to wire");
             }
 
             // ── GossipSub peer subscribed — flush buffered messages (NET-I4) ──
@@ -500,20 +618,41 @@ impl NetworkManager {
                 libp2p::identify::Event::Received {
                     peer_id,
                     info,
-                    connection_id: _,
+                    connection_id,
                 },
             )) => {
                 tracing::debug!(
                     %peer_id,
                     protocol_version = %info.protocol_version,
+                    listen_addrs = ?info.listen_addrs,
                     "Identified peer"
                 );
-                // Add addresses to Kademlia
-                for addr in &info.listen_addrs {
+                // Add ONLY the connected address to Kademlia — not all listen_addrs.
+                // Adding all addresses causes Kademlia to route DHT queries through
+                // addresses we haven't connected on, triggering redundant dials that
+                // create multiple connections per peer. request_response round-robins
+                // across connections, and degraded connections silently drop messages.
+                if let Some(connected_addr) = self.connection_addrs.get(&connection_id) {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, connected_addr.clone());
+                    tracing::debug!(
+                        %peer_id,
+                        addr = %connected_addr,
+                        "Added connected address to Kademlia (skipped {} other listen_addrs)",
+                        info.listen_addrs.len().saturating_sub(1)
+                    );
+                } else if let Some(addr) = info.listen_addrs.first() {
+                    // Fallback: connection_id not tracked (shouldn't happen)
                     self.swarm
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, addr.clone());
+                    tracing::warn!(
+                        %peer_id,
+                        "No tracked connection address for Identify, used first listen_addr"
+                    );
                 }
                 // Derive NodeId from the peer's Ed25519 public key (32 bytes)
                 // per spec: NodeId(verifying_key.to_bytes())
@@ -673,9 +812,28 @@ impl NetworkManager {
                 peer_id,
                 connection_id,
                 num_established,
+                endpoint,
                 ..
             } => {
-                tracing::info!(%peer_id, %connection_id, count = num_established, "Connection established");
+                let remote_addr = endpoint.get_remote_address();
+                let is_loopback = remote_addr.iter().any(|proto| {
+                    matches!(proto, libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback())
+                        || matches!(proto, libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback())
+                });
+                tracing::info!(
+                    %peer_id, %connection_id, count = num_established,
+                    remote_addr = %remote_addr,
+                    is_loopback,
+                    is_dialer = endpoint.is_dialer(),
+                    total_established = self.swarm.network_info().connection_counters().num_established(),
+                    total_peers = self.swarm.connected_peers().count(),
+                    pending_tensor_forwards = self.pending_tensor_outbound.len(),
+                    "DIAG: connection established"
+                );
+                // Track which address each connection uses — the Identify handler
+                // uses this to add only the connected address to Kademlia.
+                self.connection_addrs
+                    .insert(connection_id, remote_addr.clone());
                 self.update_peer_count();
 
                 // Layer 5: Peer Exchange — send PEX request on first connection only
@@ -691,11 +849,22 @@ impl NetworkManager {
 
             SwarmEvent::ConnectionClosed {
                 peer_id,
+                connection_id,
                 cause,
                 num_established,
                 ..
             } => {
-                tracing::info!(%peer_id, ?cause, remaining = num_established, "Connection closed");
+                self.connection_addrs.remove(&connection_id);
+                // Check if any in-flight tensor forwards are affected
+                let affected_tensors: Vec<_> =
+                    self.pending_tensor_outbound.values().cloned().collect();
+                tracing::warn!(
+                    %peer_id, %connection_id, ?cause, remaining = num_established,
+                    pending_tensor_forwards = self.pending_tensor_outbound.len(),
+                    affected_request_ids = ?affected_tensors.iter().take(5).map(|u| u.to_string()).collect::<Vec<_>>(),
+                    total_peers = self.swarm.connected_peers().count(),
+                    "DIAG: connection closed"
+                );
 
                 // Skip cleanup if other connections to this peer remain
                 if num_established > 0 {
@@ -741,6 +910,10 @@ impl NetworkManager {
                                     .iter()
                                     .any(|seg| seg.node_id == node_id)
                             });
+                        // Clear encryption session on full disconnect to
+                        // prevent epoch desync after reconnection.
+                        self.shared_state.session_manager.remove_session(&node_id);
+
                         if !in_active_pipeline {
                             self.shared_state.peer_registry.remove(&node_id);
                             self.peer_to_node.remove(&peer_id);
@@ -894,17 +1067,32 @@ impl NetworkManager {
                 }
             }
             SwarmRequest::TensorPayload(payload) => {
-                self.handle_tensor_payload(peer, &payload);
-                // ACK the tensor request
-                let resp = SwarmResponse::Ack;
-                if self
-                    .swarm
-                    .behaviour_mut()
-                    .request_response
-                    .send_response(channel, resp)
-                    .is_err()
-                {
-                    tracing::debug!(%peer, "Failed to send tensor ACK (channel closed)");
+                tracing::info!(
+                    %peer,
+                    payload_len = payload.len(),
+                    "DIAG: inbound TensorPayload request"
+                );
+                if let Some(request_id) = self.handle_tensor_payload(peer, &payload) {
+                    // Store the ResponseChannel so we can send the computed result as
+                    // the actual response (single substream per token, no separate request).
+                    self.pending_tensor_channels.insert(request_id, channel);
+                    tracing::info!(
+                        %peer,
+                        %request_id,
+                        pending_channels = self.pending_tensor_channels.len(),
+                        "DIAG: stored ResponseChannel for tensor forward"
+                    );
+                } else {
+                    // LayerResult or decode failure — just ACK since there's no round-trip
+                    if self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, SwarmResponse::Ack)
+                        .is_err()
+                    {
+                        tracing::debug!(%peer, "Failed to send tensor ACK (channel closed)");
+                    }
                 }
             }
         }
@@ -1004,7 +1192,12 @@ impl NetworkManager {
             }
             SwarmResponse::TensorPayload(payload) => {
                 // Tensor data in a response (e.g. LayerResult sent as response)
-                self.handle_tensor_payload(peer, &payload);
+                tracing::info!(
+                    %peer,
+                    payload_len = payload.len(),
+                    "DIAG: received TensorPayload response"
+                );
+                let _ = self.handle_tensor_payload(peer, &payload);
             }
             SwarmResponse::Ack => {
                 tracing::debug!(%peer, "Received ACK");
@@ -1014,6 +1207,14 @@ impl NetworkManager {
 
     /// Handle outbound commands from daemon tasks.
     async fn handle_outbound_command(&mut self, cmd: NetworkCommand) {
+        let cmd_name = match &cmd {
+            NetworkCommand::Broadcast(_) => "Broadcast",
+            NetworkCommand::SendTensor { .. } => "SendTensor",
+            NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
+            NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
+            NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
+        };
+        tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
             NetworkCommand::Broadcast(msg) => {
                 self.handle_broadcast(msg).await;
@@ -1110,12 +1311,17 @@ impl NetworkManager {
 
         // Try to find the peer's NodeId for encryption
         let peer_node_id = self.find_node_id_for_peer(&peer_id);
-        let use_encryption = peer_node_id.is_some();
+        // TODO: Re-enable encryption after fixing epoch desync during startup churn.
+        // The gossip_sealer and session encryption both fail after connection churn
+        // because nodes establish sessions at different epochs.
+        let use_encryption = false; // peer_node_id.is_some();
 
         let payload = if use_encryption {
             let node_id = peer_node_id.unwrap();
-            // Build the AAD from the cleartext header fields
-            let mut aad = Vec::with_capacity(25);
+            // Build the AAD from the cleartext header fields — must match
+            // decode_layer_forward_encrypted's AAD (uuid + seq + idx_pos + fmt + layer_range + model_id)
+            let model_id_bytes = forward.model_id.0.as_bytes();
+            let mut aad = Vec::with_capacity(35 + model_id_bytes.len());
             aad.extend_from_slice(forward.request_id.as_bytes());
             aad.extend_from_slice(&forward.sequence_num.to_le_bytes());
             aad.extend_from_slice(&forward.index_pos.to_le_bytes());
@@ -1125,6 +1331,22 @@ impl NetworkManager {
                 crate::types::TensorFormat::INT8 => 2,
             };
             aad.push(fmt_tag);
+            let (layer_start, layer_end) = forward.layer_range;
+            aad.extend_from_slice(&layer_start.to_le_bytes());
+            aad.extend_from_slice(&layer_end.to_le_bytes());
+            aad.extend_from_slice(&(model_id_bytes.len() as u16).to_le_bytes());
+            aad.extend_from_slice(model_id_bytes);
+
+            tracing::debug!(
+                request_id = %forward.request_id,
+                %peer_id,
+                node_id = %node_id,
+                aad_len = aad.len(),
+                activation_len = forward.activations.len(),
+                has_session = self.shared_state.session_manager.has_session(&node_id),
+                session_count = self.shared_state.session_manager.session_count(),
+                "DIAG: encrypting tensor forward"
+            );
 
             match self
                 .shared_state
@@ -1139,7 +1361,15 @@ impl NetworkManager {
                     }
                 },
                 Err(e) => {
-                    tracing::debug!(error = %e, "Encryption failed, falling back to plaintext");
+                    tracing::warn!(
+                        error = %e,
+                        request_id = %forward.request_id,
+                        %peer_id,
+                        node_id = %node_id,
+                        aad_len = aad.len(),
+                        has_session = self.shared_state.session_manager.has_session(&node_id),
+                        "DIAG: seal() failed, falling back to plaintext"
+                    );
                     match protocol::encode_layer_forward(&forward) {
                         Ok(p) => p,
                         Err(e) => {
@@ -1160,22 +1390,79 @@ impl NetworkManager {
         };
 
         let payload_len = payload.len();
+        let is_connected = self.swarm.is_connected(&peer_id);
+        // DIAG: Check if request_response behaviour thinks this peer is connected
+        let rr_is_connected = self
+            .swarm
+            .behaviour()
+            .request_response
+            .is_connected(&peer_id);
+        // Count connections to this peer for diagnostic purposes
+        let peer_conn_count = self
+            .swarm
+            .network_info()
+            .connection_counters()
+            .num_established();
+        tracing::info!(
+            %peer_id,
+            request_id = %forward.request_id,
+            rr_is_connected,
+            swarm_is_connected = is_connected,
+            "DIAG: PRE-send_request state"
+        );
+        // NOTE: Do NOT send a diagnostic ping before the tensor. Each send_request()
+        // consumes a substream slot, and on slow QUIC transports (WSL2) each substream
+        // opening takes 14-25 seconds. The diag ping would push the tensor to the back
+        // of the queue, causing it to miss the 30s pipeline timeout.
         let req = SwarmRequest::TensorPayload(payload);
-        self.swarm
+        let outbound_id = self
+            .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
+        // Track OutboundRequestId → UUID so we can notify pipeline on OutboundFailure
+        self.pending_tensor_outbound
+            .insert(outbound_id, forward.request_id);
+        // DIAG: enumerate connection IDs for this peer to detect stale conn_id issues
+        let peer_established_count = self
+            .swarm
+            .connected_peers()
+            .filter(|p| **p == peer_id)
+            .count();
+        let all_conn_ids: Vec<_> = self
+            .connection_addrs
+            .iter()
+            .filter_map(|(cid, addr)| {
+                // Log all connection IDs we're tracking
+                Some(format!("{cid:?}→{addr}"))
+            })
+            .collect();
         tracing::info!(
             %peer_id,
             request_id = %forward.request_id,
             seq = forward.sequence_num,
             encrypted = use_encryption,
             payload_len,
-            "Sent tensor forward"
+            is_connected,
+            total_connections = peer_conn_count,
+            peer_established_count,
+            pending_tensor_count = self.pending_tensor_outbound.len(),
+            ?outbound_id,
+            tracked_connections = ?all_conn_ids,
+            "DIAG: sent tensor forward via send_request"
         );
     }
 
-    /// Send a tensor result to a specific peer via the unified protocol.
+    /// Send a tensor result back to the requesting peer.
+    ///
+    /// Prefers sending the result as a **response** on the original forward's
+    /// ResponseChannel (stored in `pending_tensor_channels`). This keeps the
+    /// entire forward→result exchange on a single QUIC substream, halving
+    /// substream usage and preventing the stall that occurred when results
+    /// were sent as separate requests.
+    ///
+    /// Falls back to a new request if no stored channel is found (e.g. timeout
+    /// or the forward arrived via gossip).
     fn handle_send_tensor_result(
         &mut self,
         target_peer_bytes: Vec<u8>,
@@ -1189,29 +1476,106 @@ impl NetworkManager {
             }
         };
 
-        match protocol::encode_layer_result(&result) {
+        let is_connected = self.swarm.is_connected(&peer_id);
+        if !is_connected {
+            tracing::error!(
+                %peer_id,
+                request_id = %result.request_id,
+                "DIAG: cannot send tensor result — peer NOT connected"
+            );
+        }
+
+        // Try to send as response on the original forward's channel
+        if let Some(channel) = self.pending_tensor_channels.remove(&result.request_id) {
+            match protocol::encode_layer_result(&result) {
+                Ok(payload) => {
+                    let payload_len = payload.len();
+                    let resp = SwarmResponse::TensorPayload(payload);
+                    if self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, resp)
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            %peer_id,
+                            request_id = %result.request_id,
+                            "ResponseChannel closed, falling back to new request"
+                        );
+                        // Channel was closed (timeout/disconnect) — fall back to new request
+                        self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+                    } else {
+                        tracing::info!(
+                            %peer_id,
+                            request_id = %result.request_id,
+                            payload_len,
+                            is_connected,
+                            tokens = result.token_ids.len(),
+                            activations_bytes = result.activations.len(),
+                            finish = ?result.finish_reason,
+                            pending_channels = self.pending_tensor_channels.len(),
+                            "DIAG: sent tensor result as response (same substream)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result");
+                }
+            }
+        } else {
+            // No stored channel — send as new request (legacy fallback)
+            tracing::debug!(
+                %peer_id,
+                request_id = %result.request_id,
+                "No stored ResponseChannel, sending result as new request"
+            );
+            self.send_tensor_result_as_request(&peer_id, &result, is_connected);
+        }
+    }
+
+    /// Fallback: send tensor result as a new outbound request.
+    fn send_tensor_result_as_request(
+        &mut self,
+        peer_id: &libp2p::PeerId,
+        result: &crate::types::LayerResult,
+        is_connected: bool,
+    ) {
+        match protocol::encode_layer_result(result) {
             Ok(payload) => {
                 let payload_len = payload.len();
                 let req = SwarmRequest::TensorPayload(payload);
-                self.swarm
+                let outbound_id = self
+                    .swarm
                     .behaviour_mut()
                     .request_response
-                    .send_request(&peer_id, req);
+                    .send_request(peer_id, req);
                 tracing::info!(
                     %peer_id,
                     request_id = %result.request_id,
                     payload_len,
-                    "Sent tensor result"
+                    is_connected,
+                    tokens = result.token_ids.len(),
+                    activations_bytes = result.activations.len(),
+                    finish = ?result.finish_reason,
+                    ?outbound_id,
+                    "DIAG: sent tensor result as new request (fallback)"
                 );
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to encode tensor result");
+                tracing::warn!(error = %e, request_id = %result.request_id, "Failed to encode tensor result (fallback)");
             }
         }
     }
 
     /// Process an inbound binary tensor payload (from either request or response).
-    fn handle_tensor_payload(&mut self, peer: libp2p::PeerId, payload: &[u8]) {
+    /// Returns `Some(request_id)` if this was a LayerForward (so the caller can
+    /// save the ResponseChannel for sending the result back as a response).
+    fn handle_tensor_payload(
+        &mut self,
+        peer: libp2p::PeerId,
+        payload: &[u8],
+    ) -> Option<uuid::Uuid> {
         let tag = payload.first().copied().unwrap_or(0);
         tracing::debug!(%peer, tag, payload_len = payload.len(), "handle_tensor_payload");
         match tag {
@@ -1219,6 +1583,7 @@ impl NetworkManager {
                 tracing::info!(%peer, payload_len = payload.len(), "Received tensor LayerForward");
                 match protocol::decode_layer_forward(payload) {
                     Ok(mut forward) => {
+                        let request_id = forward.request_id;
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.outbound_tx.try_send(msg) {
@@ -1227,12 +1592,15 @@ impl NetworkManager {
                                 .network_out
                                 .record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
+                            return None;
                         } else {
                             self.shared_state.channel_metrics.network_out.record_sent();
                         }
+                        Some(request_id)
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to decode tensor forward");
+                        None
                     }
                 }
             }
@@ -1262,12 +1630,26 @@ impl NetworkManager {
                         tracing::warn!(error = %e, "Failed to decode tensor result");
                     }
                 }
+                None
             }
             protocol::TENSOR_TAG_ENCRYPTED => {
-                tracing::debug!(%peer, "Received encrypted tensor");
+                tracing::info!(
+                    %peer,
+                    payload_len = payload.len(),
+                    "DIAG: Received encrypted tensor"
+                );
                 match protocol::decode_layer_forward_encrypted(payload) {
                     Ok((mut forward, sealed, aad)) => {
                         let sender_node_id = self.find_node_id_for_peer(&peer);
+                        tracing::debug!(
+                            %peer,
+                            request_id = %forward.request_id,
+                            sender_node_id = ?sender_node_id.as_ref().map(|n| format!("{}", n)),
+                            aad_len = aad.len(),
+                            sealed_len = sealed.len(),
+                            has_session = sender_node_id.as_ref().is_some_and(|n| self.shared_state.session_manager.has_session(n)),
+                            "DIAG: decrypting tensor"
+                        );
                         if let Some(node_id) = sender_node_id {
                             match self
                                 .shared_state
@@ -1275,6 +1657,7 @@ impl NetworkManager {
                                 .open(&node_id, &sealed, &aad)
                             {
                                 Ok(plaintext) => {
+                                    let request_id = forward.request_id;
                                     forward.activations = plaintext;
                                     forward.sender_peer_bytes = Some(peer.to_bytes());
                                     if let Err(e) = self
@@ -1286,15 +1669,24 @@ impl NetworkManager {
                                             .network_out
                                             .record_dropped();
                                         tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
+                                        return None;
                                     } else {
                                         self.shared_state.channel_metrics.network_out.record_sent();
                                     }
+                                    return Some(request_id);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
+                                    tracing::error!(
                                         error = %e,
                                         %peer,
-                                        "Failed to decrypt tensor — dropping"
+                                        request_id = %forward.request_id,
+                                        node_id = %node_id,
+                                        aad_len = aad.len(),
+                                        sealed_len = sealed.len(),
+                                        model_id = %forward.model_id,
+                                        layer_range = ?forward.layer_range,
+                                        seq = forward.sequence_num,
+                                        "DIAG: decrypt FAILED — possible AAD mismatch, key mismatch, or corruption"
                                     );
                                 }
                             }
@@ -1309,9 +1701,11 @@ impl NetworkManager {
                         tracing::warn!(error = %e, "Failed to decode encrypted tensor");
                     }
                 }
+                None
             }
             _ => {
                 tracing::warn!(%peer, tag, "Unknown tensor message tag");
+                None
             }
         }
     }

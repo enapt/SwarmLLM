@@ -192,6 +192,17 @@ impl SessionManager {
         our_pub_bytes
     }
 
+    /// Remove the encryption session for a disconnected peer.
+    /// Called when all connections to the peer are closed (remaining=0).
+    /// Forces a fresh ECDH handshake on reconnection, preventing epoch desync.
+    pub fn remove_session(&self, peer: &NodeId) {
+        if self.sessions.remove(peer).is_some() {
+            self.pending_ephemeral.remove(peer);
+            self.pending_ephemeral_pub.remove(peer);
+            tracing::debug!(peer = %peer, "Cleared encryption session (peer disconnected)");
+        }
+    }
+
     /// Check if a session exists for the given peer.
     pub fn has_session(&self, peer: &NodeId) -> bool {
         self.sessions.contains_key(peer)
@@ -214,9 +225,26 @@ impl SessionManager {
             msg: plaintext,
             aad,
         };
-        let ciphertext = cipher
-            .encrypt(nonce, payload)
-            .map_err(|e| SwarmError::Encryption(format!("Seal failed: {e}")))?;
+        let nonce_counter = u64::from_le_bytes(nonce_bytes[4..12].try_into().unwrap_or([0; 8]));
+        let ciphertext = cipher.encrypt(nonce, payload).map_err(|e| {
+            tracing::error!(
+                peer = %peer,
+                nonce_counter,
+                aad_len = aad.len(),
+                plaintext_len = plaintext.len(),
+                "DIAG: seal() encryption failed: {e}"
+            );
+            SwarmError::Encryption(format!("Seal failed: {e}"))
+        })?;
+
+        tracing::trace!(
+            peer = %peer,
+            nonce_counter,
+            aad_len = aad.len(),
+            plaintext_len = plaintext.len(),
+            ciphertext_len = ciphertext.len(),
+            "DIAG: seal() success"
+        );
 
         // Prepend nonce to ciphertext: [12B nonce][ciphertext+tag]
         let mut out = Vec::with_capacity(12 + ciphertext.len());
@@ -269,9 +297,26 @@ impl SessionManager {
             msg: ciphertext,
             aad,
         };
-        let plaintext = cipher
-            .decrypt(nonce, payload)
-            .map_err(|_| SwarmError::DecryptionFailed)?;
+        let plaintext = cipher.decrypt(nonce, payload).map_err(|_| {
+            tracing::error!(
+                peer = %peer,
+                recv_nonce,
+                aad_len = aad.len(),
+                sealed_len = sealed.len(),
+                ciphertext_len = ciphertext.len(),
+                last_seen_nonce = session.last_seen_recv_nonce.load(Ordering::SeqCst),
+                "DIAG: open() decryption FAILED — likely AAD mismatch or key mismatch"
+            );
+            SwarmError::DecryptionFailed
+        })?;
+
+        tracing::trace!(
+            peer = %peer,
+            recv_nonce,
+            aad_len = aad.len(),
+            plaintext_len = plaintext.len(),
+            "DIAG: open() decryption success"
+        );
 
         // Decryption succeeded — now commit the nonce to prevent replay.
         if recv_nonce == 0 {

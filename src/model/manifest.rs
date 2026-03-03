@@ -20,6 +20,14 @@ impl ModelManifest {
         let manifest: ModelManifest =
             serde_json::from_str(&contents).map_err(SwarmError::Serialization)?;
 
+        // Reject legacy manifests at load time — v2 tensor entries are required
+        if let Err(e) = manifest.validate_version() {
+            return Err(SwarmError::Config(format!(
+                "Rejecting manifest {}: {e}. Delete and re-download shards.",
+                manifest_path.display()
+            )));
+        }
+
         tracing::debug!(
             model = %manifest.id,
             shards = manifest.shard_count,

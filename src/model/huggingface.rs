@@ -6,6 +6,24 @@ use std::time::SystemTime;
 /// Most GGUF headers are <10MB; 16MB gives margin for large vocab models.
 const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
 
+/// Read HuggingFace API token from `HF_TOKEN` env var (or `HUGGING_FACE_HUB_TOKEN` fallback).
+fn hf_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .or_else(|_| std::env::var("HUGGING_FACE_HUB_TOKEN"))
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
+/// Apply auth + user-agent headers to a reqwest builder.
+fn hf_headers(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let b = builder.header("User-Agent", "SwarmLLM/0.1");
+    if let Some(token) = hf_token() {
+        b.header("Authorization", format!("Bearer {token}"))
+    } else {
+        b
+    }
+}
+
 /// A GGUF model file discovered on HuggingFace.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HfModelResult {
@@ -61,9 +79,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
         urlencoding::encode(query)
     );
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let resp = hf_headers(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("HF API request failed: {e}"))?;
@@ -109,9 +125,7 @@ async fn fetch_gguf_files(
 ) -> Result<Vec<HfFileInfo>, String> {
     let url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let resp = hf_headers(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("File list request failed: {e}"))?;
@@ -160,9 +174,7 @@ pub async fn download_model(
 
     let url = download_url(repo_id, filename);
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let resp = hf_headers(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("Download request failed: {e}"))?;
@@ -265,9 +277,7 @@ pub async fn probe_gguf_file(
     let url = download_url(repo_id, filename);
 
     // HEAD request to get total file size
-    let head_resp = client
-        .head(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let head_resp = hf_headers(client.head(&url))
         .send()
         .await
         .map_err(|e| format!("HEAD request failed: {e}"))?;
@@ -286,9 +296,7 @@ pub async fn probe_gguf_file(
     let probe_size: u64 = GGUF_HEADER_PROBE_SIZE;
     let range_end = (probe_size - 1).min(total_size - 1);
 
-    let probe_resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let probe_resp = hf_headers(client.get(&url))
         .header("Range", format!("bytes=0-{range_end}"))
         .send()
         .await
@@ -440,9 +448,7 @@ pub async fn download_gguf_header(
     }
     let range_end = header_size - 1;
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let resp = hf_headers(client.get(&url))
         .header("Range", format!("bytes=0-{range_end}"))
         .send()
         .await
@@ -511,9 +517,7 @@ pub async fn download_tied_output_weight(
     let url = download_url(repo_id, filename);
     let range_end = abs_offset + size - 1;
 
-    let resp = client
-        .get(&url)
-        .header("User-Agent", "SwarmLLM/0.1")
+    let resp = hf_headers(client.get(&url))
         .header("Range", format!("bytes={abs_offset}-{range_end}"))
         .send()
         .await
@@ -695,9 +699,7 @@ pub async fn download_shard_v2(
         let mut resp = None;
 
         for attempt in 0..=3u32 {
-            let result = client
-                .get(&url)
-                .header("User-Agent", "SwarmLLM/0.1")
+            let result = hf_headers(client.get(&url))
                 .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
                 .send()
                 .await;
@@ -780,9 +782,7 @@ pub async fn download_shard_v2(
             );
             // Retry this range once
             range_buf.clear();
-            let retry_resp = client
-                .get(&url)
-                .header("User-Agent", "SwarmLLM/0.1")
+            let retry_resp = hf_headers(client.get(&url))
                 .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
                 .send()
                 .await

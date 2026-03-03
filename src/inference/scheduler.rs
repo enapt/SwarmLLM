@@ -286,6 +286,7 @@ impl PipelineScheduler {
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
         let mut segments = Vec::new();
         let mut current_layer = 0u32;
+        let local_node_id = self.shared_state.identity.node_id();
 
         while current_layer < num_layers {
             let is_first_segment = current_layer == 0;
@@ -315,16 +316,18 @@ impl PipelineScheduler {
             }
 
             // If this range could reach the end, prefer nodes that can be last.
-            // Check if any candidate can reach num_layers from current position.
+            // But ALWAYS keep the local node as an option — distributed inference
+            // should use locally-hosted shards first, forwarding the remainder.
             let any_reaches_end = options.iter().any(|(_, r)| r.1 >= num_layers);
             if any_reaches_end {
                 let last_capable: Vec<_> = options
                     .iter()
-                    .filter(|(c, r)| r.1 >= num_layers && c.can_be_last)
+                    .filter(|(c, r)| {
+                        (r.1 >= num_layers && c.can_be_last) || c.node_id == *local_node_id
+                    })
                     .cloned()
                     .collect();
                 if !last_capable.is_empty() {
-                    // Prefer candidates that can be the final segment
                     options = last_capable;
                 }
                 // If no can_be_last candidates reach the end, let others that DON'T
@@ -332,7 +335,7 @@ impl PipelineScheduler {
                 else {
                     let not_reaching_end: Vec<_> = options
                         .iter()
-                        .filter(|(_, r)| r.1 < num_layers)
+                        .filter(|(c, r)| r.1 < num_layers || c.node_id == *local_node_id)
                         .cloned()
                         .collect();
                     if !not_reaching_end.is_empty() {
@@ -341,10 +344,10 @@ impl PipelineScheduler {
                 }
             }
 
-            // Pick the candidate that covers the most layers. When tied, prefer
-            // the local node to avoid unnecessary network round-trips, then
-            // prefer lower-load nodes for better distribution.
-            let local_node_id = self.shared_state.identity.node_id();
+            // Pick the best candidate. Prefer the LOCAL node first to minimize
+            // network round-trips and maximize use of locally-hosted shards.
+            // Among remote candidates, prefer the one covering the most layers,
+            // then lower-load nodes for better distribution.
             let best = options.into_iter().max_by(|(ca, ra), (cb, rb)| {
                 let cov_a = ra.1 - current_layer;
                 let cov_b = rb.1 - current_layer;
@@ -358,9 +361,11 @@ impl PipelineScheduler {
                 } else {
                     0u32
                 };
-                cov_a
-                    .cmp(&cov_b)
-                    .then_with(|| local_a.cmp(&local_b))
+                // Local node always preferred — distributed inference should use
+                // locally-hosted shards first, forwarding only the remainder.
+                local_a
+                    .cmp(&local_b)
+                    .then_with(|| cov_a.cmp(&cov_b))
                     // Lower load is better → reverse comparison
                     .then_with(|| {
                         cb.load
@@ -480,7 +485,7 @@ mod tests {
 
     fn make_manifest(model_id: &str, num_layers: u32, shards: Vec<ShardInfo>) -> ModelManifest {
         ModelManifest {
-            schema_version: 1,
+            schema_version: 2,
             id: ModelId(model_id.into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,

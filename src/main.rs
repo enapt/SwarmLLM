@@ -436,7 +436,7 @@ fn init_tracing(verbose: u8) {
     let filter = if verbose > 0 {
         match verbose {
             1 => "swarmllm=debug".to_string(),
-            2 => "swarmllm=debug,libp2p=info,tower_http=debug".to_string(),
+            2 => "swarmllm=debug,libp2p=info,libp2p_request_response=debug,libp2p_swarm=debug,tower_http=debug".to_string(),
             _ => "trace".to_string(),
         }
     } else {

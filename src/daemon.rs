@@ -1552,27 +1552,56 @@ async fn dispatch_network_messages(
                         match msg {
                             // LayerResult: route to pending pipeline executor via oneshot channel
                             SwarmMessage::LayerResult(ref result) => {
-                                tracing::debug!(
+                                tracing::info!(
                                     request_id = %result.request_id,
                                     tokens = result.token_ids.len(),
                                     activations_bytes = result.activations.len(),
-                                    "Received LayerResult from remote segment"
+                                    finish = ?result.finish_reason,
+                                    pending_count = shared_state.pending_layer_results.len(),
+                                    "DIAG: dispatcher received LayerResult"
                                 );
                                 if let Some((_, tx)) = shared_state
                                     .pending_layer_results
                                     .remove(&result.request_id)
                                 {
-                                    let _ = tx.send(result.clone());
+                                    if tx.send(result.clone()).is_err() {
+                                        tracing::warn!(
+                                            request_id = %result.request_id,
+                                            tokens = result.token_ids.len(),
+                                            finish = ?result.finish_reason,
+                                            "DIAG: LayerResult delivered but pipeline receiver DROPPED"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            request_id = %result.request_id,
+                                            tokens = result.token_ids.len(),
+                                            activations_bytes = result.activations.len(),
+                                            finish = ?result.finish_reason,
+                                            pending_remaining = shared_state.pending_layer_results.len(),
+                                            "DIAG: LayerResult delivered to pipeline"
+                                        );
+                                    }
                                 } else {
                                     tracing::warn!(
                                         request_id = %result.request_id,
-                                        "No pending channel for LayerResult — dropped"
+                                        tokens = result.token_ids.len(),
+                                        finish = ?result.finish_reason,
+                                        pending_count = shared_state.pending_layer_results.len(),
+                                        "DIAG: No pending channel for LayerResult — already timed out or duplicate"
                                     );
                                 }
                             }
                             // LayerForward: process locally using split inference engine,
                             // then send back a LayerResult to the requesting node.
                             SwarmMessage::LayerForward(forward) => {
+                                tracing::info!(
+                                    request_id = %forward.request_id,
+                                    seq = forward.sequence_num,
+                                    layer_range = ?forward.layer_range,
+                                    activation_bytes = forward.activations.len(),
+                                    has_sender = forward.sender_peer_bytes.is_some(),
+                                    "DIAG: dispatcher received LayerForward, spawning handler"
+                                );
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
                                 let sem = forward_semaphore.clone();
@@ -2395,6 +2424,16 @@ pub fn try_load_from_shards(
     let layer_end = params.layer_end;
     let is_first = params.is_first;
     let is_last = params.is_last;
+
+    // Reject legacy v1 manifests — they lack tensor entries, so ShardReader
+    // would silently produce an empty tensor_map and fail at read time.
+    if params.manifest.schema_version < 2 {
+        return Err(SwarmError::Internal(format!(
+            "Model {} has schema_version {} manifest — v2 required. Re-download shards.",
+            model_id, params.manifest.schema_version
+        )));
+    }
+
     // Ensure GGUF header exists (extract from shard_000 if needed)
     if let Err(e) = crate::inference::split::ensure_gguf_header(model_dir) {
         return Err(SwarmError::Internal(format!(
@@ -2475,11 +2514,14 @@ async fn handle_layer_forward(
         }
     };
 
+    let forward_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request_id,
         seq = forward.sequence_num,
         activation_bytes = forward.activations.len(),
-        "Processing LayerForward locally"
+        model_id = %forward.model_id,
+        layer_range = ?forward.layer_range,
+        "DIAG: processing LayerForward locally"
     );
 
     let model_id = forward.model_id.clone();
@@ -2837,12 +2879,16 @@ async fn handle_layer_forward(
         }
     };
 
+    let forward_elapsed = forward_start.elapsed();
     tracing::info!(
         request_id = %request_id,
         tokens = result.token_ids.len(),
         activations_bytes = result.activations.len(),
         is_last,
-        "LayerForward processed, sending result back"
+        elapsed_ms = forward_elapsed.as_millis() as u64,
+        model_id = %model_id,
+        layers = format!("[{layer_start}..{layer_end})"),
+        "DIAG: LayerForward processed, sending result back"
     );
 
     // Track participation: increment forwards_served and earn credits (non-blocking)
@@ -2859,7 +2905,7 @@ async fn handle_layer_forward(
         }
     }
 
-    // Send back via tensor protocol
+    // Send back as a separate request to the originating peer
     if let Err(e) = network_tx
         .send(NetworkCommand::SendTensorResult {
             target_peer_bytes: sender_peer_bytes,

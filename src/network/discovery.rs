@@ -44,11 +44,11 @@ pub fn bootstrap_peers(
 
                 match swarm.dial(addr.clone()) {
                     Ok(_) => {
-                        tracing::info!(addr = %addr, "Dialing bootstrap peer");
+                        tracing::info!(addr = %addr, peer_id = ?maybe_peer_id, "Dialing bootstrap peer");
                         dialed += 1;
                     }
                     Err(e) => {
-                        tracing::debug!(addr = %addr, error = %e, "Bootstrap dial skipped");
+                        tracing::warn!(addr = %addr, peer_id = ?maybe_peer_id, error = %e, "DIAG: bootstrap dial failed");
                     }
                 }
             }
@@ -69,7 +69,11 @@ pub fn trigger_bootstrap(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmE
             Ok(())
         }
         Err(e) => {
-            tracing::debug!(error = %e, "Kademlia bootstrap failed (no known peers)");
+            tracing::warn!(
+                error = %e,
+                connected_peers = swarm.connected_peers().count(),
+                "DIAG: Kademlia bootstrap failed — no known peers in routing table"
+            );
             Ok(())
         }
     }

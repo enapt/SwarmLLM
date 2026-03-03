@@ -663,7 +663,7 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         forward: LayerForward,
     },
-    /// Send a tensor result back to a specific peer via Cap'n Proto.
+    /// Send a tensor result back to a specific peer as a new request.
     SendTensorResult {
         target_peer_bytes: Vec<u8>,
         result: LayerResult,

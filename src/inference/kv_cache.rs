@@ -149,20 +149,38 @@ impl KvCacheManager {
     ) -> CacheReuse {
         let internal_id = match self.multi_turn_sessions.get(user_session_id) {
             Some(id) => *id,
-            None => return CacheReuse::Miss,
+            None => {
+                tracing::debug!(
+                    user_session_id,
+                    total_sessions = self.sessions.len(),
+                    total_multi_turn = self.multi_turn_sessions.len(),
+                    "DIAG: KV-cache MISS — no multi-turn session found"
+                );
+                return CacheReuse::Miss;
+            }
         };
 
         // Check if session exists and isn't expired
         let session = match self.sessions.get(&internal_id) {
             Some(s) => s,
             None => {
+                tracing::info!(
+                    user_session_id,
+                    internal_id = %internal_id,
+                    "DIAG: KV-cache MISS — internal session evicted"
+                );
                 self.multi_turn_sessions.remove(user_session_id);
                 return CacheReuse::Miss;
             }
         };
 
         if session.last_accessed.elapsed() > self.ttl {
-            tracing::debug!(user_session_id, "Multi-turn session expired");
+            tracing::info!(
+                user_session_id,
+                elapsed_secs = session.last_accessed.elapsed().as_secs(),
+                ttl_secs = self.ttl.as_secs(),
+                "DIAG: KV-cache MISS — session expired"
+            );
             self.sessions.remove(&internal_id);
             self.multi_turn_sessions.remove(user_session_id);
             return CacheReuse::Miss;
@@ -176,10 +194,12 @@ impl KvCacheManager {
             .collect();
 
         if !missing.is_empty() {
-            tracing::debug!(
+            tracing::info!(
                 user_session_id,
                 missing = missing.len(),
-                "Multi-turn pipeline degraded, invalidating cache"
+                total_holders = session.cache_holders.len(),
+                active_peers = active_peers.len(),
+                "DIAG: KV-cache MISS — pipeline degraded, nodes unreachable"
             );
             self.sessions.remove(&internal_id);
             self.multi_turn_sessions.remove(user_session_id);
@@ -188,15 +208,19 @@ impl KvCacheManager {
 
         // Check prefix match: new prompt must start with the cached prompt
         if session.cached_prompt.is_empty() {
-            // Newly registered session with no cached prompt yet — miss without invalidation
             tracing::debug!(
                 user_session_id,
-                "Empty cached prompt, cache miss (no invalidation)"
+                "DIAG: KV-cache MISS — empty cached prompt (no invalidation)"
             );
             return CacheReuse::Miss;
         }
         if !new_prompt.starts_with(&session.cached_prompt) {
-            tracing::debug!(user_session_id, "Prompt prefix mismatch, cache miss");
+            tracing::info!(
+                user_session_id,
+                cached_prompt_len = session.cached_prompt.len(),
+                new_prompt_len = new_prompt.len(),
+                "DIAG: KV-cache MISS — prompt prefix mismatch"
+            );
             // Invalidate stale session since the conversation diverged
             self.sessions.remove(&internal_id);
             self.multi_turn_sessions.remove(user_session_id);
@@ -209,7 +233,9 @@ impl KvCacheManager {
             start_pos,
             cached_prompt_len = session.cached_prompt.len(),
             new_prompt_len = new_prompt.len(),
-            "Multi-turn KV-cache hit, skipping prefill"
+            cached_tokens = session.cached_tokens,
+            cache_holders = session.cache_holders.len(),
+            "DIAG: KV-cache HIT — skipping prefill"
         );
 
         // Touch the session
