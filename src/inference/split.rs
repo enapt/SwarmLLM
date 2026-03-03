@@ -97,9 +97,14 @@ impl KvCacheStore {
     }
 
     /// Clear (remove) the KV-cache for a specific request.
+    /// Also clears any TP-keyed variants (tp{rank}-{model_key}).
     pub fn clear_request(&self, model_key: &str, request_id: &str) {
         let key = Self::cache_key(model_key, request_id);
         self.caches.remove(key.as_str());
+        // Also clear TP-keyed cache entries for the same request
+        let suffix = format!("\0{request_id}");
+        self.caches
+            .retain(|k, _| !(k.ends_with(&suffix) && k.contains(model_key)));
     }
 
     /// Clean up all expired cache entries. Returns the number of entries removed.
@@ -5061,21 +5066,42 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     Ok(tensor)
 }
 
-/// Sample the next token from logits using temperature and top-p.
+/// Sample the next token from logits using full sampling parameters.
 pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32, SwarmError> {
+    sample_token_with_params(
+        logits,
+        &crate::types::SamplingParams {
+            temperature,
+            top_p,
+            ..Default::default()
+        },
+    )
+}
+
+/// Sample the next token from logits using full SamplingParams (top_k, frequency/presence penalty).
+pub fn sample_token_with_params(
+    logits: &Tensor,
+    params: &crate::types::SamplingParams,
+) -> Result<u32, SwarmError> {
     let logits = logits
         .squeeze(0)
         .map_err(|e| SwarmError::Internal(e.to_string()))?;
     let logits = logits
         .to_dtype(DType::F32)
         .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let logits_vec = logits
+    let mut logits_vec = logits
         .to_vec1::<f32>()
         .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
     if logits_vec.is_empty() {
         return Err(SwarmError::Internal("Empty logits".into()));
     }
+
+    // Apply top-k filtering before temperature scaling
+    crate::inference::sampling::apply_top_k(&mut logits_vec, params.top_k);
+
+    let temperature = params.temperature;
+    let top_p = params.top_p;
 
     if temperature <= 0.0 {
         // Greedy: argmax — O(V)
@@ -5095,6 +5121,9 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
         .map(|&x| ((x - max_val) * inv_temp).exp())
         .collect();
     let sum: f32 = probs.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        return Ok(0);
+    }
     let inv_sum = 1.0 / sum;
     for p in probs.iter_mut() {
         *p *= inv_sum;

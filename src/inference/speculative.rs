@@ -136,10 +136,21 @@ pub fn accept_reject(
     draft_tokens: &[u32],
     draft_probs: &[Vec<f32>],
     target_probs: &[Vec<f32>],
-) -> SpeculativeResult {
-    assert_eq!(draft_tokens.len(), draft_probs.len());
-    // target_probs has one extra entry (for the bonus token after all accepted drafts)
-    assert_eq!(target_probs.len(), draft_probs.len() + 1);
+) -> Result<SpeculativeResult, crate::error::SwarmError> {
+    if draft_tokens.len() != draft_probs.len() {
+        return Err(crate::error::SwarmError::Internal(format!(
+            "draft_tokens.len()={} != draft_probs.len()={}",
+            draft_tokens.len(),
+            draft_probs.len()
+        )));
+    }
+    if target_probs.len() != draft_probs.len() + 1 {
+        return Err(crate::error::SwarmError::Internal(format!(
+            "target_probs.len()={} != draft_probs.len()+1={}",
+            target_probs.len(),
+            draft_probs.len() + 1
+        )));
+    }
 
     let mut accepted_tokens = Vec::new();
 
@@ -155,10 +166,10 @@ pub fn accept_reject(
             // Draft assigned zero probability — reject immediately.
             // Sample from the target model's distribution at this position.
             let bonus = sample_from_probs(&target_probs[i]);
-            return SpeculativeResult {
+            return Ok(SpeculativeResult {
                 accepted_tokens,
                 bonus_token: Some(bonus),
-            };
+            });
         }
 
         let accept_prob = (p_target / p_draft).min(1.0);
@@ -172,26 +183,26 @@ pub fn accept_reject(
             // adjusted[t] = max(0, p_target[t] - p_draft[t]) / Z
             let adjusted = compute_adjusted_distribution(&target_probs[i], &draft_probs[i]);
             let bonus = sample_from_probs(&adjusted);
-            return SpeculativeResult {
+            return Ok(SpeculativeResult {
                 accepted_tokens,
                 bonus_token: Some(bonus),
-            };
+            });
         }
     }
 
     // All draft tokens were accepted! Sample a bonus token from the target's
     // distribution at position gamma (the last entry in target_probs).
     let Some(last_probs) = target_probs.last() else {
-        return SpeculativeResult {
+        return Ok(SpeculativeResult {
             accepted_tokens,
             bonus_token: None,
-        };
+        });
     };
     let bonus = sample_from_probs(last_probs);
-    SpeculativeResult {
+    Ok(SpeculativeResult {
         accepted_tokens,
         bonus_token: Some(bonus),
-    }
+    })
 }
 
 /// Compute the adjusted distribution for rejection sampling.
@@ -331,7 +342,7 @@ mod tests {
             uniform.clone(), // bonus position
         ];
 
-        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
 
         // All tokens should be accepted since distributions are identical
         assert_eq!(result.accepted_tokens, vec![0, 1, 2]);
@@ -347,7 +358,7 @@ mod tests {
         let draft_probs = vec![vec![0.5, 0.5, 0.0, 0.0]];
         let target_probs = vec![vec![0.25, 0.25, 0.25, 0.25], vec![0.25, 0.25, 0.25, 0.25]];
 
-        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
         // Token should be rejected since draft prob is 0
         assert!(result.accepted_tokens.is_empty());
         assert!(result.bonus_token.is_some());
@@ -367,7 +378,7 @@ mod tests {
         // Run many times to check statistical behavior
         let mut rejection_count = 0;
         for _ in 0..100 {
-            let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+            let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
             if result.accepted_tokens.is_empty() {
                 rejection_count += 1;
             }
@@ -404,7 +415,7 @@ mod tests {
             vec![0.0, 1.0],
             vec![0.5, 0.5], // bonus
         ];
-        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs);
+        let result = accept_reject(&draft_tokens, &draft_probs, &target_probs).unwrap();
         assert_eq!(result.accepted_tokens, vec![1]);
         assert!(result.bonus_token.is_some());
     }

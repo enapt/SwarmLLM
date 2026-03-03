@@ -865,11 +865,8 @@ impl PipelineExecutor {
             let is_last = split_model.layer_end >= split_model.total_layers;
 
             if is_last {
-                let token_id = split::sample_token(
-                    &output,
-                    self.request.sampling_params.temperature,
-                    self.request.sampling_params.top_p,
-                )?;
+                let token_id =
+                    split::sample_token_with_params(&output, &self.request.sampling_params)?;
                 let eos_tokens = split_model.eos_tokens();
                 let finish = if eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
@@ -938,7 +935,11 @@ impl PipelineExecutor {
                 };
 
                 if let Some((prefix_hash, prefix_len)) = prefix_result {
-                    let mut cache_guard = self.shared_state.prefix_cache.lock().unwrap();
+                    let mut cache_guard = self
+                        .shared_state
+                        .prefix_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
 
                     if let Some((layer_kv, cached_prefix_len)) =
                         cache_guard.get(&prefix_hash, &model_key)
@@ -1026,8 +1027,11 @@ impl PipelineExecutor {
                                 .collect();
 
                             if layer_kv.len() == num_layers {
-                                let mut cache_guard =
-                                    self.shared_state.prefix_cache.lock().unwrap();
+                                let mut cache_guard = self
+                                    .shared_state
+                                    .prefix_cache
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
                                 cache_guard.insert(
                                     prefix_hash,
                                     model_key.clone(),
@@ -1104,11 +1108,7 @@ impl PipelineExecutor {
 
         if is_last {
             // Last segment: output is logits → sample token
-            let token_id = split::sample_token(
-                &output,
-                self.request.sampling_params.temperature,
-                self.request.sampling_params.top_p,
-            )?;
+            let token_id = split::sample_token_with_params(&output, &self.request.sampling_params)?;
 
             // EOS detection: use tokens loaded from GGUF metadata
             let eos_tokens = split_model.eos_tokens();
@@ -1263,7 +1263,14 @@ impl PipelineExecutor {
                 }
 
                 // Wait for standby response via the oneshot channel
-                Self::wait_for_result(rx).await
+                let result = Self::wait_for_result(rx).await?;
+
+                // Update the assignment so subsequent tokens use the standby
+                // directly, avoiding repeated failover + 30s timeout per token.
+                self.assignment.segments[failed_idx].node_id = backup.node_id;
+                self.assignment.segments[failed_idx].layer_range = backup.layer_range;
+
+                Ok(result)
             }
             None => {
                 tracing::error!(

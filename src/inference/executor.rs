@@ -667,7 +667,7 @@ impl ModelExecutor {
 
             // === ACCEPT/REJECT PHASE ===
             let spec_result =
-                speculative::accept_reject(&draft_candidates, &padded_draft_probs, &verify_probs);
+                speculative::accept_reject(&draft_candidates, &padded_draft_probs, &verify_probs)?;
 
             let num_accepted = spec_result.accepted_tokens.len();
             spec_state.record_batch(num_drafted as u32, num_accepted as u32);

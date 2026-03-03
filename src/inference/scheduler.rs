@@ -416,92 +416,15 @@ impl PipelineScheduler {
     /// AllReduce communication between layers requires low latency.
     fn detect_tp_groups(
         &self,
-        segments: &[PipelineSegment],
-        candidates: &[NodeCandidate],
-        manifest: &ModelManifest,
+        _segments: &[PipelineSegment],
+        _candidates: &[NodeCandidate],
+        _manifest: &ModelManifest,
     ) -> Vec<TensorParallelGroup> {
-        let mut tp_groups = Vec::new();
-        let local_node_id = self.shared_state.identity.node_id();
-
-        for segment in segments {
-            // Find LAN peers that can serve the same layer range
-            let mut group_nodes = vec![segment.node_id.clone()];
-            let mut group_shard_ids = vec![segment.shard_id.clone()];
-
-            for candidate in candidates {
-                // Skip the primary node
-                if candidate.node_id == segment.node_id {
-                    continue;
-                }
-                // Must be a LAN peer (low latency for AllReduce)
-                let is_lan = if &candidate.node_id == local_node_id {
-                    // Local node is always "LAN" with itself
-                    group_nodes.iter().any(|n| {
-                        self.shared_state
-                            .peer_registry
-                            .get(n)
-                            .map(|p| p.is_lan_peer)
-                            .unwrap_or(false)
-                    })
-                } else {
-                    self.shared_state
-                        .peer_registry
-                        .get(&candidate.node_id)
-                        .map(|p| p.is_lan_peer)
-                        .unwrap_or(false)
-                };
-                if !is_lan {
-                    continue;
-                }
-                // Must be able to cover the same layer range
-                let covers = candidate
-                    .available_ranges
-                    .iter()
-                    .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1);
-                if !covers {
-                    continue;
-                }
-                group_nodes.push(candidate.node_id.clone());
-                group_shard_ids.push(candidate.shard_id.clone());
-                // Cap at 4 TP nodes (diminishing returns beyond that on LAN)
-                if group_nodes.len() >= 4 {
-                    break;
-                }
-            }
-
-            // Only form a TP group if we have 2+ nodes
-            if group_nodes.len() >= 2 {
-                // Collect all shard IDs needed for this layer range
-                let needed_shard_ids: Vec<ShardId> = manifest
-                    .shards
-                    .iter()
-                    .filter(|s| {
-                        s.layer_range.0 < segment.layer_range.1
-                            && s.layer_range.1 > segment.layer_range.0
-                    })
-                    .map(|s| ShardId {
-                        model_id: manifest.id.clone(),
-                        index: s.index,
-                    })
-                    .collect();
-
-                tracing::info!(
-                    tp_size = group_nodes.len(),
-                    layer_range = ?segment.layer_range,
-                    "Tensor-parallel group detected on LAN"
-                );
-                tp_groups.push(TensorParallelGroup {
-                    nodes: group_nodes,
-                    layer_range: segment.layer_range,
-                    shard_ids: if needed_shard_ids.is_empty() {
-                        group_shard_ids
-                    } else {
-                        needed_shard_ids
-                    },
-                });
-            }
-        }
-        tp_groups
+        // Multi-node TP requires AllReduce, which is not yet implemented.
+        // Forming TP groups would produce wrong hidden states (each node computes
+        // a partial result but there is no reduction step to combine them).
+        // Disabled until AllReduce lands — always return empty.
+        Vec::new()
     }
 
     /// Find standby (backup) nodes for each pipeline segment.
