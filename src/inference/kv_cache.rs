@@ -187,7 +187,15 @@ impl KvCacheManager {
         }
 
         // Check prefix match: new prompt must start with the cached prompt
-        if !new_prompt.starts_with(&session.cached_prompt) || session.cached_prompt.is_empty() {
+        if session.cached_prompt.is_empty() {
+            // Newly registered session with no cached prompt yet — miss without invalidation
+            tracing::debug!(
+                user_session_id,
+                "Empty cached prompt, cache miss (no invalidation)"
+            );
+            return CacheReuse::Miss;
+        }
+        if !new_prompt.starts_with(&session.cached_prompt) {
             tracing::debug!(user_session_id, "Prompt prefix mismatch, cache miss");
             // Invalidate stale session since the conversation diverged
             self.sessions.remove(&internal_id);
@@ -227,6 +235,7 @@ impl KvCacheManager {
                     "KV-cache session expired"
                 );
                 self.sessions.remove(session_id);
+                self.multi_turn_sessions.retain(|_, id| id != session_id);
                 return None;
             }
         }

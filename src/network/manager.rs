@@ -288,6 +288,12 @@ impl NetworkManager {
                             | SwarmMessage::HealthPong { timestamp, .. } => {
                                 now_epoch.saturating_sub(*timestamp) > 300
                             }
+                            SwarmMessage::ShardAnnounce(ann) => {
+                                now_epoch.saturating_sub(ann.timestamp.timestamp() as u64) > 300
+                            }
+                            SwarmMessage::CreditGossip(gossip) => {
+                                now_epoch.saturating_sub(gossip.timestamp.timestamp() as u64) > 300
+                            }
                             _ => false,
                         };
                         if too_old {
@@ -609,9 +615,7 @@ impl NetworkManager {
                         // a peer that restarts with a new identity can't reconnect
                         // because the stale bootstrap dial blocks mDNS.
                         let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
-                            .condition(
-                                libp2p::swarm::dial_opts::PeerCondition::Disconnected,
-                            )
+                            .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
                             .addresses(vec![addr])
                             .build();
                         if let Err(e) = self.swarm.dial(opts) {
@@ -761,21 +765,14 @@ impl NetworkManager {
                     .set_mode(Some(libp2p::kad::Mode::Server));
             }
 
-            SwarmEvent::OutgoingConnectionError {
-                peer_id,
-                error,
-                ..
-            } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 tracing::debug!(
                     ?peer_id, %error,
                     "Outgoing connection failed"
                 );
             }
 
-            SwarmEvent::IncomingConnectionError {
-                error,
-                ..
-            } => {
+            SwarmEvent::IncomingConnectionError { error, .. } => {
                 tracing::debug!(
                     %error,
                     "Incoming connection failed"
@@ -871,7 +868,19 @@ impl NetworkManager {
                     "Shard transfer request"
                 );
 
-                let response = self.serve_shard_data(&shard_req);
+                // Extract path info from self (sync), then do blocking I/O
+                // via spawn_blocking without holding &self across the await.
+                let prepared = self.prepare_shard_read(&shard_req);
+                let response = match prepared {
+                    Some((path, offset, chunk_size, model_id, shard_index)) => {
+                        read_shard_chunk_async(path, offset, chunk_size, model_id, shard_index)
+                            .await
+                    }
+                    None => SwarmResponse::ShardData(crate::types::ShardResponse {
+                        data: vec![],
+                        total_size: 0,
+                    }),
+                };
 
                 // NET-M7: Log send_response errors
                 if self
@@ -947,14 +956,12 @@ impl NetworkManager {
                     let chunk_len = data.data.len() as u64;
 
                     if let Some(ref acq_tx) = self.acquisition_tx {
-                        if let Err(e) = acq_tx.try_send(
-                            AcquisitionCommand::ShardDataReceived {
-                                shard_id: shard_id.clone(),
-                                offset,
-                                data: data.data,
-                                total_size: data.total_size,
-                            },
-                        ) {
+                        if let Err(e) = acq_tx.try_send(AcquisitionCommand::ShardDataReceived {
+                            shard_id: shard_id.clone(),
+                            offset,
+                            data: data.data,
+                            total_size: data.total_size,
+                        }) {
                             tracing::warn!(error = %e, "Failed to forward shard data to acquisition");
                         }
                     }
@@ -1309,103 +1316,33 @@ impl NetworkManager {
         }
     }
 
-    /// Serve shard data from disk. Supports two modes:
-    /// 1. Individual shard files (shard_NNN.bin) — for nodes that downloaded shards
-    /// 2. Source GGUF file with byte-range mapping — for the original model host
-    ///
-    /// The shard's `chunk_offset` is relative to the shard itself (not the source file).
-    fn serve_shard_data(&self, req: &crate::types::ShardRequest) -> SwarmResponse {
+    /// Check if a shard is available locally and return the path + request params.
+    /// Returns None if the shard is not available. This is sync to avoid holding
+    /// `&self` across async boundaries (NetworkManager is not Send).
+    fn prepare_shard_read(
+        &self,
+        req: &crate::types::ShardRequest,
+    ) -> Option<(std::path::PathBuf, u64, u64, crate::types::ModelId, u32)> {
         let model_id = &req.shard_id.model_id;
         let shard_index = req.shard_id.index;
 
-        // First try: individual shard file on disk
         let shard_path = self.shard_store.shard_path(model_id, shard_index);
         if shard_path.exists() {
-            return self.read_file_chunk(
-                &shard_path,
+            return Some((
+                shard_path,
                 req.chunk_offset,
                 req.chunk_size,
-                model_id,
+                model_id.clone(),
                 shard_index,
-            );
+            ));
         }
-
-        // Shard files are self-contained — no source GGUF fallback needed.
 
         tracing::debug!(
             model = %model_id,
             shard = shard_index,
             "Shard not available locally"
         );
-        SwarmResponse::ShardData(crate::types::ShardResponse {
-            data: vec![],
-            total_size: 0,
-        })
-    }
-
-    /// Read a chunk from a file (individual shard file on disk).
-    /// Uses spawn_blocking to avoid stalling the async event loop with file I/O.
-    fn read_file_chunk(
-        &self,
-        path: &std::path::Path,
-        offset: u64,
-        chunk_size: u64,
-        model_id: &crate::types::ModelId,
-        shard_index: u32,
-    ) -> SwarmResponse {
-        use std::io::{Read, Seek, SeekFrom};
-
-        let path = path.to_path_buf();
-        let model_id = model_id.clone();
-
-        // Perform blocking file I/O on a dedicated thread to avoid stalling
-        // the libp2p event loop while reading potentially large shard chunks.
-        let result = std::thread::scope(|_| match std::fs::File::open(&path) {
-            Ok(mut file) => {
-                let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
-                let chunk_size = chunk_size.min(32 * 1024 * 1024);
-                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                    tracing::warn!(error = %e, "Failed to seek in shard file");
-                    return SwarmResponse::ShardData(crate::types::ShardResponse {
-                        data: vec![],
-                        total_size: 0,
-                    });
-                }
-                let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
-                let mut buf = vec![0u8; read_len];
-                match file.read_exact(&mut buf) {
-                    Ok(()) => {
-                        tracing::info!(
-                            model = %model_id,
-                            shard = shard_index,
-                            bytes = buf.len(),
-                            total_size,
-                            "Serving shard chunk from file"
-                        );
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
-                            data: buf,
-                            total_size,
-                        })
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to read shard file");
-                        SwarmResponse::ShardData(crate::types::ShardResponse {
-                            data: vec![],
-                            total_size: 0,
-                        })
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to open shard file");
-                SwarmResponse::ShardData(crate::types::ShardResponse {
-                    data: vec![],
-                    total_size: 0,
-                })
-            }
-        });
-
-        result
+        None
     }
 
     /// Send a shard transfer request to a specific peer.
@@ -1541,6 +1478,77 @@ impl NetworkManager {
         }
         if dialed > 0 {
             tracing::info!(count = dialed, "PEX: dialed new peers");
+        }
+    }
+}
+
+/// Read a shard chunk from disk using spawn_blocking to avoid stalling the
+/// async event loop. This is a free function (not on NetworkManager) so
+/// `&self` is not captured across the await point.
+async fn read_shard_chunk_async(
+    path: std::path::PathBuf,
+    offset: u64,
+    chunk_size: u64,
+    model_id: crate::types::ModelId,
+    shard_index: u32,
+) -> SwarmResponse {
+    let result = tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        match std::fs::File::open(&path) {
+            Ok(mut file) => {
+                let total_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                let chunk_size = chunk_size.min(32 * 1024 * 1024);
+                if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+                    tracing::warn!(error = %e, "Failed to seek in shard file");
+                    return SwarmResponse::ShardData(crate::types::ShardResponse {
+                        data: vec![],
+                        total_size: 0,
+                    });
+                }
+                let read_len = chunk_size.min(total_size.saturating_sub(offset)) as usize;
+                let mut buf = vec![0u8; read_len];
+                match file.read_exact(&mut buf) {
+                    Ok(()) => {
+                        tracing::info!(
+                            model = %model_id,
+                            shard = shard_index,
+                            bytes = buf.len(),
+                            total_size,
+                            "Serving shard chunk from file"
+                        );
+                        SwarmResponse::ShardData(crate::types::ShardResponse {
+                            data: buf,
+                            total_size,
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to read shard file");
+                        SwarmResponse::ShardData(crate::types::ShardResponse {
+                            data: vec![],
+                            total_size: 0,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to open shard file");
+                SwarmResponse::ShardData(crate::types::ShardResponse {
+                    data: vec![],
+                    total_size: 0,
+                })
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!(error = %e, "spawn_blocking panicked during shard read");
+            SwarmResponse::ShardData(crate::types::ShardResponse {
+                data: vec![],
+                total_size: 0,
+            })
         }
     }
 }

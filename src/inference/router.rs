@@ -493,17 +493,24 @@ impl InferenceRouter {
             None
         };
 
-        // Register KV-cache session for this request
-        self.kv_cache.register_session(
-            queued.request.id,
-            crate::types::PipelineAssignment {
-                request_id: queued.request.id,
-                segments: vec![],
-                standbys: vec![],
-                tp_groups: vec![],
-            },
-            cache_start_pos.unwrap_or(0),
-        );
+        // Register multi-turn KV-cache session so subsequent turns can
+        // find this session via check_multi_turn_reuse. Use chatml_fallback
+        // consistently (same template used for the prefix check above).
+        if let Some(ref session_id) = queued.request.session_id {
+            let prompt = crate::inference::chat_template::chatml_fallback(&queued.request.messages);
+            self.kv_cache.register_multi_turn(
+                session_id,
+                queued.request.id,
+                crate::types::PipelineAssignment {
+                    request_id: queued.request.id,
+                    segments: vec![],
+                    standbys: vec![],
+                    tp_groups: vec![],
+                },
+                cache_start_pos.unwrap_or(0),
+                prompt,
+            );
+        }
 
         self.active_count.fetch_add(1, Ordering::Relaxed);
         let active_count = self.active_count.clone();
@@ -650,6 +657,31 @@ async fn execute_batch(
     tracing::debug!(batch_size, "Batch execution complete");
 }
 
+/// RAII guard that decrements active_count for any unprocessed batch items on drop.
+/// Ensures active_count is always decremented even if batch processing panics mid-loop.
+struct BatchCleanup {
+    active_count: Arc<AtomicUsize>,
+    remaining: usize,
+}
+
+impl BatchCleanup {
+    fn complete_one(&mut self) {
+        if self.remaining > 0 {
+            self.active_count.fetch_sub(1, Ordering::Relaxed);
+            self.remaining -= 1;
+        }
+    }
+}
+
+impl Drop for BatchCleanup {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.active_count
+                .fetch_sub(self.remaining, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Execute a batch of requests locally, sharing the model lock.
 ///
 /// Acquires the executor mutex once and processes all requests sequentially.
@@ -661,6 +693,10 @@ async fn execute_local_batch(
 ) {
     let mut executor = shared_state.executor.lock().await;
     let batch_size = batch.len();
+    let mut cleanup = BatchCleanup {
+        active_count: active_count.clone(),
+        remaining: batch_size,
+    };
 
     tracing::info!(batch_size, "Executing local inference batch");
 
@@ -743,7 +779,7 @@ async fn execute_local_batch(
 
         finalize_request(&shared_state, &request, &output).await;
         shared_state.active_pipelines.remove(&request.id);
-        active_count.fetch_sub(1, Ordering::Relaxed);
+        cleanup.complete_one();
         let _ = result_tx.send(output);
     }
 
@@ -790,9 +826,12 @@ async fn execute_distributed_batch(
         }));
     }
 
-    // Wait for all requests in the batch to complete
+    // Wait for all requests in the batch to complete.
+    // If a task panicked before decrementing, do it here.
     for handle in handles {
-        let _ = handle.await;
+        if handle.await.is_err() {
+            active_count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 

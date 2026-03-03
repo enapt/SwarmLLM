@@ -68,6 +68,11 @@ impl PagedKvPool {
         };
 
         // Key cache: [num_blocks, n_kv_heads, head_dim/x, BLOCK_SIZE, x]
+        assert_eq!(
+            head_dim % x,
+            0,
+            "head_dim ({head_dim}) must be divisible by element packing factor ({x})"
+        );
         let key_cache = Tensor::zeros(
             (num_blocks, n_kv_heads, head_dim / x, BLOCK_SIZE, x),
             dtype,
@@ -96,7 +101,7 @@ impl PagedKvPool {
 
     /// Allocate `count` blocks from the free list. Returns None if insufficient blocks.
     pub fn allocate(&self, count: usize) -> Option<Vec<i32>> {
-        let mut free = self.free_blocks.lock().unwrap();
+        let mut free = self.free_blocks.lock().unwrap_or_else(|e| e.into_inner());
         if free.len() < count {
             return None;
         }
@@ -109,15 +114,20 @@ impl PagedKvPool {
 
     /// Return blocks to the free list.
     pub fn free(&self, blocks: &[i32]) {
-        let mut free = self.free_blocks.lock().unwrap();
+        let mut free = self.free_blocks.lock().unwrap_or_else(|e| e.into_inner());
         for &b in blocks {
-            free.push_back(b);
+            if !free.contains(&b) {
+                free.push_back(b);
+            }
         }
     }
 
     /// Number of currently free blocks.
     pub fn free_count(&self) -> usize {
-        self.free_blocks.lock().unwrap().len()
+        self.free_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Auto-size the number of blocks based on available VRAM budget.
@@ -131,6 +141,9 @@ impl PagedKvPool {
         };
         // Each block stores: key + value = 2 * n_kv_heads * head_dim * BLOCK_SIZE * bytes_per_elem
         let bytes_per_block = 2 * n_kv_heads * head_dim * BLOCK_SIZE * bytes_per_elem;
+        if bytes_per_block == 0 {
+            return 0;
+        }
         let budget_bytes = budget_mb as usize * 1024 * 1024;
         budget_bytes / bytes_per_block
     }

@@ -459,10 +459,12 @@ impl SharedState {
 /// Maximum restart attempts before a subsystem is considered permanently failed.
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 /// Base backoff duration for subsystem restarts (doubles each attempt, capped at 16s).
-#[cfg(test)]
+/// Note: Not currently wired for production restart logic — channel-bound subsystems
+/// cannot be restarted. Kept for tests and future use.
+#[allow(dead_code)]
 const RESTART_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(1);
 /// Maximum backoff duration for subsystem restarts.
-#[cfg(test)]
+#[allow(dead_code)]
 const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(16);
 
 /// Whether a subsystem is critical to daemon operation.
@@ -475,7 +477,9 @@ pub enum SubsystemCriticality {
 }
 
 /// Compute the backoff duration for a given restart attempt.
-#[cfg(test)]
+/// Note: Not currently wired for production restart logic — channel-bound subsystems
+/// cannot be restarted. Kept for tests and future use.
+#[allow(dead_code)]
 fn restart_backoff(attempt: u32) -> std::time::Duration {
     let secs = RESTART_BACKOFF_BASE
         .as_secs()
@@ -1148,17 +1152,23 @@ impl Daemon {
         // Auto-detect region via IP geolocation (non-blocking, best-effort)
         if shared_state.config.identity.region.is_none() {
             let geo_state = shared_state.clone();
+            let mut geo_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
-                match detect_region_from_ip().await {
-                    Some(code) => {
-                        tracing::info!(region = %code, "Auto-detected region via IP geolocation");
-                        *geo_state.detected_region.write().await = Some(code);
+                tokio::select! {
+                    result = detect_region_from_ip() => {
+                        match result {
+                            Some(code) => {
+                                tracing::info!(region = %code, "Auto-detected region via IP geolocation");
+                                *geo_state.detected_region.write().await = Some(code);
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "IP geolocation unavailable — network map will show unknown region"
+                                );
+                            }
+                        }
                     }
-                    None => {
-                        tracing::debug!(
-                            "IP geolocation unavailable — network map will show unknown region"
-                        );
-                    }
+                    _ = geo_shutdown.changed() => {}
                 }
             });
         } else {
@@ -1172,9 +1182,13 @@ impl Daemon {
         {
             let announce_state = shared_state.clone();
             let announce_tx = network_tx.clone();
+            let mut announce_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
-                // Wait for peer connections to establish
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                // Wait for peer connections to establish, abort on shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                    _ = announce_shutdown.changed() => { return; }
+                }
 
                 let node_id = announce_state.identity.node_id().clone();
 
@@ -1244,11 +1258,16 @@ impl Daemon {
             } else {
                 format!("{url}/setup")
             };
+            let mut browser_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
-                // Small delay to let the server bind
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                if let Err(e) = open_browser(&target) {
-                    tracing::debug!(error = %e, "Could not open browser automatically");
+                // Small delay to let the server bind, abort on shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                        if let Err(e) = open_browser(&target) {
+                            tracing::debug!(error = %e, "Could not open browser automatically");
+                        }
+                    }
+                    _ = browser_shutdown.changed() => {}
                 }
             });
         }
@@ -1256,9 +1275,13 @@ impl Daemon {
         // Auto-load models that have local shards available
         {
             let sm = shared_state.clone();
+            let mut autoload_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
-                // Brief delay to let shard announcements propagate
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Brief delay to let shard announcements propagate, abort on shutdown
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    _ = autoload_shutdown.changed() => { return; }
+                }
                 let manifests = sm.model_registry.list_models();
                 for m in &manifests {
                     if sm.split_models.iter().any(|e| e.key().0 == m.id) {
@@ -1571,10 +1594,13 @@ async fn dispatch_network_messages(
                             }
                             // StreamingToken: route to registered streaming channel
                             SwarmMessage::StreamingToken(ref token) => {
-                                if let Some(tx) = shared_state
+                                // Clone the sender to drop the DashMap Ref (read lock) before
+                                // awaiting send() or calling remove() — avoids deadlock.
+                                let maybe_tx = shared_state
                                     .streaming_token_txs
                                     .get(&token.request_id)
-                                {
+                                    .map(|r| r.clone());
+                                if let Some(tx) = maybe_tx {
                                     if tx.send(token.clone()).await.is_err() {
                                         tracing::debug!(
                                             request_id = %token.request_id,
