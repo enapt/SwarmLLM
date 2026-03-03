@@ -154,6 +154,9 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "invalid_request_error",
             ),
+            SwarmError::ShardNotFound(_) => {
+                (StatusCode::NOT_FOUND, self.0.to_string(), "not_found_error")
+            }
             _ => {
                 // Log the full error internally but return a generic message
                 // to avoid leaking internal paths, peer errors, or DB details.

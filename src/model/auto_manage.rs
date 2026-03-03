@@ -262,10 +262,19 @@ impl AutoShardManager {
         local_node_id: &NodeId,
     ) -> u64 {
         let max_bytes = if config.max_storage_mb > 0 {
-            config.max_storage_mb * 1024 * 1024
+            config
+                .max_storage_mb
+                .saturating_mul(1024)
+                .saturating_mul(1024)
         } else {
             // Fall back to global max_disk_mb, using 50% for auto-manage
-            (self.shared_state.config.resources.max_disk_mb * 1024 * 1024) / 2
+            self.shared_state
+                .config
+                .resources
+                .max_disk_mb
+                .saturating_mul(1024)
+                .saturating_mul(1024)
+                / 2
         };
 
         // Sum up bytes of shards we already hold
@@ -1435,7 +1444,7 @@ impl AutoShardManager {
                 freed_bytes: candidate.shard_size_bytes,
                 remaining_local_shards: remaining_local,
                 holder_count_before: candidate.holder_count,
-                holder_count_after: candidate.holder_count - 1,
+                holder_count_after: candidate.holder_count.saturating_sub(1),
                 timestamp: chrono::Utc::now(),
             };
 
@@ -1483,7 +1492,7 @@ impl AutoShardManager {
     fn pressure_adjusted_target(&self, target: u32, pressure: f64, min_replicas: u32) -> u32 {
         if pressure < 0.5 {
             // Relaxed: keep extras
-            target + 1
+            target.saturating_add(1)
         } else if pressure < 0.8 {
             target
         } else if pressure < 0.95 {

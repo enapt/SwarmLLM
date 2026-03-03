@@ -1054,6 +1054,17 @@ pub async fn hf_download(
         )));
     }
 
+    // Sanitize filename to prevent path traversal
+    if filename.contains("..")
+        || filename.starts_with('.')
+        || filename.contains('/')
+        || filename.contains('\\')
+    {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Invalid filename: path traversal detected".into(),
+        )));
+    }
+
     let dest_dir = state
         .config
         .node

@@ -625,14 +625,15 @@ async fn anthropic_stream(
             .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
             .await;
 
-        // Stream tokens
+        // Stream tokens — count events as a fallback estimate
         let mut got_finish = false;
-        let mut total_output_tokens = 0u32;
+        let mut streamed_token_count = 0u32;
+        let mut finish_stop_reason = String::new();
         while let Some(event) = token_rx.recv().await {
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
                 if !event.text.is_empty() {
-                    total_output_tokens += 1;
+                    streamed_token_count += 1;
                     let _ = sse_tx
                         .send(AnthropicSseEvent::ContentBlockDelta {
                             index: 0,
@@ -640,19 +641,14 @@ async fn anthropic_stream(
                         })
                         .await;
                 }
+                finish_stop_reason = map_finish_reason(reason).into();
                 let _ = sse_tx
                     .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::MessageDelta {
-                        stop_reason: map_finish_reason(reason).into(),
-                        output_tokens: total_output_tokens,
-                    })
                     .await;
                 break;
             }
             if !event.text.is_empty() {
-                total_output_tokens += 1;
+                streamed_token_count += 1;
                 if sse_tx
                     .send(AnthropicSseEvent::ContentBlockDelta {
                         index: 0,
@@ -666,9 +662,23 @@ async fn anthropic_stream(
             }
         }
 
-        // Fallback: if pipeline finished without streaming events
-        if !got_finish {
-            match result_rx.await {
+        // Get authoritative token count from the result when available
+        let result = result_rx.await;
+        if got_finish {
+            // Use completion_tokens from result if available, else fall back to event count
+            let output_tokens = match &result {
+                Ok(Ok(output)) => output.completion_tokens,
+                _ => streamed_token_count,
+            };
+            let _ = sse_tx
+                .send(AnthropicSseEvent::MessageDelta {
+                    stop_reason: finish_stop_reason,
+                    output_tokens,
+                })
+                .await;
+        } else {
+            // Fallback: pipeline finished without streaming events
+            match result {
                 Ok(Ok(output)) => {
                     if !output.content.is_empty() {
                         let _ = sse_tx
@@ -695,7 +705,7 @@ async fn anthropic_stream(
                     let _ = sse_tx
                         .send(AnthropicSseEvent::MessageDelta {
                             stop_reason: "end_turn".into(),
-                            output_tokens: total_output_tokens,
+                            output_tokens: streamed_token_count,
                         })
                         .await;
                 }

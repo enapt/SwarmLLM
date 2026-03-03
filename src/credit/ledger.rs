@@ -134,7 +134,10 @@ impl CreditLedger {
         layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
-        let amount = rates.inference_serve * (layers as i64) * (tokens as i64);
+        let amount = rates
+            .inference_serve
+            .saturating_mul(layers as i64)
+            .saturating_mul(tokens as i64);
         self.apply_credit(amount, true).await?;
         self.persist_balance().await?;
 
@@ -152,7 +155,8 @@ impl CreditLedger {
             match crate::pool::forward::forward_credits_to_owner(ss, amount).await {
                 Ok(true) => {
                     // Credits were forwarded — deduct from member's local balance
-                    self.apply_credit(-amount, false).await?;
+                    // Use balance-only adjustment to avoid inflating lifetime_spent
+                    self.adjust_balance(-amount).await?;
                     self.persist_balance().await?;
                     tracing::info!(amount, "Forwarded earned credits to pool owner");
                 }
@@ -174,7 +178,10 @@ impl CreditLedger {
         layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
-        let amount = rates.inference_consume * (layers as i64) * (tokens as i64);
+        let amount = rates
+            .inference_consume
+            .saturating_mul(layers as i64)
+            .saturating_mul(tokens as i64);
         self.apply_credit(-amount, false).await?;
         self.persist_balance().await?;
 
@@ -328,6 +335,15 @@ impl CreditLedger {
             "Credit balance updated"
         );
 
+        Ok(())
+    }
+
+    /// Adjust balance without affecting lifetime_earned or lifetime_spent.
+    /// Used for pool credit forwarding where the balance transfer is internal accounting.
+    async fn adjust_balance(&self, delta: i64) -> Result<(), SwarmError> {
+        let mut bal = self.balance.write().await;
+        bal.balance = bal.balance.saturating_add(delta);
+        bal.last_updated = chrono::Utc::now();
         Ok(())
     }
 

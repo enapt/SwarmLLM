@@ -378,7 +378,17 @@ impl AcquisitionManager {
                 }
 
                 // Pick the best peer (lowest latency, highest trust)
-                let target = self.select_best_peer(&eligible);
+                let target = match self.select_best_peer(&eligible) {
+                    Some(peer) => peer,
+                    None => {
+                        tracing::warn!(
+                            model = %model_id,
+                            shard = shard_id.index,
+                            "All holders are local node, cannot self-download"
+                        );
+                        break;
+                    }
+                };
 
                 // Send directed shard transfer request to the target peer
                 let request = crate::types::ShardRequest {
@@ -708,7 +718,8 @@ impl AcquisitionManager {
     }
 
     /// Select the best peer to download from based on latency and trust.
-    fn select_best_peer(&self, holders: &[NodeId]) -> NodeId {
+    /// Returns `None` if all holders are the local node (self-download not possible).
+    fn select_best_peer(&self, holders: &[NodeId]) -> Option<NodeId> {
         let local_id = self.shared_state.identity.node_id().clone();
 
         holders
@@ -726,7 +737,6 @@ impl AcquisitionManager {
                     .unwrap_or(500)
             })
             .cloned()
-            .unwrap_or_else(|| holders[0].clone())
     }
 }
 

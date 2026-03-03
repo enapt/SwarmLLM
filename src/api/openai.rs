@@ -271,6 +271,8 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -813,7 +815,6 @@ async fn forward_to_peer(
         let response = axum::response::Response::builder()
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
-            .header("x-swarm-forwarded", "true")
             .body(body)
             .map_err(|e| {
                 ApiError(crate::error::SwarmError::Internal(format!(
@@ -826,7 +827,6 @@ async fn forward_to_peer(
         let body = peer_resp.text().await.unwrap_or_default();
         let response = axum::response::Response::builder()
             .header("content-type", "application/json")
-            .header("x-swarm-forwarded", "true")
             .body(axum::body::Body::from(body))
             .map_err(|e| {
                 ApiError(crate::error::SwarmError::Internal(format!(
@@ -946,6 +946,7 @@ async fn router_inference_stream(
 
     let model_name = req.model.clone();
     let rid = request_id.clone();
+    let stream_session_id = req.session_id.clone();
 
     // Bridge the streaming token channel into SSE events
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
@@ -1049,6 +1050,11 @@ async fn router_inference_stream(
                 role,
                 finish_reason,
             } => {
+                let sid = if finish_reason.is_some() {
+                    stream_session_id.clone()
+                } else {
+                    None
+                };
                 let chunk = ChatCompletionChunk {
                     id: rid.clone(),
                     object: "chat.completion.chunk",
@@ -1059,6 +1065,7 @@ async fn router_inference_stream(
                         delta: Delta { role, content },
                         finish_reason,
                     }],
+                    session_id: sid,
                 };
                 let json = serde_json::to_string(&chunk).unwrap_or_default();
                 Ok::<_, Infallible>(Event::default().data(json))
@@ -1333,6 +1340,7 @@ async fn split_stream_response(
                     delta: Delta { role, content },
                     finish_reason,
                 }],
+                session_id: None,
             };
             Ok(Event::default().data(serde_json::to_string(&chunk).unwrap_or_default()))
         }
@@ -1408,6 +1416,7 @@ async fn stream_response(
                     delta: Delta { role, content },
                     finish_reason,
                 }],
+                session_id: None,
             };
             let json = serde_json::to_string(&chunk).unwrap_or_default();
             Ok(Event::default().data(json))
