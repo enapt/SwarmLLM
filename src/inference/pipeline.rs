@@ -311,6 +311,14 @@ impl PipelineExecutor {
         } else {
             None
         };
+        // Text-based stop sequences from the chat template (e.g. "<|user|>")
+        let stop_strings = {
+            let info = self.shared_state.loaded_model_info.read().await;
+            let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
+            chat_template::extract_stop_strings(tmpl)
+        };
+        // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
+        let mut accumulated_text = String::new();
 
         // Token generation loop
         for seq_num in 0..max_tokens {
@@ -363,16 +371,38 @@ impl PipelineExecutor {
 
                     generated_tokens.extend(&result.token_ids);
 
-                    // Stream each non-EOS token — uses cached decoder (no mutex)
-                    if let Some(ref tx) = token_tx {
-                        let eos = cached_eos.as_deref().unwrap_or(&[2]);
-                        let decoder = cached_decoder.as_ref();
-                        for &tid in &result.token_ids {
-                            if !eos.contains(&tid) {
-                                let text = match decoder {
-                                    Some(d) => d.decode_tokens(&[tid]),
-                                    None => format!("[{tid}]"),
-                                };
+                    // Decode and stream each non-EOS token, checking for stop strings.
+                    let eos = cached_eos.as_deref().unwrap_or(&[2]);
+                    let decoder = cached_decoder.as_ref();
+                    let mut hit_stop_string = false;
+                    for &tid in &result.token_ids {
+                        if !eos.contains(&tid) {
+                            let text = match decoder {
+                                Some(d) => d.decode_tokens(&[tid]),
+                                None => format!("[{tid}]"),
+                            };
+                            accumulated_text.push_str(&text);
+
+                            // Check if accumulated text contains a stop string
+                            if let Some(stop) = stop_strings.iter().find(|s| accumulated_text.contains(s.as_str())) {
+                                // Trim everything from the stop string onwards
+                                if let Some(pos) = accumulated_text.find(stop.as_str()) {
+                                    let trimmed = accumulated_text[pos..].to_string();
+                                    accumulated_text.truncate(pos);
+                                    if let Some(ref mut st) = streamed_text {
+                                        // Remove the stop string from streamed text too
+                                        if let Some(spos) = st.rfind(stop.as_str()) {
+                                            st.truncate(spos);
+                                        } else if st.len() >= trimmed.len() {
+                                            st.truncate(st.len() - trimmed.len());
+                                        }
+                                    }
+                                }
+                                hit_stop_string = true;
+                                break;
+                            }
+
+                            if let Some(ref tx) = token_tx {
                                 if let Some(ref mut st) = streamed_text {
                                     st.push_str(&text);
                                 }
@@ -384,6 +414,19 @@ impl PipelineExecutor {
                                     .await;
                             }
                         }
+                    }
+
+                    if hit_stop_string {
+                        finish_reason = "stop".to_string();
+                        if let Some(ref tx) = token_tx {
+                            let _ = tx
+                                .send(StreamingTokenEvent {
+                                    text: String::new(),
+                                    finish_reason: Some("stop".to_string()),
+                                })
+                                .await;
+                        }
+                        break;
                     }
 
                     if let Some(reason) = result.finish_reason {
@@ -439,13 +482,17 @@ impl PipelineExecutor {
             .filter(|t| !eos_tokens.contains(t))
             .collect();
 
-        // For streaming: use already-decoded text. For non-streaming: decode once at end.
-        let generated_text = match streamed_text {
-            Some(text) => text,
-            None => match cached_decoder.as_ref() {
+        // For streaming: use already-decoded text. For non-streaming: use accumulated_text
+        // (which has stop strings already trimmed), falling back to full decode.
+        let generated_text = if let Some(text) = streamed_text {
+            text
+        } else if !accumulated_text.is_empty() {
+            accumulated_text
+        } else {
+            match cached_decoder.as_ref() {
                 Some(d) => d.decode_tokens(&clean_tokens),
                 None => self.decode_tokens(&clean_tokens).await,
-            },
+            }
         };
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
