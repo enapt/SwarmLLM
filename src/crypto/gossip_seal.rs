@@ -45,6 +45,7 @@ impl GossipSealer {
     /// Output format: `[4B epoch_tag][12B nonce][ciphertext+tag]`
     pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SwarmError> {
         let epoch = Self::current_epoch();
+        tracing::debug!(epoch, plaintext_len = plaintext.len(), "DIAG: gossip seal");
         let key = self.derive_epoch_key(epoch);
 
         let cipher = ChaCha20Poly1305::new_from_slice(&key)

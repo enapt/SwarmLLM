@@ -52,6 +52,12 @@ impl ModelManifest {
         }
         let computed = self.compute_hash();
         if computed != self.manifest_hash {
+            tracing::debug!(
+                model = %self.id,
+                expected = %hex::encode(self.manifest_hash),
+                actual = %hex::encode(computed),
+                "DIAG: verify_hash FAILED"
+            );
             return Err(SwarmError::ShardIntegrity {
                 expected: hex::encode(self.manifest_hash),
                 actual: hex::encode(computed),

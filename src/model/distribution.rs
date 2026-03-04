@@ -57,6 +57,13 @@ impl ShardDistributor {
         // Sort by holder count ascending (rarest first)
         shard_counts.sort_by_key(|(_, count)| *count);
 
+        tracing::debug!(
+            model = %manifest.id,
+            candidates = shard_counts.len(),
+            rarest_holders = shard_counts.first().map(|(_, c)| *c).unwrap_or(0),
+            "DIAG: select_rarest_shards"
+        );
+
         shard_counts.into_iter().map(|(id, _)| id).collect()
     }
 

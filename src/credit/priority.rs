@@ -8,7 +8,7 @@ use crate::types::PriorityTier;
 /// - Silver: positive balance
 /// - Bronze: zero or negative balance
 pub fn calculate_tier(balance: i64, network_percentile: f32) -> PriorityTier {
-    if network_percentile >= 0.90 {
+    let tier = if network_percentile >= 0.90 {
         PriorityTier::Platinum
     } else if network_percentile >= 0.70 {
         PriorityTier::Gold
@@ -16,7 +16,14 @@ pub fn calculate_tier(balance: i64, network_percentile: f32) -> PriorityTier {
         PriorityTier::Silver
     } else {
         PriorityTier::Bronze
-    }
+    };
+    tracing::debug!(
+        balance,
+        network_percentile,
+        tier = ?tier,
+        "DIAG: calculate_tier"
+    );
+    tier
 }
 
 /// Utility for tier name resolution (used by admin API).

@@ -140,7 +140,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     }
 
     push_task.abort();
-    tracing::debug!("WebSocket client disconnected");
+    tracing::debug!("DIAG: websocket client disconnected");
 }
 
 /// Lightweight snapshot of a shard's holder state for change detection.

@@ -29,6 +29,12 @@ pub fn create_invitation(
     let payload = invitation_payload(&id, pool_id, invitee, &expires_at);
     let signature = identity.sign(&payload);
 
+    tracing::debug!(
+        invitation_id = %id,
+        pool = %pool_id,
+        invitee = %invitee,
+        "DIAG: pool invitation created"
+    );
     PoolInvitation {
         id,
         pool_id: pool_id.clone(),

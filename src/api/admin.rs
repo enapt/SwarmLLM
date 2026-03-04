@@ -3113,6 +3113,12 @@ pub async fn update_schedule(
         .db
         .put_json("resource_schedule", "current", &*schedule);
 
+    tracing::debug!(
+        enabled = schedule.enabled,
+        prune_aggressiveness = %schedule.prune_aggressiveness,
+        "DIAG: schedule updated"
+    );
+
     let result = serde_json::json!({
         "status": "ok",
         "enabled": schedule.enabled,
@@ -3195,7 +3201,7 @@ pub async fn lock_shard(
         model = %model_id,
         shard = index,
         locked = body.locked,
-        "Shard lock state updated"
+        "DIAG: shard lock state updated"
     );
 
     Ok(Json(serde_json::json!({

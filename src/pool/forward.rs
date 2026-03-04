@@ -38,6 +38,13 @@ pub async fn forward_credits_to_owner(
 
     // Create member-signed credit forward
     let my_id = shared_state.identity.node_id();
+    tracing::debug!(
+        pool = %pool_id,
+        amount,
+        from = %my_id,
+        to = %owner_id,
+        "DIAG: forwarding credits to pool owner"
+    );
     let forward =
         crypto::create_credit_forward(&shared_state.identity, &pool_id, my_id, &owner_id, amount);
 

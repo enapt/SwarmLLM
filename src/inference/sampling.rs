@@ -232,7 +232,12 @@ pub fn sample_token_with_ctx(
         }
     }
 
-    // Fallback
+    // Fallback — should rarely happen (cumulative rounding)
+    tracing::warn!(
+        vocab_size = ctx.probs.len(),
+        sum,
+        "DIAG: sampling fallback — cumulative probability didn't reach threshold"
+    );
     (ctx.probs.len() - 1) as u32
 }
 

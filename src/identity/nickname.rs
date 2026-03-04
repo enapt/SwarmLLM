@@ -45,6 +45,11 @@ impl NicknameRecord {
         let timestamp = chrono::Utc::now();
         let payload = Self::signing_payload(identity.node_id(), &nickname, &timestamp);
         let signature = identity.sign(&payload);
+        tracing::debug!(
+            node = %identity.node_id(),
+            nickname = %nickname,
+            "DIAG: nickname record created"
+        );
         Ok(Self {
             node_id: identity.node_id().clone(),
             nickname,

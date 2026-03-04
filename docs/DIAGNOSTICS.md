@@ -580,6 +580,27 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/daemon.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
 
+## Coverage Statistics (2026-03-04)
+
+**197 DIAG lines across 53/79 source files (67%).**
+
+The 26 uncovered files are `mod.rs` re-exports (13), `types.rs` / `error.rs` data definitions (3), `main.rs` / `lib.rs` / `config.rs` entry points (3), `assets.rs` / `ui/mod.rs` static files (2), and utility files with no decision/timing points (5).
+
+### Coverage by Subsystem
+
+| Subsystem | Files | DIAG Lines | Key Log Points |
+|-----------|-------|------------|----------------|
+| Network (manager, behaviour, protocol, discovery, relay, peer_cache) | 6 | ~50 | Connection lifecycle, codec read/write, encryption, swarm events |
+| Inference (router, pipeline, scheduler, executor, split, sampling, speculative, vision, kv_cache, prefix_cache, chat_template) | 11 | ~40 | Request dispatch, pipeline assembly, forward pass, token sampling |
+| API (server, openai, admin, websocket, middleware, providers, anthropic) | 7 | ~35 | Server startup, SSE streaming, auth, schedule updates, WebSocket |
+| Model (shard, manifest, huggingface, acquisition, auto_manage, registry, distribution, governance, lora) | 9 | ~25 | Shard verification, HF search/download, model loading, pruning |
+| Credit (ledger, transaction, priority, anti_gaming, trust, escrow) | 6 | ~15 | Transaction verification, tier calculation, trust updates, escrow |
+| Crypto (session, key_rotation, gossip_seal, pipeline_seal) | 4 | ~10 | Key exchange, session management, encryption seal/open |
+| Daemon (daemon.rs) | 1 | ~10 | LayerForward processing, result delivery, block_in_place |
+| Pool (manager, crypto, forward) | 3 | ~5 | Pool commands, invitations, credit forwarding |
+| Identity (keypair, keystore, nickname) | 3 | ~3 | Key generation, keystore save/load, nickname records |
+| Health (monitor, rebalancer) | 2 | ~4 | Rebalance events, health monitoring |
+
 ## Testing Results (2026-03-04)
 
 ### Single-Node Inference — Verified

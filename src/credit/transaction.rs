@@ -83,6 +83,11 @@ pub fn verify_transaction(
 
     verify_single_signature(tx, from_key, true)?;
     verify_single_signature(tx, to_key, false)?;
+    tracing::debug!(
+        tx_id = %tx.id,
+        amount = tx.amount,
+        "DIAG: verify_transaction OK — dual signatures valid"
+    );
     Ok(())
 }
 

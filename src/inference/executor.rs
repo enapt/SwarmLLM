@@ -261,6 +261,14 @@ impl ModelExecutor {
         let prompt_tokens = tokens.len() as u32;
         let max_gen = params.max_tokens.min(n_ctx.saturating_sub(prompt_tokens));
 
+        tracing::debug!(
+            n_ctx,
+            prompt_tokens,
+            max_gen,
+            temperature = params.temperature,
+            "DIAG: generate_stream_llama starting decode"
+        );
+
         if prompt_tokens >= n_ctx {
             return Err(SwarmError::Inference(format!(
                 "Prompt too long: {prompt_tokens} tokens exceeds context size {n_ctx}"

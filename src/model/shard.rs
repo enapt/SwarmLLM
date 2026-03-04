@@ -86,6 +86,14 @@ impl ShardStore {
 
         let actual = *hasher.finalize().as_bytes();
 
+        if actual == info.hash {
+            tracing::debug!(
+                model = %model_id,
+                shard = info.index,
+                "DIAG: verify_shard OK"
+            );
+        }
+
         if actual != info.hash {
             tracing::info!(
                 model = %model_id,

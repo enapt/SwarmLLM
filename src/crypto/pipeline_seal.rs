@@ -51,6 +51,11 @@ pub fn seal_prompt(
     let (ephemeral_pub, key_envelope) =
         crate::crypto::session::ephemeral_seal(target_x25519_pub, &request_key, aad)?;
 
+    tracing::debug!(
+        request_id = %request_id,
+        prompt_len = prompt.len(),
+        "DIAG: pipeline prompt sealed"
+    );
     Ok(SealedPrompt {
         request_id,
         encrypted_prompt,

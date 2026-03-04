@@ -101,7 +101,10 @@ impl PoolManager {
                 }
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
-                        Some(cmd) => self.handle_command(cmd).await,
+                        Some(cmd) => {
+                            tracing::debug!(cmd = ?std::mem::discriminant(&cmd), "DIAG: pool command received");
+                            self.handle_command(cmd).await;
+                        }
                         None => break,
                     }
                 }

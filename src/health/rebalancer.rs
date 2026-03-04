@@ -79,6 +79,7 @@ impl ShardRebalancer {
     }
 
     async fn handle_event(&mut self, event: RebalanceEvent) {
+        tracing::debug!(event = ?std::mem::discriminant(&event), "DIAG: rebalancer event received");
         match event {
             RebalanceEvent::PeerLeft(departed_peer) => {
                 tracing::info!(

@@ -153,6 +153,12 @@ async fn fetch_gguf_files(
         .filter(|f| f.rfilename.ends_with(".gguf"))
         .collect();
 
+    tracing::debug!(
+        repo_id,
+        file_count = gguf_files.len(),
+        "DIAG: fetch_gguf_files complete"
+    );
+
     Ok(gguf_files)
 }
 

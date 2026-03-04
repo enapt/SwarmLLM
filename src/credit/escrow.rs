@@ -95,8 +95,16 @@ impl EscrowManager {
             bal.last_updated = chrono::Utc::now();
         }
 
+        let escrow_id = uuid::Uuid::new_v4();
+        tracing::info!(
+            escrow_id = %escrow_id,
+            request_id = %request_id,
+            amount,
+            from = %from_node,
+            "DIAG: escrow created"
+        );
         let entry = EscrowEntry {
-            id: uuid::Uuid::new_v4(),
+            id: escrow_id,
             request_id,
             amount,
             from_node: from_node.clone(),

@@ -66,6 +66,12 @@ impl VoteTally {
         }
 
         self.unique_voters.insert(vote.voter.clone());
+        tracing::debug!(
+            voter = %vote.voter,
+            vote = vote.vote,
+            weight = vote.weight,
+            "DIAG: model governance vote recorded"
+        );
 
         if vote.vote {
             self.votes_for = self.votes_for.saturating_add(vote.weight);

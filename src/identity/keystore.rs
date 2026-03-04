@@ -18,6 +18,11 @@ pub struct Keystore;
 impl Keystore {
     /// Save a signing key to disk, optionally encrypted with a passphrase.
     pub fn save(key: &SigningKey, passphrase: Option<&str>, path: &Path) -> Result<(), SwarmError> {
+        tracing::debug!(
+            path = %path.display(),
+            encrypted = passphrase.is_some(),
+            "DIAG: keystore save"
+        );
         match passphrase {
             Some(pass) => Self::save_encrypted(key, pass, path),
             None => {

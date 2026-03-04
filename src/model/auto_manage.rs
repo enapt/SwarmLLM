@@ -1878,6 +1878,7 @@ pub async fn check_and_load_model(
         total_shards = manifest.shard_count,
         ranges = ?ranges,
         ready = missing_shards == 0,
+        local_shard_indices = ?local_shard_indices,
         "DIAG: check_and_load_model"
     );
 

@@ -258,6 +258,8 @@ impl PipelineScheduler {
         tracing::debug!(
             candidates_count = candidates.len(),
             model = %manifest.id,
+            latency_range = ?candidates.first().map(|c| c.latency_ms)
+                ..=candidates.last().map(|c| c.latency_ms),
             "DIAG: gather_candidates complete"
         );
 
@@ -471,6 +473,7 @@ impl PipelineScheduler {
         tracing::debug!(
             segment_count = segments.len(),
             standby_count = standbys.len(),
+            segments = ?segments.iter().map(|s| format!("{}:{}-{}", s.node_id, s.layer_range.0, s.layer_range.1)).collect::<Vec<_>>(),
             "DIAG: find_standbys complete"
         );
 
