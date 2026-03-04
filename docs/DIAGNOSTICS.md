@@ -629,3 +629,21 @@ vim ~/.local/share/swarmllm/config.toml
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a1 cargo run --release -- run -p 8800
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_n2 cargo run --release -- run -p 8801 --bootstrap /ip4/127.0.0.1/tcp/8810
 ```
+
+### Substream Stalling Root Cause Investigation
+
+14 isolated tests in `tests/integration/test_yamux_substream.rs` proved that:
+
+1. **Yamux works perfectly** — 10 sequential round-trips with 4MB payloads, ~1.6ms each (small), ~92ms each (large)
+2. **QUIC works perfectly** — no yamux needed, native multiplexing, ~2.4ms each (small), ~193ms each (large)
+3. **Full libp2p behaviours work** — kad+gossipsub+identify+request_response, 10 rapid rounds, no stalls
+4. **Channel-driven requests work** — external mpsc channel driving requests (simulates real daemon flow)
+5. **Gossipsub heartbeats don't interfere** — 5 topic subscriptions with 1s heartbeat interval
+6. **CPU-blocking responder works** — 700ms `std::thread::sleep` on the responder, all 5 rounds complete
+
+**Root cause:** `split_model.forward()` in `handle_layer_forward()` (daemon.rs) ran synchronously on a Tokio worker thread for 708ms+, blocking the runtime. Fixed with `tokio::task::block_in_place()`.
+
+Run the yamux isolation tests:
+```bash
+cargo test --test yamux_substream -- --nocapture --test-threads=1
+```

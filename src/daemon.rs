@@ -2808,74 +2808,51 @@ async fn handle_layer_forward(
             .clear_request(&model_key, &req_id_str);
     }
 
-    // Run the forward pass with per-request KV-cache isolation
-    let output = match split_model.forward(
-        &input_tensor,
-        forward.index_pos as usize,
-        &shared_state.kv_cache_store,
-        &req_id_str,
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            send_error_result(
-                &network_tx,
-                &sender_peer_bytes,
-                request_id,
-                &format!("Forward: {e}"),
-            )
-            .await;
-            return;
-        }
-    };
+    // Run the forward pass with per-request KV-cache isolation.
+    // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
+    // split_model.forward() is CPU-bound (hundreds of ms for LLM inference) and
+    // would otherwise starve the network event loop — preventing yamux window
+    // updates and causing substream stalling on the next request_response exchange.
+    let compute_result = tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
+        let output = split_model.forward(
+            &input_tensor,
+            forward.index_pos as usize,
+            &shared_state.kv_cache_store,
+            &req_id_str,
+        ).map_err(|e| format!("Forward: {e}"))?;
 
-    let result = if is_last {
-        // Sample a token from logits
-        let token_id = match split::sample_token(&output, 0.7, 0.9) {
-            Ok(t) => t,
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Sample: {e}"),
-                )
-                .await;
-                return;
-            }
-        };
-        // EOS detection: use tokens loaded from GGUF metadata
-        let eos_tokens = split_model.eos_tokens();
-        let finish = if eos_tokens.contains(&token_id) {
-            Some(crate::types::NetworkFinishReason::Stop)
+        if is_last {
+            let token_id = split::sample_token(&output, 0.7, 0.9)
+                .map_err(|e| format!("Sample: {e}"))?;
+            let eos_tokens = split_model.eos_tokens();
+            let finish = if eos_tokens.contains(&token_id) {
+                Some(crate::types::NetworkFinishReason::Stop)
+            } else {
+                None
+            };
+            Ok(crate::types::LayerResult {
+                request_id,
+                token_ids: vec![token_id],
+                finish_reason: finish,
+                activations: vec![],
+            })
         } else {
-            None
-        };
-        crate::types::LayerResult {
-            request_id,
-            token_ids: vec![token_id],
-            finish_reason: finish,
-            activations: vec![],
+            let activation_bytes = split::tensor_to_bytes(&output)
+                .map_err(|e| format!("Encode: {e}"))?;
+            Ok(crate::types::LayerResult {
+                request_id,
+                token_ids: vec![],
+                finish_reason: None,
+                activations: activation_bytes,
+            })
         }
-    } else {
-        // Intermediate segment: serialize hidden states
-        let activation_bytes = match split::tensor_to_bytes(&output) {
-            Ok(b) => b,
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Encode: {e}"),
-                )
-                .await;
-                return;
-            }
-        };
-        crate::types::LayerResult {
-            request_id,
-            token_ids: vec![],
-            finish_reason: None,
-            activations: activation_bytes,
+    });
+
+    let result = match compute_result {
+        Ok(r) => r,
+        Err(e) => {
+            send_error_result(&network_tx, &sender_peer_bytes, request_id, &e).await;
+            return;
         }
     };
 
