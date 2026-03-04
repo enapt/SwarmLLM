@@ -156,6 +156,11 @@ impl AutoShardManager {
         request_reset_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         request_reset_interval.tick().await; // skip first tick
 
+        // Cooldown: minimum time between evaluations triggered by notify.
+        // Prevents cascading re-evaluations when peers broadcast shard progress.
+        let mut last_notify_eval = std::time::Instant::now() - Duration::from_secs(120);
+        let notify_cooldown = Duration::from_secs(60);
+
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
@@ -172,11 +177,22 @@ impl AutoShardManager {
                     }
                 }
                 _ = self.notify.notified() => {
-                    // Woken by a new HfSourceGossip or ModelManifest — wait briefly
-                    // for additional gossip to settle, then evaluate.
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    // Woken by a new HfSourceGossip or ModelManifest — wait for gossip
+                    // to settle and peers to announce their downloads before evaluating.
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    // Cooldown: skip if we evaluated recently (prevents cascading
+                    // re-evaluations from shard progress gossip between peers).
+                    let since_last = last_notify_eval.elapsed();
+                    if since_last < notify_cooldown {
+                        tracing::debug!(
+                            remaining_secs = (notify_cooldown - since_last).as_secs(),
+                            "AutoShardManager: notify cooldown active, skipping evaluation"
+                        );
+                        continue;
+                    }
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         tracing::info!("AutoShardManager: triggered by new HF source or manifest");
+                        last_notify_eval = std::time::Instant::now();
                         self.evaluate_and_download().await;
                         self.evaluate_and_prune().await;
                     }
@@ -483,6 +499,48 @@ impl AutoShardManager {
                     continue;
                 }
 
+                // Small-network deduplication: when there are peers online, use a
+                // deterministic assignment so multiple nodes don't all race to download
+                // the same unheld shard. Each node "owns" a subset of shard indices
+                // based on hash(node_id || model_id || shard_index).
+                let peers = self.shared_state.peer_registry.len();
+                if holder_count == 0 && peers > 0 && !in_configured_range {
+                    let node_count = (peers + 1) as u32; // include self
+                    // Use hash to assign this shard to a specific node slot
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(manifest.id.0.as_bytes());
+                    hasher.update(&shard.index.to_le_bytes());
+                    let hash = hasher.finalize();
+                    let assigned_slot = u32::from_le_bytes([
+                        hash.as_bytes()[0],
+                        hash.as_bytes()[1],
+                        hash.as_bytes()[2],
+                        hash.as_bytes()[3],
+                    ]) % node_count;
+                    // Our slot: hash(node_id || model_id) % node_count
+                    let mut my_hasher = blake3::Hasher::new();
+                    my_hasher.update(&local_node_id.0);
+                    my_hasher.update(manifest.id.0.as_bytes());
+                    let my_hash = my_hasher.finalize();
+                    let my_slot = u32::from_le_bytes([
+                        my_hash.as_bytes()[0],
+                        my_hash.as_bytes()[1],
+                        my_hash.as_bytes()[2],
+                        my_hash.as_bytes()[3],
+                    ]) % node_count;
+                    if assigned_slot != my_slot {
+                        tracing::debug!(
+                            model = %manifest.id,
+                            shard = shard.index,
+                            assigned_slot,
+                            my_slot,
+                            node_count,
+                            "Skipping shard — assigned to different node slot"
+                        );
+                        continue;
+                    }
+                }
+
                 // Skip shards already being downloaded on THIS node (explicit or
                 // auto-manage). Prevents racing with an in-flight download.
                 if let Some(acq) = self.shared_state.acquisition_progress.get(&manifest.id) {
@@ -593,6 +651,12 @@ impl AutoShardManager {
             usize::MAX
         };
 
+        // Per-cycle cap: in small networks (< 5 peers), download only 1 shard per
+        // cycle to give peers time to discover and download their assigned shards.
+        // In larger networks, allow 2 per cycle for faster seeding.
+        let peers = self.shared_state.peer_registry.len();
+        let per_cycle_cap = if peers < 5 { 1 } else { 2 };
+
         // Track which specific shards are currently downloading so we don't
         // start a duplicate. We check per-shard progress, NOT per-model — otherwise
         // downloading shard 0 would block acquisition of shard 1.
@@ -640,7 +704,7 @@ impl AutoShardManager {
         'outer: loop {
             let mut any_taken = false;
             for (mi, model_key) in model_order.iter().enumerate() {
-                if selected.len() >= max || selected.len() >= 2 {
+                if selected.len() >= max || selected.len() >= per_cycle_cap {
                     break 'outer;
                 }
                 let candidates_for_model = &by_model[model_key];
@@ -2061,7 +2125,7 @@ mod tests {
             interval_minutes: 60,
             max_shards: 0,
             interval_seconds: None,
-            max_concurrent_downloads: 3,
+            max_concurrent_downloads: 1,
             default_model_shard_cap: 0,
             model_policies: std::collections::HashMap::new(),
             prune_enabled: true,
@@ -2075,7 +2139,7 @@ mod tests {
     #[test]
     fn default_max_concurrent_downloads() {
         let config = crate::config::AutoManageConfig::default();
-        assert_eq!(config.max_concurrent_downloads, 3);
+        assert_eq!(config.max_concurrent_downloads, 1);
     }
 
     #[tokio::test]

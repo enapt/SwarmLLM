@@ -1088,7 +1088,7 @@ var SwarmLLM = (function() {
         });
         var data = await resp.json();
         if (data.status === 'started') {
-          ui.showBanner('success', 'Downloading shards — peers will auto-acquire the rest');
+          ui.showBanner('success', 'Downloading seed shard — auto-manage will acquire more as peers join');
           ui.closeModelBrowser();
         } else {
           ui.showBanner('warning', data.message || 'Download could not be started');

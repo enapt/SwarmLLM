@@ -1580,58 +1580,48 @@ pub async fn hf_download_shards(
             }
         };
 
-        // peer_fair_share: compute deterministic shard assignment now that we know shard count.
+        // peer_fair_share: download just ONE seed shard. Auto-manage handles the rest.
+        // Each node picks a deterministic shard (based on node_id hash) so that
+        // different nodes seed different shards when they add the same model.
         let shard_indices = if let Some(peer_count) = fair_share_peer_count {
             let total_shards = info.shard_count() as u32;
-            let node_count = (peer_count + 1) as u32; // include self
-            let my_share = total_shards.div_ceil(node_count);
 
-            // Deterministic assignment: hash(node_id || model_id) → starting offset
+            // Deterministic shard selection: hash(node_id || model_id) → shard index
             let mut hasher = blake3::Hasher::new();
             hasher.update(fair_share_node_id.0.as_ref());
             hasher.update(model_id_str.as_bytes());
             let hash = hasher.finalize();
-            let offset = u32::from_le_bytes([
+            let seed_shard = u32::from_le_bytes([
                 hash.as_bytes()[0],
                 hash.as_bytes()[1],
                 hash.as_bytes()[2],
                 hash.as_bytes()[3],
             ]) % total_shards;
 
-            let mut assigned: Vec<u32> = Vec::new();
-            for i in 0..my_share.min(total_shards) {
-                assigned.push((offset + i) % total_shards);
-            }
-            assigned.sort();
-            assigned.dedup();
+            let assigned = vec![seed_shard];
 
             tracing::info!(
                 total_shards,
                 peers = peer_count,
-                my_share = assigned.len(),
-                assigned = ?assigned,
-                "peer_fair_share: computed shard assignment"
+                seed_shard,
+                "peer_fair_share: seeding 1 shard (auto-manage will acquire more as needed)"
             );
 
-            // Update acquisition progress with the actual shard list
+            // Update acquisition progress with the single seed shard
             if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
-                entry.total_shards = assigned.len() as u32;
+                entry.total_shards = 1;
                 entry.log.push(format!(
-                    "Fair share: downloading {}/{} shards (peers will auto-acquire the rest)",
-                    assigned.len(),
-                    total_shards
+                    "Seeding shard {seed_shard}/{total_shards} — auto-manage will acquire more as peers join"
                 ));
-                for &idx in &assigned {
-                    entry.shard_progress.insert(
-                        idx,
-                        crate::model::acquisition::ShardProgress {
-                            index: idx,
-                            total_bytes: 0,
-                            downloaded_bytes: 0,
-                            state: crate::model::acquisition::ShardState::Downloading,
-                        },
-                    );
-                }
+                entry.shard_progress.insert(
+                    seed_shard,
+                    crate::model::acquisition::ShardProgress {
+                        index: seed_shard,
+                        total_bytes: 0,
+                        downloaded_bytes: 0,
+                        state: crate::model::acquisition::ShardState::Downloading,
+                    },
+                );
             }
             assigned
         } else {

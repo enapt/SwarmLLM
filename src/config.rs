@@ -523,7 +523,7 @@ impl Default for AutoManageConfig {
 }
 
 fn default_max_concurrent_downloads() -> usize {
-    3
+    1
 }
 
 fn default_min_replicas() -> u32 {
@@ -1170,9 +1170,9 @@ auto_relay = false
     }
 
     #[test]
-    fn max_concurrent_downloads_defaults_to_3() {
+    fn max_concurrent_downloads_defaults_to_1() {
         let config = Config::default();
-        assert_eq!(config.auto_manage.max_concurrent_downloads, 3);
+        assert_eq!(config.auto_manage.max_concurrent_downloads, 1);
     }
 
     #[test]
