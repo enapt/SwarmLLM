@@ -579,3 +579,53 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/identity/keypair.rs` | Identity key load |
 | `src/daemon.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
+
+## Testing Results (2026-03-04)
+
+### Single-Node Inference — Verified
+
+Full DIAG trace confirmed working lifecycle:
+
+```
+DIAG: db_open → DIAG: load identity → DIAG: server startup →
+DIAG: load_all_local → DIAG: register_manifest → DIAG: check_and_load_model →
+DIAG: assemble_pipeline_for → DIAG: SplitModel forward pass complete →
+DIAG: split stream prefill complete → DIAG: split stream decode loop complete →
+DIAG: inference completed
+```
+
+All subsystem DIAG points fire correctly during a chat request. Filter with `grep "DIAG:"` to trace the full lifecycle.
+
+### Multi-Node Distributed Inference — Partial (WSL2 Issue)
+
+Two-node TinyLlama split (shard 0 on Node 1, shard 1 on Node 2):
+
+- **1st token round-trip: WORKS** (~700ms including model forward on both nodes)
+- **2nd outbound substream: STALLS** — never reaches codec, 30s pipeline timeout fires
+- **Not caused by**: encryption, autonat/dcutr, mDNS, yamux window size, network interface
+- **Cause**: Intermittent WSL2 HNS (Hyper-V Networking Stack) issue — same binary confirmed working hours earlier with ~20-26ms per-token latency
+
+The DIAG trace for the successful 1st token shows the full distributed path:
+
+```
+[Node 1] DIAG: assemble_pipeline_for → DIAG: starting forward_through_segments
+[Node 1] DIAG: codec write_request → DIAG: encrypting tensor forward (if enabled)
+[Node 2] DIAG: codec read_request → DIAG: inbound TensorPayload request
+[Node 2] DIAG: dispatcher received LayerForward → DIAG: SplitModel forward pass complete
+[Node 2] DIAG: codec write_response → DIAG: ResponseSent event
+[Node 1] DIAG: codec read_response → DIAG: received TensorPayload response
+[Node 1] DIAG: forward_through_segments completed
+```
+
+### Config Note for Multi-Node Testing
+
+Config loads from `~/.local/share/swarmllm/config.toml` (the default `data_dir`), not from `SWARMLLM_NODE_DATA_DIR`. To change network settings for multi-node testing, edit the global config file:
+
+```bash
+# Edit the global config (affects all nodes on this machine)
+vim ~/.local/share/swarmllm/config.toml
+
+# Per-node data dirs only affect data storage, not config
+SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a1 cargo run --release -- run -p 8800
+SWARMLLM_NODE_DATA_DIR=/tmp/swarm_n2 cargo run --release -- run -p 8801 --bootstrap /ip4/127.0.0.1/tcp/8810
+```
