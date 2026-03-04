@@ -105,7 +105,7 @@ impl NetworkManager {
                 #[allow(deprecated)]
                 || {
                     let mut cfg = libp2p::yamux::Config::default();
-                    cfg.set_receive_window_size(16 * 1024 * 1024); // 16MB — WSL2 mitigation
+                    cfg.set_receive_window_size(16 * 1024 * 1024); // 16MB — large tensor payloads
                     cfg.set_max_buffer_size(16 * 1024 * 1024);
                     cfg
                 },
