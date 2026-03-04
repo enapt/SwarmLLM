@@ -1262,13 +1262,16 @@ impl PipelineExecutor {
                         )
                         .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
 
-                        // Forward prefix through model (populates KV cache)
-                        let _prefix_out = split_model.forward(
-                            &prefix_tensor,
-                            0,
-                            &self.shared_state.kv_cache_store,
-                            &request_id_str,
-                        )?;
+                        // Forward prefix through model (populates KV cache).
+                        // block_in_place: CPU-bound inference must not starve yamux.
+                        let _prefix_out = tokio::task::block_in_place(|| {
+                            split_model.forward(
+                                &prefix_tensor,
+                                0,
+                                &self.shared_state.kv_cache_store,
+                                &request_id_str,
+                            )
+                        })?;
 
                         // Extract and cache prefix KV state
                         {
@@ -1355,14 +1358,19 @@ impl PipelineExecutor {
             .as_ref()
             .and_then(|id| self.shared_state.adapter_registry.get(id));
 
-        // Run the forward pass with per-request KV-cache isolation
-        let output = split_model.forward_with_lora(
-            &input_tensor,
-            effective_index_pos,
-            &self.shared_state.kv_cache_store,
-            &request_id_str,
-            lora_adapter.as_deref(),
-        )?;
+        // Run the forward pass with per-request KV-cache isolation.
+        // CRITICAL: block_in_place() tells Tokio to move other tasks off this thread
+        // before the CPU-bound forward pass (~700-1000ms). Without this, the blocked
+        // thread starves yamux, preventing outbound substream opens for tensor forwards.
+        let output = tokio::task::block_in_place(|| {
+            split_model.forward_with_lora(
+                &input_tensor,
+                effective_index_pos,
+                &self.shared_state.kv_cache_store,
+                &request_id_str,
+                lora_adapter.as_deref(),
+            )
+        })?;
 
         // Track stats (credit persistence is batched at end of request)
         if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
@@ -1756,8 +1764,9 @@ impl PipelineExecutor {
             } else {
                 // We're not in the TP group — run full (non-TP) layer
                 let mut model = model_arc.lock().await;
-                let result =
-                    model.forward(&current_activations, index_pos, kv_cache_store, &req_id_str)?;
+                let result = tokio::task::block_in_place(|| {
+                    model.forward(&current_activations, index_pos, kv_cache_store, &req_id_str)
+                })?;
                 current_activations = result;
                 // Skip remaining layers since full forward processes all of them
                 break;

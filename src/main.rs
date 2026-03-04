@@ -372,9 +372,9 @@ async fn test_split_inference(
         &candle_core::Device::Cpu,
     )?;
 
-    let logits = model
-        .forward(&input, 0, &kv_store, test_request_id)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let logits =
+        tokio::task::block_in_place(|| model.forward(&input, 0, &kv_store, test_request_id))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     let first_token = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut generated = vec![first_token];
@@ -399,9 +399,10 @@ async fn test_split_inference(
         let input =
             candle_core::Tensor::from_vec(vec![last_token], &[1, 1], &candle_core::Device::Cpu)?;
 
-        let logits = model
-            .forward(&input, index_pos, &kv_store, test_request_id)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let logits = tokio::task::block_in_place(|| {
+            model.forward(&input, index_pos, &kv_store, test_request_id)
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
         let token_id = sample_token(&logits, 0.0, 1.0).map_err(|e| anyhow::anyhow!("{e}"))?;
         index_pos += 1;
 
@@ -436,7 +437,7 @@ fn init_tracing(verbose: u8) {
     let filter = if verbose > 0 {
         match verbose {
             1 => "swarmllm=debug".to_string(),
-            2 => "swarmllm=debug,libp2p=info,libp2p_request_response=debug,libp2p_swarm=debug,tower_http=debug".to_string(),
+            2 => "swarmllm=debug,libp2p=info,libp2p_request_response=debug,libp2p_swarm=debug,yamux=debug,multistream_select=debug,tower_http=debug".to_string(),
             _ => "trace".to_string(),
         }
     } else {

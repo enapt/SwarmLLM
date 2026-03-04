@@ -764,8 +764,8 @@ impl Default for NetworkConfig {
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
             enable_mdns: true,
-            enable_autonat: true,
-            enable_dcutr: true,
+            enable_autonat: false,
+            enable_dcutr: false,
             enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
@@ -820,6 +820,17 @@ impl Config {
         // 1. Start with defaults
         let mut config = Self::default();
 
+        // 1b. Apply data_dir overrides BEFORE config file lookup, so the config
+        // is loaded from the correct data directory when SWARMLLM_NODE_DATA_DIR
+        // or --data-dir is set. Without this, config.toml is always loaded from
+        // the default data dir (~/.local/share/swarmllm/), ignoring per-node
+        // overrides and applying stale settings (e.g. enable_autonat=true).
+        if let Some(dir) = cli_data_dir {
+            config.node.data_dir = dir.to_path_buf();
+        } else if let Ok(val) = std::env::var("SWARMLLM_NODE_DATA_DIR") {
+            config.node.data_dir = PathBuf::from(val);
+        }
+
         // 2. Load from config file if it exists
         let path = config_path
             .map(PathBuf::from)
@@ -830,6 +841,12 @@ impl Config {
             config = toml::from_str(&contents).map_err(|e| {
                 SwarmError::Config(format!("Failed to parse {}: {e}", path.display()))
             })?;
+            // Re-apply data_dir overrides since toml::from_str replaces the entire config
+            if let Some(dir) = cli_data_dir {
+                config.node.data_dir = dir.to_path_buf();
+            } else if let Ok(val) = std::env::var("SWARMLLM_NODE_DATA_DIR") {
+                config.node.data_dir = PathBuf::from(val);
+            }
             tracing::info!(path = %path.display(), "Loaded config");
         }
 

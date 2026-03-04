@@ -102,26 +102,15 @@ impl NetworkManager {
             .with_tcp(
                 libp2p::tcp::Config::default().nodelay(true),
                 libp2p::noise::Config::new,
-                #[allow(deprecated)]
-                || {
-                    let mut cfg = libp2p::yamux::Config::default();
-                    cfg.set_receive_window_size(16 * 1024 * 1024); // 16MB — large tensor payloads
-                    cfg.set_max_buffer_size(16 * 1024 * 1024);
-                    cfg
-                },
+                // Use yamux 0.13 defaults (auto-tuned windows, 1 GiB max connection window).
+                // NOTE: Do NOT call set_receive_window_size or set_max_buffer_size — those
+                // are deprecated and silently downgrade to yamux 0.12 which has severe
+                // substream opening delays (~30s between successful outbound requests).
+                libp2p::yamux::Config::default,
             )
             .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
             .with_quic()
-            .with_relay_client(
-                libp2p::noise::Config::new,
-                #[allow(deprecated)]
-                || {
-                    let mut cfg = libp2p::yamux::Config::default();
-                    cfg.set_receive_window_size(16 * 1024 * 1024);
-                    cfg.set_max_buffer_size(16 * 1024 * 1024);
-                    cfg
-                },
-            )
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
             .with_behaviour(|_key, relay_behaviour| {
                 behaviour::build_behaviour(
@@ -145,6 +134,12 @@ impl NetworkManager {
                     .with_notify_handler_buffer_size(
                         std::num::NonZeroUsize::new(256).expect("256 > 0"),
                     )
+                    // Increase connection→swarm event buffer from default 7 to 64.
+                    // With many sub-behaviours (identify, kademlia, gossipsub, mdns),
+                    // the default 7-slot buffer fills during post-connect bursts,
+                    // blocking the connection task at events.send().await and preventing
+                    // it from processing inbound NotifyHandler commands (tensor forwards).
+                    .with_per_connection_event_buffer_size(64)
             })
             .build();
 
@@ -226,12 +221,8 @@ impl NetworkManager {
         let mut peer_cache_interval = tokio::time::interval(discovery::PEER_CACHE_SAVE_INTERVAL);
         peer_cache_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Periodic send_request health check.
-        // IMPORTANT: Interval must be high enough that pings don't flood the
-        // request_response handler's outbound queue. On QUIC (especially WSL2),
-        // each substream opening can take 14-25 seconds. At 5s intervals, 4-5
-        // pings queue up per substream, starving tensor forwards of their slot.
-        // 120s keeps the queue nearly empty so tensor forwards get immediate service.
+        // Periodic send_request health check via PeerExchangeRequest.
+        // 120s keeps the outbound queue nearly empty so tensor forwards get immediate service.
         let mut rr_ping_interval = tokio::time::interval(std::time::Duration::from_secs(120));
         rr_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut rr_ping_seq: u64 = 0;

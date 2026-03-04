@@ -65,8 +65,12 @@ pub fn build_behaviour(
     // Kademlia DHT for peer and shard discovery
     let store = MemoryStore::new(local_peer_id);
     let mut kademlia = kad::Behaviour::new(local_peer_id, store);
-    // NET-I7: Start in Client mode, switch to Server when external address is confirmed
-    kademlia.set_mode(Some(kad::Mode::Client));
+    // Use Server mode so nodes accept each other's DHT queries.
+    // Client mode rejects inbound queries — when BOTH nodes are Client, rejected
+    // substream negotiations flood the connection event channel (capacity 7),
+    // blocking delivery of NotifyHandler(SendRequest) commands and preventing
+    // tensor forwards from ever reaching the codec.
+    kademlia.set_mode(Some(kad::Mode::Server));
 
     // GossipSub for network-wide announcements
     // Use blake3 for deterministic message IDs across processes

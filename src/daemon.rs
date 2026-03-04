@@ -2813,40 +2813,43 @@ async fn handle_layer_forward(
     // split_model.forward() is CPU-bound (hundreds of ms for LLM inference) and
     // would otherwise starve the network event loop — preventing yamux window
     // updates and causing substream stalling on the next request_response exchange.
-    let compute_result = tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-        let output = split_model.forward(
-            &input_tensor,
-            forward.index_pos as usize,
-            &shared_state.kv_cache_store,
-            &req_id_str,
-        ).map_err(|e| format!("Forward: {e}"))?;
+    let compute_result =
+        tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
+            let output = split_model
+                .forward(
+                    &input_tensor,
+                    forward.index_pos as usize,
+                    &shared_state.kv_cache_store,
+                    &req_id_str,
+                )
+                .map_err(|e| format!("Forward: {e}"))?;
 
-        if is_last {
-            let token_id = split::sample_token(&output, 0.7, 0.9)
-                .map_err(|e| format!("Sample: {e}"))?;
-            let eos_tokens = split_model.eos_tokens();
-            let finish = if eos_tokens.contains(&token_id) {
-                Some(crate::types::NetworkFinishReason::Stop)
+            if is_last {
+                let token_id =
+                    split::sample_token(&output, 0.7, 0.9).map_err(|e| format!("Sample: {e}"))?;
+                let eos_tokens = split_model.eos_tokens();
+                let finish = if eos_tokens.contains(&token_id) {
+                    Some(crate::types::NetworkFinishReason::Stop)
+                } else {
+                    None
+                };
+                Ok(crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![token_id],
+                    finish_reason: finish,
+                    activations: vec![],
+                })
             } else {
-                None
-            };
-            Ok(crate::types::LayerResult {
-                request_id,
-                token_ids: vec![token_id],
-                finish_reason: finish,
-                activations: vec![],
-            })
-        } else {
-            let activation_bytes = split::tensor_to_bytes(&output)
-                .map_err(|e| format!("Encode: {e}"))?;
-            Ok(crate::types::LayerResult {
-                request_id,
-                token_ids: vec![],
-                finish_reason: None,
-                activations: activation_bytes,
-            })
-        }
-    });
+                let activation_bytes =
+                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?;
+                Ok(crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: activation_bytes,
+                })
+            }
+        });
 
     let result = match compute_result {
         Ok(r) => r,

@@ -1315,8 +1315,9 @@ async fn split_non_stream_response(
     // Tokenize the prompt — forward() handles embedding internally
     let (input, prompt_tokens) = model.tokenize(&prompt)?;
 
-    // First forward pass (prefill) — process entire prompt at once
-    let logits = model.forward(&input, 0, &kv_store, &request_id)?;
+    // First forward pass (prefill) — process entire prompt at once.
+    // block_in_place: CPU-bound inference must not starve async runtime.
+    let logits = tokio::task::block_in_place(|| model.forward(&input, 0, &kv_store, &request_id))?;
     // logits shape: (1, seq_len, vocab) — take last token's logits
     let last_logits = logits
         .narrow(1, prompt_tokens - 1, 1)
@@ -1343,7 +1344,9 @@ async fn split_non_stream_response(
 
         // Create single-token tensor — forward() handles embedding
         let input = model.token_tensor(next_token)?;
-        let logits = model.forward(&input, index_pos, &kv_store, &request_id)?;
+        let logits = tokio::task::block_in_place(|| {
+            model.forward(&input, index_pos, &kv_store, &request_id)
+        })?;
         next_token = sample_token(&logits, params.temperature, params.top_p)?;
         index_pos += 1;
     }
@@ -1453,9 +1456,11 @@ async fn split_stream_response(
             }
         };
 
-        // Prefill
+        // Prefill — block_in_place for CPU-bound inference
         let prefill_start = std::time::Instant::now();
-        let logits = match model.forward(&input, 0, &kv_store, &request_id) {
+        let logits = match tokio::task::block_in_place(|| {
+            model.forward(&input, 0, &kv_store, &request_id)
+        }) {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!(model_id = %model_id, prompt_tokens, "DIAG: split stream prefill failed: {e}");
@@ -1527,7 +1532,9 @@ async fn split_stream_response(
                     break;
                 }
             };
-            let logits = match model.forward(&input, index_pos, &kv_store, &request_id) {
+            let logits = match tokio::task::block_in_place(|| {
+                model.forward(&input, index_pos, &kv_store, &request_id)
+            }) {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::error!(

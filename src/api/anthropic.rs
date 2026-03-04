@@ -839,8 +839,10 @@ async fn anthropic_split_non_stream(
     // Tokenize the prompt — forward() handles embedding internally
     let (input, prompt_tokens) = split_model.tokenize(&prompt)?;
 
-    // First forward pass (prefill) — process entire prompt at once
-    let logits = split_model.forward(&input, 0, &kv_store, &request_id)?;
+    // First forward pass (prefill) — process entire prompt at once.
+    // block_in_place: CPU-bound inference must not starve async runtime.
+    let logits =
+        tokio::task::block_in_place(|| split_model.forward(&input, 0, &kv_store, &request_id))?;
     let last_logits = logits
         .narrow(1, prompt_tokens - 1, 1)
         .map_err(|e| ApiError(crate::error::SwarmError::Internal(e.to_string())))?;
@@ -858,7 +860,9 @@ async fn anthropic_split_non_stream(
 
         // Create single-token tensor — forward() handles embedding
         let input = split_model.token_tensor(next_token)?;
-        let logits = split_model.forward(&input, index_pos, &kv_store, &request_id)?;
+        let logits = tokio::task::block_in_place(|| {
+            split_model.forward(&input, index_pos, &kv_store, &request_id)
+        })?;
         next_token = sample_token(&logits, params.temperature, params.top_p)?;
         index_pos += 1;
     }
@@ -958,17 +962,18 @@ async fn anthropic_split_stream(
             }
         };
 
-        // Prefill
-        let logits = match split_model.forward(&input, 0, &kv_store, &rid) {
-            Ok(l) => l,
-            Err(_) => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                return;
-            }
-        };
+        // Prefill — block_in_place for CPU-bound inference
+        let logits =
+            match tokio::task::block_in_place(|| split_model.forward(&input, 0, &kv_store, &rid)) {
+                Ok(l) => l,
+                Err(_) => {
+                    let _ = sse_tx
+                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                        .await;
+                    let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                    return;
+                }
+            };
         let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
             Ok(l) => l,
             Err(_) => {
@@ -1017,7 +1022,9 @@ async fn anthropic_split_stream(
                 Ok(h) => h,
                 Err(_) => break,
             };
-            let logits = match split_model.forward(&input, index_pos, &kv_store, &rid) {
+            let logits = match tokio::task::block_in_place(|| {
+                split_model.forward(&input, index_pos, &kv_store, &rid)
+            }) {
                 Ok(l) => l,
                 Err(_) => break,
             };

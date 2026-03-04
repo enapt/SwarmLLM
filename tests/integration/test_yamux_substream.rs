@@ -259,11 +259,7 @@ async fn run_sequential_exchanges(
         match result {
             Ok(Ok(())) => {
                 let elapsed = start.elapsed();
-                eprintln!(
-                    "  [round {}] completed in {:?}",
-                    i + 1,
-                    elapsed
-                );
+                eprintln!("  [round {}] completed in {:?}", i + 1, elapsed);
                 durations.push(elapsed);
             }
             Ok(Err(e)) => return Err(e),
@@ -489,9 +485,7 @@ fn build_full_behaviour_swarm() -> Swarm<FullBehaviour> {
         .unwrap()
         .with_swarm_config(|c| {
             c.with_idle_connection_timeout(Duration::from_secs(60))
-                .with_notify_handler_buffer_size(
-                    std::num::NonZeroUsize::new(256).expect("256 > 0"),
-                )
+                .with_notify_handler_buffer_size(std::num::NonZeroUsize::new(256).expect("256 > 0"))
         })
         .build()
 }
@@ -847,7 +841,11 @@ async fn test_full_behaviour_channel_driven() {
             // Simulate compute delay (model forward pass)
             tokio::time::sleep(Duration::from_millis(500)).await;
             eprintln!("  [daemon] sending request {} via channel", i + 1);
-            if cmd_tx_clone.send((p2_clone, payload_clone.clone())).await.is_err() {
+            if cmd_tx_clone
+                .send((p2_clone, payload_clone.clone()))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -942,7 +940,13 @@ async fn test_full_behaviour_with_gossipsub_topics() {
     let mut swarm2 = build_full_behaviour_swarm();
 
     // Subscribe both swarms to multiple gossipsub topics (like production)
-    let topics = vec!["swarm/models", "swarm/credits", "swarm/health", "swarm/identity", "swarm/pools"];
+    let topics = vec![
+        "swarm/models",
+        "swarm/credits",
+        "swarm/health",
+        "swarm/identity",
+        "swarm/pools",
+    ];
     for topic_str in &topics {
         let topic = gossipsub::IdentTopic::new(*topic_str);
         swarm1.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
@@ -1076,9 +1080,7 @@ async fn test_full_behaviour_cpu_blocking_responder() {
 
 #[tokio::test]
 async fn test_full_behaviour_sequential_small() {
-    eprintln!(
-        "\n=== TEST: Full behaviour (kad+gossipsub+identify+rr), 1KB payload, 5 rounds ==="
-    );
+    eprintln!("\n=== TEST: Full behaviour (kad+gossipsub+identify+rr), 1KB payload, 5 rounds ===");
     let mut swarm1 = build_full_behaviour_swarm();
     let mut swarm2 = build_full_behaviour_swarm();
     let (_p1, p2) = connect_full_swarms(&mut swarm1, &mut swarm2).await.unwrap();
@@ -1105,9 +1107,7 @@ async fn test_full_behaviour_sequential_small() {
 
 #[tokio::test]
 async fn test_full_behaviour_sequential_large() {
-    eprintln!(
-        "\n=== TEST: Full behaviour (kad+gossipsub+identify+rr), 4MB payload, 5 rounds ==="
-    );
+    eprintln!("\n=== TEST: Full behaviour (kad+gossipsub+identify+rr), 4MB payload, 5 rounds ===");
     let mut swarm1 = build_full_behaviour_swarm();
     let mut swarm2 = build_full_behaviour_swarm();
     let (_p1, p2) = connect_full_swarms(&mut swarm1, &mut swarm2).await.unwrap();
