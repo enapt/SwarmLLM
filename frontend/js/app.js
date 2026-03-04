@@ -21,6 +21,9 @@ var SwarmLLM = (function() {
   var ACTIVE_SESSION_KEY = 'swarmllm_active_session';
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
 
+  // Clear stale chat sessions on each page load (dev mode)
+  try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
+
   // --- HELPERS ---
   function escapeHtml(str) {
     var div = document.createElement('div');
