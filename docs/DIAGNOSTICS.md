@@ -306,11 +306,11 @@ Only logged on startup if the database is corrupted. The node will function but 
 
 ## WSL2 Mitigations
 
-WSL2's Hyper-V Networking Stack (HNS) introduces TCP stalls and protocol negotiation failures that can starve libp2p's outbound substream requests. Two mitigations are available via config:
+WSL2's Hyper-V Networking Stack (HNS) causes multi-address connection races when autonat/mDNS discover the WSL2 NAT adapter (10.255.255.254). With `max_established_per_peer=1`, both nodes simultaneously establish connections via multiple interfaces, sending mutual yamux GoAway frames that kill ALL connections. Two mitigations are available via config:
 
 ### Disable autonat/dcutr
 
-AutoNAT and DCUtR generate protocol negotiation traffic that can starve `poll_outbound` in libp2p's `Connection::poll` loop (handler NotifyBehaviour events have priority over `poll_outbound`). On WSL2, where protocol negotiations are already slow, this can prevent tensor forwards from ever reaching the codec.
+AutoNAT and DCUtR trigger mDNS multi-address discovery on WSL2 (loopback + LAN + NAT adapter), causing connection races. Disable for WSL2 testing. `NetworkConfig::default()` already sets these to `false` (the serde default of `true` only applies when loading from a config file).
 
 ```toml
 # config/default.toml or ~/.local/share/swarmllm/config.toml
@@ -321,14 +321,9 @@ enable_dcutr = false
 
 Both protocols use `Toggle<T>` wrappers — when disabled, no events are emitted and no network traffic is generated. NAT detection and hole-punching are not needed for loopback/LAN testing.
 
-### Yamux window size
+### Yamux configuration
 
-The yamux receive window and max buffer are set to 16MB (up from the default 256KB). This prevents flow control stalls when forwarding large tensor activations over TCP+Yamux on WSL2:
-
-```
-cfg.set_receive_window_size(16 * 1024 * 1024);  // 16MB
-cfg.set_max_buffer_size(16 * 1024 * 1024);       // 16MB
-```
+Yamux uses 0.13 defaults with auto-tuned windows (1 GiB max connection window). Do NOT call the deprecated `set_receive_window_size` or `set_max_buffer_size` methods — they silently downgrade to yamux 0.12 which has severe substream opening delays (~30s between successful outbound requests).
 
 ### WSL2 networking mode
 
@@ -640,13 +635,19 @@ The DIAG trace for the successful 1st token shows the full distributed path:
 
 ### Config Note for Multi-Node Testing
 
-Config loads from `~/.local/share/swarmllm/config.toml` (the default `data_dir`), not from `SWARMLLM_NODE_DATA_DIR`. To change network settings for multi-node testing, edit the global config file:
+Config now loads from `<data_dir>/config.toml`, where `data_dir` respects `--data-dir` CLI flag and `SWARMLLM_NODE_DATA_DIR` env var. Each test node can have its own config:
 
 ```bash
-# Edit the global config (affects all nodes on this machine)
-vim ~/.local/share/swarmllm/config.toml
+# Create per-node configs
+cat > /tmp/swarm_a1/config.toml <<'EOF'
+[network]
+enable_autonat = false
+enable_dcutr = false
+enable_mdns = false
+EOF
+cp /tmp/swarm_a1/config.toml /tmp/swarm_n2/config.toml
 
-# Per-node data dirs only affect data storage, not config
+# Each node loads config from its own data dir
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_a1 cargo run --release -- run -p 8800
 SWARMLLM_NODE_DATA_DIR=/tmp/swarm_n2 cargo run --release -- run -p 8801 --bootstrap /ip4/127.0.0.1/tcp/8810
 ```
@@ -662,7 +663,15 @@ SWARMLLM_NODE_DATA_DIR=/tmp/swarm_n2 cargo run --release -- run -p 8801 --bootst
 5. **Gossipsub heartbeats don't interfere** — 5 topic subscriptions with 1s heartbeat interval
 6. **CPU-blocking responder works** — 700ms `std::thread::sleep` on the responder, all 5 rounds complete
 
-**Root cause:** `split_model.forward()` in `handle_layer_forward()` (daemon.rs) ran synchronously on a Tokio worker thread for 708ms+, blocking the runtime. Fixed with `tokio::task::block_in_place()`.
+**Root causes (two interacting bugs, both fixed):**
+
+1. **Config loading order bug** (`src/config.rs`): `Config::load_or_create()` applied `SWARMLLM_NODE_DATA_DIR` env var *after* config file lookup, so per-node configs were ignored and the global config (`~/.local/share/swarmllm/config.toml` with `enable_autonat=true`) was always used. **Fix:** Apply data_dir overrides *before* config file lookup.
+
+2. **WSL2 multi-address connection race**: With autonat enabled, mDNS discovered the peer on multiple addresses (127.0.0.1, 172.27.198.18, 10.255.255.254). Both nodes simultaneously established connections via the WSL2 NAT adapter. With `max_established_per_peer=1`, both sides denied each other's connections — sending mutual yamux GoAway frames that killed ALL connections.
+
+3. **Tokio runtime blocking** (`daemon.rs`): `split_model.forward()` ran synchronously on a Tokio worker thread for 708ms+, blocking the runtime. **Fix:** `tokio::task::block_in_place()` wrapper.
+
+**Status:** All three issues fixed. Distributed inference verified working (streaming + non-streaming) with ~130ms per-token pipeline latency. E2E encryption re-enabled.
 
 Run the yamux isolation tests:
 ```bash

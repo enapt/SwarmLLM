@@ -565,7 +565,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 │  Tier 1: Pairwise Sessions (unicast)                        │
 │    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
 │    Forward secrecy: ephemeral X25519 re-keying every 10min  │
-│    Session epoch mixed into key derivation (no nonce reuse) │
+│    Nonce reuse prevented by session clearing on disconnect   │
 │    Replay protection: atomic fetch_max on recv nonce        │
 │    (rejects nonce ≤ last_seen via lock-free TOCTOU-safe op) │
 │    Static DH fallback for initial session before first reke │

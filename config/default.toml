@@ -15,8 +15,8 @@ enable_relay = true
 enable_relay_client = true
 max_peers = 200
 enable_mdns = true                 # LAN discovery via mDNS (finds peers on same network)
-enable_autonat = true              # NAT detection (disable on WSL2 to fix substream stalling)
-enable_dcutr = true                # Hole punching (disable on WSL2 to fix substream stalling)
+enable_autonat = true              # NAT detection (set false on WSL2 to prevent connection races)
+enable_dcutr = true                # Hole punching (set false on WSL2 to prevent connection races)
 enable_encryption = true           # E2E encryption for tensor forwards
 # gossip_network_id = "my-private-net"  # Uncomment for private networks (default: "swarmllm-mainnet-v1")
 

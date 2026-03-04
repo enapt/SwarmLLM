@@ -7,7 +7,7 @@
 For direct peer-to-peer communication:
 - Ed25519 → X25519 → ECDH → ChaCha20-Poly1305
 - Forward secrecy via ephemeral X25519 re-keying every 10 minutes
-- Session epoch mixed into key derivation (prevents nonce reuse)
+- Nonce reuse prevented by session clearing on disconnect (`remove_session()`)
 - Replay protection: atomic `fetch_max` on receive nonce
 - Nonce state updated only after successful decryption (prevents DoS)
 
