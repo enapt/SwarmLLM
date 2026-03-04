@@ -163,6 +163,17 @@ pub struct NetworkConfig {
     /// Set to a custom value (e.g. "my-private-net") for private networks.
     #[serde(default)]
     pub gossip_network_id: Option<String>,
+    /// Enable AutoNAT for NAT detection (default: true).
+    /// Disable on WSL2 to prevent protocol negotiation noise that starves outbound substreams.
+    #[serde(default = "default_true")]
+    pub enable_autonat: bool,
+    /// Enable DCUtR for hole punching (default: true).
+    /// Disable on WSL2 to prevent protocol negotiation noise that starves outbound substreams.
+    #[serde(default = "default_true")]
+    pub enable_dcutr: bool,
+    /// Enable E2E encryption for tensor forwards and control messages (default: true).
+    #[serde(default = "default_true")]
+    pub enable_encryption: bool,
     /// Enable zstd compression for tensor payloads sent over the network.
     /// Only payloads larger than `tensor_compress_threshold` bytes are compressed.
     #[serde(default = "default_true")]
@@ -753,6 +764,9 @@ impl Default for NetworkConfig {
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
             enable_mdns: true,
+            enable_autonat: true,
+            enable_dcutr: true,
+            enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
             tensor_compress_level: default_tensor_compress_level(),

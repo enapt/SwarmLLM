@@ -46,6 +46,12 @@ impl SpeculativeDraftState {
     pub fn record_batch(&mut self, proposed: u32, accepted: u32) {
         self.total_proposed += proposed;
         self.accepted_count += accepted;
+        tracing::debug!(
+            drafted_count = proposed,
+            accepted_count = accepted,
+            acceptance_rate = format!("{:.2}", self.acceptance_rate()),
+            "DIAG: speculative batch"
+        );
     }
 }
 

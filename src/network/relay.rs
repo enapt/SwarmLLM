@@ -67,7 +67,7 @@ pub fn handle_relay_server_event(event: libp2p::relay::Event) {
             tracing::info!(
                 peer = %src_peer_id,
                 renewed,
-                "Relay reservation accepted"
+                "DIAG: relay reservation accepted"
             );
         }
         Event::CircuitReqAccepted {

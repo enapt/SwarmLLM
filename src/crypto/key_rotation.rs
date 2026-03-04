@@ -51,13 +51,12 @@ pub async fn run_key_rotation(
                 let before = session_manager.session_count();
                 session_manager.evict_stale(MAX_SESSION_AGE);
                 let after = session_manager.session_count();
-                if before != after {
-                    tracing::info!(
-                        evicted = before - after,
-                        remaining = after,
-                        "Evicted stale encryption sessions"
-                    );
-                }
+                tracing::debug!(
+                    active_sessions = before,
+                    stale_evicted = before - after,
+                    remaining = after,
+                    "DIAG: key rotation tick (eviction)"
+                );
             }
             _ = rotation_interval.tick() => {
                 // Initiate ephemeral re-keying with all active peers
@@ -66,8 +65,9 @@ pub async fn run_key_rotation(
                     continue;
                 }
                 tracing::info!(
-                    peers = peers.len(),
-                    "Initiating ephemeral key rotation for active sessions"
+                    active_sessions = peers.len(),
+                    rekey_initiated = peers.len(),
+                    "DIAG: key rotation tick (re-keying)"
                 );
                 for peer in &peers {
                     let ephemeral_pub = session_manager.initiate_ephemeral_exchange(peer);

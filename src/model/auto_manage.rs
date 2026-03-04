@@ -1151,7 +1151,7 @@ impl AutoShardManager {
         tracing::debug!(
             model = %candidate.model_id,
             shard = candidate.shard_index,
-            "Shard file already exists on disk, registering"
+            "DIAG: register_local_shard"
         );
         let node_id = self.shared_state.identity.node_id().clone();
         let shard_id = ShardId {
@@ -1186,6 +1186,11 @@ impl AutoShardManager {
         // Compute resource pressure
         let resource_pressure = self.compute_resource_pressure();
         let pressure_urgent = resource_pressure > 0.95;
+        tracing::info!(
+            resource_pressure = format!("{:.2}", resource_pressure),
+            pressure_urgent,
+            "DIAG: evaluate_and_prune starting"
+        );
 
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
@@ -1865,12 +1870,15 @@ pub async fn check_and_load_model(
         return;
     }
 
+    let missing_shards = manifest.shard_count as usize - local_shard_indices.len();
     tracing::info!(
         model = %model_id,
-        local_shards = local_shard_indices.len(),
+        available_shards = local_shard_indices.len(),
+        missing_shards,
         total_shards = manifest.shard_count,
         ranges = ?ranges,
-        "Loading model segments for inference"
+        ready = missing_shards == 0,
+        "DIAG: check_and_load_model"
     );
 
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);

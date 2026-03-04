@@ -49,8 +49,6 @@ pub struct SessionManager {
     local_secret: StaticSecret,
     local_public: PublicKey,
     sessions: DashMap<NodeId, CachedSession>,
-    /// Monotonic session epoch counter to prevent key reuse across re-established sessions.
-    session_epoch: AtomicU64,
     /// Pending ephemeral secrets for in-progress key exchanges (initiator side).
     /// Removed and consumed when the peer responds with their ephemeral key.
     pending_ephemeral: DashMap<NodeId, EphemeralSecret>,
@@ -67,7 +65,6 @@ impl SessionManager {
             local_secret: secret,
             local_public: public,
             sessions: DashMap::new(),
-            session_epoch: AtomicU64::new(0),
             pending_ephemeral: DashMap::new(),
             pending_ephemeral_pub: DashMap::new(),
         }
@@ -79,20 +76,18 @@ impl SessionManager {
     }
 
     /// Establish a session with a peer given their X25519 public key.
-    /// SEC-C5: Each session gets a unique epoch counter mixed into key derivation
-    /// to prevent nonce reuse when sessions are re-established with the same peer.
+    /// Nonce reuse across re-established sessions is prevented by `remove_session()`
+    /// clearing all session state on disconnect, forcing a fresh ECDH handshake.
     pub fn establish_session(&self, peer: &NodeId, peer_x25519_pub: PublicKey) {
-        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
         let shared_secret = self.local_secret.diffie_hellman(&peer_x25519_pub);
-        let cipher_key = derive_cipher_key_with_epoch(
+        let cipher_key = derive_cipher_key(
             shared_secret.as_bytes(),
             &self.local_public,
             &peer_x25519_pub,
-            epoch,
         );
         self.sessions
             .insert(peer.clone(), CachedSession::new(cipher_key));
-        tracing::debug!(peer = %peer, epoch, "Established encryption session");
+        tracing::debug!(peer = %peer, "Established encryption session");
     }
 
     /// Initiate an ephemeral ECDH key exchange for forward secrecy.
@@ -138,23 +133,21 @@ impl SessionManager {
         let shared_secret = ephemeral_secret.diffie_hellman(&peer_ephemeral_pub);
         // ephemeral_secret is consumed by diffie_hellman — dropped here
 
-        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
         let our_ephemeral_pub = PublicKey::from(
             self.pending_ephemeral_pub
                 .remove(peer)
                 .map(|(_, b)| b)
                 .unwrap_or(*self.local_public.as_bytes()),
         );
-        let cipher_key = derive_cipher_key_with_epoch(
+        let cipher_key = derive_cipher_key(
             shared_secret.as_bytes(),
             &our_ephemeral_pub,
             &peer_ephemeral_pub,
-            epoch,
         );
 
         self.sessions
             .insert(peer.clone(), CachedSession::new(cipher_key));
-        tracing::debug!(peer = %peer, epoch, "Established ephemeral forward-secret session");
+        tracing::debug!(peer = %peer, "Established ephemeral forward-secret session");
         true
     }
 
@@ -177,17 +170,15 @@ impl SessionManager {
         let shared_secret = our_ephemeral_secret.diffie_hellman(&peer_ephemeral_pub);
         // our_ephemeral_secret is consumed — dropped here
 
-        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst);
-        let cipher_key = derive_cipher_key_with_epoch(
+        let cipher_key = derive_cipher_key(
             shared_secret.as_bytes(),
             &our_ephemeral_public,
             &peer_ephemeral_pub,
-            epoch,
         );
 
         self.sessions
             .insert(peer.clone(), CachedSession::new(cipher_key));
-        tracing::debug!(peer = %peer, epoch, "Accepted ephemeral forward-secret session (responder)");
+        tracing::debug!(peer = %peer, "Accepted ephemeral forward-secret session (responder)");
 
         our_pub_bytes
     }
@@ -429,30 +420,6 @@ pub fn ed25519_pubkey_to_x25519(ed_pub_bytes: &[u8; 32]) -> Option<PublicKey> {
     let edwards_point = compressed.decompress()?;
     let montgomery = edwards_point.to_montgomery();
     Some(PublicKey::from(montgomery.to_bytes()))
-}
-
-/// SEC-C5: Derive a cipher key with session epoch mixed in to prevent key reuse.
-fn derive_cipher_key_with_epoch(
-    shared_secret: &[u8],
-    pub_a: &PublicKey,
-    pub_b: &PublicKey,
-    epoch: u64,
-) -> [u8; 32] {
-    let (first, second) = if pub_a.as_bytes() < pub_b.as_bytes() {
-        (pub_a.as_bytes(), pub_b.as_bytes())
-    } else {
-        (pub_b.as_bytes(), pub_a.as_bytes())
-    };
-    let mut salt = Vec::with_capacity(72);
-    salt.extend_from_slice(first);
-    salt.extend_from_slice(second);
-    salt.extend_from_slice(&epoch.to_le_bytes());
-
-    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
-    let mut okm = [0u8; 32];
-    hk.expand(b"swarmllm-session-v1", &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    okm
 }
 
 /// Derive a symmetric cipher key from an ECDH shared secret using HKDF-SHA256.

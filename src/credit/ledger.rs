@@ -264,6 +264,11 @@ impl CreditLedger {
 
     /// Record a completed transaction to the database.
     pub fn record_transaction(&self, tx: &CreditTransaction) -> Result<(), SwarmError> {
+        tracing::info!(
+            tx_id = %tx.id,
+            credit_delta = tx.amount,
+            "DIAG: record_transaction"
+        );
         self.db
             .put_json(TREE_TRANSACTIONS, &tx.id.to_string(), tx)?;
         Ok(())

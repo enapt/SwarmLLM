@@ -78,6 +78,8 @@ impl PipelineScheduler {
             ));
         }
 
+        let start = std::time::Instant::now();
+
         // Gather all candidates: nodes that have shards for this model
         let candidates = self.gather_candidates(&manifest, local_node_id);
         if candidates.is_empty() {
@@ -101,10 +103,12 @@ impl PipelineScheduler {
         tracing::info!(
             request_id = %request_id,
             model = %model_id,
+            candidates_count = candidates.len(),
             segments = segments.len(),
             standbys = standbys.len(),
             tp_groups = tp_groups.len(),
-            "Pipeline assembled"
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "DIAG: assemble_pipeline_for completed"
         );
 
         Ok(PipelineAssignment {
@@ -250,6 +254,12 @@ impl PipelineScheduler {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
+
+        tracing::debug!(
+            candidates_count = candidates.len(),
+            model = %manifest.id,
+            "DIAG: gather_candidates complete"
+        );
 
         candidates
     }
@@ -457,6 +467,12 @@ impl PipelineScheduler {
                 });
             }
         }
+
+        tracing::debug!(
+            segment_count = segments.len(),
+            standby_count = standbys.len(),
+            "DIAG: find_standbys complete"
+        );
 
         standbys
     }

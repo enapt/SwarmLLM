@@ -92,6 +92,8 @@ impl NetworkManager {
         let kp_clone = keypair.clone();
         let relay_cfg = relay_server_config;
         let enable_mdns = config.network.enable_mdns;
+        let enable_autonat = config.network.enable_autonat;
+        let enable_dcutr = config.network.enable_dcutr;
         // Load cached peer count to auto-scale GossipSub mesh parameters.
         let known_peers = crate::network::peer_cache::load_peer_cache(&shared_state.db).len()
             + config.network.bootstrap_peers.len();
@@ -100,11 +102,26 @@ impl NetworkManager {
             .with_tcp(
                 libp2p::tcp::Config::default().nodelay(true),
                 libp2p::noise::Config::new,
-                libp2p::yamux::Config::default,
+                #[allow(deprecated)]
+                || {
+                    let mut cfg = libp2p::yamux::Config::default();
+                    cfg.set_receive_window_size(16 * 1024 * 1024); // 16MB — WSL2 mitigation
+                    cfg.set_max_buffer_size(16 * 1024 * 1024);
+                    cfg
+                },
             )
             .map_err(|e| SwarmError::Network(format!("TCP transport error: {e}")))?
             .with_quic()
-            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+            .with_relay_client(
+                libp2p::noise::Config::new,
+                #[allow(deprecated)]
+                || {
+                    let mut cfg = libp2p::yamux::Config::default();
+                    cfg.set_receive_window_size(16 * 1024 * 1024);
+                    cfg.set_max_buffer_size(16 * 1024 * 1024);
+                    cfg
+                },
+            )
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
             .with_behaviour(|_key, relay_behaviour| {
                 behaviour::build_behaviour(
@@ -112,6 +129,8 @@ impl NetworkManager {
                     relay_behaviour,
                     relay_cfg.as_ref(),
                     enable_mdns,
+                    enable_autonat,
+                    enable_dcutr,
                     known_peers,
                     Some(&config.network),
                 )
@@ -669,9 +688,22 @@ impl NetworkManager {
                     if let Some(x25519_pub) =
                         crate::crypto::session::ed25519_pubkey_to_x25519(&ed_key.to_bytes())
                     {
+                        tracing::info!(
+                            %peer_id,
+                            node_id = %node_id,
+                            session_type = "static",
+                            "DIAG: key exchange initiated"
+                        );
                         self.shared_state
                             .session_manager
                             .establish_session(&node_id, x25519_pub);
+                        tracing::info!(
+                            %peer_id,
+                            node_id = %node_id,
+                            session_type = "static",
+                            session_count = self.shared_state.session_manager.session_count(),
+                            "DIAG: encryption session established"
+                        );
                     }
                 }
 
@@ -1311,10 +1343,8 @@ impl NetworkManager {
 
         // Try to find the peer's NodeId for encryption
         let peer_node_id = self.find_node_id_for_peer(&peer_id);
-        // TODO: Re-enable encryption after fixing epoch desync during startup churn.
-        // The gossip_sealer and session encryption both fail after connection churn
-        // because nodes establish sessions at different epochs.
-        let use_encryption = false; // peer_node_id.is_some();
+        let use_encryption =
+            self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
 
         let payload = if use_encryption {
             let node_id = peer_node_id.unwrap();
@@ -1432,10 +1462,7 @@ impl NetworkManager {
         let all_conn_ids: Vec<_> = self
             .connection_addrs
             .iter()
-            .filter_map(|(cid, addr)| {
-                // Log all connection IDs we're tracking
-                Some(format!("{cid:?}→{addr}"))
-            })
+            .map(|(cid, addr)| format!("{cid:?}→{addr}"))
             .collect();
         tracing::info!(
             %peer_id,

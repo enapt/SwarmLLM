@@ -27,7 +27,13 @@ impl ModelRegistry {
 
     /// Register a model manifest.
     pub fn register_manifest(&self, manifest: ModelManifest) {
-        tracing::info!(model = %manifest.id, name = %manifest.name, "Registered model");
+        tracing::info!(
+            model = %manifest.id,
+            name = %manifest.name,
+            schema_version = manifest.schema_version,
+            shard_count = manifest.shard_count,
+            "DIAG: register_manifest"
+        );
         self.manifests.insert(manifest.id.clone(), manifest);
     }
 
@@ -130,8 +136,8 @@ impl ModelRegistry {
         }
 
         tracing::info!(
-            models = registry.manifests.len(),
-            "Loaded model registry from DB"
+            manifests_loaded_count = registry.manifests.len(),
+            "DIAG: load_from_db complete"
         );
 
         Ok(registry)

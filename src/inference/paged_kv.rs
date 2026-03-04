@@ -103,12 +103,22 @@ impl PagedKvPool {
     pub fn allocate(&self, count: usize) -> Option<Vec<i32>> {
         let mut free = self.free_blocks.lock().unwrap_or_else(|e| e.into_inner());
         if free.len() < count {
+            tracing::debug!(
+                requested = count,
+                free_blocks = free.len(),
+                "DIAG: paged_kv allocate FAILED — insufficient blocks"
+            );
             return None;
         }
         let mut blocks = Vec::with_capacity(count);
         for _ in 0..count {
             blocks.push(free.pop_front().unwrap());
         }
+        tracing::debug!(
+            blocks_allocated = count,
+            free_blocks = free.len(),
+            "DIAG: paged_kv allocate"
+        );
         Some(blocks)
     }
 

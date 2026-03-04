@@ -87,6 +87,11 @@ impl ShardStore {
         let actual = *hasher.finalize().as_bytes();
 
         if actual != info.hash {
+            tracing::info!(
+                model = %model_id,
+                shard = info.index,
+                "DIAG: verify_shard FAILED — hash mismatch"
+            );
             // Quarantine the bad shard
             let quarantine_path = path.with_extension("bin.quarantine");
             if let Err(e) = std::fs::rename(&path, &quarantine_path) {
@@ -227,15 +232,16 @@ impl ShardStore {
             }
         }
 
-        if rejected > 0 {
-            tracing::warn!(
-                rejected,
-                "Rejected unverified or corrupt model data on startup"
-            );
-        }
+        let model_count = shards
+            .iter()
+            .map(|(m, _)| m)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         tracing::info!(
-            count = shards.len(),
-            "Loaded verified local shard inventory"
+            model_count,
+            total_shards = shards.len(),
+            rejected_count = rejected,
+            "DIAG: load_all_local complete"
         );
         Ok(shards)
     }

@@ -304,21 +304,278 @@ DIAG: failed to read credit balance from database — starting at zero
 
 Only logged on startup if the database is corrupted. The node will function but starts with 0 credits.
 
+## WSL2 Mitigations
+
+WSL2's Hyper-V Networking Stack (HNS) introduces TCP stalls and protocol negotiation failures that can starve libp2p's outbound substream requests. Two mitigations are available via config:
+
+### Disable autonat/dcutr
+
+AutoNAT and DCUtR generate protocol negotiation traffic that can starve `poll_outbound` in libp2p's `Connection::poll` loop (handler NotifyBehaviour events have priority over `poll_outbound`). On WSL2, where protocol negotiations are already slow, this can prevent tensor forwards from ever reaching the codec.
+
+```toml
+# config/default.toml or ~/.local/share/swarmllm/config.toml
+[network]
+enable_autonat = false
+enable_dcutr = false
+```
+
+Both protocols use `Toggle<T>` wrappers — when disabled, no events are emitted and no network traffic is generated. NAT detection and hole-punching are not needed for loopback/LAN testing.
+
+### Yamux window size
+
+The yamux receive window and max buffer are set to 16MB (up from the default 256KB). This prevents flow control stalls when forwarding large tensor activations over TCP+Yamux on WSL2:
+
+```
+cfg.set_receive_window_size(16 * 1024 * 1024);  // 16MB
+cfg.set_max_buffer_size(16 * 1024 * 1024);       // 16MB
+```
+
+### WSL2 networking mode
+
+For best results, use mirrored networking in `~/.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+This avoids the virtual NAT layer that causes additional latency and routing issues.
+
+### Recommendation
+
+For production testing, use native Linux (dual boot or bare metal). WSL2 is suitable for single-node development and basic multi-node testing with the above mitigations, but production distributed inference should run on native networking.
+
+## Inference Subsystem Diagnostics
+
+### Scheduler (scheduler.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: assemble_pipeline_for` | `candidates_count`, `segments`, `standbys`, `elapsed_ms` |
+| DEBUG | `DIAG: gather_candidates` | `candidates_count` |
+| DEBUG | `DIAG: find_standbys` | `segment_count`, `standby_count` |
+
+### Executor (executor.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: load_model` | `path`, `backend_type`, `elapsed_ms` |
+| DEBUG | `DIAG: generate_stream starting` | `prompt_len`, `temperature`, `max_tokens` |
+
+### Speculative Decoding (speculative.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
+
+### Vision (vision.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: encode_images` | `image_count`, `elapsed_ms` |
+
+### Paged KV-Cache (paged_kv.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: paged_kv allocate` | `blocks_needed`, `free_blocks` |
+| WARN  | `DIAG: paged_kv allocate OOM` | `blocks_needed`, `free_blocks` |
+
+### Prefix Cache (prefix_cache.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: prefix_cache lookup` | `cache_entries`, `hit` (true/false) |
+
+### Chat Template (chat_template.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: build_prompt` | `template_matched`, `fallback` |
+
+## Model Subsystem Diagnostics
+
+### Shard Store (shard.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: verify_shard FAILED` | `model`, `shard` |
+| INFO  | `DIAG: load_all_local complete` | `model_count`, `total_shards`, `rejected_count` |
+
+### Model Registry (registry.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: register_manifest` | `model_id`, `schema_version`, `shard_count` |
+| INFO  | `DIAG: load_from_db complete` | `manifests_loaded_count` |
+
+### HuggingFace (huggingface.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: search_gguf_models` | `query`, `repos_found` |
+
+### Manifest (manifest.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: load_from_dir` | `dir`, `schema_version`, `shard_count` |
+
+### LoRA (lora.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: load_adapter` | `adapter_path`, `rank`, `alpha`, `target_modules` |
+
+### Acquisition (acquisition.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: handle_acquire` | `model`, `needed_shards` |
+| DEBUG | `DIAG: select_best_peer` | `eligible_peers`, `selected_peer` |
+
+### Auto-Manage (auto_manage.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: evaluate_and_prune` | `resource_pressure`, `pressure_urgent` |
+| DEBUG | `DIAG: register_local_shard` | `model`, `shard_index` |
+| INFO  | `DIAG: check_and_load_model` | `model_id`, `available_shards`, `missing_shards`, `ready` |
+
+## API Subsystem Diagnostics
+
+### Server (server.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: server startup` | `addr` |
+
+### Admin (admin.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: hf_download_shards` | `model_id`, `variant` |
+
+### Providers (providers.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: resolve_provider` | `model_id`, `resolved_provider` |
+
+### WebSocket (websocket.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: websocket connected` | `addr` |
+
+### Middleware (middleware.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: auth failure` | `path`, `auth_present` |
+
+## Credit Subsystem Diagnostics
+
+### Ledger (ledger.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: record_transaction` | `tx_type`, `delta`, `new_balance` |
+
+### Escrow (escrow.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: create_escrow` / `DIAG: release_escrow` | `tx_id`, `amount`, `state` |
+
+### Trust (trust.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: update_trust` | `node`, `score_delta`, `new_score` |
+
+## Crypto Subsystem Diagnostics
+
+### Key Rotation (key_rotation.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: key rotation eviction tick` | `active_sessions`, `stale_evicted` |
+| DEBUG | `DIAG: key rotation re-keying tick` | `active_sessions`, `rekey_initiated` |
+
+### Key Exchange (manager.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: key exchange initiated` | `peer` |
+| INFO  | `DIAG: key exchange completed` | `peer`, `elapsed_ms` |
+
+## Infrastructure Diagnostics
+
+### Database (db.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: db_open` | `path` |
+
+### Identity (keypair.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| INFO  | `DIAG: load identity` | `path` |
+
+### Peer Cache (peer_cache.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: peer cache saved` | `count` |
+
+### Relay (relay.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| DEBUG | `DIAG: relay reservation` | `peer` |
+
 ## Files Modified
 
 | File | Diagnostics Added |
 |------|-------------------|
 | `src/crypto/session.rs` | seal/open success+failure logging with nonce, AAD, key state |
-| `src/network/manager.rs` | Encrypted tensor send/receive, connection lifecycle, gossip audit, outbound tracking |
-| `src/network/behaviour.rs` | Connection limits logged at startup (max 1/peer, 500 total) |
+| `src/crypto/key_rotation.rs` | Eviction tick, re-keying tick with session counts |
+| `src/network/manager.rs` | Encrypted tensor send/receive, connection lifecycle, gossip audit, outbound tracking, key exchange |
+| `src/network/behaviour.rs` | Connection limits, autonat/dcutr toggle state |
 | `src/network/discovery.rs` | Bootstrap failures promoted to WARN with peer counts |
 | `src/network/protocol.rs` | Tensor decompression success/failure with sizes and compression ratios |
+| `src/network/relay.rs` | Relay reservation logging |
+| `src/network/peer_cache.rs` | Peer cache save count |
 | `src/inference/pipeline.rs` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
 | `src/inference/router.rs` | Pipeline schedule vs execute timing breakdown, result channel delivery, streaming done event |
 | `src/inference/split.rs` | Per-forward-pass timing with seq_len/layer/kv_offset context, KV-cache cleanup logging |
 | `src/inference/kv_cache.rs` | KV-cache hit/miss with detailed miss reasons (expired, degraded, prefix mismatch, evicted) |
-| `src/api/openai.rs` | All 3 streaming paths (distributed, split, local) with per-token timing, client disconnect detection, fallback path logging |
+| `src/inference/scheduler.rs` | Pipeline assembly timing, candidate counts, standby counts |
+| `src/inference/executor.rs` | Model load timing with backend type, generate_stream params |
+| `src/inference/speculative.rs` | Batch acceptance rate tracking |
+| `src/inference/vision.rs` | Image encoding timing |
+| `src/inference/paged_kv.rs` | Block allocation success/failure |
+| `src/inference/prefix_cache.rs` | Cache hit/miss with entry counts |
+| `src/inference/chat_template.rs` | Template matching and fallback detection |
+| `src/model/shard.rs` | Shard verification failures, load_all_local summary |
+| `src/model/registry.rs` | Manifest registration with schema version, DB load counts |
+| `src/model/huggingface.rs` | Search result counts, HF_TOKEN auth |
+| `src/model/manifest.rs` | Manifest load with schema version and shard count |
+| `src/model/lora.rs` | Adapter load with rank, alpha, target modules |
+| `src/model/acquisition.rs` | Acquisition requests, peer selection |
+| `src/model/auto_manage.rs` | Prune evaluation, shard registration, model readiness |
+| `src/api/server.rs` | Server startup with bind address |
+| `src/api/openai.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
+| `src/api/admin.rs` | HF shard download initiation |
+| `src/api/providers.rs` | Provider resolution |
+| `src/api/websocket.rs` | WebSocket connection lifecycle |
+| `src/api/middleware.rs` | Auth failure with path context |
+| `src/credit/ledger.rs` | Transaction recording with balance changes, DB restore failure |
+| `src/credit/escrow.rs` | Escrow create/release with state |
+| `src/credit/trust.rs` | Trust score updates |
+| `src/storage/db.rs` | Database open with path |
+| `src/identity/keypair.rs` | Identity key load |
 | `src/daemon.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
-| `src/credit/ledger.rs` | DB restore failure logging |
-| `src/model/huggingface.rs` | HF_TOKEN auth support for gated models |

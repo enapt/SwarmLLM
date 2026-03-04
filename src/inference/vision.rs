@@ -428,6 +428,7 @@ impl VisionModule {
             return Err(SwarmError::Inference("No images to encode".into()));
         }
 
+        let start = std::time::Instant::now();
         let target_size = self.encoder.config().image_size;
         let pixel_values = preprocess_images(images, target_size, &self.device)?;
 
@@ -442,9 +443,18 @@ impl VisionModule {
             .dims3()
             .map_err(|e| SwarmError::Inference(format!("Vision output dims: {e}")))?;
 
-        projected
+        let result = projected
             .reshape(&[b * n, h])
-            .map_err(|e| SwarmError::Inference(format!("Vision output reshape: {e}")))
+            .map_err(|e| SwarmError::Inference(format!("Vision output reshape: {e}")))?;
+
+        tracing::debug!(
+            image_count = images.len(),
+            patch_count = b * n,
+            elapsed_ms = start.elapsed().as_millis() as u64,
+            "DIAG: encode_images complete"
+        );
+
+        Ok(result)
     }
 
     /// Number of embedding tokens each image produces.

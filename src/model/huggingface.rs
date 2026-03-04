@@ -115,6 +115,13 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
         }
     }
 
+    tracing::debug!(
+        query,
+        repos_count = repos.len(),
+        gguf_files_found = results.len(),
+        "DIAG: search_gguf_models complete"
+    );
+
     Ok(results)
 }
 

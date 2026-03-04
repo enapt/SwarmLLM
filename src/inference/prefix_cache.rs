@@ -67,10 +67,13 @@ impl PrefixCache {
             prefix_hash: *prefix_hash,
             model_key: model_key.to_string(),
         };
+        let cache_entries = self.entries.len();
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.last_accessed = Instant::now();
+            tracing::debug!(cache_entries, hit = true, "DIAG: prefix_cache lookup");
             Some((&entry.layer_kv, entry.prefix_len))
         } else {
+            tracing::debug!(cache_entries, hit = false, "DIAG: prefix_cache lookup");
             None
         }
     }

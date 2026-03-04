@@ -95,10 +95,11 @@ impl ModelExecutor {
                 .to_string()
         });
 
+        let load_start = std::time::Instant::now();
         tracing::info!(
             path = %path.display(),
             gpu_layers = gpu_layers,
-            "Loading model"
+            "DIAG: load_model starting"
         );
 
         #[cfg(feature = "llama")]
@@ -148,10 +149,19 @@ impl ModelExecutor {
         self.model_name = name;
         self.loaded = true;
 
-        #[cfg(feature = "llama")]
-        tracing::info!(model = %self.model_name, "Model loaded (llama-cpp-2 with GPU)");
-        #[cfg(not(feature = "llama"))]
-        tracing::info!(model = %self.model_name, "Model loaded (stub — enable 'llama' feature for real inference)");
+        let backend_type = if cfg!(feature = "llama") {
+            "llama-cpp-2"
+        } else {
+            "stub"
+        };
+        tracing::info!(
+            model = %self.model_name,
+            path = %path.display(),
+            gpu_layers,
+            backend_type,
+            elapsed_ms = load_start.elapsed().as_millis() as u64,
+            "DIAG: load_model completed"
+        );
 
         Ok(())
     }
@@ -195,7 +205,7 @@ impl ModelExecutor {
             prompt_len = prompt.len(),
             temperature = params.temperature,
             max_tokens = params.max_tokens,
-            "Starting generation"
+            "DIAG: generate_stream starting"
         );
 
         #[cfg(feature = "llama")]

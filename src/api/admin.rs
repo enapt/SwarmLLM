@@ -1440,6 +1440,14 @@ pub async fn hf_download_shards(
         )));
     }
 
+    tracing::info!(
+        repo_id = %repo_id,
+        filename = %filename,
+        shard_count = shard_indices.len(),
+        peer_fair_share,
+        "DIAG: hf_download_shards handler"
+    );
+
     // peer_fair_share: compute shard assignment deterministically.
     // Deferred until after probe (we need shard_count), so store the peer count now.
     let fair_share_peer_count = if peer_fair_share && shard_indices.is_empty() {

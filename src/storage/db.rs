@@ -83,7 +83,7 @@ impl Database {
         let inner = redb::Database::create(&db_path).map_err(|e| {
             SwarmError::Database(format!("Failed to open {}: {e}", db_path.display()))
         })?;
-        tracing::info!(path = %db_path.display(), "Opened database");
+        tracing::info!(path = %db_path.display(), "DIAG: db_open");
 
         let db = Self {
             inner: Arc::new(inner),

@@ -31,6 +31,16 @@ pub struct ProviderInfo {
 /// 1. Model prefix: `claude-*` → Anthropic, `gpt-*` → OpenAI, `deepseek-*` → DeepSeek, etc.
 /// 2. Explicit syntax: `provider:model` (e.g. `openai:gpt-4o`)
 pub fn resolve_provider(model: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
+    let result = resolve_provider_inner(model, config);
+    tracing::debug!(
+        model_id = model,
+        resolved_provider = ?result.as_ref().map(|p| &p.name),
+        "DIAG: provider resolution"
+    );
+    result
+}
+
+fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
     // Explicit provider:model syntax
     if let Some((provider_name, _model_name)) = model.split_once(':') {
         return resolve_by_name(provider_name, config);

@@ -17,6 +17,7 @@ pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> imp
 }
 
 async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
+    tracing::debug!("DIAG: websocket client connected");
     let (mut sender, mut receiver) = socket.split();
 
     // Track last pong timestamp for dead connection detection

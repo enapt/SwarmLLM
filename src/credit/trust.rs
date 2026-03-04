@@ -97,9 +97,9 @@ impl TrustManager {
         tracing::debug!(
             node = %node_id,
             event = event.name(),
-            delta,
+            score_delta = delta,
             new_score,
-            "Trust score updated"
+            "DIAG: trust score update"
         );
 
         new_score

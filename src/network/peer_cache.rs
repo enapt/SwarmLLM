@@ -25,7 +25,7 @@ pub fn save_peer_cache(db: &Database, addrs: &[String]) {
 
     tracing::debug!(
         count = addrs.len().min(MAX_CACHED_PEERS),
-        "Saved peer cache"
+        "DIAG: peer cache saved"
     );
 }
 

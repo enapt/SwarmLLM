@@ -30,8 +30,10 @@ impl ModelManifest {
 
         tracing::debug!(
             model = %manifest.id,
-            shards = manifest.shard_count,
-            "Loaded manifest"
+            schema_version = manifest.schema_version,
+            shard_count = manifest.shard_count,
+            dir_path = %dir.display(),
+            "DIAG: load_from_dir manifest loaded"
         );
 
         Ok(manifest)

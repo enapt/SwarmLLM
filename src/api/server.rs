@@ -210,7 +210,7 @@ pub async fn run_server(
     let app = build_router(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 
-    tracing::info!(%addr, "Starting HTTP server");
+    tracing::info!(%addr, "DIAG: server startup");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
@@ -244,7 +244,7 @@ pub async fn run_server_with_state(
     let app = build_router(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
 
-    tracing::info!(%addr, "Starting HTTP server");
+    tracing::info!(%addr, "DIAG: server startup");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

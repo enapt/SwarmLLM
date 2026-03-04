@@ -41,7 +41,7 @@ impl Identity {
             let signing_key = SigningKey::from_bytes(&key_bytes);
             let node_id = NodeId(signing_key.verifying_key().to_bytes());
 
-            tracing::info!(node_id = %node_id, "Loaded identity");
+            tracing::info!(node_id = %node_id, "DIAG: identity key loaded from disk");
             Ok(Self {
                 signing_key,
                 node_id,

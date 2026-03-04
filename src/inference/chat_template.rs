@@ -570,9 +570,19 @@ pub fn build_prompt(
 ) -> String {
     if let Some(tmpl) = template {
         if let Some(result) = apply_chat_template(tmpl, messages, bos_token, eos_token, true) {
+            tracing::debug!(template_matched = true, "DIAG: chat template applied");
             return result;
         }
-        tracing::warn!("Failed to apply chat template, falling back to ChatML");
+        tracing::warn!(
+            fallback = "chatml",
+            "DIAG: chat template failed, using fallback"
+        );
+    } else {
+        tracing::debug!(
+            template_matched = false,
+            fallback = "chatml",
+            "DIAG: no chat template, using fallback"
+        );
     }
     chatml_fallback(messages)
 }

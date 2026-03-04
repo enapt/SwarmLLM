@@ -33,8 +33,8 @@ pub struct SwarmBehaviour {
     pub kademlia: kad::Behaviour<MemoryStore>,
     pub gossipsub: gossipsub::Behaviour,
     pub identify: identify::Behaviour,
-    pub autonat: autonat::Behaviour,
-    pub dcutr: dcutr::Behaviour,
+    pub autonat: libp2p::swarm::behaviour::toggle::Toggle<autonat::Behaviour>,
+    pub dcutr: libp2p::swarm::behaviour::toggle::Toggle<dcutr::Behaviour>,
     pub relay_client: relay::client::Behaviour,
     /// Relay server: accepts reservations from NAT'd peers and forwards circuits.
     pub relay_server: relay::Behaviour,
@@ -49,11 +49,14 @@ pub struct SwarmBehaviour {
 /// `known_peers` is the count of peers from the peer cache, used to auto-scale
 /// GossipSub mesh parameters. Small clusters (< 10 peers) use lower thresholds,
 /// while larger networks scale up for faster message propagation.
+#[allow(clippy::too_many_arguments)]
 pub fn build_behaviour(
     local_key: &Keypair,
     relay_behaviour: relay::client::Behaviour,
     relay_server_config: Option<&RelayServerConfig>,
     enable_mdns: bool,
+    enable_autonat: bool,
+    enable_dcutr: bool,
     known_peers: usize,
     network_config: Option<&NetworkConfig>,
 ) -> Result<SwarmBehaviour, Box<dyn std::error::Error>> {
@@ -146,11 +149,24 @@ pub fn build_behaviour(
         local_key.public(),
     ));
 
-    // AutoNAT for NAT detection
-    let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
+    // AutoNAT for NAT detection (toggleable — disable on WSL2)
+    let autonat_behaviour = if enable_autonat {
+        Some(autonat::Behaviour::new(
+            local_peer_id,
+            autonat::Config::default(),
+        ))
+    } else {
+        tracing::info!("DIAG: autonat disabled by config");
+        None
+    };
 
-    // DCUtR for hole punching
-    let dcutr = dcutr::Behaviour::new(local_peer_id);
+    // DCUtR for hole punching (toggleable — disable on WSL2)
+    let dcutr_behaviour = if enable_dcutr {
+        Some(dcutr::Behaviour::new(local_peer_id))
+    } else {
+        tracing::info!("DIAG: dcutr disabled by config");
+        None
+    };
 
     // Relay server: if config provided, use those limits; otherwise use defaults.
     let relay_config = relay_server_config
@@ -195,8 +211,8 @@ pub fn build_behaviour(
         kademlia,
         gossipsub,
         identify,
-        autonat,
-        dcutr,
+        autonat: autonat_behaviour.into(),
+        dcutr: dcutr_behaviour.into(),
         relay_client: relay_behaviour,
         relay_server,
         connection_limits,
@@ -214,7 +230,7 @@ mod tests {
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         // relay_transport isn't used in this test
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, false, 0, None);
+        let result = build_behaviour(&keypair, relay_behaviour, None, false, true, true, 0, None);
         assert!(result.is_ok());
     }
 
@@ -228,7 +244,16 @@ mod tests {
             max_circuits: 8,
             ..Default::default()
         };
-        let result = build_behaviour(&keypair, relay_behaviour, Some(&relay_cfg), false, 0, None);
+        let result = build_behaviour(
+            &keypair,
+            relay_behaviour,
+            Some(&relay_cfg),
+            false,
+            true,
+            true,
+            0,
+            None,
+        );
         assert!(result.is_ok());
     }
 
@@ -237,7 +262,7 @@ mod tests {
         let keypair = Keypair::generate_ed25519();
         let (relay_transport, relay_behaviour) = relay::client::new(keypair.public().to_peer_id());
         drop(relay_transport);
-        let result = build_behaviour(&keypair, relay_behaviour, None, true, 0, None);
+        let result = build_behaviour(&keypair, relay_behaviour, None, true, true, true, 0, None);
         assert!(result.is_ok());
         let behaviour = result.unwrap();
         // mDNS should be enabled (Toggle wraps Some)

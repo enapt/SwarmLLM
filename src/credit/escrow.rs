@@ -117,7 +117,8 @@ impl EscrowManager {
             escrow_id = %escrow_id,
             request_id = %request_id,
             amount,
-            "Created escrow"
+            state = "pending",
+            "DIAG: escrow hold"
         );
 
         Ok(escrow_id)
@@ -163,7 +164,8 @@ impl EscrowManager {
             escrow_id = %escrow_id,
             amount,
             to_node = %to_node,
-            "Released escrow"
+            state = "released",
+            "DIAG: escrow release"
         );
 
         Ok(amount)

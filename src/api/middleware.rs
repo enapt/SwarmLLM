@@ -198,6 +198,11 @@ pub async fn auth_middleware(
     match token {
         Some(t) if constant_time_eq(t.as_bytes(), expected_key.as_bytes()) => next.run(req).await,
         _ => {
+            tracing::debug!(
+                request_path = %path,
+                auth_present = token.is_some(),
+                "DIAG: auth failure"
+            );
             let body = serde_json::json!({
                 "error": {
                     "message": "Invalid or missing API key. Provide a valid Bearer token in the Authorization header.",

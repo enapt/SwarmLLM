@@ -126,6 +126,16 @@ pub fn load_adapter(
     let num_layers = weights.len();
     tracing::info!(adapter_id, num_layers, rank, alpha, "Loaded LoRA adapter");
 
+    tracing::debug!(
+        adapter_id,
+        name,
+        base_model,
+        rank,
+        num_layers,
+        size_bytes = file_size,
+        "DIAG: lora adapter loaded"
+    );
+
     Ok(LoraAdapter {
         metadata: AdapterMetadata {
             id: adapter_id.to_string(),

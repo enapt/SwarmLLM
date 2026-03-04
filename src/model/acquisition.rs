@@ -239,7 +239,7 @@ impl AcquisitionManager {
             model = %model_id,
             shards = manifest.shard_count,
             size_bytes = manifest.total_size_bytes,
-            "Starting model acquisition"
+            "DIAG: handle_acquire starting"
         );
 
         // Save the verified manifest to disk
@@ -343,6 +343,13 @@ impl AcquisitionManager {
             self.register_model(&model_id, &manifest);
             return;
         }
+
+        tracing::info!(
+            model = %model_id,
+            needed_shards = needed.len(),
+            total_shards,
+            "DIAG: handle_acquire requesting shards"
+        );
 
         // Request each needed shard from the network with retry logic
         for shard_id in &needed {
@@ -714,7 +721,7 @@ impl AcquisitionManager {
     fn select_best_peer(&self, holders: &[NodeId]) -> Option<NodeId> {
         let local_id = self.shared_state.identity.node_id().clone();
 
-        holders
+        let selected = holders
             .iter()
             .filter(|n| **n != local_id)
             .min_by_key(|node_id| {
@@ -728,7 +735,15 @@ impl AcquisitionManager {
                     })
                     .unwrap_or(500)
             })
-            .cloned()
+            .cloned();
+
+        tracing::debug!(
+            eligible_peers = holders.len(),
+            selected_peer = ?selected.as_ref().map(|n| n.to_string()),
+            "DIAG: select_best_peer"
+        );
+
+        selected
     }
 }
 
