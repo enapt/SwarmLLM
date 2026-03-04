@@ -18,6 +18,8 @@ enable_mdns = true                 # LAN discovery via mDNS (finds peers on same
 enable_autonat = true              # NAT detection (set false on WSL2 to prevent connection races)
 enable_dcutr = true                # Hole punching (set false on WSL2 to prevent connection races)
 enable_encryption = true           # E2E encryption for tensor forwards
+enable_quic = true                 # QUIC transport (set false on WSL2 — QUIC wins connection race over TCP)
+# listen_address = "0.0.0.0"      # Bind address for P2P (set "127.0.0.1" on WSL2)
 # gossip_network_id = "my-private-net"  # Uncomment for private networks (default: "swarmllm-mainnet-v1")
 
 [inference]

@@ -44,9 +44,10 @@ pub struct NetworkManager {
     buffered_gossip: Vec<(String, Vec<u8>)>,
     /// Whether relay listen has been activated for this session (at most once).
     relay_activated: bool,
-    /// Maps OutboundRequestId → inference UUID for tensor forwards.
+    /// Maps OutboundRequestId → (inference UUID, send time, target PeerId) for tensor forwards.
     /// Used to notify the pipeline on OutboundFailure instead of silent 30s timeout.
-    pending_tensor_outbound: HashMap<OutboundRequestId, uuid::Uuid>,
+    /// The Instant is used for stale tensor cleanup (35s timeout).
+    pending_tensor_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId)>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -171,24 +172,31 @@ impl NetworkManager {
 
         // Listen on QUIC and TCP
         // TCP P2P uses port+10 to avoid conflicting with the HTTP API server on the same TCP port.
-        let quic_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1")
-            .parse()
-            .map_err(|e| SwarmError::Network(format!("Invalid QUIC address: {e}")))?;
+        let listen_ip = &config.network.listen_address;
         let tcp_port = port + 10;
-        let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{tcp_port}")
+        let tcp_addr: Multiaddr = format!("/ip4/{listen_ip}/tcp/{tcp_port}")
             .parse()
             .map_err(|e| SwarmError::Network(format!("Invalid TCP address: {e}")))?;
 
-        self.swarm
-            .listen_on(quic_addr.clone())
-            .map_err(|e| SwarmError::Network(format!("Failed to listen on QUIC: {e}")))?;
+        if config.network.enable_quic {
+            let quic_addr: Multiaddr = format!("/ip4/{listen_ip}/udp/{port}/quic-v1")
+                .parse()
+                .map_err(|e| SwarmError::Network(format!("Invalid QUIC address: {e}")))?;
+            self.swarm
+                .listen_on(quic_addr.clone())
+                .map_err(|e| SwarmError::Network(format!("Failed to listen on QUIC: {e}")))?;
 
-        // TCP listen is best-effort — may not be available depending on transport config
-        match self.swarm.listen_on(tcp_addr.clone()) {
-            Ok(_) => tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections"),
-            Err(e) => {
-                tracing::warn!(%quic_addr, error = %e, "TCP listen unavailable, using QUIC only");
+            match self.swarm.listen_on(tcp_addr.clone()) {
+                Ok(_) => tracing::info!(%quic_addr, %tcp_addr, "Listening for P2P connections"),
+                Err(e) => {
+                    tracing::warn!(%quic_addr, error = %e, "TCP listen unavailable, using QUIC only");
+                }
             }
+        } else {
+            self.swarm
+                .listen_on(tcp_addr.clone())
+                .map_err(|e| SwarmError::Network(format!("Failed to listen on TCP: {e}")))?;
+            tracing::info!(%tcp_addr, "Listening for P2P connections (QUIC disabled)");
         }
 
         // Subscribe to GossipSub topics
@@ -227,6 +235,11 @@ impl NetworkManager {
         rr_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut rr_ping_seq: u64 = 0;
 
+        // Periodic stale tensor forward cleanup — catches requests that are silently dropped
+        // by libp2p (no OutboundFailure event) due to stale ConnectionIds or handler starvation.
+        let mut stale_tensor_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        stale_tensor_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         tracing::info!("NetworkManager running");
 
         loop {
@@ -239,15 +252,24 @@ impl NetworkManager {
                         break;
                     }
                 }
-                // Periodic discovery
+                // Periodic discovery — skip when tensor forwards are in-flight to avoid
+                // Kademlia event bursts that create back-pressure in the connection task's
+                // event channel, delaying NotifyHandler delivery for tensor forwards.
                 _ = discovery_interval.tick() => {
-                    tracing::debug!("Discovery tick");
-                    let _ = discovery::trigger_bootstrap(&mut self.swarm);
-                    // Re-dial cached peers that we're not currently connected to.
-                    // This handles peers that went offline and came back.
-                    let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
-                    if !cached.is_empty() {
-                        let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                    if !self.pending_tensor_outbound.is_empty() {
+                        tracing::debug!(
+                            pending = self.pending_tensor_outbound.len(),
+                            "Skipping discovery tick — tensor forwards pending"
+                        );
+                    } else {
+                        tracing::debug!("Discovery tick");
+                        let _ = discovery::trigger_bootstrap(&mut self.swarm);
+                        // Re-dial cached peers that we're not currently connected to.
+                        // This handles peers that went offline and came back.
+                        let cached = crate::network::peer_cache::load_peer_cache(&self.shared_state.db);
+                        if !cached.is_empty() {
+                            let _ = discovery::bootstrap_peers(&mut self.swarm, &cached);
+                        }
                     }
                     self.update_peer_count();
                 }
@@ -282,6 +304,76 @@ impl NetworkManager {
                                     pending_tensor_out = self.pending_tensor_outbound.len(),
                                     "DIAG: rr_ping sent (health check)"
                                 );
+                            }
+                        }
+                    }
+                }
+                // Stale tensor forward cleanup — catches requests stuck in the handler
+                // due to yamux/connection-task stalls where the libp2p SubstreamRequested
+                // timeout (futures_timer::Delay) fails to fire. When detected, we disconnect
+                // the stale peer to force a fresh TCP+yamux session on the next exchange.
+                _ = stale_tensor_interval.tick() => {
+                    if !self.pending_tensor_outbound.is_empty() {
+                        let now = std::time::Instant::now();
+                        let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
+                        for (req_id, (uuid, sent_at, target_peer)) in &self.pending_tensor_outbound {
+                            let age = now.duration_since(*sent_at);
+                            let is_rr_pending = self.swarm.behaviour()
+                                .request_response.is_pending_outbound(target_peer, req_id);
+                            let is_connected = self.swarm.is_connected(target_peer);
+                            let rr_connected = self.swarm.behaviour()
+                                .request_response.is_connected(target_peer);
+                            tracing::debug!(
+                                ?req_id,
+                                request_id = %uuid,
+                                %target_peer,
+                                age_secs = age.as_secs(),
+                                is_rr_pending,
+                                is_connected,
+                                rr_connected,
+                                "DIAG: pending tensor forward status"
+                            );
+                            if age.as_secs() > 20 {
+                                stale.push((*req_id, *uuid, *target_peer));
+                            }
+                        }
+                        // Collect unique stale peers for disconnection
+                        let mut stale_peers: std::collections::HashSet<libp2p::PeerId> = std::collections::HashSet::new();
+                        for (req_id, uuid, target_peer) in stale {
+                            tracing::warn!(
+                                ?req_id,
+                                request_id = %uuid,
+                                %target_peer,
+                                "DIAG: stale tensor forward (>20s) — notifying pipeline + disconnecting peer"
+                            );
+                            self.pending_tensor_outbound.remove(&req_id);
+                            stale_peers.insert(target_peer);
+                            let error_result = crate::types::LayerResult {
+                                request_id: uuid,
+                                token_ids: vec![],
+                                finish_reason: Some(crate::types::NetworkFinishReason::Error(
+                                    "Tensor forward timed out (20s)".to_string(),
+                                )),
+                                activations: vec![],
+                            };
+                            if let Err(e) = self.outbound_tx
+                                .try_send(SwarmMessage::LayerResult(error_result))
+                            {
+                                tracing::warn!(error = %e, "Failed to send stale tensor error to pipeline");
+                            }
+                        }
+                        // Disconnect stale peers to reset the yamux session.
+                        // The connection task may be stuck (handler not polled, SubstreamRequested
+                        // timeout not firing). Disconnecting kills the stale TCP+yamux session.
+                        // The peer will be reconnected on the next send_request() or Kademlia
+                        // bootstrap (60s interval).
+                        for peer in &stale_peers {
+                            if self.swarm.is_connected(peer) {
+                                tracing::warn!(
+                                    %peer,
+                                    "DIAG: disconnecting stale peer to reset yamux session"
+                                );
+                                let _ = self.swarm.disconnect_peer_id(*peer);
                             }
                         }
                     }
@@ -448,11 +540,13 @@ impl NetworkManager {
                     "DIAG: OutboundFailure"
                 );
                 // Check if this was a pending tensor forward — notify the pipeline
-                if let Some(inference_uuid) = self.pending_tensor_outbound.remove(&request_id) {
+                if let Some((inference_uuid, sent_at, _target)) = self.pending_tensor_outbound.remove(&request_id) {
+                    let age_ms = sent_at.elapsed().as_millis();
                     tracing::error!(
                         %peer,
                         inference_request_id = %inference_uuid,
                         %error,
+                        age_ms,
                         "Tensor forward OutboundFailure — notifying pipeline"
                     );
                     // Send an error LayerResult so the pipeline can failover immediately
@@ -880,11 +974,11 @@ impl NetworkManager {
                 self.connection_addrs.remove(&connection_id);
                 // Check if any in-flight tensor forwards are affected
                 let affected_tensors: Vec<_> =
-                    self.pending_tensor_outbound.values().cloned().collect();
+                    self.pending_tensor_outbound.values().map(|(u, _, _)| u.to_string()).collect();
                 tracing::warn!(
                     %peer_id, %connection_id, ?cause, remaining = num_established,
                     pending_tensor_forwards = self.pending_tensor_outbound.len(),
-                    affected_request_ids = ?affected_tensors.iter().take(5).map(|u| u.to_string()).collect::<Vec<_>>(),
+                    affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
                     total_peers = self.swarm.connected_peers().count(),
                     "DIAG: connection closed"
                 );
@@ -1431,19 +1525,48 @@ impl NetworkManager {
             swarm_is_connected = is_connected,
             "DIAG: PRE-send_request state"
         );
-        // NOTE: Do NOT send a diagnostic ping before the tensor. Each send_request()
-        // consumes a substream slot, and on slow QUIC transports (WSL2) each substream
-        // opening takes 14-25 seconds. The diag ping would push the tensor to the back
-        // of the queue, causing it to miss the 30s pipeline timeout.
+        // CRITICAL: If the swarm says the peer is not connected, fail immediately.
+        // The rr behaviour may have a stale connection entry (rr_connected=true)
+        // after a disconnect, causing send_request() to target a dead ConnectionId
+        // whose NotifyHandler is silently dropped by the swarm pool.
+        if !is_connected {
+            tracing::warn!(
+                %peer_id,
+                request_id = %forward.request_id,
+                rr_is_connected,
+                "Peer not connected — failing tensor forward immediately"
+            );
+            let error_result = crate::types::LayerResult {
+                request_id: forward.request_id,
+                token_ids: vec![],
+                finish_reason: Some(crate::types::NetworkFinishReason::Error(
+                    "Peer not connected".to_string(),
+                )),
+                activations: vec![],
+            };
+            if let Err(e) = self.outbound_tx
+                .try_send(SwarmMessage::LayerResult(error_result))
+            {
+                tracing::warn!(error = %e, "Failed to send not-connected error to pipeline");
+            }
+            return;
+        }
         let req = SwarmRequest::TensorPayload(payload);
         let outbound_id = self
             .swarm
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
-        // Track OutboundRequestId → UUID so we can notify pipeline on OutboundFailure
+        // Track OutboundRequestId → (UUID, time, peer) so we can notify pipeline on OutboundFailure
+        // and clean up stale requests.
         self.pending_tensor_outbound
-            .insert(outbound_id, forward.request_id);
+            .insert(outbound_id, (forward.request_id, std::time::Instant::now(), peer_id));
+        // DIAG: check is_pending_outbound immediately — confirms the request was registered
+        let is_rr_pending = self
+            .swarm
+            .behaviour()
+            .request_response
+            .is_pending_outbound(&peer_id, &outbound_id);
         // DIAG: enumerate connection IDs for this peer to detect stale conn_id issues
         let peer_established_count = self
             .swarm
@@ -1464,6 +1587,7 @@ impl NetworkManager {
             is_connected,
             total_connections = peer_conn_count,
             peer_established_count,
+            is_rr_pending,
             pending_tensor_count = self.pending_tensor_outbound.len(),
             ?outbound_id,
             tracked_connections = ?all_conn_ids,
@@ -1835,12 +1959,28 @@ impl NetworkManager {
     }
 
     /// Save current peer addresses to the persistent cache.
+    /// Appends `/p2p/<peer_id>` to each address so that `bootstrap_peers` can
+    /// skip already-connected peers via the `is_connected()` check.
     fn save_peer_cache(&self) {
         let addrs: Vec<String> = self
             .shared_state
             .peer_registry
             .iter()
-            .flat_map(|entry| entry.addresses.clone())
+            .flat_map(|entry| {
+                // Resolve PeerId from the reverse index so we can append /p2p/<id>
+                let peer_id = entry.peer_id_bytes.as_ref().and_then(|b| {
+                    libp2p::PeerId::from_bytes(b).ok()
+                });
+                entry.addresses.iter().map(move |addr| {
+                    if let Some(ref pid) = peer_id {
+                        // Only append if not already present
+                        if !addr.contains("/p2p/") {
+                            return format!("{addr}/p2p/{pid}");
+                        }
+                    }
+                    addr.clone()
+                }).collect::<Vec<_>>()
+            })
             .collect();
         if !addrs.is_empty() {
             crate::network::peer_cache::save_peer_cache(&self.shared_state.db, &addrs);

@@ -187,7 +187,7 @@ pub fn announce_shards(
 }
 
 /// Discovery interval for periodic peer discovery.
-pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
+pub const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Peer cache save interval.
 pub const PEER_CACHE_SAVE_INTERVAL: Duration = Duration::from_secs(300);

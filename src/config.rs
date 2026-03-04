@@ -184,6 +184,29 @@ pub struct NetworkConfig {
     /// Minimum payload size in bytes before compression is applied (default 1024).
     #[serde(default = "default_tensor_compress_threshold")]
     pub tensor_compress_threshold: usize,
+    /// IP address to bind P2P listeners on (default: "0.0.0.0" = all interfaces).
+    /// Set to "127.0.0.1" on WSL2 to prevent connections via unreliable NAT adapters.
+    #[serde(default = "default_listen_address")]
+    pub listen_address: String,
+    /// Enable QUIC transport (default: true).
+    /// Disable on WSL2 to prevent QUIC connection races with TCP (QUIC handshake is faster
+    /// than TCP+Noise+Yamux, causing max_established_per_peer=1 to kill the TCP connection).
+    #[serde(default = "default_true")]
+    pub enable_quic: bool,
+}
+
+fn default_listen_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// Detect WSL2 by checking /proc/version for "microsoft" or "WSL".
+fn is_wsl2() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|v| {
+            let lower = v.to_lowercase();
+            lower.contains("microsoft") || lower.contains("wsl")
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -771,6 +794,8 @@ impl Default for NetworkConfig {
             tensor_compression: true,
             tensor_compress_level: default_tensor_compress_level(),
             tensor_compress_threshold: default_tensor_compress_threshold(),
+            listen_address: default_listen_address(),
+            enable_quic: true,
         }
     }
 }
@@ -836,8 +861,10 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| config.node.data_dir.join("config.toml"));
 
+        let mut config_text = String::new();
         if path.exists() {
             let contents = std::fs::read_to_string(&path).map_err(SwarmError::Io)?;
+            config_text = contents.clone();
             config = toml::from_str(&contents).map_err(|e| {
                 SwarmError::Config(format!("Failed to parse {}: {e}", path.display()))
             })?;
@@ -898,6 +925,40 @@ impl Config {
         }
         if !cli_bootstrap.is_empty() {
             config.network.bootstrap_peers = cli_bootstrap;
+        }
+
+        // 5. Auto-detect WSL2 and apply safe network defaults.
+        // Only overrides values the user didn't explicitly set in config.toml.
+        if is_wsl2() {
+            let has = |key: &str| config_text.contains(key);
+            let net = &mut config.network;
+            let mut adapted = Vec::new();
+            if !has("enable_quic") {
+                net.enable_quic = false;
+                adapted.push("enable_quic=false");
+            }
+            if !has("enable_autonat") {
+                net.enable_autonat = false;
+                adapted.push("enable_autonat=false");
+            }
+            if !has("enable_dcutr") {
+                net.enable_dcutr = false;
+                adapted.push("enable_dcutr=false");
+            }
+            if !has("enable_mdns") {
+                net.enable_mdns = false;
+                adapted.push("enable_mdns=false");
+            }
+            if !has("listen_address") {
+                net.listen_address = "127.0.0.1".to_string();
+                adapted.push("listen_address=127.0.0.1");
+            }
+            if !adapted.is_empty() {
+                tracing::info!(
+                    settings = adapted.join(", "),
+                    "WSL2 detected: auto-applied safe network defaults (set explicitly in config.toml to override)"
+                );
+            }
         }
 
         // Validate

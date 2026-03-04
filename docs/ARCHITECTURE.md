@@ -754,3 +754,41 @@ When a requested model isn't available locally, requests are routed to cloud pro
 | Windows x86_64 | P1 | CUDA |
 | macOS x86_64 | P2 | CPU only |
 | Linux aarch64 | P3 | CPU only |
+
+## WSL2 Networking Notes
+
+WSL2 has several networking quirks that affect P2P connections. These settings should be applied via `config.toml` when running on WSL2.
+
+### Required Settings
+
+```toml
+[network]
+enable_autonat = false    # Prevents protocol noise on WSL2 virtual adapters
+enable_dcutr = false      # Hole punching unreliable through WSL2 NAT
+enable_mdns = false       # mDNS discovers multiple interfaces, causing connection races
+enable_quic = false       # QUIC handshake beats TCP+Noise+Yamux, winning the connection
+                          # race and then failing on large payloads (tensor forwards)
+listen_address = "127.0.0.1"  # Bind only to loopback; avoids WSL2 NAT adapters
+                               # (172.x.x.x, 10.255.255.254) which are unreliable
+```
+
+### Why These Are Needed
+
+**Multiple network interfaces**: WSL2 exposes 3+ IP addresses (127.0.0.1, 172.27.x.x, 10.255.255.254). With `max_established_per_peer=1`, simultaneous connection attempts via different interfaces cause mutual rejection (yamux GoAway frames), killing all connections.
+
+**QUIC vs TCP race**: When both transports listen on 127.0.0.1, QUIC's 0-RTT handshake completes before TCP+Noise+Yamux negotiation. The QUIC connection wins `max_established_per_peer=1`, but QUIC over WSL2 can't reliably handle large request_response payloads (tensor forwards of 200KB+). Small messages (health pings) work fine.
+
+**AutoNAT/DCUtR**: These protocols trigger additional connection attempts to all discovered addresses, amplifying the race condition.
+
+### Multi-Node Testing on WSL2
+
+Use `SWARMLLM_NODE_DATA_DIR` for per-node isolation and TCP-only bootstrap:
+
+```bash
+# Node 1
+SWARMLLM_NODE_DATA_DIR=/tmp/node1 ./swarmllm run -p 8800
+
+# Node 2 (bootstrap via TCP, port+10)
+SWARMLLM_NODE_DATA_DIR=/tmp/node2 ./swarmllm run -p 8801 \
+  --bootstrap /ip4/127.0.0.1/tcp/8810
+```

@@ -144,7 +144,10 @@ pub fn build_behaviour(
             StreamProtocol::new("/swarmllm/1.0.0"),
             request_response::ProtocolSupport::Full,
         )],
-        request_response::Config::default().with_request_timeout(Duration::from_secs(300)),
+        // NET-C3: 30s timeout covers LAN shard transfers (256MB @ 100Mbps < 25s)
+        // and is short enough that stuck worker_stream futures clear quickly,
+        // preventing the progressive request_response handler stall seen with 300s.
+        request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
     );
 
     // Identify protocol

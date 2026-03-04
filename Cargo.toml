@@ -145,6 +145,9 @@ path = "tests/integration/main.rs"
 name = "yamux_substream"
 path = "tests/integration/test_yamux_substream.rs"
 
+[patch.crates-io]
+libp2p-request-response = { path = "vendor/libp2p-request-response" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
