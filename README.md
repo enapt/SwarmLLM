@@ -82,7 +82,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ## Features
 
 ### Inference
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly using candle for direct tensor computation
+- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, ~130ms per-token pipeline latency over TCP. Candle-based direct tensor computation with E2E encryption
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Multi-Provider Gateway** — Route requests to cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq) when the model isn't available locally. Native Anthropic Messages API at `/v1/messages`. Model prefix routing or explicit `provider:model` syntax
@@ -95,7 +95,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ### Networking & Security
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
-- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, QUIC transport, NAT traversal (auto-relay), connection limits, gossip replay protection
+- **P2P Networking** — libp2p with Kademlia DHT, GossipSub, TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy), pipeline sealing, and authenticated sealed gossip
 - **Hidden States API** — `/v1/internal/hidden-states` exposes per-layer activations for research (adapter insertion, activation inspection)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
@@ -120,7 +120,7 @@ Single Rust binary, three simultaneous functions:
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
-| P2P Node | Peer discovery, shard hosting, distributed inference, credits | libp2p / QUIC |
+| P2P Node | Peer discovery, shard hosting, distributed inference, credits | libp2p / TCP+QUIC |
 | LLM API Server | OpenAI-compatible inference endpoint | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
@@ -238,7 +238,7 @@ Commands:
 Options:
   -c, --config <PATH>       Config file path
   -p, --port <PORT>         Listen port [default: 8800]
-  -d, --data-dir <PATH>     Data directory [default: ~/.swarmllm]
+  -d, --data-dir <PATH>     Data directory [default: ~/.local/share/swarmllm]
   -m, --model <PATH>        Path to a GGUF model file to load
       --gpu-layers <N>      Number of layers to offload to GPU (0 = CPU only)
       --bootstrap <ADDR>    Bootstrap peer multiaddr
@@ -248,7 +248,7 @@ Options:
 
 ## Configuration
 
-Config lives at `~/.swarmllm/config.toml`. All values can be overridden with environment variables using the `SWARMLLM_` prefix:
+Config lives at `~/.local/share/swarmllm/config.toml` (Linux), `~/Library/Application Support/swarmllm/config.toml` (macOS), or `%APPDATA%\swarmllm\config.toml` (Windows). All values can be overridden with environment variables using the `SWARMLLM_` prefix:
 
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000
@@ -262,7 +262,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 |---------|-------------|
 | `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
-| `[network]` | `bootstrap_peers`, `enable_mdns`, `gossip_network_id`, `enable_relay`, `max_peers` |
+| `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_autonat`, `enable_dcutr`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers` |
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
@@ -288,7 +288,7 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 |-------|-----------|
 | Language | Rust (2021 edition) |
 | Async Runtime | Tokio |
-| Networking | libp2p 0.55 (QUIC + mDNS + Kademlia + GossipSub) |
+| Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
 | HTTP Server | Axum 0.7 |
 | Inference | candle (split/distributed, CUDA, flash/paged attention), llama.cpp (single-node) |
@@ -313,7 +313,7 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 488 tests | Limited | Limited | Varies |
+| **Test Suite** | 525 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 
