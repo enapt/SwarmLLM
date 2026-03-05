@@ -1741,7 +1741,7 @@ var SwarmLLM = (function() {
         readyModels.forEach(function(m) {
           var opt = document.createElement('option');
           opt.value = m.id;
-          var displayName = m.name || formatModelDisplayName(m.id);
+          var displayName = formatModelDisplayName(m.name || m.id);
           opt.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '...' : displayName;
           opt.title = m.id;
           sel.appendChild(opt);
@@ -3244,8 +3244,11 @@ var SwarmLLM = (function() {
         name = parts.slice(1).join('_');
       }
     }
+    // Preserve decimal numbers (1.1b, v0.3) by replacing dots between digits with placeholder
+    name = name.replace(/(\d)\.(\d)/g, '$1\x00$2');
     // Split on separators and format each part
     return name.split(/[-_.]/).filter(Boolean).map(function(s) {
+      s = s.replace(/\x00/g, '.'); // restore decimal dots
       // Keep quant tags uppercase (Q4_K_M, Q5_K_S, etc.)
       if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return s.toUpperCase();
       // Keep version strings as-is (v1, v0.3)

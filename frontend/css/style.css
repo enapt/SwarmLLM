@@ -429,12 +429,12 @@ a:hover { color: var(--accent-hover); }
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 14px;
+  padding: 8px 10px;
   transition: all var(--transition);
   position: relative;
   overflow: hidden;
-  flex: 1; min-width: 100px;
-  display: flex; align-items: center; gap: 10px;
+  flex: 1; min-width: 90px;
+  display: flex; align-items: center; gap: 8px;
 }
 .stat-card:hover { border-color: var(--border-light); }
 
