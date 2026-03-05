@@ -888,12 +888,16 @@ async fn execute_request(
 
     // Check if we can handle this entirely locally.
     // Use the atomic flag to avoid locking the executor mutex just to check readiness.
+    // Skip the llama.cpp path when a LoRA adapter is requested — LoRA is only
+    // supported on the split model (candle) path via forward_with_lora().
     let local_node_id = shared_state.identity.node_id().clone();
     let is_split_mode = shared_state.config.inference.shard_range.is_some();
+    let has_lora = request.lora_adapter.is_some();
     if shared_state
         .model_loaded
         .load(std::sync::atomic::Ordering::Acquire)
         && !is_split_mode
+        && !has_lora
     {
         // Local-only inference path (single node has the model loaded)
         let mut executor = shared_state.executor.lock().await;
