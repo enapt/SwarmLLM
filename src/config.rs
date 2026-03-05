@@ -763,6 +763,23 @@ impl Default for NodeConfig {
     }
 }
 
+impl ResourceConfig {
+    /// Compute the effective VRAM budget for inference model loading.
+    ///
+    /// - If `max_gpu_vram_mb > 0`: use it as a hard cap.
+    /// - Else if GPU detected (`gpu_vram_total_mb > 0`): use 80% of total.
+    /// - Else: `None` (CPU-only node, no budget = unlimited).
+    pub fn inference_vram_budget_mb(&self, gpu_vram_total_mb: u64) -> Option<u64> {
+        if self.max_gpu_vram_mb > 0 {
+            Some(self.max_gpu_vram_mb)
+        } else if gpu_vram_total_mb > 0 {
+            Some((gpu_vram_total_mb as f64 * 0.8) as u64)
+        } else {
+            None
+        }
+    }
+}
+
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
@@ -1240,5 +1257,23 @@ max_concurrent_requests = 42
         // Defaults for others
         assert_eq!(params.max_batch_size, 1);
         assert_eq!(params.max_peers, 200);
+    }
+
+    #[test]
+    fn vram_budget_explicit_cap() {
+        let rc = ResourceConfig { max_gpu_vram_mb: 4000, ..Default::default() };
+        assert_eq!(rc.inference_vram_budget_mb(8000), Some(4000));
+    }
+
+    #[test]
+    fn vram_budget_auto_80_percent() {
+        let rc = ResourceConfig::default(); // max_gpu_vram_mb = 0
+        assert_eq!(rc.inference_vram_budget_mb(8000), Some(6400));
+    }
+
+    #[test]
+    fn vram_budget_no_gpu() {
+        let rc = ResourceConfig::default();
+        assert_eq!(rc.inference_vram_budget_mb(0), None);
     }
 }

@@ -611,7 +611,45 @@ pub async fn chat_completions(
                             None => (None, String::new(), String::new()),
                         }
                     } else {
-                        (None, String::new(), String::new())
+                        // No header on disk — try fetching from HuggingFace for remote models
+                        let mid = crate::types::ModelId(safe_id.clone());
+                        let model_dir = state
+                            .shared_state
+                            .config
+                            .node
+                            .data_dir
+                            .join("models")
+                            .join(&safe_id);
+                        if let Some(hf_src) = state.shared_state.hf_sources.get(&mid) {
+                            let shard_size = state.shared_state.config.model.shard_size_bytes();
+                            if let Ok(info) = crate::model::huggingface::probe_gguf_file(
+                                &hf_src.repo_id,
+                                &hf_src.filename,
+                                shard_size,
+                            )
+                            .await
+                            {
+                                if let Ok(hp) = crate::model::huggingface::download_gguf_header(
+                                    &hf_src.repo_id,
+                                    &hf_src.filename,
+                                    &model_dir,
+                                    info.header_size,
+                                )
+                                .await
+                                {
+                                    match crate::inference::pipeline::template_from_header(&hp) {
+                                        Some((t, b, e)) => (t, b, e),
+                                        None => (None, String::new(), String::new()),
+                                    }
+                                } else {
+                                    (None, String::new(), String::new())
+                                }
+                            } else {
+                                (None, String::new(), String::new())
+                            }
+                        } else {
+                            (None, String::new(), String::new())
+                        }
                     }
                 }
             }

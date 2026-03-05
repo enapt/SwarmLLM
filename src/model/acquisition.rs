@@ -712,7 +712,8 @@ impl AcquisitionManager {
         let shared = self.shared_state.clone();
         let mid = model_id.clone();
         tokio::spawn(async move {
-            crate::model::auto_manage::check_and_load_model(&shared, &mid).await;
+            let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared);
+            crate::model::auto_manage::check_and_load_model(&shared, &mid, vram_budget).await;
         });
     }
 

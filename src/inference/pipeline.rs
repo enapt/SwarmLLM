@@ -669,6 +669,48 @@ impl PipelineExecutor {
                     }
                 }
             } else {
+                // No header on disk — try fetching from HuggingFace on-demand
+                if let Some(hf_source) = self.shared_state.hf_sources.get(model_id) {
+                    let model_dir = self
+                        .shared_state
+                        .config
+                        .node
+                        .data_dir
+                        .join("models")
+                        .join(&model_id.0);
+                    tracing::info!(
+                        model = %model_id,
+                        repo = %hf_source.repo_id,
+                        "Fetching GGUF header from HuggingFace for remote model"
+                    );
+                    let probe_result = crate::model::huggingface::probe_gguf_file(
+                        &hf_source.repo_id,
+                        &hf_source.filename,
+                        self.shared_state.config.model.shard_size_bytes(),
+                    )
+                    .await;
+                    if let Ok(info) = probe_result {
+                        if let Ok(path) = crate::model::huggingface::download_gguf_header(
+                            &hf_source.repo_id,
+                            &hf_source.filename,
+                            &model_dir,
+                            info.header_size,
+                        )
+                        .await
+                        {
+                            if let Some((eos, decoder, tokenizer_opt)) =
+                                Self::decoder_from_header(&path)
+                            {
+                                let ptc = if let Some(ref tok) = tokenizer_opt {
+                                    tok.encode(prompt).len()
+                                } else {
+                                    prompt.chars().count() / 4
+                                };
+                                return (ptc, eos, decoder);
+                            }
+                        }
+                    }
+                }
                 let ptc = prompt.chars().count() / 4;
                 (
                     ptc,
@@ -869,13 +911,19 @@ impl PipelineExecutor {
                     tp_meta: None,
                 };
 
-                // Look up the peer's libp2p PeerId bytes from the peer registry.
-                // NodeId (Ed25519 key) != PeerId (libp2p identity), so we need the mapping.
+                // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
+                // survives disconnects) first, fall back to peer_registry.
                 let target_peer_bytes = self
                     .shared_state
-                    .peer_registry
+                    .peer_id_map
                     .get(&segment.node_id)
-                    .and_then(|p| p.peer_id_bytes.clone())
+                    .map(|r| r.value().clone())
+                    .or_else(|| {
+                        self.shared_state
+                            .peer_registry
+                            .get(&segment.node_id)
+                            .and_then(|p| p.peer_id_bytes.clone())
+                    })
                     .ok_or_else(|| {
                         SwarmError::Network(format!(
                             "No peer_id_bytes for node {}",
@@ -1100,16 +1148,22 @@ impl PipelineExecutor {
             let split_model = load_result?;
             // VRAM-aware eviction before inserting new model
             let max_batch = self.shared_state.config.inference.max_batch_size as usize;
+            let batch_timeout = std::time::Duration::from_millis(
+                self.shared_state.config.inference.batch_timeout_ms,
+            );
             let new_entry = if max_batch > 1 {
                 crate::inference::split::SplitModelEntry::new_with_batching(
                     split_model,
                     self.shared_state.kv_cache_store.clone(),
                     max_batch,
+                    batch_timeout,
                 )
             } else {
                 crate::inference::split::SplitModelEntry::new(split_model)
             };
-            if let Some(budget_mb) = self.shared_state.config.inference.max_split_model_memory_mb {
+            let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
+                .or(self.shared_state.config.inference.max_split_model_memory_mb);
+            if let Some(budget_mb) = vram_budget {
                 crate::inference::split::evict_split_models_lru(
                     &self.shared_state.split_models,
                     &self.shared_state.active_pipelines,
@@ -1125,7 +1179,7 @@ impl PipelineExecutor {
         }
 
         // Get model entry and extract what we need
-        let (split_model_ref, batch_forwarder) = {
+        let (split_model_ref, batch_forwarder, cached_eos_tokens) = {
             let entry = self
                 .shared_state
                 .split_models
@@ -1135,6 +1189,7 @@ impl PipelineExecutor {
             (
                 entry.value().model.clone(),
                 entry.value().batch_forwarder.clone(),
+                entry.value().eos_tokens.clone(),
             )
         };
 
@@ -1170,15 +1225,20 @@ impl PipelineExecutor {
                 stats.forwards_served += 1;
             }
 
-            // Post-process: need model lock for EOS tokens and sampling
-            let split_model = split_model_ref.lock().await;
-            let is_last = split_model.layer_end >= split_model.total_layers;
+            // Determine is_last from segment info (no model lock needed)
+            let is_last = {
+                let manifest = self
+                    .shared_state
+                    .model_registry
+                    .get_manifest(model_id)
+                    .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
+                layer_end >= manifest.num_layers as usize
+            };
 
             if is_last {
                 let token_id =
                     split::sample_token_with_params(&output, &self.request.sampling_params)?;
-                let eos_tokens = split_model.eos_tokens();
-                let finish = if eos_tokens.contains(&token_id) {
+                let finish = if cached_eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
                 } else {
                     None

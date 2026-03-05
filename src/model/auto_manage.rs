@@ -1012,6 +1012,18 @@ impl AutoShardManager {
                         return;
                     }
                 };
+                // Check architecture support before downloading
+                let arch_str = &info.tensor_meta.architecture;
+                let arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
+                if !arch.is_supported() {
+                    tracing::warn!(
+                        model = %model_id,
+                        arch = %arch_str,
+                        "AutoShardManager: skipping unsupported architecture"
+                    );
+                    return;
+                }
+
                 let layout = match info.layouts.get(shard_idx as usize) {
                     Some(l) => l,
                     None => {
@@ -1167,7 +1179,8 @@ impl AutoShardManager {
                         let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
 
                         // Load whatever shards are now available for inference
-                        check_and_load_model(&shared, &model_id).await;
+                        let vram_budget = compute_vram_budget(&shared);
+                        check_and_load_model(&shared, &model_id, vram_budget).await;
 
                         // Notify dashboard that models have changed
                         let _ = shared.models_changed_tx.send(());
@@ -1231,7 +1244,8 @@ impl AutoShardManager {
     /// A node does NOT need all shards — it loads whatever it has and participates
     /// in distributed inference for the layers it covers.
     async fn check_model_complete(&self, model_id: &ModelId) {
-        check_and_load_model(&self.shared_state, model_id).await;
+        let vram_budget = compute_vram_budget(&self.shared_state);
+        check_and_load_model(&self.shared_state, model_id, vram_budget).await;
         let _ = self.shared_state.models_changed_tx.send(());
     }
 
@@ -1836,6 +1850,24 @@ impl AutoShardManager {
     }
 }
 
+/// Estimate VRAM for a segment (layer range) by scaling the full-model estimate
+/// by the fraction of layers covered.
+fn estimate_segment_vram_mb(manifest: &crate::types::ModelManifest, layer_start: usize, layer_end: usize) -> u64 {
+    let total_layers = manifest.num_layers as usize;
+    if total_layers == 0 {
+        return estimate_model_vram_mb(manifest.total_size_bytes);
+    }
+    let fraction = (layer_end - layer_start) as f64 / total_layers as f64;
+    let full_vram = estimate_model_vram_mb(manifest.total_size_bytes);
+    (full_vram as f64 * fraction).ceil() as u64
+}
+
+/// Compute the VRAM budget from SharedState for passing to `check_and_load_model`.
+pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
+    let gpu_total = shared.gpu_info.as_ref().map(|g| g.vram_total_mb).unwrap_or(0);
+    shared.config.resources.inference_vram_budget_mb(gpu_total)
+}
+
 /// Load whatever local shards are available for inference.
 ///
 /// Called after each shard download completes (both auto-manage and manual).
@@ -1846,6 +1878,7 @@ impl AutoShardManager {
 pub async fn check_and_load_model(
     shared: &std::sync::Arc<crate::daemon::SharedState>,
     model_id: &ModelId,
+    vram_budget_mb: Option<u64>,
 ) {
     let manifest = match shared.model_registry.get_manifest(model_id) {
         Some(m) => m,
@@ -1960,6 +1993,33 @@ pub async fn check_and_load_model(
             continue; // Already loaded this segment
         }
 
+        // VRAM budget pre-check: skip loading if budget is full (shards stay on disk for P2P)
+        if let Some(budget) = vram_budget_mb {
+            let estimated = estimate_segment_vram_mb(&manifest, layer_start, layer_end);
+            let total_loaded: u64 = shared.split_models.iter().map(|e| e.value().estimated_vram_mb).sum();
+            if total_loaded + estimated > budget {
+                // Try LRU eviction first
+                crate::inference::split::evict_split_models_lru(
+                    &shared.split_models,
+                    &shared.active_pipelines,
+                    budget,
+                    estimated,
+                );
+                let total_after: u64 = shared.split_models.iter().map(|e| e.value().estimated_vram_mb).sum();
+                if total_after + estimated > budget {
+                    tracing::info!(
+                        model = %model_id,
+                        layers = format!("[{layer_start}..{layer_end})"),
+                        estimated_mb = estimated,
+                        loaded_mb = total_after,
+                        budget_mb = budget,
+                        "VRAM budget full — skipping auto-load (shards remain on disk for P2P)"
+                    );
+                    continue;
+                }
+            }
+        }
+
         // is_first requires shard 0 (token_embd.weight is always at tensor offset 0)
         // is_last requires the final shard (output.weight spans to the end of the file)
         let has_shard_0 = local_shard_indices.contains(&0);
@@ -2038,20 +2098,27 @@ pub async fn check_and_load_model(
                 let eos_token = split_model.eos_token_str().to_string();
                 // VRAM-aware eviction before inserting new model
                 let max_batch = shared.config.inference.max_batch_size as usize;
+                let batch_timeout = std::time::Duration::from_millis(
+                    shared.config.inference.batch_timeout_ms,
+                );
                 let new_entry = if max_batch > 1 {
                     crate::inference::split::SplitModelEntry::new_with_batching(
                         split_model,
                         shared.kv_cache_store.clone(),
                         max_batch,
+                        batch_timeout,
                     )
                 } else {
                     crate::inference::split::SplitModelEntry::new(split_model)
                 };
-                if let Some(budget_mb) = shared.config.inference.max_split_model_memory_mb {
+                // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
+                let eviction_budget = vram_budget_mb
+                    .or(shared.config.inference.max_split_model_memory_mb);
+                if let Some(budget) = eviction_budget {
                     crate::inference::split::evict_split_models_lru(
                         &shared.split_models,
                         &shared.active_pipelines,
-                        budget_mb,
+                        budget,
                         new_entry.estimated_vram_mb,
                     );
                 }

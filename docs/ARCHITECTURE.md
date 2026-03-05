@@ -344,13 +344,17 @@ Long prompts are split into chunks for overlapped prefill and decode:
 - Config: `speculative_decoding`, `speculative_gamma`, `draft_model_path`
 - Falls back to standard decoding if no draft model available
 
-### Batched Inference
+### Batched Inference (Pipeline Bubble Filling)
 
 - `BatchForwarder` collects concurrent decode-step requests into GPU batches
 - Position-independent ops (norms, MLP) run on stacked `[batch, seq, dim]` tensors
 - Attention runs per-request (different KV-caches and positions)
 - Output split back via `Tensor::narrow` per request
 - Prefill and single-item batches use sequential path
+- **Both local and remote requests** route through `BatchForwarder` — remote `LayerForward` requests (from `handle_layer_forward` in `daemon.rs`) submit to the same batch queue as local pipeline segments, filling pipeline bubbles where a node would otherwise sit idle waiting for upstream/downstream nodes
+- Timeout-based batch collection: when a request arrives and fewer than `max_batch_size` items are queued, the processor waits up to `batch_timeout_ms` for more requests before dispatching
+- `SplitModelEntry` caches `eos_tokens: Vec<u32>` at construction, enabling lock-free sampling after batched forward passes (no model mutex needed for EOS detection)
+- Config: `max_batch_size` (default 1 = no batching), `batch_timeout_ms` (default 50ms)
 
 ### VRAM-Aware Cache Eviction
 

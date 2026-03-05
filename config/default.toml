@@ -4,7 +4,7 @@ listen_port = 8800
 contribution = "minimal"       # "minimal", "moderate", "maximum" — change in dashboard
 
 [resources]
-max_gpu_vram_mb = 0            # 0 = auto-detect
+max_gpu_vram_mb = 0            # 0 = auto (80% of detected GPU used for inference; rest stays on disk for P2P)
 max_ram_mb = 0                 # 0 = auto (50% of system RAM)
 max_disk_mb = 50000            # 50GB for model storage
 max_bandwidth_mbps = 0         # 0 = unlimited
@@ -28,8 +28,8 @@ session_timeout_seconds = 600
 max_concurrent_requests = 10
 # model_path = "/path/to/model.gguf"  # Uncomment and set to load a model
 gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
-max_batch_size = 1             # 1 = no batching (sequential); >1 enables continuous batching
-batch_timeout_ms = 50          # Max ms to wait for a full batch before dispatching
+max_batch_size = 1             # 1 = no batching (sequential); >1 enables batching for both local and remote forwards (pipeline bubble filling)
+batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error

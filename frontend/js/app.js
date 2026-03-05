@@ -540,7 +540,7 @@ var SwarmLLM = (function() {
 
         // Shard grid
         var shardHtml = '';
-        if (shardCount > 1 && shards.length > 0) {
+        if (shards.length > 0) {
           shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shards.forEach(function(s) {
@@ -1080,13 +1080,18 @@ var SwarmLLM = (function() {
         }
 
         // Use peer_fair_share: backend probes internally and computes fair share
-        ui.showBanner('info', 'Starting smart shard download...');
+        ui.showBanner('info', 'Probing model...');
         var resp = await authFetch('/api/admin/hf/download-shards', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ repo_id: repoId, filename: filename, peer_fair_share: true }),
         });
         var data = await resp.json();
+        if (!resp.ok) {
+          var errMsg = (data.error && data.error.message) || 'Download failed';
+          ui.showBanner('error', errMsg);
+          return;
+        }
         if (data.status === 'started') {
           ui.showBanner('success', 'Downloading seed shard — auto-manage will acquire more as peers join');
           ui.closeModelBrowser();
@@ -2127,7 +2132,13 @@ var SwarmLLM = (function() {
     var g = data.general || {};
     var m = data.model || {};
     var summaryParts = [];
-    if (g.architecture) summaryParts.push('<span class="meta-tag">' + escapeHtml(g.architecture) + '</span>');
+    if (g.architecture) {
+      var archTag = '<span class="meta-tag">' + escapeHtml(g.architecture) + '</span>';
+      if (g.architecture_supported === false) {
+        archTag += '<span class="meta-tag" style="background:var(--error-bg,#5c2020);color:var(--error-fg,#ff6b6b)">unsupported</span>';
+      }
+      summaryParts.push(archTag);
+    }
     if (g.quantization) summaryParts.push('<span class="meta-tag">' + escapeHtml(g.quantization) + '</span>');
     if (m.context_length) summaryParts.push('<span class="meta-tag">ctx ' + m.context_length.toLocaleString() + '</span>');
     if (m.block_count) summaryParts.push('<span class="meta-tag">' + m.block_count + ' layers</span>');

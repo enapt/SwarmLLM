@@ -195,25 +195,27 @@ impl PipelineScheduler {
             let last_shard_idx = manifest.shard_count.saturating_sub(1);
             let can_be_last = shard_indices.contains(&last_shard_idx);
 
-            // Use peer-reported load from health pings when available,
-            // fall back to local active_pipelines count for our own node
+            // Use the most up-to-date load info: for local node, use active_pipelines
+            // directly. For remote nodes, take the max of health-ping report and local
+            // pipeline tracking (health pings can be stale by up to ~5s).
             let active_load = if &node_id == local_node_id {
                 self.shared_state.active_pipelines.len() as f32
             } else {
-                self.shared_state
+                let health_ping_load = self
+                    .shared_state
                     .peer_registry
                     .get(&node_id)
                     .map(|p| p.active_request_count as f32)
-                    .unwrap_or_else(|| {
-                        // Fallback: estimate from active pipelines (pre-health-ping behavior)
-                        self.shared_state
-                            .active_pipelines
-                            .iter()
-                            .filter(|entry| {
-                                entry.value().segments.iter().any(|s| s.node_id == node_id)
-                            })
-                            .count() as f32
+                    .unwrap_or(0.0);
+                let local_pipeline_load = self
+                    .shared_state
+                    .active_pipelines
+                    .iter()
+                    .filter(|entry| {
+                        entry.value().segments.iter().any(|s| s.node_id == node_id)
                     })
+                    .count() as f32;
+                health_ping_load.max(local_pipeline_load)
             };
 
             candidates.push(NodeCandidate {

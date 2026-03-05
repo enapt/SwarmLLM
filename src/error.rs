@@ -134,6 +134,16 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "server_error",
             ),
+            SwarmError::Inference(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                self.0.to_string(),
+                "server_error",
+            ),
+            SwarmError::Internal(ref msg) if msg.contains("Unsupported") => (
+                StatusCode::BAD_REQUEST,
+                self.0.to_string(),
+                "invalid_request_error",
+            ),
             SwarmError::PeerNotFound(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),

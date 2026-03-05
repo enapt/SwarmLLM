@@ -1391,11 +1391,15 @@ pub async fn hf_probe(
             };
             state.shared_state.hf_probe_cache.insert(mid, probe_info);
 
+            let arch_str = &info.tensor_meta.architecture;
+            let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "total_size": info.total_size,
                 "header_size": info.header_size,
                 "shard_count": info.shard_count(),
+                "architecture": arch_str,
+                "architecture_supported": model_arch.is_supported(),
             })))
         }
         Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
@@ -1499,6 +1503,35 @@ pub async fn hf_download_shards(
     let model_id_str = safe_name.clone();
     let mid = crate::types::ModelId(model_id_str.clone());
 
+    // ── Synchronous probe + architecture check ──────────────────────────
+    // Probe before spawning the download task so we can return an immediate
+    // HTTP error for unsupported architectures (fast: reads ~few KB header).
+    let configured_shard_size = state.shared_state.config.model.shard_size_bytes();
+    let info = crate::model::huggingface::probe_gguf_file(
+        &repo_id,
+        &filename,
+        configured_shard_size,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "HuggingFace probe failed");
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "HuggingFace probe failed: {e}"
+        )))
+    })?;
+
+    let arch_str = &info.tensor_meta.architecture;
+    let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
+    if !model_arch.is_supported() {
+        let msg = format!(
+            "Unsupported architecture '{}'. Supported: {}",
+            arch_str,
+            crate::inference::split::ModelArch::supported_list().join(", ")
+        );
+        tracing::warn!(%arch_str, "Refusing download: unsupported architecture");
+        return Err(ApiError(crate::error::SwarmError::Internal(msg)));
+    }
+
     // Create initial acquisition progress entry with per-shard progress so that
     // auto-manage can detect these downloads are already in flight and skip them.
     let log_msg = if peer_fair_share && shard_indices.is_empty() {
@@ -1554,31 +1587,6 @@ pub async fn hf_download_shards(
     tokio::spawn(async move {
         let download_mid = mid.clone();
         let download_shared = shared.clone();
-        let configured_shard_size = shared.config.model.shard_size_bytes();
-
-        // ── Phase 1: Probe + header → broadcast manifest EARLY ──────────
-        // This lets peers learn about the model and begin auto-acquiring
-        // shards in parallel while this node is still downloading.
-
-        let info = match crate::model::huggingface::probe_gguf_file(
-            &repo_id,
-            &filename,
-            configured_shard_size,
-        )
-        .await
-        {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::error!(error = %e, "HuggingFace probe failed");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
-                {
-                    entry.state =
-                        crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
-                    entry.log.push(format!("Probe failed: {}", e));
-                }
-                return;
-            }
-        };
 
         // peer_fair_share: download just ONE seed shard. Auto-manage handles the rest.
         // Each node picks a deterministic shard (based on node_id hash) so that
@@ -2004,9 +2012,11 @@ pub async fn hf_download_shards(
             }
 
             // Load available shards for inference (partial is fine)
+            let vram_budget = crate::model::auto_manage::compute_vram_budget(&download_shared);
             crate::model::auto_manage::check_and_load_model(
                 &download_shared,
                 &crate::types::ModelId(model_id_str.clone()),
+                vram_budget,
             )
             .await;
 
@@ -2081,7 +2091,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
             .and_then(|v| v.to_string().ok().cloned())
             .unwrap_or_else(|| "llama".to_string());
         match arch_str.as_str() {
-            "qwen2" => crate::types::ModelArchitecture::Qwen2,
+            "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
             "mistral" => crate::types::ModelArchitecture::Mistral,
             "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
             _ => crate::types::ModelArchitecture::Llama,
@@ -2898,7 +2908,8 @@ pub async fn model_metadata(
         "model_id": model_id,
         "general": {
             "name": get_str("general.name"),
-            "architecture": arch,
+            "architecture": &arch,
+            "architecture_supported": crate::inference::split::ModelArch::from_gguf_arch(&arch).is_supported(),
             "file_type": file_type,
             "quantization": quant_str,
         },

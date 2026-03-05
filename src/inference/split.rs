@@ -153,6 +153,8 @@ pub struct SplitModelEntry {
     /// True if this entry has both embedding (first) and output head (last) — i.e., all layers.
     /// Set at construction time so the fast path can check without locking the model mutex.
     pub is_complete: bool,
+    /// Cached EOS token IDs for lock-free sampling after batched forward passes.
+    pub eos_tokens: Vec<u32>,
 }
 
 impl SplitModelEntry {
@@ -160,6 +162,7 @@ impl SplitModelEntry {
     pub fn new(model: SplitModel) -> Self {
         let estimated_vram_mb = model.estimate_vram_mb();
         let is_complete = model.is_first() && model.is_last();
+        let eos_tokens = model.eos_tokens().to_vec();
         Self {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(model)),
             last_used: std::sync::atomic::AtomicU64::new(
@@ -171,6 +174,7 @@ impl SplitModelEntry {
             estimated_vram_mb,
             batch_forwarder: None,
             is_complete,
+            eos_tokens,
         }
     }
 
@@ -179,15 +183,18 @@ impl SplitModelEntry {
         model: SplitModel,
         kv_cache_store: std::sync::Arc<KvCacheStore>,
         max_batch_size: usize,
+        batch_timeout: std::time::Duration,
     ) -> Self {
         let estimated_vram_mb = model.estimate_vram_mb();
         let is_complete = model.is_first() && model.is_last();
+        let eos_tokens = model.eos_tokens().to_vec();
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let batch_forwarder = if max_batch_size > 1 {
             Some(std::sync::Arc::new(BatchForwarder::new(
                 model_arc.clone(),
                 kv_cache_store,
                 max_batch_size,
+                batch_timeout,
             )))
         } else {
             None
@@ -203,6 +210,7 @@ impl SplitModelEntry {
             estimated_vram_mb,
             batch_forwarder,
             is_complete,
+            eos_tokens,
         }
     }
 
@@ -322,6 +330,8 @@ pub struct BatchForwarder {
     kv_cache_store: std::sync::Arc<KvCacheStore>,
     /// Maximum batch size (from config). 1 = no batching.
     max_batch_size: usize,
+    /// How long to wait for additional requests before dispatching a partial batch.
+    batch_timeout: std::time::Duration,
 }
 
 impl BatchForwarder {
@@ -330,6 +340,7 @@ impl BatchForwarder {
         model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
         kv_cache_store: std::sync::Arc<KvCacheStore>,
         max_batch_size: usize,
+        batch_timeout: std::time::Duration,
     ) -> Self {
         Self {
             queue: tokio::sync::Mutex::new(Vec::new()),
@@ -337,6 +348,7 @@ impl BatchForwarder {
             model,
             kv_cache_store,
             max_batch_size: max_batch_size.max(1),
+            batch_timeout,
         }
     }
 
@@ -366,6 +378,13 @@ impl BatchForwarder {
         // drain the queue and process the batch.  If another task already holds
         // the lock (processing a previous batch), we just wait on our oneshot.
         if let Ok(mut model_guard) = self.model.try_lock() {
+            // Wait briefly for more requests to accumulate (if timeout configured)
+            if !self.batch_timeout.is_zero() {
+                let q_len = self.queue.lock().await.len();
+                if q_len < self.max_batch_size {
+                    let _ = tokio::time::timeout(self.batch_timeout, self.notify.notified()).await;
+                }
+            }
             self.drain_and_process(&mut model_guard).await;
         }
 
@@ -753,7 +772,7 @@ impl ModelArch {
     pub fn from_gguf_arch(arch: &str) -> Self {
         match arch {
             "llama" => ModelArch::Llama,
-            "qwen2" | "qwen3" => ModelArch::Qwen2,
+            "qwen2" | "qwen3" | "qwen2moe" => ModelArch::Qwen2,
             "gemma" => ModelArch::Gemma,
             "gemma2" => ModelArch::Gemma2,
             "phi3" => ModelArch::Phi3,
@@ -789,7 +808,15 @@ impl ModelArch {
 
     /// Whether this architecture is supported for split inference.
     pub fn is_supported(&self) -> bool {
-        true
+        !matches!(self, ModelArch::Unknown(_))
+    }
+
+    /// List of GGUF architecture strings supported by the split inference engine.
+    pub fn supported_list() -> &'static [&'static str] {
+        &[
+            "llama", "qwen2", "qwen3", "qwen2moe", "gemma", "gemma2",
+            "phi3", "mistral", "starcoder2", "deepseek2", "glm4", "llama4",
+        ]
     }
 }
 
@@ -1300,6 +1327,10 @@ struct LayerWeights {
     attention_bk: Option<Tensor>,
     attention_bv: Option<Tensor>,
     attention_norm: RmsNorm,
+    /// Qwen3 applies RmsNorm to Q per-head after projection (before RoPE).
+    attn_q_norm: Option<RmsNorm>,
+    /// Qwen3 applies RmsNorm to K per-head after projection (before RoPE).
+    attn_k_norm: Option<RmsNorm>,
     ffn: FfnVariant,
     ffn_norm: RmsNorm,
     n_head: usize,
@@ -1543,7 +1574,7 @@ impl LayerWeights {
         max_seq_len: usize,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
-        let (b_sz, seq_len, n_embd) = x.dims3()?;
+        let (b_sz, seq_len, _n_embd) = x.dims3()?;
         let mut q = self.attention_wq.forward(x)?;
         let mut k = self.attention_wk.forward(x)?;
         let mut v = self.attention_wv.forward(x)?;
@@ -1596,18 +1627,25 @@ impl LayerWeights {
             v = v.broadcast_add(bv)?;
         }
 
-        let q = q
-            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let mut q = q
+            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
+        let mut k = k
+            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
         let v = v
             .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
+
+        // Qwen3 QK normalization: RmsNorm applied per-head before RoPE
+        if let Some(ref qn) = self.attn_q_norm {
+            q = qn.forward(&q)?;
+        }
+        if let Some(ref kn) = self.attn_k_norm {
+            k = kn.forward(&k)?;
+        }
+
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
 
         let q = self.apply_rotary_emb(&q, index_pos)?;
         let k = self.apply_rotary_emb(&k, index_pos)?;
@@ -1642,7 +1680,8 @@ impl LayerWeights {
             self.attn_logit_softcap,
         )?;
 
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
+        let attn_out_dim = self.n_head * self.head_dim;
+        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, attn_out_dim])?;
         let mut wo_out = self.attention_wo.forward(&y)?;
 
         // Apply LoRA delta to O projection
@@ -1863,6 +1902,9 @@ pub struct GgufTensorMeta {
     /// DeepSeek-V2/V3 expert count (0 for non-MoE models).
     #[serde(default)]
     pub expert_count: usize,
+    /// Raw GGUF architecture string (e.g. "llama", "qwen2", "qwen35").
+    #[serde(default)]
+    pub architecture: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1918,10 +1960,17 @@ impl GgufTensorMeta {
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
+        // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
+        let head_dim = ct
+            .metadata
+            .get(&format!("{arch}.attention.key_length"))
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize)
+            .unwrap_or(embedding_length / head_count);
         // rope.dimension_count may not exist for all architectures — derive from head_dim
         let rope_dim = md_get("rope.dimension_count")
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or((embedding_length / head_count) as u32) as usize;
+            .unwrap_or(head_dim as u32) as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
@@ -1964,6 +2013,7 @@ impl GgufTensorMeta {
             rope_freq_base,
             rms_norm_eps,
             expert_count,
+            architecture: arch,
         })
     }
 }
@@ -2331,6 +2381,14 @@ impl SplitModel {
 
         tracing::info!(arch = %model_arch, "Detected model architecture");
 
+        if !model_arch.is_supported() {
+            return Err(SwarmError::Internal(format!(
+                "Unsupported model architecture '{}'. Supported architectures: {}",
+                arch_str,
+                ModelArch::supported_list().join(", ")
+            )));
+        }
+
         let arch = &arch_str; // keep for metadata key lookups
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
@@ -2352,9 +2410,16 @@ impl SplitModel {
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))?
             as usize;
+        // head_dim: prefer attention.key_length from GGUF (Qwen3 uses 128 vs embed/heads=64)
+        let head_dim = ct
+            .metadata
+            .get(&format!("{arch}.attention.key_length"))
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize)
+            .unwrap_or(embedding_length / head_count);
         let rope_dim = md_get("rope.dimension_count")
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or((embedding_length / head_count) as u32) as usize;
+            .unwrap_or(head_dim as u32) as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
@@ -2377,7 +2442,6 @@ impl SplitModel {
         let use_rope_contiguous = model_arch.use_rope_contiguous();
         let activation = model_arch.default_activation();
 
-        let head_dim = embedding_length / head_count;
         let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
@@ -2738,6 +2802,8 @@ impl SplitModel {
                         attention_bk,
                         attention_bv,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                        attn_q_norm: None,
+                        attn_k_norm: None,
                         ffn: FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -2940,6 +3006,8 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                    attn_q_norm: None,
+                    attn_k_norm: None,
                     ffn,
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                     n_head: head_count,
@@ -3081,6 +3149,20 @@ impl SplitModel {
                                     ))
                                 })?;
 
+                            // Qwen3 QK normalization (optional)
+                            let attn_q_norm = ct_ref
+                                .tensor(&mut cursor, &format!("{prefix}.attn_q_norm.weight"), device_ref)
+                                .ok()
+                                .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                                .transpose()
+                                .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
+                            let attn_k_norm = ct_ref
+                                .tensor(&mut cursor, &format!("{prefix}.attn_k_norm.weight"), device_ref)
+                                .ok()
+                                .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                                .transpose()
+                                .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
+
                             Ok(LayerVariant::Dense(LayerWeights {
                                 attention_wq: QMatMul::from_qtensor(attention_wq)
                                     .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -3094,6 +3176,8 @@ impl SplitModel {
                                 attention_bk,
                                 attention_bv,
                                 attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                                attn_q_norm,
+                                attn_k_norm,
                                 ffn: FfnVariant::Dense(Mlp {
                                     ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -3366,6 +3450,14 @@ impl SplitModel {
 
         tracing::info!(arch = %model_arch, "Detected model architecture");
 
+        if !model_arch.is_supported() {
+            return Err(SwarmError::Internal(format!(
+                "Unsupported model architecture '{}'. Supported architectures: {}",
+                arch_str,
+                ModelArch::supported_list().join(", ")
+            )));
+        }
+
         let arch = &arch_str;
         let md_get = |suffix: &str| {
             let key = format!("{arch}.{suffix}");
@@ -3387,9 +3479,16 @@ impl SplitModel {
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))?
             as usize;
+        // head_dim: prefer attention.key_length from GGUF (Qwen3 uses 128 vs embed/heads=64)
+        let head_dim = ct
+            .metadata
+            .get(&format!("{arch}.attention.key_length"))
+            .and_then(|v| v.to_u32().ok())
+            .map(|v| v as usize)
+            .unwrap_or(embedding_length / head_count);
         let rope_dim = md_get("rope.dimension_count")
             .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or((embedding_length / head_count) as u32) as usize;
+            .unwrap_or(head_dim as u32) as usize;
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
             .to_f32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
@@ -3411,7 +3510,6 @@ impl SplitModel {
         let use_rope_contiguous = model_arch.use_rope_contiguous();
         let activation = model_arch.default_activation();
 
-        let head_dim = embedding_length / head_count;
         let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
@@ -3794,6 +3892,8 @@ impl SplitModel {
                         attention_bk,
                         attention_bv,
                         attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                        attn_q_norm: None,
+                        attn_k_norm: None,
                         ffn: FfnVariant::Dense(Mlp {
                             ffn_gate: QMatMul::from_qtensor(ffn_gate)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -4002,6 +4102,8 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                    attn_q_norm: None,
+                    attn_k_norm: None,
                     ffn,
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
                     n_head: head_count,
@@ -4090,6 +4192,20 @@ impl SplitModel {
                         SwarmError::Internal(format!("Failed to load {prefix}.ffn_norm: {e}"))
                     })?;
 
+                // Qwen3 QK normalization (optional)
+                let attn_q_norm = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_q_norm.weight"), &device)
+                    .ok()
+                    .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
+                let attn_k_norm = ct
+                    .tensor(&mut reader, &format!("{prefix}.attn_k_norm.weight"), &device)
+                    .ok()
+                    .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                    .transpose()
+                    .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
+
                 layers.push(LayerVariant::Dense(LayerWeights {
                     attention_wq: QMatMul::from_qtensor(attention_wq)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -4103,6 +4219,8 @@ impl SplitModel {
                     attention_bk,
                     attention_bv,
                     attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                    attn_q_norm,
+                    attn_k_norm,
                     ffn: FfnVariant::Dense(Mlp {
                         ffn_gate: QMatMul::from_qtensor(ffn_gate)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -5814,6 +5932,7 @@ mod tests {
             estimated_vram_mb: vram_mb,
             batch_forwarder: None,
             is_complete: false,
+            eos_tokens: vec![],
         }
     }
 
@@ -5982,6 +6101,8 @@ mod tests {
                 attention_bk: None,
                 attention_bv: None,
                 attention_norm: make_rms_norm(&norm_w),
+                attn_q_norm: None,
+                attn_k_norm: None,
                 ffn: FfnVariant::Dense(Mlp {
                     ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                     ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
@@ -6140,6 +6261,7 @@ mod tests {
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let forwarder = std::sync::Arc::new(BatchForwarder::new(
             model_arc, kv_store, 4, // max batch size
+            std::time::Duration::ZERO, // no timeout in test
         ));
 
         // Spawn 3 concurrent forward requests
@@ -6280,7 +6402,15 @@ mod tests {
         assert_eq!(ModelArch::from_gguf_arch("gemma2"), ModelArch::Gemma2);
         assert_eq!(ModelArch::from_gguf_arch("phi3"), ModelArch::Phi3);
         assert_eq!(ModelArch::from_gguf_arch("mistral"), ModelArch::Mistral);
+        assert_eq!(ModelArch::from_gguf_arch("qwen2moe"), ModelArch::Qwen2);
         assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
+        assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
+        assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
+        assert_eq!(ModelArch::from_gguf_arch("starcoder2"), ModelArch::Starcoder2);
+        assert!(matches!(
+            ModelArch::from_gguf_arch("qwen35"),
+            ModelArch::Unknown(_)
+        ));
         assert!(matches!(
             ModelArch::from_gguf_arch("unknown_arch"),
             ModelArch::Unknown(_)
@@ -6311,12 +6441,14 @@ mod tests {
         assert!(!ModelArch::Llama.use_gemma_norm());
         assert!(!ModelArch::Qwen2.use_gemma_norm());
 
-        // Supported: all architectures now supported (including DeepSeek2)
+        // Supported: known architectures are supported, Unknown is not
         assert!(ModelArch::Llama.is_supported());
         assert!(ModelArch::Qwen2.is_supported());
         assert!(ModelArch::Gemma2.is_supported());
         assert!(ModelArch::Phi3.is_supported());
         assert!(ModelArch::DeepSeek2.is_supported());
+        assert!(!ModelArch::Unknown("qwen35".to_string()).is_supported());
+        assert!(!ModelArch::Unknown("mamba".to_string()).is_supported());
     }
 
     // ── GQA verification tests ──
@@ -6364,6 +6496,8 @@ mod tests {
                 attention_bk: None,
                 attention_bv: None,
                 attention_norm: make_rms_norm(&norm_w),
+                attn_q_norm: None,
+                attn_k_norm: None,
                 ffn: FfnVariant::Dense(Mlp {
                     ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                     ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
@@ -6752,6 +6886,8 @@ mod tests {
             attention_bk: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
             attention_bv: Some(Tensor::randn(0f32, 0.01, (kv_dim,), &device).unwrap()),
             attention_norm: make_rms_norm(&norm_w),
+            attn_q_norm: None,
+            attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
                 ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
@@ -7377,6 +7513,8 @@ mod tests {
             attention_bk: None,
             attention_bv: None,
             attention_norm: make_rms_norm(hidden_dim),
+            attn_q_norm: None,
+            attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(hidden_dim, intermediate),
                 ffn_down: make_qmatmul(intermediate, hidden_dim),
@@ -7538,6 +7676,8 @@ mod tests {
             attention_bk: None,
             attention_bv: None,
             attention_norm: make_rms_norm(&norm_w),
+            attn_q_norm: None,
+            attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
                 ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
@@ -7610,6 +7750,8 @@ mod tests {
             attention_bk: None,
             attention_bv: None,
             attention_norm: make_rms_norm(&norm_w),
+            attn_q_norm: None,
+            attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
                 ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
                 ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
@@ -7782,6 +7924,8 @@ mod tests {
                 attention_bk: None,
                 attention_bv: None,
                 attention_norm: make_rms_norm(hidden_dim),
+                attn_q_norm: None,
+                attn_k_norm: None,
                 ffn,
                 ffn_norm: make_rms_norm(hidden_dim),
                 n_head,

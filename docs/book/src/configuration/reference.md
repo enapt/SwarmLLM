@@ -54,8 +54,8 @@ Every configuration option, organized by section.
 | `model_path` | path | none | Path to a GGUF model file |
 | `gpu_layers` | integer | `0` | Layers to offload to GPU. `0` = CPU only |
 | `kv_cache_ttl_secs` | integer | `600` | KV-cache lifetime |
-| `max_batch_size` | integer | `1` | Max request batch size. `1` = no batching |
-| `batch_timeout_ms` | integer | `50` | Ms to wait for a full batch |
+| `max_batch_size` | integer | `1` | Max request batch size. `1` = no batching. When `> 1`, both local and remote forward requests batch together via `BatchForwarder`, filling pipeline bubbles in distributed inference |
+| `batch_timeout_ms` | integer | `50` | Ms to wait for additional requests before dispatching a partial batch. `0` = dispatch immediately (purely opportunistic batching) |
 | `speculative_decoding` | boolean | `false` | Enable speculative decoding |
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step |
 | `draft_model_path` | path | none | Path to draft model |

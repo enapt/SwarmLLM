@@ -389,9 +389,16 @@ fn build_tensor_meta_from_content(
     let embedding_length = md_get("embedding_length")?
         .to_u32()
         .map_err(|e| e.to_string())? as usize;
+    // head_dim: prefer attention.key_length (Qwen3 uses 128 vs embed/heads=64)
+    let head_dim_actual = ct
+        .metadata
+        .get(&format!("{arch}.attention.key_length"))
+        .and_then(|v| v.to_u32().ok())
+        .map(|v| v as usize)
+        .unwrap_or(embedding_length / head_count);
     let rope_dim = md_get("rope.dimension_count")
         .and_then(|v| v.to_u32().map_err(|e| e.to_string()))
-        .unwrap_or((embedding_length / head_count) as u32) as usize;
+        .unwrap_or(head_dim_actual as u32) as usize;
     let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
         .to_f32()
         .map_err(|e| e.to_string())? as f64;
@@ -437,6 +444,7 @@ fn build_tensor_meta_from_content(
         rope_freq_base,
         rms_norm_eps,
         expert_count,
+        architecture: arch.clone(),
     })
 }
 

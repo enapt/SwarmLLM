@@ -818,6 +818,10 @@ impl NetworkManager {
                 };
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
+                // Persistent NodeId → PeerId mapping (survives disconnects)
+                self.shared_state
+                    .peer_id_map
+                    .insert(node_id.clone(), peer_id.to_bytes());
                 self.shared_state
                     .peer_registry
                     .insert(node_id.clone(), peer_info);

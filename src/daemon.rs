@@ -183,6 +183,11 @@ pub struct SharedState {
     /// Broadcast channel fired when models change (shard download, load, prune).
     /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
     pub models_changed_tx: broadcast::Sender<()>,
+    /// Persistent NodeId → PeerId bytes mapping. Populated by the identify handler
+    /// and NEVER cleared on disconnect. Solves the race where the scheduler picks a
+    /// peer from shard_holders but the peer_registry entry was removed on disconnect
+    /// and hasn't been re-created by identify yet.
+    pub peer_id_map: DashMap<NodeId, Vec<u8>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -430,6 +435,7 @@ impl SharedState {
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
+            peer_id_map: DashMap::new(),
             shutdown_tx,
         });
 
@@ -1274,12 +1280,23 @@ impl Daemon {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                     _ = autoload_shutdown.changed() => { return; }
                 }
-                let manifests = sm.model_registry.list_models();
+                let mut manifests = sm.model_registry.list_models();
+                // Sort by request count descending so popular models get VRAM priority on restart
+                manifests.sort_by(|a, b| {
+                    let count_a = sm.model_request_counts.get(&a.id)
+                        .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(0);
+                    let count_b = sm.model_request_counts.get(&b.id)
+                        .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))
+                        .unwrap_or(0);
+                    count_b.cmp(&count_a)
+                });
+                let vram_budget = crate::model::auto_manage::compute_vram_budget(&sm);
                 for m in &manifests {
                     if sm.split_models.iter().any(|e| e.key().0 == m.id) {
                         continue;
                     }
-                    crate::model::auto_manage::check_and_load_model(&sm, &m.id).await;
+                    crate::model::auto_manage::check_and_load_model(&sm, &m.id, vram_budget).await;
                 }
             });
         }
@@ -2660,16 +2677,22 @@ async fn handle_layer_forward(
                 // VRAM-aware eviction: if a memory budget is set, evict LRU
                 // models before inserting the new one.
                 let max_batch = shared_state.config.inference.max_batch_size as usize;
+                let batch_timeout = std::time::Duration::from_millis(
+                    shared_state.config.inference.batch_timeout_ms,
+                );
                 let new_entry = if max_batch > 1 {
                     crate::inference::split::SplitModelEntry::new_with_batching(
                         model,
                         shared_state.kv_cache_store.clone(),
                         max_batch,
+                        batch_timeout,
                     )
                 } else {
                     crate::inference::split::SplitModelEntry::new(model)
                 };
-                if let Some(budget_mb) = shared_state.config.inference.max_split_model_memory_mb {
+                let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state)
+                    .or(shared_state.config.inference.max_split_model_memory_mb);
+                if let Some(budget_mb) = vram_budget {
                     let evicted = crate::inference::split::evict_split_models_lru(
                         &shared_state.split_models,
                         &shared_state.active_pipelines,
@@ -2701,23 +2724,205 @@ async fn handle_layer_forward(
         }
     }
 
-    let split_model_ref = match shared_state.split_models.get(&split_key) {
-        Some(r) => {
-            r.value().touch();
-            r.value().model.clone()
-        }
-        None => {
-            send_error_result(
-                &network_tx,
-                &sender_peer_bytes,
-                request_id,
-                "Split model vanished",
-            )
-            .await;
-            return;
-        }
-    };
+    let (split_model_ref, batch_forwarder, cached_eos_tokens) =
+        match shared_state.split_models.get(&split_key) {
+            Some(r) => {
+                r.value().touch();
+                (
+                    r.value().model.clone(),
+                    r.value().batch_forwarder.clone(),
+                    r.value().eos_tokens.clone(),
+                )
+            }
+            None => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    "Split model vanished",
+                )
+                .await;
+                return;
+            }
+        };
 
+    // Clear per-request KV-cache at the start of a new request (prefill)
+    let req_id_str = request_id.to_string();
+    if forward.sequence_num == 0 {
+        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
+        shared_state
+            .kv_cache_store
+            .clear_request(&model_key, &req_id_str);
+    }
+
+    // Try batch path for decode steps (seq > 0) when batching is enabled.
+    // Prefill (seq 0 on is_first) requires tokenization under the model lock,
+    // so it always falls through to the sequential path.
+    let use_batch = batch_forwarder.is_some() && forward.sequence_num > 0;
+
+    if use_batch {
+        let forwarder = batch_forwarder.unwrap();
+
+        // Build input tensor without holding the model lock
+        let input_tensor = if is_first {
+            // Decode step on first segment: single token ID as i64 LE
+            let token_id = if forward.activations.len() >= 8 {
+                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            "Invalid activation data",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                i64::from_le_bytes(bytes)
+            } else {
+                0i64
+            };
+            match candle_core::Tensor::from_vec(
+                vec![token_id],
+                &[1, 1],
+                &candle_core::Device::Cpu,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            match split::bytes_to_tensor(&forward.activations) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Decode: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        // Submit to batch forwarder — will be batched with other concurrent requests
+        let output = match forwarder
+            .submit(input_tensor, forward.index_pos as usize, req_id_str)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Batch forward: {e}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        // Post-process using cached eos_tokens (no model lock needed)
+        let result = if is_last {
+            match split::sample_token(&output, 0.7, 0.9) {
+                Ok(token_id) => {
+                    let finish = if cached_eos_tokens.contains(&token_id) {
+                        Some(crate::types::NetworkFinishReason::Stop)
+                    } else {
+                        None
+                    };
+                    crate::types::LayerResult {
+                        request_id,
+                        token_ids: vec![token_id],
+                        finish_reason: finish,
+                        activations: vec![],
+                    }
+                }
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Sample: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            match split::tensor_to_bytes(&output) {
+                Ok(activation_bytes) => crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: activation_bytes,
+                },
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Encode: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        let forward_elapsed = forward_start.elapsed();
+        tracing::info!(
+            request_id = %request_id,
+            tokens = result.token_ids.len(),
+            activations_bytes = result.activations.len(),
+            is_last,
+            elapsed_ms = forward_elapsed.as_millis() as u64,
+            model_id = %model_id,
+            layers = format!("[{layer_start}..{layer_end})"),
+            batched = true,
+            "DIAG: LayerForward processed via batch forwarder"
+        );
+
+        // Track participation
+        {
+            if let Ok(mut stats) = shared_state.node_stats.try_write() {
+                stats.forwards_served += 1;
+            }
+            let layers_processed = (layer_end - layer_start) as i64;
+            let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+            if let Ok(mut bal) = shared_state.credit_balance.try_write() {
+                bal.balance += earned;
+                bal.lifetime_earned += earned as u64;
+                bal.last_updated = chrono::Utc::now();
+            }
+        }
+
+        if let Err(e) = network_tx
+            .send(NetworkCommand::SendTensorResult {
+                target_peer_bytes: sender_peer_bytes,
+                result,
+            })
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
+        }
+        return;
+    }
+
+    // Sequential path: prefill or batching disabled
     let mut split_model = split_model_ref.lock().await;
 
     // Convert activation bytes to a candle Tensor
@@ -2798,15 +3003,6 @@ async fn handle_layer_forward(
             }
         }
     };
-
-    // Clear per-request KV-cache at the start of a new request (prefill)
-    let req_id_str = request_id.to_string();
-    if forward.sequence_num == 0 {
-        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
-        shared_state
-            .kv_cache_store
-            .clear_request(&model_key, &req_id_str);
-    }
 
     // Run the forward pass with per-request KV-cache isolation.
     // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
@@ -2933,10 +3129,18 @@ fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitect
         Err(_) => "llama".to_string(),
     };
     match arch_str.as_str() {
-        "qwen2" => crate::types::ModelArchitecture::Qwen2,
+        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
         "mistral" => crate::types::ModelArchitecture::Mistral,
         "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-        _ => crate::types::ModelArchitecture::Llama,
+        // All remaining supported transformer architectures map to Llama
+        // (they share the same manifest structure).
+        "llama" | "gemma" | "gemma2" | "starcoder2" | "deepseek2" | "glm4" | "llama4" => {
+            crate::types::ModelArchitecture::Llama
+        }
+        other => {
+            tracing::warn!(arch = other, "Unknown model architecture, defaulting to Llama");
+            crate::types::ModelArchitecture::Llama
+        }
     }
 }
 
