@@ -3335,7 +3335,14 @@ var SwarmLLM = (function() {
     if (!dot || !label || !detail) return;
 
     var peers = statsData ? (statsData.peers || 0) : 0;
-    var hasLocalModel = !!(statsData && statsData.hosted_shards && statsData.hosted_shards > 0);
+    // hosted_shards comes from /api/admin/stats but NOT from WebSocket stats_update
+    // Fall back to checking if any model cards show as active/ready
+    var hostedShards = statsData ? (statsData.hosted_shards || 0) : 0;
+    if (hostedShards === 0) {
+      var el = document.getElementById('hosted-shards');
+      if (el) hostedShards = parseInt(el.textContent, 10) || 0;
+    }
+    var hasLocalModel = hostedShards > 0;
 
     // Determine configured cloud providers
     var cloudProviders = [];
