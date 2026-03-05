@@ -454,6 +454,56 @@ async fn logprobs_request_accepted() {
     assert_eq!(resp.status(), 503);
 }
 
+/// C10: response_format json_object accepted.
+#[tokio::test]
+async fn response_format_json_object_accepted() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Return a JSON object with name and age"}],
+            "response_format": {"type": "json_object"}
+        }))
+        .send()
+        .await
+        .unwrap();
+    // 503 = no model (not 400/422 = parsed OK)
+    assert_eq!(resp.status(), 503);
+}
+
+/// C10: response_format json_schema accepted.
+#[tokio::test]
+async fn response_format_json_schema_accepted() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Give me a person"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "person",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "age": {"type": "integer"}
+                        },
+                        "required": ["name", "age"]
+                    }
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
 /// V7: tool role messages parse correctly.
 #[tokio::test]
 async fn tool_role_multi_turn_request() {

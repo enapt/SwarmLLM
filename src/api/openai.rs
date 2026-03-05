@@ -56,6 +56,11 @@ pub struct ChatCompletionRequest {
     /// Number of top log probabilities to return per token (0-20). Requires logprobs=true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<u32>,
+    /// Structured output format. Supports:
+    /// - `{"type": "json_object"}` — model outputs valid JSON
+    /// - `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` — constrained to schema
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
     /// Optional session ID for multi-turn KV-cache reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -119,6 +124,34 @@ pub struct TopLogProb {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChoiceLogProbs {
     pub content: Vec<TokenLogProb>,
+}
+
+/// OpenAI-compatible response_format for structured outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResponseFormat {
+    /// Default text output.
+    #[serde(rename = "text")]
+    Text,
+    /// Model must output valid JSON.
+    #[serde(rename = "json_object")]
+    JsonObject,
+    /// Model output constrained to a JSON schema.
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        json_schema: JsonSchemaSpec,
+    },
+}
+
+/// JSON schema specification for structured output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonSchemaSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub schema: serde_json::Value,
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// API-layer chat message supporting OpenAI's multimodal content format.
@@ -215,10 +248,43 @@ impl ApiChatMessage {
 
 impl ChatCompletionRequest {
     /// Convert API messages to internal ChatMessage format, decoding images.
-    /// When tools are provided, injects a tool-description system message.
+    /// When tools or response_format are provided, injects system message(s).
     pub fn to_internal_messages(&self) -> Result<Vec<ChatMessage>, crate::error::SwarmError> {
         let mut messages: Vec<ChatMessage> =
             self.messages.iter().map(|m| m.to_chat_message()).collect::<Result<_, _>>()?;
+
+        // Inject structured output instructions
+        if let Some(ref fmt) = self.response_format {
+            let instruction = match fmt {
+                ResponseFormat::Text => None,
+                ResponseFormat::JsonObject => Some(
+                    "You must respond with valid JSON only. Do not include any text \
+                     outside the JSON object. Do not use markdown code blocks."
+                        .to_string(),
+                ),
+                ResponseFormat::JsonSchema { json_schema } => {
+                    let schema_str = serde_json::to_string_pretty(&json_schema.schema)
+                        .unwrap_or_else(|_| json_schema.schema.to_string());
+                    Some(format!(
+                        "You must respond with valid JSON that conforms to the following schema. \
+                         Do not include any text outside the JSON object. Do not use markdown code blocks.\n\n\
+                         Schema name: {}\n\
+                         Schema:\n{schema_str}",
+                        json_schema.name
+                    ))
+                }
+            };
+            if let Some(inst) = instruction {
+                messages.insert(
+                    0,
+                    ChatMessage {
+                        role: crate::types::Role::System,
+                        content: inst,
+                        images: vec![],
+                    },
+                );
+            }
+        }
 
         // Inject tool definitions as a system message prefix
         if let Some(ref tools) = self.tools {
@@ -2365,5 +2431,83 @@ mod tests {
         let json = serde_json::to_string(&delta).unwrap();
         assert!(json.contains("\"tool_calls\""));
         assert!(json.contains("\"call_1\""));
+    }
+
+    #[test]
+    fn response_format_json_object_deserializes() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "json_object"}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.response_format, Some(ResponseFormat::JsonObject)));
+    }
+
+    #[test]
+    fn response_format_json_schema_deserializes() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "person",
+                    "schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+                    "strict": true
+                }
+            }
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        match req.response_format {
+            Some(ResponseFormat::JsonSchema { ref json_schema }) => {
+                assert_eq!(json_schema.name, "person");
+                assert!(json_schema.strict);
+            }
+            _ => panic!("expected JsonSchema"),
+        }
+    }
+
+    #[test]
+    fn response_format_text_deserializes() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "text"}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.response_format, Some(ResponseFormat::Text)));
+    }
+
+    #[test]
+    fn response_format_absent_is_none() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}]
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.response_format.is_none());
+    }
+
+    #[test]
+    fn json_schema_injects_system_prompt() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "result",
+                    "schema": {"type": "object"}
+                }
+            }
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let msgs = req.to_internal_messages().unwrap();
+        // Should have 2 messages: injected system + original user
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, crate::types::Role::System));
+        assert!(msgs[0].content.contains("valid JSON"));
+        assert!(msgs[0].content.contains("result"));
     }
 }
