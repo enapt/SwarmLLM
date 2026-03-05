@@ -178,6 +178,8 @@ fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
         stop: req.stop_sequences.clone().unwrap_or_default(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
+        logprobs: false,
+        top_logprobs: 0,
     }
 }
 

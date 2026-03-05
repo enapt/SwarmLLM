@@ -250,6 +250,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -262,6 +263,12 @@ pub struct SamplingParams {
     pub stop: Vec<String>,
     pub frequency_penalty: f32,
     pub presence_penalty: f32,
+    /// Whether to return log probabilities for sampled tokens.
+    #[serde(default)]
+    pub logprobs: bool,
+    /// Number of top log probabilities to return per token (0-20).
+    #[serde(default)]
+    pub top_logprobs: u32,
 }
 
 impl Default for SamplingParams {
@@ -274,6 +281,8 @@ impl Default for SamplingParams {
             stop: vec![],
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
+            logprobs: false,
+            top_logprobs: 0,
         }
     }
 }
@@ -859,6 +868,20 @@ mod tests {
             serde_json::to_string(&Role::Assistant).unwrap(),
             "\"assistant\""
         );
+        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
+    }
+
+    #[test]
+    fn role_tool_deserializes() {
+        let role: Role = serde_json::from_str("\"tool\"").unwrap();
+        assert!(matches!(role, Role::Tool));
+    }
+
+    #[test]
+    fn sampling_params_logprobs_defaults() {
+        let params = SamplingParams::default();
+        assert!(!params.logprobs);
+        assert_eq!(params.top_logprobs, 0);
     }
 
     #[test]

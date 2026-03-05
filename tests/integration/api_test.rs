@@ -296,3 +296,194 @@ async fn api_key_endpoint_returns_key() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["api_key"].as_str().unwrap(), key);
 }
+
+/// V3: Concurrent load test — fire 8 simultaneous requests, verify all complete.
+/// Without a model loaded, all should return 503, but the key assertion is that
+/// the server handles all requests concurrently without deadlock or dropped connections.
+#[tokio::test]
+async fn concurrent_requests_all_complete() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let num_requests = 8;
+
+    let mut handles = Vec::new();
+    for i in 0..num_requests {
+        let client = client.clone();
+        let url = format!("{base}/v1/chat/completions");
+        handles.push(tokio::spawn(async move {
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": format!("request {i}")}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            (i, resp.status().as_u16())
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+
+    // All 8 requests should complete (503 = no model loaded, not a server error)
+    assert_eq!(results.len(), num_requests);
+    for (i, status) in &results {
+        assert_eq!(
+            *status, 503,
+            "Request {i} returned {status}, expected 503 (no model)"
+        );
+    }
+}
+
+/// V3: Concurrent requests with mixed endpoints — tests server doesn't deadlock
+/// under concurrent load across different endpoint types.
+#[tokio::test]
+async fn concurrent_mixed_endpoints() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+
+    let mut handles = Vec::new();
+
+    // 4 chat requests
+    for _ in 0..4 {
+        let c = client.clone();
+        let url = format!("{base}/v1/chat/completions");
+        handles.push(tokio::spawn(async move {
+            c.post(&url)
+                .json(&serde_json::json!({
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }));
+    }
+
+    // 4 model list requests
+    for _ in 0..4 {
+        let c = client.clone();
+        let url = format!("{base}/v1/models");
+        handles.push(tokio::spawn(async move {
+            c.get(&url).send().await.unwrap().status().as_u16()
+        }));
+    }
+
+    // 4 status requests
+    for _ in 0..4 {
+        let c = client.clone();
+        let url = format!("{base}/v1/status");
+        handles.push(tokio::spawn(async move {
+            c.get(&url).send().await.unwrap().status().as_u16()
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        results.push(handle.await.unwrap());
+    }
+
+    assert_eq!(results.len(), 12);
+    // Chat: 503 (no model), Models: 200, Status: 200
+    for (i, status) in results.iter().enumerate() {
+        if i < 4 {
+            assert_eq!(*status, 503, "Chat request {i}: expected 503");
+        } else {
+            assert_eq!(*status, 200, "Request {i}: expected 200");
+        }
+    }
+}
+
+/// V7: tool_calls request accepted by the API (returns 503 without model, but parses OK).
+#[tokio::test]
+async fn tool_calls_request_accepted() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "What's the weather in NYC?"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for a location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"}
+                        },
+                        "required": ["location"]
+                    }
+                }
+            }],
+            "tool_choice": "auto"
+        }))
+        .send()
+        .await
+        .unwrap();
+    // Should be 503 (no model) not 400/422 (parse error)
+    assert_eq!(resp.status(), 503);
+}
+
+/// V7: logprobs request accepted by the API.
+#[tokio::test]
+async fn logprobs_request_accepted() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "logprobs": true,
+            "top_logprobs": 5
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+}
+
+/// V7: tool role messages parse correctly.
+#[tokio::test]
+async fn tool_role_multi_turn_request() {
+    let (base, key) = spawn_test_server().await;
+    let client = auth_client(&key);
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"location\":\"NYC\"}"}
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "{\"temp\": 72, \"condition\": \"sunny\"}"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    // 503 = no model, not 400/422 = parsing worked
+    assert_eq!(resp.status(), 503);
+}
