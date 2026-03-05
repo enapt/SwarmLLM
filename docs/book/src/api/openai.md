@@ -26,13 +26,21 @@ curl http://localhost:8800/v1/chat/completions \
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `model` | string | yes | — | Model name |
-| `messages` | array | yes | — | Chat messages (`role` + `content`) |
+| `model` | string | yes | — | Model name (or `"auto"` for first available) |
+| `messages` | array | yes | — | Chat messages (`role` + `content`). Roles: `system`, `user`, `assistant`, `tool` |
 | `stream` | boolean | no | `false` | Enable SSE streaming |
 | `max_tokens` | integer | no | `2048` | Max tokens to generate |
 | `temperature` | float | no | `0.7` | Sampling temperature (0.0-2.0) |
 | `top_p` | float | no | `1.0` | Nucleus sampling threshold |
+| `stop` | string or array | no | — | Stop sequence(s) |
+| `frequency_penalty` | float | no | `0.0` | Frequency penalty (-2.0 to 2.0) |
+| `presence_penalty` | float | no | `0.0` | Presence penalty (-2.0 to 2.0) |
+| `tools` | array | no | — | Tool/function definitions for function calling |
+| `tool_choice` | string or object | no | — | `"none"`, `"auto"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
+| `logprobs` | boolean | no | `false` | Return log probabilities for output tokens |
+| `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`) |
 | `session_id` | string | no | — | Reuse KV-cache from a previous request |
+| `lora_adapter` | string | no | — | LoRA adapter ID for fine-tuned inference |
 
 ### Response (non-streaming)
 
@@ -44,13 +52,63 @@ curl http://localhost:8800/v1/chat/completions \
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "Rust is a systems programming language..."},
-    "finish_reason": "stop"
+    "finish_reason": "stop",
+    "logprobs": null
   }],
   "usage": {
     "prompt_tokens": 15,
     "completion_tokens": 42,
     "total_tokens": 57
   }
+}
+```
+
+### Response with logprobs
+
+When `logprobs: true` and `top_logprobs: 3`:
+
+```json
+{
+  "choices": [{
+    "message": {"role": "assistant", "content": "Hello"},
+    "finish_reason": "stop",
+    "logprobs": {
+      "content": [{
+        "token": "Hello",
+        "logprob": -0.234,
+        "bytes": null,
+        "top_logprobs": [
+          {"token": "Hello", "logprob": -0.234, "bytes": null},
+          {"token": "Hi", "logprob": -1.456, "bytes": null},
+          {"token": "Hey", "logprob": -2.012, "bytes": null}
+        ]
+      }]
+    }
+  }]
+}
+```
+
+### Response with tool_calls
+
+When the model calls a tool, `finish_reason` is `"tool_calls"` and `content` is null:
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"location\":\"NYC\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
 }
 ```
 
@@ -109,6 +167,7 @@ client = OpenAI(
     api_key="YOUR_API_KEY"
 )
 
+# Basic streaming
 response = client.chat.completions.create(
     model="qwen2.5-coder-7b",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -118,6 +177,32 @@ response = client.chat.completions.create(
 for chunk in response:
     if chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="")
+```
+
+### Python — Function calling
+
+```python
+response = client.chat.completions.create(
+    model="qwen2.5-coder-7b",
+    messages=[{"role": "user", "content": "What's the weather in NYC?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    }],
+    tool_choice="auto"
+)
+
+if response.choices[0].finish_reason == "tool_calls":
+    for tc in response.choices[0].message.tool_calls:
+        print(f"Call {tc.function.name}({tc.function.arguments})")
 ```
 
 ### JavaScript (openai)
