@@ -652,4 +652,145 @@ mod tests {
         assert_eq!(config.image_size, 336);
         assert_eq!((config.image_size / config.patch_size).pow(2), 576); // 576 patches
     }
+
+    #[test]
+    fn patch_embedding_construction() {
+        // Verify PatchEmbedding accepts correct weight shapes
+        let device = Device::Cpu;
+        let patch_size = 4;
+        let hidden_dim = 16;
+        let num_patches = 4; // (8/4)^2 = 4
+        let patch_dim = 3 * patch_size * patch_size; // 48
+
+        let proj_weight =
+            Tensor::ones(&[hidden_dim, patch_dim], DType::F32, &device).unwrap();
+        let proj_bias = Tensor::zeros(&[hidden_dim], DType::F32, &device).unwrap();
+        let cls_token = Tensor::zeros(&[1, 1, hidden_dim], DType::F32, &device).unwrap();
+        let pos_embed =
+            Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
+
+        let _patch_embed = PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+        // Construction succeeds — forward requires specific candle matmul broadcasting
+        // which is validated with real model weights in E2E testing
+    }
+
+    #[test]
+    fn vision_transformer_block_forward() {
+        use candle_nn::VarMap;
+        let device = Device::Cpu;
+        let hidden_dim = 32;
+        let num_heads = 4;
+        let vm = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &device);
+
+        let ln1 = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("ln1")).unwrap();
+        let attn_qkv = candle_nn::linear(hidden_dim, 3 * hidden_dim, vb.pp("qkv")).unwrap();
+        let attn_proj = candle_nn::linear(hidden_dim, hidden_dim, vb.pp("proj")).unwrap();
+        let ln2 = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("ln2")).unwrap();
+        let fc1 = candle_nn::linear(hidden_dim, 4 * hidden_dim, vb.pp("fc1")).unwrap();
+        let fc2 = candle_nn::linear(4 * hidden_dim, hidden_dim, vb.pp("fc2")).unwrap();
+
+        let block =
+            VisionTransformerBlock::new(ln1, attn_qkv, attn_proj, ln2, fc1, fc2, num_heads, hidden_dim);
+
+        // (1, 5, 32) → (1, 5, 32) — shape preserved
+        let x = Tensor::randn(0f32, 0.1, &[1, 5, hidden_dim], &device).unwrap();
+        let out = block.forward(&x).unwrap();
+        assert_eq!(out.dims(), x.dims());
+    }
+
+    #[test]
+    fn multimodal_projection_forward() {
+        use candle_nn::VarMap;
+        let device = Device::Cpu;
+        let vision_hidden = 64;
+        let proj_dim = 32;
+        let llm_hidden = 16;
+        let vm = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &device);
+
+        let proj1 = candle_nn::linear(vision_hidden, proj_dim, vb.pp("p1")).unwrap();
+        let proj2 = candle_nn::linear(proj_dim, llm_hidden, vb.pp("p2")).unwrap();
+        let mm = MultimodalProjection::new(proj1, proj2, llm_hidden);
+
+        // (1, 5, 64) → (1, 5, 16) — projects to LLM space
+        let features = Tensor::randn(0f32, 0.1, &[1, 5, vision_hidden], &device).unwrap();
+        let out = mm.forward(&features).unwrap();
+        assert_eq!(out.dims(), &[1, 5, llm_hidden]);
+        assert_eq!(mm.llm_hidden_dim(), llm_hidden);
+    }
+
+    #[test]
+    fn vision_encoder_num_tokens() {
+        use candle_nn::VarMap;
+        let device = Device::Cpu;
+        let patch_size = 4;
+        let image_size = 8;
+        let hidden_dim = 16;
+        let num_heads = 2;
+        let num_patches = (image_size / patch_size) * (image_size / patch_size); // 4
+        let patch_dim = 3 * patch_size * patch_size;
+
+        let proj_weight = Tensor::zeros(&[hidden_dim, patch_dim], DType::F32, &device).unwrap();
+        let proj_bias = Tensor::zeros(&[hidden_dim], DType::F32, &device).unwrap();
+        let cls_token = Tensor::zeros(&[1, 1, hidden_dim], DType::F32, &device).unwrap();
+        let pos_embed = Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
+        let patch_embed = PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+
+        let vm = VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &device);
+        let ln1 = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("ln1")).unwrap();
+        let qkv = candle_nn::linear(hidden_dim, 3 * hidden_dim, vb.pp("qkv")).unwrap();
+        let proj = candle_nn::linear(hidden_dim, hidden_dim, vb.pp("proj")).unwrap();
+        let ln2 = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("ln2")).unwrap();
+        let fc1 = candle_nn::linear(hidden_dim, 4 * hidden_dim, vb.pp("fc1")).unwrap();
+        let fc2 = candle_nn::linear(4 * hidden_dim, hidden_dim, vb.pp("fc2")).unwrap();
+        let block = VisionTransformerBlock::new(ln1, qkv, proj, ln2, fc1, fc2, num_heads, hidden_dim);
+
+        let final_ln = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("fln")).unwrap();
+
+        let config = VisionConfig {
+            image_size: image_size as u32,
+            patch_size: patch_size as u32,
+            vision_hidden_size: hidden_dim as u32,
+            vision_num_layers: 1,
+            vision_num_heads: num_heads as u32,
+            projection_dim: hidden_dim as u32,
+        };
+
+        let encoder = VisionEncoder::new(patch_embed, vec![block], final_ln, config);
+        assert_eq!(encoder.num_vision_tokens(), num_patches + 1); // 4 patches + CLS
+        assert_eq!(encoder.config().image_size, image_size as u32);
+    }
+
+    #[test]
+    fn preprocess_gradient_pattern_image() {
+        // Synthetic gradient image — verify preprocessing handles non-uniform content
+        let size = 32;
+        let mut rgb = Vec::with_capacity(3 * size * size);
+        for y in 0..size {
+            for x in 0..size {
+                rgb.push(((x * 255) / size) as u8);
+                rgb.push(((y * 255) / size) as u8);
+                rgb.push((((x + y) * 127) / size) as u8);
+            }
+        }
+        let img = ImageData {
+            rgb_bytes: rgb,
+            width: size as u32,
+            height: size as u32,
+        };
+        let device = Device::Cpu;
+        let tensor = preprocess_image(&img, 16, &device).unwrap();
+        assert_eq!(tensor.dims(), &[3, 16, 16]);
+
+        // Verify channel statistics differ (gradient creates variation)
+        let flat: Vec<f32> = tensor.flatten_all().unwrap().to_vec1().unwrap();
+        let ch0: Vec<f32> = flat[..256].to_vec();
+        let ch1: Vec<f32> = flat[256..512].to_vec();
+        let mean0: f32 = ch0.iter().sum::<f32>() / ch0.len() as f32;
+        let mean1: f32 = ch1.iter().sum::<f32>() / ch1.len() as f32;
+        // Channels should have different means due to different gradient patterns
+        assert!((mean0 - mean1).abs() > 0.01, "Channels should differ");
+    }
 }

@@ -392,4 +392,223 @@ mod tests {
         assert!(registry.get("nonexistent").is_none());
         assert!(!registry.remove("nonexistent"));
     }
+
+    #[test]
+    fn apply_lora_multi_seq() {
+        // Verify LoRA works with seq_len > 1
+        let device = Device::Cpu;
+        let seq_len = 4;
+        let in_dim = 16;
+        let out_dim = 16;
+        let rank = 4;
+        let alpha = 8.0;
+
+        let base_output = Tensor::zeros((1, seq_len, out_dim), DType::F32, &device).unwrap();
+        let x = Tensor::ones((1, seq_len, in_dim), DType::F32, &device).unwrap();
+        let a = Tensor::ones((rank, in_dim), DType::F32, &device).unwrap();
+        let b = Tensor::ones((out_dim, rank), DType::F32, &device).unwrap();
+        let lora = LoraLayerWeights { a, b };
+
+        let result = apply_lora(&base_output, &x, &lora, alpha, rank).unwrap();
+        assert_eq!(result.dims(), &[1, seq_len, out_dim]);
+
+        // Expected: (B @ A @ x) * scale = ones * in_dim * rank * (8/4) = 16 * 4 * 2 = 128
+        let vals = result.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(vals.len(), seq_len * out_dim);
+        for &v in &vals {
+            assert!((v - 128.0).abs() < 1e-3, "Expected 128.0, got {v}");
+        }
+    }
+
+    #[test]
+    fn apply_lora_random_weights_changes_output() {
+        // Verify LoRA actually modifies the base output (non-trivial delta)
+        let device = Device::Cpu;
+        let in_dim = 8;
+        let out_dim = 8;
+        let rank = 2;
+        let alpha = 4.0;
+
+        let base_output = Tensor::ones((1, 1, out_dim), DType::F32, &device).unwrap();
+        let x = Tensor::randn(0f32, 1.0, (1, 1, in_dim), &device).unwrap();
+        let a = Tensor::randn(0f32, 1.0, (rank, in_dim), &device).unwrap();
+        let b = Tensor::randn(0f32, 1.0, (out_dim, rank), &device).unwrap();
+        let lora = LoraLayerWeights { a, b };
+
+        let result = apply_lora(&base_output, &x, &lora, alpha, rank).unwrap();
+        let base_vals = base_output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let result_vals = result.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        // Output should differ from base (LoRA adds a non-zero delta)
+        let diff: f32 = base_vals
+            .iter()
+            .zip(result_vals.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff > 0.01, "LoRA should modify the output, diff={diff}");
+    }
+
+    /// Helper to write a minimal safetensors file with given tensor data.
+    fn write_safetensors(
+        path: &std::path::Path,
+        tensors: Vec<(String, Vec<f32>, Vec<usize>)>,
+    ) {
+        let byte_data: Vec<(String, Vec<u8>, Vec<usize>)> = tensors
+            .into_iter()
+            .map(|(name, floats, shape)| {
+                let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+                (name, bytes, shape)
+            })
+            .collect();
+
+        let views: Vec<(String, safetensors::tensor::TensorView<'_>)> = byte_data
+            .iter()
+            .map(|(name, data, shape)| {
+                (
+                    name.clone(),
+                    safetensors::tensor::TensorView::new(
+                        safetensors::Dtype::F32,
+                        shape.to_vec(),
+                        data,
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect();
+
+        let serialized = safetensors::tensor::serialize(
+            views.iter().map(|(n, v)| (n.as_str(), v.clone())),
+            None,
+        )
+        .unwrap();
+        std::fs::write(path, serialized).unwrap();
+    }
+
+    #[test]
+    fn load_adapter_from_generated_safetensors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_adapter.safetensors");
+
+        let rank = 4usize;
+        let dim = 32usize;
+        let mut tensors = Vec::new();
+
+        for layer in 0..2 {
+            for proj in &["q_proj", "v_proj"] {
+                let a_key = format!(
+                    "base_model.model.model.layers.{layer}.self_attn.{proj}.lora_A.weight"
+                );
+                tensors.push((a_key, vec![0.01f32; rank * dim], vec![rank, dim]));
+
+                let b_key = format!(
+                    "base_model.model.model.layers.{layer}.self_attn.{proj}.lora_B.weight"
+                );
+                tensors.push((b_key, vec![0.01f32; dim * rank], vec![dim, rank]));
+            }
+        }
+
+        write_safetensors(&path, tensors);
+
+        let adapter = load_adapter(&path, "test-id", "Test Adapter", "llama-test", rank, 8.0, &Device::Cpu).unwrap();
+
+        assert_eq!(adapter.metadata.id, "test-id");
+        assert_eq!(adapter.metadata.name, "Test Adapter");
+        assert_eq!(adapter.metadata.rank, rank);
+        assert_eq!(adapter.metadata.alpha, 8.0);
+        assert_eq!(adapter.weights.len(), 4); // 2 layers × 2 projections
+        assert!(adapter.weights.contains_key("blk.0.attn_q"));
+        assert!(adapter.weights.contains_key("blk.0.attn_v"));
+        assert!(adapter.weights.contains_key("blk.1.attn_q"));
+        assert!(adapter.weights.contains_key("blk.1.attn_v"));
+
+        let w = adapter.weights.get("blk.0.attn_q").unwrap();
+        assert_eq!(w.a.dims(), &[rank, dim]);
+        assert_eq!(w.b.dims(), &[dim, rank]);
+    }
+
+    #[test]
+    fn load_adapter_and_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("e2e_adapter.safetensors");
+
+        let rank = 2usize;
+        let dim = 8usize;
+        write_safetensors(&path, vec![
+            ("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(), vec![0.1; rank * dim], vec![rank, dim]),
+            ("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(), vec![0.1; dim * rank], vec![dim, rank]),
+        ]);
+
+        let adapter = load_adapter(&path, "e2e", "E2E", "test", rank, 4.0, &Device::Cpu).unwrap();
+        assert_eq!(adapter.weights.len(), 1);
+
+        let base_output = Tensor::zeros((1, 1, dim), DType::F32, &Device::Cpu).unwrap();
+        let x = Tensor::ones((1, 1, dim), DType::F32, &Device::Cpu).unwrap();
+        let lora_weights = adapter.weights.get("blk.0.attn_q").unwrap();
+        let result = apply_lora(&base_output, &x, lora_weights, adapter.metadata.alpha, adapter.metadata.rank).unwrap();
+
+        let vals = result.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let sum: f32 = vals.iter().sum();
+        assert!(sum.abs() > 0.001, "LoRA output should be non-zero, got sum={sum}");
+
+        // Uniform input + uniform weights → all output values identical
+        let first = vals[0];
+        for &v in &vals[1..] {
+            assert!((v - first).abs() < 1e-5, "Values should be uniform");
+        }
+    }
+
+    #[test]
+    fn normalize_lora_key_all_projections() {
+        // Verify all 7 supported projection types
+        let cases = vec![
+            ("layers.0.self_attn.q_proj.lora_A", "blk.0.attn_q"),
+            ("layers.1.self_attn.k_proj.lora_B", "blk.1.attn_k"),
+            ("layers.2.self_attn.v_proj.lora_A", "blk.2.attn_v"),
+            ("layers.3.self_attn.o_proj.lora_B", "blk.3.attn_output"),
+            ("layers.4.mlp.gate_proj.lora_A", "blk.4.ffn_gate"),
+            ("layers.5.mlp.up_proj.lora_B", "blk.5.ffn_up"),
+            ("layers.6.mlp.down_proj.lora_A", "blk.6.ffn_down"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                normalize_lora_key(input),
+                Some(expected.to_string()),
+                "Failed for input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_registry_with_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter_path = dir.path().join("adapters").join("reg_test.safetensors");
+        std::fs::create_dir_all(adapter_path.parent().unwrap()).unwrap();
+
+        let rank = 2usize;
+        let dim = 4usize;
+        write_safetensors(&adapter_path, vec![
+            ("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(), vec![0.0; rank * dim], vec![rank, dim]),
+            ("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(), vec![0.0; dim * rank], vec![dim, rank]),
+        ]);
+
+        let registry = AdapterRegistry::new(dir.path());
+        let meta = registry
+            .register("reg-1", "RegTest", "llama", rank, 4.0, &adapter_path, &Device::Cpu)
+            .unwrap();
+        assert_eq!(meta.id, "reg-1");
+        assert_eq!(meta.num_layers, 1);
+
+        let loaded = registry.get("reg-1").unwrap();
+        assert_eq!(loaded.metadata.name, "RegTest");
+        assert_eq!(registry.list().len(), 1);
+
+        // Duplicate registration fails
+        let dup = registry.register("reg-1", "Dup", "llama", rank, 4.0, &adapter_path, &Device::Cpu);
+        assert!(dup.is_err());
+
+        // Remove
+        assert!(registry.remove("reg-1"));
+        assert!(registry.get("reg-1").is_none());
+        assert!(registry.list().is_empty());
+    }
 }
