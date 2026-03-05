@@ -97,12 +97,8 @@ var SwarmLLM = (function() {
     },
 
     showBanner: function(type, message) {
-      var banner = document.getElementById('status-banner');
-      if (!banner) return;
-      banner.innerHTML = '<div class="alert alert-' + type + '">' + escapeHtml(message) + '</div>';
-      if (type === 'success') {
-        setTimeout(function() { banner.innerHTML = ''; }, 3000);
-      }
+      // Also show as toast for better visibility
+      showToast(message, type === 'warning' ? 'warning' : type === 'error' ? 'error' : type === 'success' ? 'success' : 'info');
     }
   };
 
@@ -119,7 +115,7 @@ var SwarmLLM = (function() {
 
     newSession: function() {
       var id = 'session_' + Date.now();
-      sessions[id] = { id: id, title: 'New Chat', messages: [], created: Date.now() };
+      sessions[id] = { id: id, title: 'New Chat', messages: [], created: Date.now(), model: currentModel || '' };
       currentSessionId = id;
       chat.saveSessions();
       chat.renderSessionList();
@@ -160,7 +156,14 @@ var SwarmLLM = (function() {
         div.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
         div.onclick = function() { chat.switchSession(s.id); };
         var title = s.title.length > 28 ? s.title.substring(0, 28) + '...' : s.title;
-        div.innerHTML = '<span class="session-title">' + escapeHtml(title) + '</span>' +
+        var timeStr = '';
+        if (s.created) {
+          var d = new Date(s.created);
+          timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        }
+        var modelStr = s.model ? formatModelDisplayName(s.model) : '';
+        var metaLine = (timeStr || modelStr) ? '<span class="session-meta">' + escapeHtml(timeStr) + (modelStr ? ' \u00b7 ' + escapeHtml(modelStr) : '') + '</span>' : '';
+        div.innerHTML = '<div class="session-info"><span class="session-title">' + escapeHtml(title) + '</span>' + metaLine + '</div>' +
           '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
         list.appendChild(div);
       });
@@ -571,10 +574,19 @@ var SwarmLLM = (function() {
               }
             }
 
+            // WI-12: Check verifying state
+            if (s.download && s.download.state === 'Verifying') {
+              cls = 'verifying'; dlCount++;
+              label = '\u2713';
+              if (missingCount > 0) missingCount--;
+              if (peerCount > 0 && !s.local) peerCount--;
+            }
+
             var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')';
-            if (cls === 'local') title += ' \u2014 Stored locally';
+            if (cls === 'local') title += ' \u2014 Verified, stored locally';
             else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer(s)';
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
+            else if (cls === 'verifying') title += ' \u2014 Downloaded, verifying (BLAKE3)...';
             else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
             else title += ' \u2014 Not available';
 
@@ -675,14 +687,49 @@ var SwarmLLM = (function() {
           metaBtnHtml = '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>';
         }
 
-        var name = m.name || m.id;
+        var name = formatModelDisplayName(m.name || m.id);
+
+        // Unload button for loaded models (WI-3)
+        var unloadHtml = '';
+        if (m.status === 'loaded') {
+          unloadHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + escapeHtml(m.id) + '" style="margin-right:4px">Unload</button>';
+        }
+
+        // Per-shard download bars — stacked vertically (WI-13)
+        var perShardDlHtml = '';
+        if (isDownloading && shards.length > 0) {
+          var dlShardBars = shards.filter(function(s) {
+            return s.download && s.download.state === 'Downloading';
+          });
+          if (dlShardBars.length > 1) {
+            perShardDlHtml = '<div class="per-shard-dl">';
+            dlShardBars.forEach(function(s) {
+              var pct = s.download.progress_pct || 0;
+              var bytes = s.download.downloaded_bytes || 0;
+              var total = s.download.total_bytes || s.size_bytes || 0;
+              perShardDlHtml += '<div class="per-shard-dl-row">' +
+                '<span class="per-shard-dl-label">Shard ' + s.index + '</span>' +
+                '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct + '%"></div></div>' +
+                '<span class="per-shard-dl-pct">' + formatBytes(bytes) + '/' + formatBytes(total) + ' (' + pct + '%)</span>' +
+                '</div>';
+            });
+            perShardDlHtml += '</div>';
+          }
+        }
+
+        // Source label (HF / Network)
+        var sourceLabel = '';
+        if (m.source === 'network' && hostedShards === 0) {
+          sourceLabel = '<span class="badge badge-remote" title="Available via network peers">Remote</span>';
+        }
+
         card.innerHTML =
           '<div class="model-header">' +
-            '<span class="model-name">' + escapeHtml(name) + probedBadge + '</span>' +
-            '<span>' + metaBtnHtml + gearHtml + statusHtml + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
+            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + probedBadge + sourceLabel + '</span>' +
+            '<span>' + metaBtnHtml + gearHtml + statusHtml + (unloadHtml ? ' ' + unloadHtml : '') + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
-          shardHtml + progressHtml +
+          shardHtml + progressHtml + perShardDlHtml +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + escapeHtml(m.id) + '"></div>';
 
         list.appendChild(card);
@@ -714,7 +761,10 @@ var SwarmLLM = (function() {
             var dlPct = sd.progress_pct || 0;
 
             if (sd.state === 'complete') { newClass = 'local'; localCount++; }
-            else if (sd.state === 'downloading' || sd.state === 'verifying') {
+            else if (sd.state === 'verifying') {
+              newClass = 'verifying'; dlCount++;
+              label = '\u2713';
+            } else if (sd.state === 'downloading') {
               newClass = 'downloading'; dlCount++;
               label = dlPct + '%';
             } else if (sd.state === 'pending') {
@@ -738,7 +788,8 @@ var SwarmLLM = (function() {
 
               // Update title
               var title = 'Shard ' + sd.index;
-              if (newClass === 'local') title += ' \u2014 Complete';
+              if (newClass === 'local') title += ' \u2014 Verified, stored locally';
+              else if (newClass === 'verifying') title += ' \u2014 Downloaded, verifying (BLAKE3)...';
               else if (newClass === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
               else if (newClass === 'queued') title += ' \u2014 Queued for download';
               else if (sd.state === 'failed') title += ' \u2014 Failed';
@@ -916,9 +967,28 @@ var SwarmLLM = (function() {
           activeAcquisitions[modelId] = { started: Date.now() };
         }
         dashboard.renderAcquisitionPanel(modelId, status);
+
+        // WI-11: HF rate limit detection — warn if speed < 100KB/s for > 30s
+        if (status.state === 'downloading' && status.source === 'huggingface') {
+          var acqInfo = activeAcquisitions[modelId];
+          var speed = status.speed_bytes_per_sec || 0;
+          if (speed > 0 && speed < 102400) {
+            if (!acqInfo._slowSince) acqInfo._slowSince = Date.now();
+            else if (Date.now() - acqInfo._slowSince > 30000 && !acqInfo._throttleWarned) {
+              acqInfo._throttleWarned = true;
+              showToast('HuggingFace may be rate-limiting downloads. Speed: ' + formatSpeed(speed) + '. Download will continue automatically.', 'warning', 10000);
+            }
+          } else {
+            acqInfo._slowSince = null;
+          }
+        }
+
         if (status.state === 'complete') {
+          showToast('Download complete: ' + (status.model_name || modelId), 'success');
           setTimeout(function() { delete activeAcquisitions[modelId]; dashboard.loadInitial(); }, 3000);
         } else if (status.state === 'failed') {
+          var reason = (typeof status.state === 'object' && status.state.failed) ? status.state.failed.reason : '';
+          showToast('Download failed: ' + (status.model_name || modelId) + (reason ? ' — ' + reason : ''), 'error', 8000);
           setTimeout(function() { delete activeAcquisitions[modelId]; }, 10000);
         }
       });
@@ -1093,10 +1163,10 @@ var SwarmLLM = (function() {
           return;
         }
         if (data.status === 'started') {
-          ui.showBanner('success', 'Downloading seed shard — auto-manage will acquire more as peers join');
+          showToast('Downloading seed shard — auto-manage will acquire more as peers join', 'success');
           ui.closeModelBrowser();
         } else {
-          ui.showBanner('warning', data.message || 'Download could not be started');
+          showToast(data.message || 'Download could not be started', 'warning');
         }
       } catch (e) {
         ui.showBanner('error', 'Download failed: ' + e.message);
@@ -1593,6 +1663,7 @@ var SwarmLLM = (function() {
           // Live-update shard grid cells and progress bars without full re-render
           dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
           dlQueue.updateFromWs(msg.data.acquisitions);
+          updateChatDownloadProgress(msg.data.acquisitions);
           if (msg.data.region_summary && activeTab === 'network-map') {
             networkMap.updateFromWs(msg.data.region_summary);
           }
@@ -1765,30 +1836,35 @@ var SwarmLLM = (function() {
   // Shard Context Menu
   // ========================================================================
   // ========================================================================
-  // LAN Discovery Toast Notifications
+  // Unified Toast Notification System
   // ========================================================================
-  function showLanDiscoveryToast(text) {
-    var container = document.getElementById('prune-toast-container');
+  function showToast(text, type, duration) {
+    type = type || 'info';
+    duration = duration || 5000;
+    var container = document.getElementById('toast-container');
     if (!container) {
       container = document.createElement('div');
-      container.id = 'prune-toast-container';
-      container.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;max-width:400px';
+      container.id = 'toast-container';
+      container.className = 'toast-container';
       document.body.appendChild(container);
     }
     var toast = document.createElement('div');
-    toast.className = 'lan-discovery-toast';
-    toast.style.cssText = 'background:var(--card-bg,#1e1e2e);color:var(--text,#cdd6f4);border:1px solid #a6e3a1;border-radius:8px;padding:0.75rem 1rem;font-size:0.8rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);opacity:0;transform:translateX(100%);transition:all 0.3s ease';
-    toast.innerHTML = '<span style="margin-right:0.5rem">&#128279;</span>' + escapeHtml(text);
+    toast.className = 'toast toast-' + type;
+    var icons = { success: '\u2713', error: '\u2717', warning: '\u26A0', info: '\u2139' };
+    toast.innerHTML = '<span class="toast-icon">' + (icons[type] || icons.info) + '</span>' +
+      '<span class="toast-text">' + escapeHtml(text) + '</span>' +
+      '<button class="toast-close" onclick="this.parentNode.remove()">\u00d7</button>';
     container.appendChild(toast);
-    requestAnimationFrame(function() {
-      toast.style.opacity = '1';
-      toast.style.transform = 'translateX(0)';
-    });
-    setTimeout(function() {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateX(100%)';
+    requestAnimationFrame(function() { toast.classList.add('toast-show'); });
+    var timer = setTimeout(function() {
+      toast.classList.remove('toast-show');
       setTimeout(function() { toast.remove(); }, 300);
-    }, 8000);
+    }, duration);
+    toast.addEventListener('click', function() { clearTimeout(timer); toast.remove(); });
+  }
+
+  function showLanDiscoveryToast(text) {
+    showToast(text, 'success', 8000);
   }
 
   // ========================================================================
@@ -1855,31 +1931,8 @@ var SwarmLLM = (function() {
     document.body.prepend(banner);
   }
 
-  // ========================================================================
-  // Prune Toast Notifications
-  // ========================================================================
   function showPruneToast(text) {
-    var container = document.getElementById('prune-toast-container');
-    if (!container) {
-      container = document.createElement('div');
-      container.id = 'prune-toast-container';
-      container.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;max-width:400px';
-      document.body.appendChild(container);
-    }
-    var toast = document.createElement('div');
-    toast.className = 'prune-toast';
-    toast.style.cssText = 'background:var(--card-bg,#1e1e2e);color:var(--text,#cdd6f4);border:1px solid var(--accent,#89b4fa);border-radius:8px;padding:0.75rem 1rem;font-size:0.8rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);opacity:0;transform:translateX(100%);transition:all 0.3s ease';
-    toast.textContent = text;
-    container.appendChild(toast);
-    requestAnimationFrame(function() {
-      toast.style.opacity = '1';
-      toast.style.transform = 'translateX(0)';
-    });
-    setTimeout(function() {
-      toast.style.opacity = '0';
-      toast.style.transform = 'translateX(100%)';
-      setTimeout(function() { toast.remove(); }, 300);
-    }, 6000);
+    showToast(text, 'info', 6000);
   }
 
   // ========================================================================
@@ -1920,14 +1973,17 @@ var SwarmLLM = (function() {
   // Resource Schedule Card
   // ========================================================================
   async function loadSchedule() {
+    var el = document.getElementById('schedule-form');
     try {
       var resp = await authFetch('/api/admin/schedule');
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">No schedule configured</div>';
+        return;
+      }
       var s = await resp.json();
       renderScheduleCard(s);
     } catch (e) {
-      var el = document.getElementById('schedule-form');
-      if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">Could not load schedule</div>';
+      if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">No schedule configured</div>';
     }
   }
 
@@ -2441,6 +2497,24 @@ var SwarmLLM = (function() {
   }
 
   // ========================================================================
+  // Unload Model (WI-3)
+  // ========================================================================
+  async function unloadModel(modelId) {
+    try {
+      var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/unload', { method: 'POST' });
+      if (resp.ok) {
+        showToast('Model unloaded: ' + formatModelDisplayName(modelId), 'success');
+        loadModels();
+      } else {
+        var errData = await resp.json().catch(function() { return {}; });
+        showToast(errData.error || 'Failed to unload model', 'error');
+      }
+    } catch (e) {
+      showToast('Unload failed: ' + e.message, 'error');
+    }
+  }
+
+  // ========================================================================
   // Shutdown
   // ========================================================================
   async function shutdown() {
@@ -2628,7 +2702,7 @@ var SwarmLLM = (function() {
           var tierClass = (e.tier || 'silver').toLowerCase();
           html += '<tr>'
             + '<td class="mono">' + (e.rank || i+1) + '</td>'
-            + '<td>' + escapeHtml(e.display_name) + ' <span class="text-muted mono" style="font-size:0.75rem">' + escapeHtml(e.node_id) + '</span></td>'
+            + '<td>' + (e.display_name !== e.node_id ? escapeHtml(e.display_name) + ' <span class="text-muted mono" style="font-size:0.75rem">' + escapeHtml(e.node_id) + '</span>' : '<span class="mono">' + escapeHtml(e.node_id) + '</span>') + '</td>'
             + '<td class="mono">' + (e.credits || 0) + '</td>'
             + '<td><span class="tier-badge ' + tierClass + '">' + escapeHtml(e.tier || 'Silver') + '</span></td>'
             + '</tr>';
@@ -2792,6 +2866,29 @@ var SwarmLLM = (function() {
         }
       }
 
+      // Add pulsing dots at center of active regions (WI-16)
+      var svg = document.querySelector('.world-svg');
+      if (svg) {
+        svg.querySelectorAll('.map-node-dot').forEach(function(d) { d.remove(); });
+        var activeCodes = Object.keys(counts);
+        for (var k = 0; k < activeCodes.length; k++) {
+          var cc = activeCodes[k];
+          var regionEl = document.getElementById('region-' + cc);
+          if (!regionEl) continue;
+          var bbox = regionEl.getBBox();
+          var cx = bbox.x + bbox.width / 2;
+          var cy = bbox.y + bbox.height / 2;
+          var dotR = Math.max(3, Math.min(8, counts[cc] * 2));
+          var dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          dot.setAttribute('cx', cx);
+          dot.setAttribute('cy', cy);
+          dot.setAttribute('r', dotR);
+          dot.setAttribute('fill', 'rgba(59,130,246,0.7)');
+          dot.setAttribute('class', 'map-node-dot');
+          svg.appendChild(dot);
+        }
+      }
+
       document.getElementById('map-total-nodes').textContent = totalNodes;
       document.getElementById('map-total-regions').textContent = totalRegions;
       document.getElementById('map-legend-max').textContent = maxCount;
@@ -2863,13 +2960,17 @@ var SwarmLLM = (function() {
       document.getElementById('map-legend-max').textContent = maxCount;
     },
 
+    // ISO alpha-2 → country name (WI-16)
+    countryNames: {US:'United States',CA:'Canada',MX:'Mexico',BR:'Brazil',AR:'Argentina',CL:'Chile',CO:'Colombia',GB:'United Kingdom',FR:'France',DE:'Germany',ES:'Spain',IT:'Italy',NL:'Netherlands',SE:'Sweden',NO:'Norway',FI:'Finland',PL:'Poland',UA:'Ukraine',RU:'Russia',TR:'Turkey',IN:'India',CN:'China',JP:'Japan',KR:'South Korea',AU:'Australia',NZ:'New Zealand',ZA:'South Africa',NG:'Nigeria',EG:'Egypt',KE:'Kenya',SG:'Singapore',ID:'Indonesia',TH:'Thailand',VN:'Vietnam',PH:'Philippines',TW:'Taiwan',IL:'Israel',AE:'UAE',SA:'Saudi Arabia',CH:'Switzerland',AT:'Austria',CZ:'Czech Republic',RO:'Romania',IE:'Ireland',PT:'Portugal',DK:'Denmark',BE:'Belgium'},
+
     showTooltip: function(event, code) {
       networkMap.hideTooltip();
       var info = networkMap.data && networkMap.data.regions ? networkMap.data.regions[code] : null;
       var tip = document.createElement('div');
       tip.id = 'map-tooltip';
       tip.className = 'map-tooltip';
-      var html = '<strong>' + code + '</strong>';
+      var countryName = networkMap.countryNames[code] || code;
+      var html = '<strong>' + countryName + '</strong> <span class="text-muted" style="font-size:0.7rem">' + code + '</span>';
       if (info) {
         html += '<span class="mono" style="margin-left:8px">' + info.total + ' node' + (info.total !== 1 ? 's' : '') + '</span>';
         if (info.models) {
@@ -2877,7 +2978,9 @@ var SwarmLLM = (function() {
           if (mids.length > 0) {
             html += '<div class="mt-1" style="font-size:0.75rem">';
             for (var i = 0; i < Math.min(mids.length, 5); i++) {
-              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mids[i].length > 20 ? mids[i].substring(0, 20) + '...' : mids[i]) + '</span><span class="mono">' + info.models[mids[i]] + '</span></div>';
+              var mName = formatModelDisplayName(mids[i]);
+              if (mName.length > 22) mName = mName.substring(0, 22) + '...';
+              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mName) + '</span><span class="mono">' + info.models[mids[i]] + '</span></div>';
             }
             if (mids.length > 5) html += '<div class="text-muted">+' + (mids.length - 5) + ' more</div>';
             html += '</div>';
@@ -2961,7 +3064,12 @@ var SwarmLLM = (function() {
     on('send-btn', 'click', function() { chat.send(); });
     on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
 
-    // Network discovery
+    // Network discovery — share popover toggle
+    on('btn-share-network', 'click', function(e) {
+      e.stopPropagation();
+      var pop = document.getElementById('share-popover');
+      if (pop) pop.classList.toggle('show');
+    });
     on('btn-copy-network-code', 'click', function() { copyNetworkCode(); });
     on('btn-join-network', 'click', function() { joinNetwork(); });
 
@@ -2987,6 +3095,12 @@ var SwarmLLM = (function() {
     document.addEventListener('click', function(e) {
       var target = e.target;
 
+      // Close share popover when clicking outside
+      var pop = document.getElementById('share-popover');
+      if (pop && pop.classList.contains('show') && !pop.contains(target) && target.id !== 'btn-share-network') {
+        pop.classList.remove('show');
+      }
+
       // Session delete button
       var delId = target.getAttribute('data-delete-session');
       if (delId) { e.stopPropagation(); chat.deleteSession(delId, e); return; }
@@ -3003,6 +3117,10 @@ var SwarmLLM = (function() {
 
       var removeId = target.getAttribute('data-remove-model');
       if (removeId) { removeModel(removeId); return; }
+
+      // Unload model button (WI-3)
+      var unloadId = target.getAttribute('data-unload-model');
+      if (unloadId) { unloadModel(unloadId); return; }
 
       // HF download button
       var hfRepo = target.getAttribute('data-hf-download');
@@ -3114,12 +3232,26 @@ var SwarmLLM = (function() {
   // Format a raw model ID into a friendly display name
   function formatModelDisplayName(id) {
     if (!id) return 'Unknown';
-    // Strip common suffixes like -gguf, .gguf, -q4_k_m etc.
-    var name = id.replace(/\.gguf$/i, '').replace(/-gguf$/i, '');
-    // Capitalize first letter of each segment
+    var name = id;
+    // Strip common suffixes
+    name = name.replace(/\.gguf$/i, '').replace(/-gguf$/i, '');
+    // Remove repo prefix duplication: "tinyllama_tinyllama-1.1b" -> "tinyllama-1.1b"
+    var parts = name.split(/[_]/);
+    if (parts.length >= 2) {
+      var prefix = parts[0].toLowerCase();
+      var rest = parts.slice(1).join('_').toLowerCase();
+      if (rest.indexOf(prefix) === 0) {
+        name = parts.slice(1).join('_');
+      }
+    }
+    // Split on separators and format each part
     return name.split(/[-_.]/).filter(Boolean).map(function(s) {
-      // Keep quant tags uppercase
+      // Keep quant tags uppercase (Q4_K_M, Q5_K_S, etc.)
       if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return s.toUpperCase();
+      // Keep version strings as-is (v1, v0.3)
+      if (/^v\d/i.test(s)) return s;
+      // Keep size designators (1b, 7b, 1.1b)
+      if (/^\d+\.?\d*[bBmM]$/.test(s)) return s.toUpperCase();
       return s.charAt(0).toUpperCase() + s.slice(1);
     }).join(' ');
   }
@@ -3133,12 +3265,61 @@ var SwarmLLM = (function() {
     if (sendBtn) sendBtn.disabled = !hasModels;
     if (chatInput) {
       chatInput.disabled = !hasModels;
-      chatInput.placeholder = hasModels ? 'Type your message...' : 'No models available — download a model to start chatting';
+      if (hasModels) {
+        chatInput.placeholder = 'Type your message...';
+      } else {
+        // Check if a model is currently downloading (WI-9)
+        var dlInfo = document.getElementById('chat-dl-progress');
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download a model to start chatting';
+      }
     }
     if (emptyState && !hasModels) {
       emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser to start chatting</p>' +
         '<button class="btn btn-primary" onclick="SwarmLLM.openModelBrowser && SwarmLLM.openModelBrowser()">Browse Models</button>';
     }
+  }
+
+  // Show download progress inline above chat input when no model available (WI-9)
+  function updateChatDownloadProgress(acquisitions) {
+    var container = document.querySelector('.chat-input-area');
+    if (!container) return;
+    var existing = document.getElementById('chat-dl-progress');
+
+    // Only show when no model is loaded
+    var chatInput = document.getElementById('chat-input');
+    if (chatInput && !chatInput.disabled) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    if (!acquisitions || acquisitions.length === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    var active = acquisitions.find(function(a) {
+      return typeof a.state === 'string' && (a.state === 'downloading' || a.state === 'awaiting_manifest');
+    });
+    if (!active) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    var pct = 0;
+    if (active.total_bytes > 0) pct = Math.min(100, Math.round((active.downloaded_bytes || 0) / active.total_bytes * 100));
+    var speed = active.speed_bytes_per_sec || 0;
+    var name = formatModelDisplayName(active.model_name || active.model_id || '');
+    var text = 'Downloading ' + name + '... ' + pct + '%';
+    if (speed > 0) text += ' (' + formatSpeed(speed) + ')';
+
+    if (!existing) {
+      existing = document.createElement('div');
+      existing.id = 'chat-dl-progress';
+      existing.className = 'chat-dl-progress';
+      container.insertBefore(existing, container.firstChild);
+    }
+    existing.innerHTML = '<div class="chat-dl-bar"><div class="chat-dl-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="chat-dl-text">' + escapeHtml(text) + '</span>';
   }
 
   // ========================================================================

@@ -2473,6 +2473,54 @@ pub async fn delete_model(
     })))
 }
 
+/// POST /api/admin/models/:model_id/unload — Unload a model from memory without deleting files.
+///
+/// Clears split models and loaded model info for the given model, freeing VRAM/memory.
+/// Shard files, manifests, and registry entries remain intact for future re-loading.
+pub async fn unload_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    // Remove split models for this model (frees VRAM/memory)
+    let mut segments_removed = 0u32;
+    shared.split_models.retain(|key, _| {
+        if key.0 == mid {
+            segments_removed += 1;
+            false
+        } else {
+            true
+        }
+    });
+
+    // Clear loaded model info if it matches this model
+    {
+        let mut info = shared.loaded_model_info.write().await;
+        if info.as_ref().map(|i| i.name == model_id).unwrap_or(false) {
+            *info = None;
+            shared
+                .model_loaded
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    // Clear GGUF metadata cache for this model
+    shared.gguf_meta.remove(&mid);
+
+    // Notify dashboard
+    let _ = shared.models_changed_tx.send(());
+
+    tracing::info!(model = %model_id, segments = segments_removed, "Model unloaded from memory");
+
+    Ok(Json(serde_json::json!({
+        "status": "unloaded",
+        "model_id": model_id,
+        "segments_removed": segments_removed,
+    })))
+}
+
 /// DELETE /api/admin/models/:model_id/shards/:shard_index — Remove a single shard.
 ///
 /// Deletes the shard file from disk, removes self from shard_holders in model_registry,

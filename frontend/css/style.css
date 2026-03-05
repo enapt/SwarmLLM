@@ -193,6 +193,8 @@ a:hover { color: var(--accent-hover); }
 .session-item:hover { background: var(--bg-tertiary); }
 .session-item.active { background: var(--accent-glow); border-left-color: var(--accent); }
 
+.session-info { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
+.session-meta { font-size: 0.65rem; color: var(--text-muted); margin-top: 1px; }
 .session-title {
   font-size: 0.8rem;
   color: var(--text-primary);
@@ -419,23 +421,29 @@ a:hover { color: var(--accent-hover); }
 }
 
 /* ---- Stat cards ---- */
+/* Compact stat strip — single row */
+.stat-strip {
+  display: flex; gap: 8px; flex-wrap: wrap;
+}
 .stat-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 16px 20px;
+  border-radius: var(--radius);
+  padding: 10px 14px;
   transition: all var(--transition);
   position: relative;
   overflow: hidden;
+  flex: 1; min-width: 100px;
+  display: flex; align-items: center; gap: 10px;
 }
-.stat-card:hover { border-color: var(--border-light); transform: translateY(-1px); }
+.stat-card:hover { border-color: var(--border-light); }
 
 .stat-card .stat-icon {
-  width: 36px; height: 36px;
-  border-radius: var(--radius);
+  width: 28px; height: 28px;
+  border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 1.1rem;
-  margin-bottom: 10px;
+  font-size: 0.85rem;
+  flex-shrink: 0;
 }
 .stat-card .stat-icon.blue { background: var(--accent-glow); color: var(--accent); }
 .stat-card .stat-icon.green { background: var(--green-dim); color: var(--green); }
@@ -443,17 +451,20 @@ a:hover { color: var(--accent-hover); }
 .stat-card .stat-icon.purple { background: var(--purple-dim); color: var(--purple); }
 .stat-card .stat-icon.teal { background: rgba(0, 210, 190, 0.12); color: #00d2be; }
 
+.stat-card .stat-body { display: flex; flex-direction: column; }
 .stat-card .stat-value {
   font-family: var(--font-mono);
-  font-size: 1.8rem;
+  font-size: 1.2rem;
   font-weight: 700;
   line-height: 1.1;
   color: var(--text-primary);
 }
 .stat-card .stat-label {
-  font-size: 0.75rem;
+  font-size: 0.65rem;
   color: var(--text-secondary);
-  margin-top: 4px;
+  margin-top: 1px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 
 /* ---- Grid ---- */
@@ -719,6 +730,16 @@ label {
 }
 .form-group { margin-bottom: 14px; }
 
+/* Compact Node panel (WI-7) */
+.node-compact .panel-header { margin-bottom: 6px; }
+.node-hw-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; font-size: 0.8rem; }
+.node-hw-label { width: 42px; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; flex-shrink: 0; }
+.node-hw-value { flex: 1; font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.progress-bar.mini-bar { width: 60px; height: 5px; flex-shrink: 0; }
+.vram-breakdown { font-size: 0.68rem; color: var(--text-muted); margin-top: 3px; }
+.vram-breakdown span { display: inline-block; margin-right: 10px; }
+.fill.cyan { background: var(--cyan); }
+
 /* Range slider */
 input[type="range"] {
   -webkit-appearance: none;
@@ -824,6 +845,12 @@ input[type="range"]::-webkit-slider-thumb {
   font-family: var(--font-mono);
   font-size: 0.8rem;
 }
+
+/* Chat download progress (WI-9) */
+.chat-dl-progress { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 0.75rem; color: var(--text-muted); }
+.chat-dl-bar { flex: 1; height: 4px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden; max-width: 200px; }
+.chat-dl-fill { height: 100%; background: var(--cyan); transition: width 0.5s; }
+.chat-dl-text { white-space: nowrap; }
 
 .chat-input-area {
   padding: 12px 20px 16px;
@@ -961,6 +988,11 @@ input[type="range"]::-webkit-slider-thumb {
   border: 1px solid var(--cyan); border-style: dashed;
   color: var(--cyan); font-size: 0.55rem;
 }
+.model-card .shard-cell.verifying {
+  background: var(--yellow, #eab308); border: 1px solid var(--yellow, #eab308);
+  color: var(--bg-primary); font-size: 0.55rem;
+  animation: pulse-shard-glow 1.5s ease-in-out infinite;
+}
 .model-card .shard-cell.missing { background: var(--bg-tertiary); border: 1px dashed var(--border-light); color: var(--text-secondary); }
 @keyframes pulse-shard-glow {
   0%, 100% { box-shadow: none; }
@@ -976,12 +1008,28 @@ input[type="range"]::-webkit-slider-thumb {
 .model-card .shard-legend .leg-dl::before { background: var(--cyan); }
 .model-card .shard-legend .leg-peer-dl::before { background: var(--orange); }
 .model-card .shard-legend .leg-queued::before { background: var(--bg-tertiary); border: 1px dashed var(--cyan); }
+.model-card .shard-legend .leg-verifying::before { background: var(--yellow); }
 .model-card .shard-legend .leg-missing::before { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
 .model-card .dl-progress { margin-top: 8px; }
 .model-card .dl-progress .dl-bar { width: 100%; height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; display: flex; gap: 1px; }
 .model-card .dl-progress .dl-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); border-radius: 4px; transition: width 0.5s ease-out; min-width: 0; }
 .model-card .dl-progress .dl-seg { height: 100%; overflow: hidden; position: relative; background: var(--bg-tertiary); }
 .model-card .dl-progress .dl-seg-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width 0.5s ease-out; }
+
+/* Per-shard download bars — stacked vertically (WI-13) */
+.per-shard-dl { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.per-shard-dl-row { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; }
+.per-shard-dl-label { width: 52px; color: var(--text-muted); flex-shrink: 0; }
+.per-shard-dl-bar { flex: 1; height: 6px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden; }
+.per-shard-dl-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); transition: width 0.5s ease-out; }
+.per-shard-dl-pct { width: 130px; text-align: right; color: var(--text-muted); flex-shrink: 0; font-family: 'SF Mono', 'Fira Code', monospace; }
+
+/* Remote badge */
+.badge-remote { background: var(--orange); color: var(--bg-primary); font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 600; }
+
+/* Unload button outline variant */
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+.btn-outline:hover { border-color: var(--orange); color: var(--orange); }
 
 /* Metadata info button */
 .model-meta-btn {
@@ -1095,6 +1143,14 @@ input[type="range"]::-webkit-slider-thumb {
 .world-svg .map-region:hover {
   stroke: var(--accent);
   stroke-width: 1.5;
+}
+.world-svg .map-node-dot {
+  pointer-events: none;
+  animation: pulse-map-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-map-dot {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; r: attr(r); }
 }
 .map-tooltip {
   position: absolute;
@@ -1403,3 +1459,48 @@ input[type="range"]::-webkit-slider-thumb {
 .mode-dot.cloud { background: var(--accent); }
 .mode-dot.offline { background: var(--text-muted); }
 .mode-label { font-weight: 600; }
+
+/* ─── Toast Notifications ─── */
+.toast-container {
+  position: fixed; bottom: 1rem; right: 1rem; z-index: 9999;
+  display: flex; flex-direction: column-reverse; gap: 0.5rem;
+  max-width: 400px; pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-secondary); color: var(--text-primary);
+  border: 1px solid var(--border-light); border-radius: var(--radius);
+  padding: 10px 14px; font-size: 0.8rem;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  opacity: 0; transform: translateX(100%);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: auto; cursor: pointer;
+}
+.toast-show { opacity: 1; transform: translateX(0); }
+.toast-success { border-color: var(--green); }
+.toast-success .toast-icon { color: var(--green); }
+.toast-error { border-color: var(--red); }
+.toast-error .toast-icon { color: var(--red); }
+.toast-warning { border-color: var(--orange); }
+.toast-warning .toast-icon { color: var(--orange); }
+.toast-info { border-color: var(--accent); }
+.toast-info .toast-icon { color: var(--accent); }
+.toast-icon { font-size: 1rem; flex-shrink: 0; font-weight: 700; }
+.toast-text { flex: 1; line-height: 1.3; }
+.toast-close {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 1.1rem; cursor: pointer; padding: 0 2px; line-height: 1;
+}
+.toast-close:hover { color: var(--text-primary); }
+
+/* ─── Network Discovery Share Popover ─── */
+.share-popover {
+  position: absolute; top: 100%; right: 0; z-index: 100;
+  background: var(--bg-secondary); border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg); padding: 16px;
+  box-shadow: var(--shadow-lg); width: 340px;
+  display: none;
+}
+.share-popover.show { display: block; }
+.share-popover label { font-size: 0.8rem; margin-bottom: 4px; display: block; }
+.share-popover .text-muted { font-size: 0.7rem; }

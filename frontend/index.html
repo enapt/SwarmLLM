@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self';">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <title>SwarmLLM</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -344,127 +345,133 @@
             <span class="text-muted" id="mode-detail"></span>
           </div>
 
-          <!-- Stat cards -->
-          <div class="grid grid-3 mb-2" id="stats-row">
+          <!-- Stat strip — compact single row -->
+          <div class="stat-strip mb-2" id="stats-row">
             <div class="stat-card">
               <div class="stat-icon blue">&#9901;</div>
-              <div class="stat-value" id="stat-peers">0</div>
-              <div class="stat-label">Connected Peers <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-peers">0</div>
+                <div class="stat-label">Peers <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+              </div>
             </div>
             <div class="stat-card">
               <div class="stat-icon green">&#9733;</div>
-              <div class="stat-value" id="stat-credits">0</div>
-              <div class="stat-label">Credit Balance</div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-credits">0</div>
+                <div class="stat-label">Credits</div>
+              </div>
             </div>
             <div class="stat-card" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
-              <div class="stat-value" id="stat-requests-made">0</div>
-              <div class="stat-label">Requests Made</div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-requests-made">0</div>
+                <div class="stat-label">Requests</div>
+              </div>
             </div>
-            <div class="stat-card" title="Full inference requests completed by this node (orchestrator)">
+            <div class="stat-card" title="Full inference requests completed by this node">
               <div class="stat-icon purple">&#9889;</div>
-              <div class="stat-value" id="stat-served">0</div>
-              <div class="stat-label">Requests Served</div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-served">0</div>
+                <div class="stat-label">Served</div>
+              </div>
             </div>
-            <div class="stat-card" title="Layer forward passes processed for distributed inference (earns credits)">
+            <div class="stat-card" title="Layer forward passes processed (earns credits)">
               <div class="stat-icon teal">&#9881;</div>
-              <div class="stat-value" id="stat-forwards">0</div>
-              <div class="stat-label">Forwards Processed</div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-forwards">0</div>
+                <div class="stat-label">Forwards</div>
+              </div>
             </div>
             <div class="stat-card">
               <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
-              <div class="stat-value" id="stat-active">0</div>
-              <div class="stat-label">Active Requests</div>
+              <div class="stat-body">
+                <div class="stat-value" id="stat-active">0</div>
+                <div class="stat-label">Active</div>
+              </div>
             </div>
           </div>
 
-          <!-- Network invite code (hidden when network is established) -->
-          <div class="panel mb-2" id="invite-code-panel" style="display:none">
-            <div class="panel-header">
-              <h2>Network Discovery</h2>
+          <!-- Network Discovery — compact share popover (hidden when established) -->
+          <div id="invite-code-panel" style="display:none;position:relative" class="mb-2">
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn btn-sm" id="btn-share-network" title="Share your network code" style="display:flex;align-items:center;gap:4px">
+                <span style="font-size:1rem">&#128279;</span> Share Network Code
+              </button>
               <span class="badge" id="network-phase-badge">seedling</span>
             </div>
-            <div id="invite-code-share" style="margin-bottom:0.75rem">
-              <label style="font-size:0.85rem;margin-bottom:0.25rem">Your Network Code</label>
-              <div style="display:flex;gap:0.5rem">
-                <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.75rem;flex:1">
+            <div class="share-popover" id="share-popover">
+              <label style="font-weight:600;margin-bottom:6px">Your Network Code</label>
+              <div style="display:flex;gap:0.5rem;margin-bottom:8px">
+                <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1">
                 <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
               </div>
-              <div class="text-muted" style="font-size:0.75rem;margin-top:0.25rem">Share this code with a friend to connect your nodes</div>
-            </div>
-            <div style="margin-top:0.75rem">
-              <label style="font-size:0.85rem;margin-bottom:0.25rem">Join Network</label>
+              <div class="text-muted" style="margin-bottom:10px">Share this code with a friend to connect your nodes</div>
+              <label style="font-weight:600;margin-bottom:4px">Join Network</label>
               <div style="display:flex;gap:0.5rem">
-                <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste a friend's code" style="font-size:0.75rem;flex:1">
+                <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste a friend's code" style="font-size:0.7rem;flex:1">
                 <button class="btn btn-sm btn-primary" id="btn-join-network">Join</button>
               </div>
-              <div class="text-muted" id="join-status" style="font-size:0.75rem;margin-top:0.25rem"></div>
+              <div class="text-muted" id="join-status" style="margin-top:4px"></div>
             </div>
           </div>
 
           <div class="grid grid-2">
-            <!-- Node panel -->
-            <div class="panel">
+            <!-- Node panel — compact (WI-7) -->
+            <div class="panel node-compact">
               <div class="panel-header">
                 <h2>Node</h2>
-                <span class="mono text-muted" id="version" style="font-size:0.8rem">v...</span>
+                <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
               </div>
-              <div class="form-group">
-                <label>CPU</label>
-                <div class="mono" id="node-cpu" style="font-size:0.85rem">...</div>
+              <div class="node-hw-row">
+                <span class="node-hw-label">CPU</span>
+                <span class="mono node-hw-value" id="node-cpu">...</span>
               </div>
-              <div class="form-group">
-                <label>GPU</label>
-                <div class="mono" id="node-gpu" style="font-size:0.85rem">Detecting...</div>
-                <div class="mono text-muted" id="node-vram" style="font-size:0.8rem"></div>
+              <div class="node-hw-row">
+                <span class="node-hw-label">GPU</span>
+                <span class="mono node-hw-value" id="node-gpu">Detecting...</span>
               </div>
-              <div class="form-group">
-                <label>RAM</label>
-                <div class="flex-between mb-1">
-                  <span class="mono" id="ram-used" style="font-size:0.85rem">...</span>
-                  <span class="text-muted" id="ram-total" style="font-size:0.85rem">/ ...</span>
-                </div>
-                <div class="progress-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
+              <div class="node-hw-row">
+                <span class="node-hw-label">VRAM</span>
+                <span class="mono node-hw-value" id="node-vram">...</span>
               </div>
-              <div class="form-group">
-                <label>Disk</label>
-                <div class="flex-between mb-1">
-                  <span class="mono" id="disk-used" style="font-size:0.85rem">...</span>
-                  <span class="text-muted" id="disk-total" style="font-size:0.85rem">/ ...</span>
-                </div>
-                <div class="progress-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+              <div class="vram-bar-container" style="margin:6px 0 4px">
+                <div class="progress-bar" style="height:10px"><div class="fill cyan" id="vram-bar" style="width:0%"></div></div>
+                <div id="vram-breakdown" class="vram-breakdown"></div>
               </div>
-              <div class="flex-between">
-                <label style="margin:0">Hosted Shards</label>
-                <span class="mono" id="hosted-shards">0</span>
+              <div class="node-hw-row">
+                <span class="node-hw-label">RAM</span>
+                <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
+                <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
               </div>
-              <div class="flex-between mt-1">
-                <label style="margin:0">Uptime</label>
-                <span class="mono" id="uptime">...</span>
+              <div class="node-hw-row">
+                <span class="node-hw-label">Disk</span>
+                <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
+                <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+              </div>
+              <div class="node-hw-row" style="margin-top:2px">
+                <span class="node-hw-label">Shards</span>
+                <span class="mono node-hw-value" id="hosted-shards">0</span>
               </div>
             </div>
 
-            <!-- Credits panel -->
+            <!-- Credits panel — compact -->
             <div class="panel">
               <div class="panel-header">
                 <h2>Credits</h2>
                 <span class="tier-badge silver" id="credit-tier">...</span>
               </div>
-              <div style="font-family:var(--font-mono);font-size:2.5rem;font-weight:700;margin:8px 0 16px" id="credit-balance">0</div>
-              <div class="grid grid-2">
+              <div style="font-family:var(--font-mono);font-size:2rem;font-weight:700;margin:4px 0 10px" id="credit-balance">0</div>
+              <div class="grid grid-2" style="gap:8px">
                 <div>
-                  <div class="stat-label">Lifetime Earned</div>
-                  <div class="mono text-green" style="font-size:1.1rem;font-weight:600" id="credit-earned">+0</div>
-                  <div class="text-muted" style="font-size:0.7rem;margin-top:2px">10 credits/layer processed</div>
+                  <div class="stat-label">Earned</div>
+                  <div class="mono text-green" style="font-size:1rem;font-weight:600" id="credit-earned">+0</div>
                 </div>
                 <div>
-                  <div class="stat-label">Lifetime Spent</div>
-                  <div class="mono text-red" style="font-size:1.1rem;font-weight:600" id="credit-spent">-0</div>
-                  <div class="text-muted" style="font-size:0.7rem;margin-top:2px">8 credits/token consumed</div>
+                  <div class="stat-label">Spent</div>
+                  <div class="mono text-red" style="font-size:1rem;font-weight:600" id="credit-spent">-0</div>
                 </div>
               </div>
-              <div class="mt-2">
-                <label>Activity</label>
+              <div class="mt-1">
                 <div class="sparkline" id="credit-sparkline"></div>
               </div>
             </div>
@@ -485,8 +492,8 @@
             </div>
           </div>
 
-          <!-- Download Queue -->
-          <div class="panel mt-2 hidden" id="download-queue-panel">
+          <!-- Download Queue (hidden — progress now inline in model cards, WI-2) -->
+          <div class="panel mt-2 hidden" id="download-queue-panel" style="display:none !important">
             <div class="panel-header">
               <h2>Downloads</h2>
               <span class="text-muted" id="download-queue-count"></span>

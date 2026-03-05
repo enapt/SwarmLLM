@@ -96,7 +96,14 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
     // Frontend routes, health checks, static assets — always exempt
     if matches!(
         path,
-        "/" | "/health" | "/health/ready" | "/metrics" | "/admin" | "/chat" | "/setup"
+        "/"
+            | "/health"
+            | "/health/ready"
+            | "/metrics"
+            | "/admin"
+            | "/chat"
+            | "/setup"
+            | "/favicon.ico"
     ) || path.starts_with("/static/")
     {
         return true;
@@ -117,6 +124,7 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
                 | "/api/admin/providers"
+                | "/api/admin/schedule"
         ) || path.starts_with("/api/admin/hf/source/")
             || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
             || path.starts_with("/api/identity/")
@@ -232,6 +240,7 @@ mod tests {
         assert!(is_exempt_request("/setup", &get));
         assert!(is_exempt_request("/static/css/style.css", &get));
         assert!(is_exempt_request("/static/js/app.js", &get));
+        assert!(is_exempt_request("/favicon.ico", &get));
         // Read-only dashboard endpoints — GET exempt
         assert!(is_exempt_request("/api/admin/stats", &get));
         assert!(is_exempt_request("/api/admin/config", &get));
@@ -243,6 +252,7 @@ mod tests {
         assert!(is_exempt_request("/api/admin/hf/probe", &get));
         assert!(is_exempt_request("/api/admin/network-map", &get));
         assert!(is_exempt_request("/api/admin/network-code", &get));
+        assert!(is_exempt_request("/api/admin/schedule", &get));
         assert!(is_exempt_request("/api/identity/nickname", &get));
         assert!(is_exempt_request("/api/pool/state", &get));
     }
