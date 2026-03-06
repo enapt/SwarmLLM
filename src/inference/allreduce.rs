@@ -283,4 +283,90 @@ mod tests {
         // Delivering again should fail (already consumed)
         assert!(!registry.deliver(resp));
     }
+
+    #[test]
+    fn test_allreduce_collector_four_ranks() {
+        let mut collector = TpAllReduceCollector::new(4);
+        let request_id = Uuid::new_v4();
+
+        // 4 ranks each contributing [rank, rank, rank]
+        for rank in 0..4u32 {
+            let val = rank as f32;
+            let raw: Vec<u8> = [val, val, val]
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect();
+            let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
+            let req = TpAllReduceRequest {
+                request_id,
+                layer_idx: 0,
+                tp_rank: rank,
+                tp_size: 4,
+                partial_data: compressed,
+                shape: vec![1, 1, 3],
+                op: AllReduceOp::Sum,
+            };
+            let all = collector.insert(req, None);
+            assert_eq!(all, rank == 3); // only last one completes
+        }
+
+        let (reduced, _) = collector.reduce_sum().unwrap();
+        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
+        let vals: Vec<f32> = dec
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        // 0+1+2+3 = 6.0
+        assert_eq!(vals, vec![6.0, 6.0, 6.0]);
+    }
+
+    #[test]
+    fn test_allreduce_collector_out_of_order() {
+        let mut collector = TpAllReduceCollector::new(3);
+        let request_id = Uuid::new_v4();
+
+        // Insert rank 2, then 0, then 1
+        for &rank in &[2u32, 0, 1] {
+            let val = (rank + 1) as f32;
+            let raw: Vec<u8> = [val]
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect();
+            let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
+            let req = TpAllReduceRequest {
+                request_id,
+                layer_idx: 7,
+                tp_rank: rank,
+                tp_size: 3,
+                partial_data: compressed,
+                shape: vec![1, 1, 1],
+                op: AllReduceOp::Sum,
+            };
+            collector.insert(req, None);
+        }
+
+        let (reduced, _) = collector.reduce_sum().unwrap();
+        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
+        let vals: Vec<f32> = dec
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        // 1+2+3 = 6.0
+        assert_eq!(vals, vec![6.0]);
+    }
+
+    #[test]
+    fn test_registry_undelivered() {
+        let registry = AllReduceRegistry::new();
+        let rid = Uuid::new_v4();
+
+        // Deliver without registering — should return false
+        let resp = TpAllReduceResponse {
+            request_id: rid,
+            layer_idx: 0,
+            reduced_data: vec![],
+            shape: vec![],
+        };
+        assert!(!registry.deliver(resp));
+    }
 }
