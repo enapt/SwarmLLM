@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{ReadableTable, TableDefinition};
+use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::error::SwarmError;
 
 /// Current database schema version. Increment when making breaking changes.
 /// Version 2: migrated from sled to redb.
-pub const DB_SCHEMA_VERSION: u32 = 2;
+/// Version 3: upgraded to redb 3.x (v3 file format).
+pub const DB_SCHEMA_VERSION: u32 = 3;
 
 /// Critical trees to check during integrity verification.
 const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];
@@ -78,11 +79,29 @@ pub struct Database {
 
 impl Database {
     /// Open (or create) the redb database at `data_dir/db.redb`.
+    ///
+    /// If the file uses an old format, it is deleted and recreated.
     pub fn open(data_dir: &Path) -> Result<Self, SwarmError> {
         let db_path = data_dir.join("db.redb");
-        let inner = redb::Database::create(&db_path).map_err(|e| {
-            SwarmError::Database(format!("Failed to open {}: {e}", db_path.display()))
-        })?;
+        let inner = match redb::Database::create(&db_path) {
+            Ok(db) => db,
+            Err(redb::DatabaseError::UpgradeRequired(version)) => {
+                tracing::warn!(
+                    old_version = version,
+                    "Old redb v{version} database found; deleting and recreating"
+                );
+                let _ = std::fs::remove_file(&db_path);
+                redb::Database::create(&db_path).map_err(|e| {
+                    SwarmError::Database(format!("Failed to create {}: {e}", db_path.display()))
+                })?
+            }
+            Err(e) => {
+                return Err(SwarmError::Database(format!(
+                    "Failed to open {}: {e}",
+                    db_path.display()
+                )));
+            }
+        };
         tracing::info!(path = %db_path.display(), "DIAG: db_open");
 
         let db = Self {

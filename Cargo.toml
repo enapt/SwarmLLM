@@ -75,7 +75,7 @@ candle-flash-attn = { version = "0.9", optional = true }
 candle-paged-attention = { path = "vendor/candle-paged-attention", optional = true }
 
 # Database
-redb = "2"
+redb = "3"
 sled = { version = "0.34", optional = true }
 
 # Concurrent state
