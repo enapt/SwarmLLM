@@ -443,8 +443,9 @@ impl BatchForwarder {
 pub struct BpeTokenizer {
     /// token string → token ID
     token_to_id: HashMap<String, u32>,
-    /// Merge pair (left, right) → merge rank (lower = higher priority)
-    merge_ranks: HashMap<(String, String), usize>,
+    /// Merge pair "left\0right" → merge rank (lower = higher priority).
+    /// Uses concatenated string key with \0 separator for zero-allocation lookups.
+    merge_ranks: HashMap<String, usize>,
     /// Byte → GPT-2 unicode character mapping
     byte_encoder: [char; 256],
     /// GPT-2 unicode char → byte reverse mapping
@@ -472,12 +473,16 @@ impl BpeTokenizer {
             token_to_id.insert(tok.clone(), i as u32);
         }
 
-        // Build merge rank lookup: (left, right) → rank
+        // Build merge rank lookup: "left\0right" → rank (zero-alloc lookups via reusable buffer)
         let mut merge_ranks = HashMap::with_capacity(merges_raw.len());
         for (rank, line) in merges_raw.iter().enumerate() {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             if parts.len() == 2 {
-                merge_ranks.insert((parts[0].to_string(), parts[1].to_string()), rank);
+                let mut key = String::with_capacity(parts[0].len() + 1 + parts[1].len());
+                key.push_str(parts[0]);
+                key.push('\0');
+                key.push_str(parts[1]);
+                merge_ranks.insert(key, rank);
             }
         }
 
@@ -638,14 +643,19 @@ impl BpeTokenizer {
 
         // Apply BPE merges using the standard algorithm:
         // Repeatedly find the highest-priority (lowest rank) merge pair and apply it.
+        // Uses a reusable lookup buffer to avoid String allocations in the scan loop.
         let mut symbols = chars;
+        let mut lookup_buf = String::new();
         loop {
-            // Find the pair with the lowest merge rank
+            // Find the pair with the lowest merge rank (zero-allocation scan)
             let mut best_rank = usize::MAX;
             let mut best_idx = usize::MAX;
             for i in 0..symbols.len() - 1 {
-                let pair = (symbols[i].clone(), symbols[i + 1].clone());
-                if let Some(&rank) = self.merge_ranks.get(&pair) {
+                lookup_buf.clear();
+                lookup_buf.push_str(&symbols[i]);
+                lookup_buf.push('\0');
+                lookup_buf.push_str(&symbols[i + 1]);
+                if let Some(&rank) = self.merge_ranks.get(&lookup_buf) {
                     if rank < best_rank {
                         best_rank = rank;
                         best_idx = i;

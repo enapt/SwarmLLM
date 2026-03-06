@@ -176,18 +176,18 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    // Exempt peer-forwarded requests — loopback only.
-    // In production, peers forward via HTTP to the local API server.
-    // Only trust x-swarm-forwarded from loopback to prevent external auth bypass.
-    if addr.ip().is_loopback()
-        && req
+    // Exempt internal forwarded requests authenticated with per-process secret token.
+    // Replaces the old x-swarm-forwarded header check which was guessable by any localhost process.
+    if addr.ip().is_loopback() {
+        if let Some(token) = req
             .headers()
-            .get("x-swarm-forwarded")
+            .get("x-swarm-internal-token")
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == "true")
-            .unwrap_or(false)
-    {
-        return next.run(req).await;
+        {
+            if token == state.shared_state.internal_auth_token {
+                return next.run(req).await;
+            }
+        }
     }
 
     let expected_key = &state.shared_state.api_key;

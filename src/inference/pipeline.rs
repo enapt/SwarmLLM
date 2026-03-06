@@ -684,14 +684,30 @@ impl PipelineExecutor {
                                 if let Some(ref mut st) = streamed_text {
                                     st.push_str(&text);
                                 }
-                                let _ = tx
+                                if tx
                                     .send(StreamingTokenEvent {
                                         text,
                                         finish_reason: None,
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    // Client disconnected — stop generating tokens
+                                    tracing::info!(
+                                        request_id = %request_id,
+                                        seq_num,
+                                        "Streaming client disconnected — stopping generation"
+                                    );
+                                    finish_reason = "stop".to_string();
+                                    break;
+                                }
                             }
                         }
+                    }
+
+                    // Client disconnect already set finish_reason — break outer loop
+                    if !finish_reason.is_empty() {
+                        break;
                     }
 
                     if hit_stop_string {

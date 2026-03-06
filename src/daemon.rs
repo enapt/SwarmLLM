@@ -97,6 +97,9 @@ pub struct SharedState {
     pub pool_credit_rates: DashMap<NodeId, crate::config::CreditRateConfig>,
     /// API Bearer token for authentication.
     pub api_key: String,
+    /// Per-process internal auth token for loopback forwarded requests.
+    /// Prevents localhost auth bypass via guessable headers.
+    pub internal_auth_token: String,
     /// Lock-free flag indicating a model is loaded in the llama-cpp executor.
     /// Set after `executor.load_model()` succeeds; checked by InferenceRouter
     /// to avoid locking the executor mutex just to check readiness.
@@ -389,6 +392,12 @@ impl SharedState {
             pool_tx: RwLock::new(None),
             pool_credit_rates: DashMap::new(),
             api_key,
+            internal_auth_token: {
+                use rand::RngCore;
+                let mut bytes = [0u8; 16];
+                rand::rngs::OsRng.fill_bytes(&mut bytes);
+                hex::encode(bytes)
+            },
             model_loaded: std::sync::atomic::AtomicBool::new(false),
             auto_manage_enabled: std::sync::atomic::AtomicBool::new(auto_manage_enabled),
             anti_gaming: tokio::sync::Mutex::new(crate::credit::anti_gaming::AntiGaming::new()),
@@ -1023,6 +1032,7 @@ impl Daemon {
         let inference_router = InferenceRouter::new(
             shared_state.clone(),
             router_cmd_rx,
+            router_cmd_tx.clone(),
             network_tx.clone(),
             shutdown_rx.clone(),
         );

@@ -30,7 +30,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let mut lan_rx = shared_state.lan_discovery_tx.subscribe();
     let mut update_rx = shared_state.update_tx.subscribe();
     let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
-    let push_task = tokio::spawn(async move {
+    let mut push_task = tokio::spawn(async move {
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         // Track previous shard registry snapshot for change detection
@@ -128,18 +128,30 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
         }
     });
 
-    // Read incoming messages (keep-alive + pong tracking)
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(Message::Pong(_)) => {
-                *last_pong.lock().await = tokio::time::Instant::now();
+    // Race push_task against receiver loop — either side exiting cleans up the other.
+    // Without this, if push_task exits first (sender dropped), the receiver loop blocks
+    // indefinitely waiting for the client to send a close frame.
+    let recv_loop = async {
+        while let Some(msg) = receiver.next().await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Pong(_)) => {
+                    *last_pong.lock().await = tokio::time::Instant::now();
+                }
+                _ => {}
             }
-            _ => {} // Ignore other messages
+        }
+    };
+
+    tokio::select! {
+        _ = &mut push_task => {
+            tracing::debug!("DIAG: websocket push_task exited first");
+        }
+        _ = recv_loop => {
+            push_task.abort();
+            tracing::debug!("DIAG: websocket receiver loop exited first");
         }
     }
-
-    push_task.abort();
     tracing::debug!("DIAG: websocket client disconnected");
 }
 

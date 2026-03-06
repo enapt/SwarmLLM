@@ -24,6 +24,11 @@ const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 /// Maximum cold-start wait time before returning 503 (seconds).
 const COLD_START_WAIT_SECS: u32 = 10;
 
+/// Maximum number of concurrent requests in the cold-start polling loop.
+/// Prevents unbounded task pile-up when many requests arrive for unavailable models.
+static COLD_START_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(5));
+
 // ---- Request types ----
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -704,6 +709,18 @@ pub async fn chat_completions(
 
         // Cold-start wait: shard announcements may still be propagating.
         // Poll for up to 10 seconds before giving up.
+        // Semaphore prevents unbounded pile-up under burst traffic.
+        let _cold_permit = match COLD_START_SEMAPHORE.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %req.model,
+                    "Cold-start wait slots full — returning 503 immediately"
+                );
+                return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
+            }
+        };
         let max_polls = COLD_START_WAIT_SECS * 2; // 500ms intervals
         for attempt in 1..=max_polls {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1326,6 +1343,7 @@ async fn router_inference_stream(
 
         // Read tokens from the pipeline as they arrive
         let mut got_finish = false;
+        let mut client_disconnected = false;
         while let Some(event) = token_rx.recv().await {
             if let Some(ref reason) = event.finish_reason {
                 got_finish = true;
@@ -1373,11 +1391,26 @@ async fn router_inference_stream(
                     tracing::warn!(
                         token_count,
                         elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                        "DIAG: SSE token delta send failed — client disconnected mid-stream"
+                        "DIAG: SSE client disconnected mid-stream — cancelling pipeline"
                     );
+                    client_disconnected = true;
                     break;
                 }
             }
+        }
+
+        // Client disconnected: drop token_rx to signal pipeline to stop generating,
+        // and skip the result_rx fallback to avoid blocking on a now-useless pipeline.
+        if client_disconnected {
+            drop(token_rx);
+            tracing::info!(
+                token_count,
+                elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                "SSE pipeline cancelled due to client disconnect"
+            );
+            // Send Done in case sse_rx is still draining
+            let _ = sse_tx.send(StreamEvent::Done).await;
+            return;
         }
 
         // Fallback: if pipeline finished without sending streaming events

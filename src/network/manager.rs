@@ -438,16 +438,36 @@ impl NetworkManager {
                     Ok(msg) => Ok(msg),
                     Err(ref seal_err) => {
                         let fallback = protocol::decode_message(&message.data);
-                        if fallback.is_ok() {
-                            tracing::debug!(
-                                seal_error = %seal_err,
-                                topic = %message.topic,
-                                source = ?message.source,
-                                data_len = message.data.len(),
-                                "DIAG: gossip decryption failed, plaintext fallback succeeded"
-                            );
+                        match &fallback {
+                            Ok(msg) => {
+                                // Only allow safe message types through plaintext fallback.
+                                // ShardAnnounce, CreditGossip, etc. require sealed gossip to
+                                // prevent unauthenticated injection attacks.
+                                let is_safe = matches!(
+                                    msg,
+                                    SwarmMessage::HealthPing { .. }
+                                        | SwarmMessage::HealthPong { .. }
+                                );
+                                if is_safe {
+                                    tracing::debug!(
+                                        seal_error = %seal_err,
+                                        source = ?message.source,
+                                        "DIAG: gossip plaintext fallback (safe message type)"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        seal_error = %seal_err,
+                                        source = ?message.source,
+                                        "Rejecting unauthenticated gossip — seal required for this message type"
+                                    );
+                                }
+                                if is_safe { fallback } else { Err(serde_json::Error::io(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "Unsealed gossip rejected for non-safe message type",
+                                ))) }
+                            }
+                            Err(_) => fallback,
                         }
-                        fallback
                     }
                 };
 

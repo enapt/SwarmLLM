@@ -87,6 +87,12 @@ pub enum RouterCommand {
     },
     /// A network message relevant to inference (LayerForward, LayerResult, etc.)
     NetworkMessage(SwarmMessage),
+    /// Update multi-turn KV-cache token count after inference completes.
+    UpdateCacheTokens {
+        session_id: String,
+        total_tokens: u32,
+        prompt: String,
+    },
 }
 
 /// The InferenceRouter is the brain of distributed inference.
@@ -112,12 +118,15 @@ pub struct InferenceRouter {
     queue_notify: Arc<tokio::sync::Notify>,
     max_batch_size: usize,
     batch_timeout: std::time::Duration,
+    /// Sender for spawned tasks to send commands back to the router (e.g., KV-cache updates).
+    self_tx: mpsc::Sender<RouterCommand>,
 }
 
 impl InferenceRouter {
     pub fn new(
         shared_state: Arc<SharedState>,
         command_rx: mpsc::Receiver<RouterCommand>,
+        command_tx: mpsc::Sender<RouterCommand>,
         network_tx: mpsc::Sender<NetworkCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
@@ -158,6 +167,7 @@ impl InferenceRouter {
             queue_notify: Arc::new(tokio::sync::Notify::new()),
             max_batch_size,
             batch_timeout,
+            self_tx: command_tx,
         }
     }
 
@@ -202,6 +212,17 @@ impl InferenceRouter {
                         }
                         Some(RouterCommand::NetworkMessage(msg)) => {
                             self.handle_network_message(msg).await;
+                        }
+                        Some(RouterCommand::UpdateCacheTokens { session_id, total_tokens, prompt }) => {
+                            if let Some(internal_id) = self.kv_cache.get_internal_id(&session_id) {
+                                self.kv_cache.update_cached_tokens(&internal_id, total_tokens);
+                                self.kv_cache.update_cached_prompt(&internal_id, prompt);
+                                tracing::debug!(
+                                    session_id,
+                                    total_tokens,
+                                    "Updated multi-turn KV-cache token count"
+                                );
+                            }
                         }
                         None => {
                             tracing::info!("Command channel closed, shutting down");
@@ -438,6 +459,12 @@ impl InferenceRouter {
                 Ok(RouterCommand::NetworkMessage(msg)) => {
                     self.handle_network_message(msg).await;
                 }
+                Ok(RouterCommand::UpdateCacheTokens { session_id, total_tokens, prompt }) => {
+                    if let Some(internal_id) = self.kv_cache.get_internal_id(&session_id) {
+                        self.kv_cache.update_cached_tokens(&internal_id, total_tokens);
+                        self.kv_cache.update_cached_prompt(&internal_id, prompt);
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -517,6 +544,7 @@ impl InferenceRouter {
         let shared_state = self.shared_state.clone();
         let network_tx = self.network_tx.clone();
         let scheduler = self.scheduler.clone();
+        let self_tx = self.self_tx.clone();
         let request = queued.request;
         let result_tx = queued.result_tx;
         let token_tx = queued.token_tx;
@@ -570,6 +598,21 @@ impl InferenceRouter {
             }
 
             finalize_request(&shared_state, &request, &output).await;
+
+            // Update multi-turn KV-cache with actual token count so subsequent
+            // turns can skip prefill via start_pos
+            if let (Some(ref session_id), Ok(ref result)) = (&request.session_id, &output) {
+                let total_tokens = result.prompt_tokens + result.completion_tokens;
+                let prompt =
+                    crate::inference::chat_template::chatml_fallback(&request.messages);
+                let _ = self_tx
+                    .send(RouterCommand::UpdateCacheTokens {
+                        session_id: session_id.clone(),
+                        total_tokens,
+                        prompt,
+                    })
+                    .await;
+            }
 
             // Remove from active pipelines
             shared_state.active_pipelines.remove(&request.id);
@@ -1134,10 +1177,9 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let _ = cmd_tx; // keep alive
         let _ = shutdown_tx;
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, cmd_tx, net_tx, shutdown_rx);
 
         // Add 3 requests for model "alpha", 2 for model "beta"
         for _ in 0..3 {
@@ -1186,7 +1228,7 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         // Add 3 requests
         for _ in 0..3 {
@@ -1225,7 +1267,7 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         // Add 5 requests all same model
         for _ in 0..5 {
@@ -1263,7 +1305,7 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, net_tx, shutdown_rx);
+        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         let batch = router.collect_batch(4);
         assert!(batch.is_empty());
