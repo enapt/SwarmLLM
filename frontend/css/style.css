@@ -108,7 +108,51 @@ a:hover { color: var(--accent-hover); }
   align-items: center;
   gap: 4px;
 }
+.model-dropdown { position: relative; }
+.model-dropdown-trigger {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 5px 10px; cursor: pointer; color: var(--text-primary);
+  font-size: 0.78rem; min-width: 140px; max-width: 220px;
+}
+.model-dropdown-trigger:hover { border-color: var(--border-light); }
+.model-dropdown-trigger span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
+.model-dropdown-arrow { font-size: 0.6rem; opacity: 0.6; flex-shrink: 0; }
+.model-dropdown-panel {
+  display: none; position: absolute; top: 100%; right: 0; margin-top: 4px;
+  background: var(--bg-secondary); border: 1px solid var(--border-light); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 1000;
+  min-width: 260px; max-width: 320px; max-height: 400px;
+  display: none; flex-direction: column;
+}
+.model-dropdown.open .model-dropdown-panel { display: flex; }
+.model-dropdown-search {
+  margin: 8px 8px 4px; padding: 6px 10px; font-size: 0.8rem;
+  background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-primary); outline: none;
+}
+.model-dropdown-search:focus { border-color: var(--accent); }
+.model-dropdown-list { overflow-y: auto; max-height: 330px; padding: 4px 0; }
+.model-dropdown-group { padding: 0; }
+.model-dropdown-group-header {
+  display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer;
+  font-size: 0.72rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em;
+  user-select: none;
+}
+.model-dropdown-group-header:hover { background: var(--bg-tertiary); }
+.model-dropdown-group-header .group-arrow { font-size: 0.55rem; transition: transform 0.15s; }
+.model-dropdown-group.collapsed .group-arrow { transform: rotate(-90deg); }
+.model-dropdown-group.collapsed .model-dropdown-group-items { display: none; }
+.model-dropdown-item {
+  padding: 6px 12px 6px 24px; cursor: pointer; font-size: 0.82rem;
+  color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.model-dropdown-item:hover { background: var(--accent); color: #fff; border-radius: 2px; }
+.model-dropdown-item.selected { background: rgba(99,102,241,0.15); }
+.model-dropdown-item.hidden { display: none; }
+.model-dropdown-empty { padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem; }
 .model-selector select {
+  display: none; /* hidden, replaced by custom dropdown */
   width: auto;
   min-width: 140px;
   max-width: 200px;
@@ -1026,6 +1070,16 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* Remote badge */
 .badge-remote { background: var(--orange); color: var(--bg-primary); font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 600; }
+
+/* Cloud provider badge & cards */
+.badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
+.model-card.cloud-model { border-left: 3px solid var(--accent); opacity: 0.9; }
+.cloud-models-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0 8px; }
+.cloud-divider-line { flex: 1; height: 1px; background: var(--border); }
+.cloud-divider-label { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; }
+.cloud-model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.cloud-model-tag { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px; font-size: 0.78rem; color: var(--text-primary); cursor: pointer; transition: all 0.15s; }
+.cloud-model-tag:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
 
 /* Unload button outline variant */
 .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }

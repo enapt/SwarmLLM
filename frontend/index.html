@@ -274,9 +274,17 @@
     </div>
     <div class="header-right">
       <div class="model-selector">
-        <select id="model-select" title="Active model">
-          <option value="">No model loaded</option>
-        </select>
+        <div class="model-dropdown" id="model-dropdown">
+          <button class="model-dropdown-trigger" id="model-dropdown-trigger" title="Active model">
+            <span id="model-dropdown-label">No model loaded</span>
+            <span class="model-dropdown-arrow">&#9662;</span>
+          </button>
+          <div class="model-dropdown-panel" id="model-dropdown-panel">
+            <input type="text" class="model-dropdown-search" id="model-dropdown-search" placeholder="Filter models..." autocomplete="off" />
+            <div class="model-dropdown-list" id="model-dropdown-list"></div>
+          </div>
+        </div>
+        <input type="hidden" id="model-select" value="" />
         <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models">+</button>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings">&#9881;</button>

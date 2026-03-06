@@ -383,7 +383,15 @@ var SwarmLLM = (function() {
       try {
         var resp = await fetch('/api/admin/models');
         var models = await resp.json();
-        dashboard.renderModels(models);
+        var cloudModels = [];
+        try {
+          var pmResp = await fetch('/api/admin/provider-models');
+          if (pmResp.ok) {
+            var pmData = await pmResp.json();
+            cloudModels = pmData.models || [];
+          }
+        } catch (e) {}
+        dashboard.renderModels(models, cloudModels);
       } catch (e) {
         ui.showBanner('error', 'Failed to load model list');
       }
@@ -480,11 +488,12 @@ var SwarmLLM = (function() {
       updateModeIndicator(data, _cachedProviderData);
     },
 
-    renderModels: function(models) {
+    renderModels: function(models, cloudModels) {
       var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
 
-      if (!models || models.length === 0) {
+      var hasCloud = cloudModels && cloudModels.length > 0;
+      if ((!models || models.length === 0) && !hasCloud) {
         list.innerHTML = '';
         empty.style.display = '';
         return;
@@ -734,6 +743,46 @@ var SwarmLLM = (function() {
 
         list.appendChild(card);
       });
+
+      // Cloud provider models — one compact card per provider
+      if (hasCloud) {
+        var providerLabels = {
+          openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+          mistral: 'Mistral', groq: 'Groq'
+        };
+        var divider = document.createElement('div');
+        divider.className = 'cloud-models-divider';
+        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Providers</span><span class="cloud-divider-line"></span>';
+        list.appendChild(divider);
+
+        // Group by provider
+        var byProvider = {};
+        cloudModels.forEach(function(cm) {
+          var p = cm.provider || 'cloud';
+          if (!byProvider[p]) byProvider[p] = [];
+          byProvider[p].push(cm);
+        });
+
+        Object.keys(byProvider).forEach(function(p) {
+          var pLabel = providerLabels[p] || p;
+          var pModels = byProvider[p];
+          var modelTags = pModels.map(function(cm) {
+            return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="Click to select ' + escapeHtml(cm.id) + '">' + escapeHtml(cm.name || cm.id) + '</span>';
+          }).join('');
+
+          var card = document.createElement('div');
+          card.className = 'model-card cloud-model';
+          card.innerHTML =
+            '<div class="model-header">' +
+              '<span class="model-name">' + escapeHtml(pLabel) + '</span>' +
+              '<span><span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
+              '<span style="color:var(--green);font-weight:600;font-size:0.8rem;margin-left:8px">Connected</span></span>' +
+            '</div>' +
+            '<div class="cloud-model-tags">' + modelTags + '</div>' +
+            '<div class="model-meta"><span style="color:var(--text-muted);font-size:0.75rem">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</span></div>';
+          list.appendChild(card);
+        });
+      }
     },
 
     /// Live-update shard cells and progress bars from WebSocket data without full re-render.
@@ -1713,6 +1762,8 @@ var SwarmLLM = (function() {
   // ========================================================================
   // Model loading + selection
   // ========================================================================
+  var _modelDropdownData = []; // [{id, name, group, provider}]
+
   async function loadModels() {
     try {
       // Fetch admin model list + provider models in parallel
@@ -1728,7 +1779,7 @@ var SwarmLLM = (function() {
         }
       } catch (e) {}
 
-      // Build set of ready model IDs (status: loaded, ready, or all shards available)
+      // Build set of ready model IDs
       var readySet = {};
       adminModels.forEach(function(m) {
         var isReady = m.status === 'loaded' || m.status === 'ready' ||
@@ -1736,75 +1787,188 @@ var SwarmLLM = (function() {
         if (isReady) readySet[m.id] = true;
       });
 
-      var sel = document.getElementById('model-select');
-      sel.innerHTML = '';
-
       var readyModels = adminModels.filter(function(m) { return readySet[m.id]; });
       var hasAny = readyModels.length > 0 || providerModels.length > 0;
 
+      // Build grouped data
+      var providerLabels = {
+        openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+        mistral: 'Mistral', groq: 'Groq'
+      };
+      var groups = [];
+      _modelDropdownData = [];
+
+      if (readyModels.length > 0) {
+        var items = readyModels.map(function(m) {
+          var displayName = formatModelDisplayName(m.name || m.id);
+          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: 'local' };
+        });
+        groups.push({ key: 'local', label: 'Local / Network', items: items });
+        _modelDropdownData = _modelDropdownData.concat(items);
+      }
+
+      if (providerModels.length > 0) {
+        var byProvider = {};
+        providerModels.forEach(function(m) {
+          var p = m.provider || 'cloud';
+          if (!byProvider[p]) byProvider[p] = [];
+          byProvider[p].push(m);
+        });
+        Object.keys(byProvider).forEach(function(p) {
+          var items = byProvider[p].map(function(m) {
+            return { id: m.id, name: m.name || m.id, group: p, provider: p };
+          });
+          groups.push({ key: p, label: (providerLabels[p] || p) + ' (cloud)', items: items });
+          _modelDropdownData = _modelDropdownData.concat(items);
+        });
+      }
+
+      // Render custom dropdown
+      renderModelDropdown(groups, hasAny);
+
+      // Restore saved selection
       if (hasAny) {
         var savedModel = null;
         try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
-
-        // Add local/network models
-        if (readyModels.length > 0) {
-          var localGroup = document.createElement('optgroup');
-          localGroup.label = '\u{1F4BB} Local / Network Models';
-          readyModels.forEach(function(m) {
-            var opt = document.createElement('option');
-            opt.value = m.id;
-            var displayName = formatModelDisplayName(m.name || m.id);
-            opt.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '...' : displayName;
-            opt.title = m.id;
-            localGroup.appendChild(opt);
-          });
-          sel.appendChild(localGroup);
-        }
-
-        // Add cloud provider models (grouped by provider)
-        if (providerModels.length > 0) {
-          var byProvider = {};
-          providerModels.forEach(function(m) {
-            var p = m.provider || 'cloud';
-            if (!byProvider[p]) byProvider[p] = [];
-            byProvider[p].push(m);
-          });
-          var providerLabels = {
-            openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-            mistral: 'Mistral', groq: 'Groq'
-          };
-          Object.keys(byProvider).forEach(function(p) {
-            var group = document.createElement('optgroup');
-            group.label = '\u2601\uFE0F ' + (providerLabels[p] || p) + ' (cloud)';
-            byProvider[p].forEach(function(m) {
-              var opt = document.createElement('option');
-              opt.value = m.id;
-              opt.textContent = m.name || m.id;
-              opt.title = m.id + ' \u2014 routed to ' + (providerLabels[p] || p) + ' API (not shared on network)';
-              group.appendChild(opt);
-            });
-            sel.appendChild(group);
-          });
-        }
-
-        // Restore saved selection
-        var allIds = readyModels.map(function(m) { return m.id; })
-          .concat(providerModels.map(function(m) { return m.id; }));
+        var allIds = _modelDropdownData.map(function(m) { return m.id; });
         var found = savedModel && allIds.indexOf(savedModel) !== -1;
-        currentModel = found ? savedModel : allIds[0];
-        sel.value = currentModel;
-      } else if (adminModels.length > 0) {
-        currentModel = '';
-        sel.innerHTML = '<option value="" disabled>No models ready</option>';
+        selectModelDropdown(found ? savedModel : allIds[0]);
       } else {
         currentModel = '';
-        sel.innerHTML = '<option value="">No model loaded</option>';
+        updateModelDropdownLabel('No model loaded');
       }
+
       syncMobileModelSelect();
       updateChatAvailability(hasAny);
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
+  }
+
+  function renderModelDropdown(groups, hasAny) {
+    var list = document.getElementById('model-dropdown-list');
+    if (!list) return;
+    list.innerHTML = '';
+
+    if (!hasAny) {
+      list.innerHTML = '<div class="model-dropdown-empty">No models available</div>';
+      return;
+    }
+
+    groups.forEach(function(g) {
+      var groupEl = document.createElement('div');
+      groupEl.className = 'model-dropdown-group';
+      groupEl.setAttribute('data-group', g.key);
+
+      var header = document.createElement('div');
+      header.className = 'model-dropdown-group-header';
+      header.innerHTML = '<span class="group-arrow">&#9662;</span> ' + escapeHtml(g.label) + ' <span style="opacity:0.5;font-weight:400">(' + g.items.length + ')</span>';
+      header.addEventListener('click', function() {
+        groupEl.classList.toggle('collapsed');
+      });
+      groupEl.appendChild(header);
+
+      var itemsEl = document.createElement('div');
+      itemsEl.className = 'model-dropdown-group-items';
+      g.items.forEach(function(item) {
+        var el = document.createElement('div');
+        el.className = 'model-dropdown-item';
+        el.setAttribute('data-value', item.id);
+        el.setAttribute('data-search', (item.name + ' ' + item.id).toLowerCase());
+        el.textContent = item.name;
+        el.title = item.id;
+        el.addEventListener('click', function() {
+          selectModelDropdown(item.id);
+          closeModelDropdown();
+        });
+        itemsEl.appendChild(el);
+      });
+      groupEl.appendChild(itemsEl);
+      list.appendChild(groupEl);
+    });
+  }
+
+  function selectModelDropdown(modelId) {
+    currentModel = modelId;
+    document.getElementById('model-select').value = modelId;
+    try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
+
+    // Update trigger label
+    var item = _modelDropdownData.find(function(m) { return m.id === modelId; });
+    updateModelDropdownLabel(item ? item.name : modelId);
+
+    // Update selected state
+    var items = document.querySelectorAll('#model-dropdown-list .model-dropdown-item');
+    items.forEach(function(el) {
+      el.classList.toggle('selected', el.getAttribute('data-value') === modelId);
+    });
+  }
+
+  function updateModelDropdownLabel(text) {
+    var label = document.getElementById('model-dropdown-label');
+    if (label) label.textContent = text;
+  }
+
+  function closeModelDropdown() {
+    var dd = document.getElementById('model-dropdown');
+    if (dd) dd.classList.remove('open');
+  }
+
+  function initModelDropdown() {
+    var trigger = document.getElementById('model-dropdown-trigger');
+    var dd = document.getElementById('model-dropdown');
+    var search = document.getElementById('model-dropdown-search');
+    if (!trigger || !dd) return;
+
+    trigger.addEventListener('click', function(e) {
+      e.stopPropagation();
+      dd.classList.toggle('open');
+      if (dd.classList.contains('open') && search) {
+        search.value = '';
+        filterModelDropdown('');
+        setTimeout(function() { search.focus(); }, 50);
+      }
+    });
+
+    // Filter on search input
+    if (search) {
+      search.addEventListener('input', function() {
+        filterModelDropdown(search.value);
+      });
+      search.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { closeModelDropdown(); }
+        if (e.key === 'Enter') {
+          // Select first visible item
+          var first = document.querySelector('#model-dropdown-list .model-dropdown-item:not(.hidden)');
+          if (first) {
+            selectModelDropdown(first.getAttribute('data-value'));
+            closeModelDropdown();
+          }
+        }
+      });
+    }
+
+    // Close on outside click
+    document.addEventListener('click', function(e) {
+      if (!dd.contains(e.target)) closeModelDropdown();
+    });
+  }
+
+  function filterModelDropdown(query) {
+    var q = query.toLowerCase().trim();
+    var items = document.querySelectorAll('#model-dropdown-list .model-dropdown-item');
+    items.forEach(function(el) {
+      var match = !q || el.getAttribute('data-search').indexOf(q) !== -1;
+      el.classList.toggle('hidden', !match);
+    });
+    // Auto-expand groups with matches, collapse empty ones
+    var groups = document.querySelectorAll('#model-dropdown-list .model-dropdown-group');
+    groups.forEach(function(g) {
+      var visibleItems = g.querySelectorAll('.model-dropdown-item:not(.hidden)');
+      if (q) {
+        g.classList.toggle('collapsed', visibleItems.length === 0);
+      }
+    });
   }
 
   async function requestModel(modelId) {
@@ -1823,23 +1987,7 @@ var SwarmLLM = (function() {
   }
 
   function selectModel(modelId) {
-    currentModel = modelId;
-    try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
-    var sel = document.getElementById('model-select');
-    if (sel) {
-      // Ensure model is in the dropdown
-      var found = false;
-      for (var i = 0; i < sel.options.length; i++) {
-        if (sel.options[i].value === modelId) { found = true; break; }
-      }
-      if (!found) {
-        var opt = document.createElement('option');
-        opt.value = modelId;
-        opt.textContent = modelId.length > 30 ? modelId.substring(0, 30) + '...' : modelId;
-        sel.appendChild(opt);
-      }
-      sel.value = modelId;
-    }
+    selectModelDropdown(modelId);
     ui.showBanner('success', 'Model selected: ' + modelId);
     // Refresh model list from server
     loadModels();
@@ -3155,6 +3303,9 @@ var SwarmLLM = (function() {
       var selectId = target.getAttribute('data-select-model');
       if (selectId) { selectModel(selectId); return; }
 
+      var cloudId = target.getAttribute('data-select-cloud');
+      if (cloudId) { selectModelDropdown(cloudId); ui.showBanner('success', 'Model selected: ' + cloudId); return; }
+
       var cancelId = target.getAttribute('data-cancel-download');
       if (cancelId) { cancelDownload(cancelId); return; }
 
@@ -3240,24 +3391,15 @@ var SwarmLLM = (function() {
   // Mobile Model Selector Sync
   // ========================================================================
   function initMobileModelSync() {
-    var desktop = document.getElementById('model-select');
     var mobile = document.getElementById('mobile-model-select');
     var mobileBtn = document.getElementById('btn-mobile-browse');
-    if (!desktop || !mobile) return;
 
     // Sync mobile → desktop on change
-    mobile.addEventListener('change', function() {
-      desktop.value = mobile.value;
-      currentModel = mobile.value;
-      try { localStorage.setItem('swarmllm_current_model', currentModel); } catch (e) {}
-    });
-
-    // Sync desktop → mobile on change
-    desktop.addEventListener('change', function() {
-      syncMobileModelSelect();
-      currentModel = desktop.value;
-      try { localStorage.setItem('swarmllm_current_model', currentModel); } catch (e) {}
-    });
+    if (mobile) {
+      mobile.addEventListener('change', function() {
+        selectModelDropdown(mobile.value);
+      });
+    }
 
     // Mobile browse button opens model browser
     if (mobileBtn) {
@@ -3268,11 +3410,17 @@ var SwarmLLM = (function() {
   }
 
   function syncMobileModelSelect() {
-    var desktop = document.getElementById('model-select');
     var mobile = document.getElementById('mobile-model-select');
-    if (!desktop || !mobile) return;
-    mobile.innerHTML = desktop.innerHTML;
-    mobile.value = desktop.value;
+    if (!mobile) return;
+    // Rebuild mobile select from dropdown data
+    mobile.innerHTML = '';
+    _modelDropdownData.forEach(function(m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name;
+      mobile.appendChild(opt);
+    });
+    mobile.value = currentModel;
   }
 
   // Format a raw model ID into a friendly display name
@@ -3452,6 +3600,7 @@ var SwarmLLM = (function() {
   function init() {
     bindEvents();
     initCollapsiblePanels();
+    initModelDropdown();
     initMobileModelSync();
 
     inputEl = document.getElementById('chat-input');
