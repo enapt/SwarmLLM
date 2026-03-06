@@ -424,62 +424,23 @@ impl NetworkManager {
                 message,
                 ..
             })) => {
-                // Try to unseal gossip (encrypted), then try plaintext JSON decode.
-                // This handles key mismatches between bootstrap and joining nodes
-                // as well as pre-encryption upgrade nodes.
-                let seal_result = self
+                // All gossip messages MUST be sealed with the epoch-based group key (PSK).
+                // No plaintext fallback — reject anything that fails to unseal.
+                let decoded = self
                     .shared_state
                     .gossip_sealer
                     .open(&message.data)
+                    .map_err(|e| {
+                        tracing::debug!(
+                            source = ?message.source,
+                            error = %e,
+                            "Rejecting unsealed gossip message"
+                        );
+                        e
+                    })
                     .and_then(|plaintext| {
                         protocol::decode_message(&plaintext).map_err(|e| e.into())
                     });
-                let decoded = match seal_result {
-                    Ok(msg) => Ok(msg),
-                    Err(ref seal_err) => {
-                        let fallback = protocol::decode_message(&message.data);
-                        match &fallback {
-                            Ok(msg) => {
-                                // Allow gossip messages through plaintext fallback when
-                                // the crypto session hasn't been established yet (e.g. at
-                                // startup before key exchange completes).
-                                // Only point-to-point inference messages are rejected
-                                // without a seal — gossip is self-reported and verified
-                                // at consumption time (BLAKE3 for shards, dual-sig for
-                                // credit txns).
-                                // TODO: enforce sealed gossip once session establishment
-                                // is reliably fast (pre-connection key exchange).
-                                let is_unsafe = matches!(
-                                    msg,
-                                    SwarmMessage::InferenceRequest(_)
-                                        | SwarmMessage::SealedInferenceRequest(_)
-                                        | SwarmMessage::LayerForward(_)
-                                        | SwarmMessage::LayerResult(_)
-                                        | SwarmMessage::StreamingToken(_)
-                                );
-                                if is_unsafe {
-                                    tracing::warn!(
-                                        seal_error = %seal_err,
-                                        source = ?message.source,
-                                        "Rejecting unauthenticated gossip — seal required for inference messages"
-                                    );
-                                    Err(serde_json::Error::io(std::io::Error::new(
-                                        std::io::ErrorKind::PermissionDenied,
-                                        "Unsealed gossip rejected for inference message type",
-                                    )))
-                                } else {
-                                    tracing::debug!(
-                                        seal_error = %seal_err,
-                                        source = ?message.source,
-                                        "DIAG: gossip plaintext fallback (non-inference message)"
-                                    );
-                                    fallback
-                                }
-                            }
-                            Err(_) => fallback,
-                        }
-                    }
-                };
 
                 match decoded {
                     Ok(msg) => {
@@ -1432,7 +1393,15 @@ impl NetworkManager {
 
         match protocol::encode_message(&msg) {
             Ok(data) => {
-                let publish_data = data;
+                // Always seal gossip with epoch-based group key (PSK).
+                // This prevents passive sniffing even before per-peer sessions exist.
+                let publish_data = match self.shared_state.gossip_sealer.seal(&data) {
+                    Ok(sealed) => sealed,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to seal gossip message, dropping");
+                        return;
+                    }
+                };
 
                 let gossip_topic = IdentTopic::new(topic);
                 match self
