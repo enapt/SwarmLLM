@@ -508,6 +508,10 @@ pub enum SwarmMessage {
     // Vision — distributed mmproj encoding
     VisionEncodeRequest(VisionEncodeRequest),
     VisionEncodeResponse(VisionEncodeResponse),
+
+    // Tensor Parallelism — AllReduce coordination
+    TpAllReduceRequest(TpAllReduceRequest),
+    TpAllReduceResponse(TpAllReduceResponse),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -574,6 +578,45 @@ pub struct VisionEncodeResponse {
     pub embeddings: Vec<u8>,
     pub num_tokens: u32,
     pub hidden_dim: u32,
+}
+
+/// AllReduce request: a node sends its partial tensor to be reduced.
+///
+/// Used in tensor-parallel inference where multiple nodes compute partial
+/// results for the same layer and need to sum them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TpAllReduceRequest {
+    /// Inference request this belongs to.
+    pub request_id: uuid::Uuid,
+    /// Which layer is being reduced.
+    pub layer_idx: u32,
+    /// This node's TP rank within the group.
+    pub tp_rank: u32,
+    /// Total number of TP ranks in the group.
+    pub tp_size: u32,
+    /// Zstd-compressed partial tensor data (FP32).
+    pub partial_data: Vec<u8>,
+    /// Shape of the partial tensor: [batch_size, seq_len, hidden_dim].
+    pub shape: Vec<u32>,
+    /// Reduction operation (currently only Sum).
+    pub op: AllReduceOp,
+}
+
+/// AllReduce response: the reduced (summed) tensor from the coordinator.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TpAllReduceResponse {
+    pub request_id: uuid::Uuid,
+    pub layer_idx: u32,
+    /// Zstd-compressed reduced tensor (sum of all partials).
+    pub reduced_data: Vec<u8>,
+    pub shape: Vec<u32>,
+}
+
+/// Reduction operation for tensor parallelism.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AllReduceOp {
+    /// Element-wise sum of partial tensors across TP ranks.
+    Sum,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

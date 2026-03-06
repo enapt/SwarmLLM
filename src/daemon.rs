@@ -201,6 +201,10 @@ pub struct SharedState {
     /// when the VisionEncodeResponse arrives.
     pub pending_vision_results:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::VisionEncodeResponse>>,
+    /// Pending tensor-parallel AllReduce partials, keyed by (request_id, layer_idx).
+    /// Coordinator collects partials from all TP ranks, sums them, and responds.
+    pub pending_tp_partials:
+        DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -271,6 +275,73 @@ pub struct HfProbeInfo {
     pub shard_count: u32,
     pub total_size_bytes: u64,
     pub probed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Collects partial AllReduce tensors from TP ranks for a single (request, layer).
+/// When all `tp_size` partials arrive, the coordinator sums them and responds.
+pub struct TpAllReduceCollector {
+    pub tp_size: u32,
+    /// Collected partials indexed by tp_rank.
+    pub partials: Vec<Option<crate::types::TpAllReduceRequest>>,
+    /// Sender peer bytes for responding to each rank.
+    pub sender_peers: Vec<Option<Vec<u8>>>,
+    pub created_at: std::time::Instant,
+}
+
+impl TpAllReduceCollector {
+    pub fn new(tp_size: u32) -> Self {
+        Self {
+            tp_size,
+            partials: vec![None; tp_size as usize],
+            sender_peers: vec![None; tp_size as usize],
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Insert a partial. Returns true when all partials have arrived.
+    pub fn insert(&mut self, req: crate::types::TpAllReduceRequest, sender_peer: Option<Vec<u8>>) -> bool {
+        let rank = req.tp_rank as usize;
+        if rank < self.partials.len() {
+            self.sender_peers[rank] = sender_peer;
+            self.partials[rank] = Some(req);
+        }
+        self.partials.iter().all(|p| p.is_some())
+    }
+
+    /// Sum all partial tensors (f32) and return the reduced bytes + shape.
+    pub fn reduce_sum(&self) -> Result<(Vec<u8>, Vec<u32>), crate::error::SwarmError> {
+        let first = self.partials[0].as_ref().unwrap();
+        let shape = first.shape.clone();
+        let elem_count: usize = shape.iter().map(|&s| s as usize).product();
+
+        // Decompress first partial
+        let decompressed = zstd::decode_all(std::io::Cursor::new(&first.partial_data))
+            .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+        let mut sum = vec![0.0f32; elem_count];
+        if decompressed.len() == elem_count * 4 {
+            for (i, chunk) in decompressed.chunks_exact(4).enumerate() {
+                sum[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+        }
+
+        // Add remaining partials
+        for partial in &self.partials[1..] {
+            let req = partial.as_ref().unwrap();
+            let dec = zstd::decode_all(std::io::Cursor::new(&req.partial_data))
+                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+            if dec.len() == elem_count * 4 {
+                for (i, chunk) in dec.chunks_exact(4).enumerate() {
+                    sum[i] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                }
+            }
+        }
+
+        // Compress reduced result
+        let raw: Vec<u8> = sum.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1)
+            .map_err(|e| crate::error::SwarmError::Internal(format!("zstd compress: {e}")))?;
+        Ok((compressed, shape))
+    }
 }
 
 impl SharedState {
@@ -460,6 +531,7 @@ impl SharedState {
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
             pending_vision_results: DashMap::new(),
+            pending_tp_partials: DashMap::new(),
             shutdown_tx,
         });
 
@@ -2087,6 +2159,81 @@ async fn dispatch_network_messages(
                                         &exchange.ephemeral_pubkey,
                                     );
                                 }
+                            }
+                            // Tensor-parallel AllReduce: collect partial from a TP rank
+                            SwarmMessage::TpAllReduceRequest(req) => {
+                                let key = (req.request_id, req.layer_idx);
+                                let tp_size = req.tp_size;
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+
+                                // Extract sender peer bytes from the request context
+                                // (embedded by NetworkManager when receiving the rr request)
+                                let sender_peer = None; // TODO: plumb sender peer from rr handler
+
+                                let all_arrived = {
+                                    let mut entry = ss.pending_tp_partials
+                                        .entry(key)
+                                        .or_insert_with(|| TpAllReduceCollector::new(tp_size));
+                                    entry.insert(req, sender_peer)
+                                };
+
+                                if all_arrived {
+                                    // All partials collected — reduce and respond
+                                    tokio::spawn(async move {
+                                        let collector = ss.pending_tp_partials.remove(&key);
+                                        if let Some((_, collector)) = collector {
+                                            match collector.reduce_sum() {
+                                                Ok((reduced_data, shape)) => {
+                                                    let resp = crate::types::TpAllReduceResponse {
+                                                        request_id: key.0,
+                                                        layer_idx: key.1,
+                                                        reduced_data,
+                                                        shape,
+                                                    };
+                                                    // Broadcast response to all TP participants
+                                                    let msg = SwarmMessage::TpAllReduceResponse(resp);
+                                                    let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        request_id = %key.0,
+                                                        layer_idx = key.1,
+                                                        "AllReduce sum failed"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            // Tensor-parallel AllReduce response: deliver to waiting pipeline
+                            SwarmMessage::TpAllReduceResponse(ref resp) => {
+                                let _key = (resp.request_id, resp.layer_idx);
+                                // Route to pending channel if a local pipeline is waiting
+                                if let Some((_, tx)) = shared_state
+                                    .pending_layer_results
+                                    .remove(&resp.request_id)
+                                {
+                                    // The pipeline will receive this as a LayerResult with the
+                                    // reduced activations. For now, log that we got it.
+                                    tracing::debug!(
+                                        request_id = %resp.request_id,
+                                        layer_idx = resp.layer_idx,
+                                        "AllReduce response received but LayerResult routing TBD"
+                                    );
+                                    // Re-insert since we're not consuming it yet
+                                    shared_state.pending_layer_results.insert(resp.request_id, tx);
+                                }
+                                // Store for pipeline consumption via a dedicated pending map
+                                // (will be wired in C4: execute_tp_segment)
+                                tracing::debug!(
+                                    request_id = %resp.request_id,
+                                    layer_idx = resp.layer_idx,
+                                    reduced_bytes = resp.reduced_data.len(),
+                                    "AllReduce response received"
+                                );
                             }
                             // Other messages handled by NetworkManager
                             _ => {}
