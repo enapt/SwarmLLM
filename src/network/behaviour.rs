@@ -145,9 +145,9 @@ pub fn build_behaviour(
             request_response::ProtocolSupport::Full,
         )],
         // NET-C3: 30s timeout covers LAN shard transfers (256MB @ 100Mbps < 25s)
-        // and is short enough that stuck worker_stream futures clear quickly,
-        // preventing the progressive request_response handler stall seen with 300s.
-        request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
+        // 600s to accommodate CPU-only inference on large models (7B+).
+        // The vendored handler's Tokio-based watchdog handles stuck futures separately.
+        request_response::Config::default().with_request_timeout(Duration::from_secs(600)),
     );
 
     // Identify protocol

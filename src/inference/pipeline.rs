@@ -1034,7 +1034,8 @@ impl PipelineExecutor {
                     ));
                 }
 
-                let result = Self::wait_for_result(rx, request_id, idx, &segment.node_id).await;
+                let num_layers = segment.layer_range.1 - segment.layer_range.0;
+                let result = Self::wait_for_result(rx, request_id, idx, &segment.node_id, num_layers, activations.len()).await;
 
                 match result {
                     Ok(result) => {
@@ -1716,15 +1717,42 @@ impl PipelineExecutor {
         Some((hash, prefix_len))
     }
 
+    /// Compute a reasonable timeout for a remote segment based on workload.
+    ///
+    /// Prefill (large activation = many input tokens) is much slower than decode
+    /// (single token). Budget 15s/layer for prefill, 2s/layer for decode, with
+    /// a 30s floor and 600s ceiling.
+    fn compute_segment_timeout(num_layers: u32, activation_bytes: usize) -> Duration {
+        // Heuristic: activation > 100KB means prefill, otherwise decode
+        let is_prefill = activation_bytes > 100_000;
+        let per_layer_secs: u64 = if is_prefill { 15 } else { 2 };
+        let base = (num_layers as u64) * per_layer_secs;
+        let timeout = base.clamp(30, 600);
+        Duration::from_secs(timeout)
+    }
+
     /// Wait for a remote segment to return its result via the oneshot channel.
     async fn wait_for_result(
         rx: tokio::sync::oneshot::Receiver<LayerResult>,
         request_id: uuid::Uuid,
         segment_idx: usize,
         node_id: &crate::types::NodeId,
+        num_layers: u32,
+        activation_bytes: usize,
     ) -> Result<LayerResult, SwarmError> {
+        let timeout = Self::compute_segment_timeout(num_layers, activation_bytes);
         let send_time = std::time::Instant::now();
-        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        tracing::info!(
+            request_id = %request_id,
+            segment = segment_idx,
+            node = %node_id,
+            timeout_secs = timeout.as_secs(),
+            num_layers,
+            activation_bytes,
+            is_prefill = activation_bytes > 100_000,
+            "DIAG: waiting for remote segment result"
+        );
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => {
                 let elapsed = send_time.elapsed();
                 tracing::info!(
@@ -1755,11 +1783,13 @@ impl PipelineExecutor {
                     request_id = %request_id,
                     segment = segment_idx,
                     node = %node_id,
-                    timeout_secs = 30,
-                    "DIAG: segment TIMED OUT after 30s — no result received"
+                    timeout_secs = timeout.as_secs(),
+                    num_layers,
+                    activation_bytes,
+                    "DIAG: segment TIMED OUT — no result received"
                 );
                 Err(SwarmError::PipelineError(
-                    "Timed out waiting for segment result".into(),
+                    format!("Timed out waiting for segment result ({}s, {} layers)", timeout.as_secs(), num_layers),
                 ))
             }
         }
@@ -1853,8 +1883,10 @@ impl PipelineExecutor {
                 }
 
                 // Wait for standby response via the oneshot channel
+                let failed_segment = &self.assignment.segments[failed_idx];
+                let num_layers = failed_segment.layer_range.1 - failed_segment.layer_range.0;
                 let result =
-                    Self::wait_for_result(rx, request_id, failed_idx, &backup.node_id).await?;
+                    Self::wait_for_result(rx, request_id, failed_idx, &backup.node_id, num_layers, activations.len()).await?;
 
                 // Update the assignment so subsequent tokens use the standby
                 // directly, avoiding repeated failover + 30s timeout per token.

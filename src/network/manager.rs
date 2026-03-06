@@ -44,10 +44,10 @@ pub struct NetworkManager {
     buffered_gossip: Vec<(String, Vec<u8>)>,
     /// Whether relay listen has been activated for this session (at most once).
     relay_activated: bool,
-    /// Maps OutboundRequestId → (inference UUID, send time, target PeerId) for tensor forwards.
-    /// Used to notify the pipeline on OutboundFailure instead of silent 30s timeout.
-    /// The Instant is used for stale tensor cleanup (35s timeout).
-    pending_tensor_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId)>,
+    /// Maps OutboundRequestId → (inference UUID, send time, target PeerId, num_layers, activation_bytes)
+    /// for tensor forwards. Used to notify the pipeline on OutboundFailure.
+    /// The Instant + workload info are used for adaptive stale tensor cleanup.
+    pending_tensor_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -316,8 +316,13 @@ impl NetworkManager {
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
-                        for (req_id, (uuid, sent_at, target_peer)) in &self.pending_tensor_outbound {
+                        for (req_id, (uuid, sent_at, target_peer, num_layers, activation_bytes)) in &self.pending_tensor_outbound {
                             let age = now.duration_since(*sent_at);
+                            // Adaptive timeout: 15s/layer for prefill, 2s/layer for decode,
+                            // clamped to [30s, 600s]. Matches pipeline.rs logic.
+                            let is_prefill = *activation_bytes > 100_000;
+                            let per_layer = if is_prefill { 15u64 } else { 2 };
+                            let timeout_secs = ((*num_layers as u64) * per_layer).clamp(30, 600);
                             let is_rr_pending = self.swarm.behaviour()
                                 .request_response.is_pending_outbound(target_peer, req_id);
                             let is_connected = self.swarm.is_connected(target_peer);
@@ -328,12 +333,13 @@ impl NetworkManager {
                                 request_id = %uuid,
                                 %target_peer,
                                 age_secs = age.as_secs(),
+                                timeout_secs,
                                 is_rr_pending,
                                 is_connected,
                                 rr_connected,
                                 "DIAG: pending tensor forward status"
                             );
-                            if age.as_secs() > 20 {
+                            if age.as_secs() > timeout_secs {
                                 stale.push((*req_id, *uuid, *target_peer));
                             }
                         }
@@ -344,7 +350,7 @@ impl NetworkManager {
                                 ?req_id,
                                 request_id = %uuid,
                                 %target_peer,
-                                "DIAG: stale tensor forward (>20s) — notifying pipeline + disconnecting peer"
+                                "DIAG: stale tensor forward — notifying pipeline + disconnecting peer"
                             );
                             self.pending_tensor_outbound.remove(&req_id);
                             stale_peers.insert(target_peer);
@@ -352,7 +358,7 @@ impl NetworkManager {
                                 request_id: uuid,
                                 token_ids: vec![],
                                 finish_reason: Some(crate::types::NetworkFinishReason::Error(
-                                    "Tensor forward timed out (20s)".to_string(),
+                                    "Tensor forward timed out".to_string(),
                                 )),
                                 activations: vec![],
                             };
@@ -540,7 +546,7 @@ impl NetworkManager {
                     "DIAG: OutboundFailure"
                 );
                 // Check if this was a pending tensor forward — notify the pipeline
-                if let Some((inference_uuid, sent_at, _target)) = self.pending_tensor_outbound.remove(&request_id) {
+                if let Some((inference_uuid, sent_at, _target, _, _)) = self.pending_tensor_outbound.remove(&request_id) {
                     let age_ms = sent_at.elapsed().as_millis();
                     tracing::error!(
                         %peer,
@@ -978,7 +984,7 @@ impl NetworkManager {
                 self.connection_addrs.remove(&connection_id);
                 // Check if any in-flight tensor forwards are affected
                 let affected_tensors: Vec<_> =
-                    self.pending_tensor_outbound.values().map(|(u, _, _)| u.to_string()).collect();
+                    self.pending_tensor_outbound.values().map(|(u, _, _, _, _)| u.to_string()).collect();
                 tracing::warn!(
                     %peer_id, %connection_id, ?cause, remaining = num_established,
                     pending_tensor_forwards = self.pending_tensor_outbound.len(),
@@ -1561,10 +1567,12 @@ impl NetworkManager {
             .behaviour_mut()
             .request_response
             .send_request(&peer_id, req);
-        // Track OutboundRequestId → (UUID, time, peer) so we can notify pipeline on OutboundFailure
-        // and clean up stale requests.
+        // Track OutboundRequestId → (UUID, time, peer, layers, activation_size)
+        // so we can notify pipeline on OutboundFailure and compute adaptive stale timeouts.
+        let num_layers = forward.layer_range.1 - forward.layer_range.0;
+        let activation_bytes = forward.activations.len();
         self.pending_tensor_outbound
-            .insert(outbound_id, (forward.request_id, std::time::Instant::now(), peer_id));
+            .insert(outbound_id, (forward.request_id, std::time::Instant::now(), peer_id, num_layers, activation_bytes));
         // DIAG: check is_pending_outbound immediately — confirms the request was registered
         let is_rr_pending = self
             .swarm
