@@ -3094,8 +3094,8 @@ var SwarmLLM = (function() {
       // Country paths
       var codes = Object.keys(networkMap.paths);
       for (var i = 0; i < codes.length; i++) {
-        var code = codes[i];
-        var d = networkMap.paths[code];
+        var code = escapeHtml(codes[i]);
+        var d = escapeHtml(networkMap.paths[codes[i]] || '');
         svg += '<path id="region-' + code + '" d="' + d + '" fill="var(--bg-tertiary)" stroke="var(--border)" stroke-width="0.5" class="map-region" data-code="' + code + '"/>';
       }
       svg += '</svg>';
