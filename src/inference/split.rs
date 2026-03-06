@@ -127,8 +127,8 @@ impl KvCacheStore {
 
     /// Remove all cache entries for a given request_id (across all models).
     pub fn cleanup_request_id(&self, request_id: &str) {
-        self.caches
-            .retain(|key, _| !key.ends_with(&format!("\0{request_id}")));
+        let suffix = format!("\0{request_id}");
+        self.caches.retain(|key, _| !key.ends_with(&suffix));
     }
 
     /// Get the number of active cache entries.

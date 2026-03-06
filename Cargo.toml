@@ -40,11 +40,8 @@ libp2p = { version = "0.55", features = [
 ] }
 
 # HTTP server
-axum = { version = "0.7", features = ["ws", "multipart"] }
-axum-extra = { version = "0.9", features = ["typed-header"] }
-hyper = { version = "1", features = ["full"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace", "fs", "compression-gzip"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -129,9 +126,7 @@ rocm = ["llama", "llama-cpp-2/rocm"]
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
-assert_cmd = "2"
-predicates = "3"
-wiremock = "0.6"
+curve25519-dalek = "4"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
 [[test]]

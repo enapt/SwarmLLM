@@ -91,7 +91,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
                 let mut sorted: Vec<f64> = s.iter().cloned().collect();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let p50_ms = sorted[count / 2] * 1000.0;
-                let p95_ms = sorted[(count as f64 * 0.95) as usize] * 1000.0;
+                let p95_ms = sorted[((count as f64 * 0.95) as usize).min(count - 1)] * 1000.0;
                 let p99_ms = sorted[((count as f64 * 0.99) as usize).min(count - 1)] * 1000.0;
                 serde_json::json!({
                     "total_requests": state.shared_state.inference_requests_total

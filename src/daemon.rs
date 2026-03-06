@@ -2114,10 +2114,9 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
     }
 
     // 3. Generate a new 32-byte hex key
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngCore;
     let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     key = hex::encode(bytes);
 
     // Persist to DB

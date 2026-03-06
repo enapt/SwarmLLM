@@ -1120,6 +1120,7 @@ static PEER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::
 fn get_peer_client() -> &'static reqwest::Client {
     PEER_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(
                 INFERENCE_FORWARD_TIMEOUT_SECS,
             ))

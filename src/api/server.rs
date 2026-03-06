@@ -174,7 +174,7 @@ pub fn build_router(state: AppState) -> Router {
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
         // Middleware (layers run bottom-to-top: CORS first, then auth, then body limit, then handler)
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB request body limit
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB request body limit (VLM images can be 20MB+)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

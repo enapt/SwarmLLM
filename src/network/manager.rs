@@ -367,6 +367,14 @@ impl NetworkManager {
                             {
                                 tracing::warn!(error = %e, "Failed to send stale tensor error to pipeline");
                             }
+                            // Also clean up the inbound response channel for this request
+                            // to prevent unbounded memory leak on timed-out distributed inference
+                            if self.pending_tensor_channels.remove(&uuid).is_some() {
+                                tracing::debug!(
+                                    request_id = %uuid,
+                                    "Cleaned up stale pending_tensor_channel"
+                                );
+                            }
                         }
                         // Disconnect stale peers to reset the yamux session.
                         // The connection task may be stuck (handler not polled, SubstreamRequested

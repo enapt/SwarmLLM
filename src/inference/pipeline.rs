@@ -259,6 +259,9 @@ impl PipelineExecutor {
         let timeout = std::time::Duration::from_secs(120);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => {
+                self.shared_state
+                    .pending_vision_results
+                    .remove(&self.request.id);
                 tracing::info!(
                     request_id = %self.request.id,
                     num_tokens = resp.num_tokens,
@@ -307,9 +310,6 @@ impl PipelineExecutor {
             .map_err(|e| SwarmError::Inference(format!("zstd decompress vision: {e}")))?;
         // Raw bytes are FP16 LE — convert to f16 values
         let num_f16 = raw_bytes.len() / 2;
-        let f16_values: Vec<half::f16> = (0..num_f16)
-            .map(|i| half::f16::from_le_bytes([raw_bytes[i * 2], raw_bytes[i * 2 + 1]]))
-            .collect();
         // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
         // Infer hidden_dim from common sizes, fall back to sqrt-ish heuristic.
         let hidden_dim = if num_f16 % 4096 == 0 {
@@ -325,8 +325,11 @@ impl PipelineExecutor {
             )));
         };
         let num_tokens = num_f16 / hidden_dim;
-        // Convert f16 → f32 for the tensor
-        let f32_values: Vec<f32> = f16_values.iter().map(|f| f.to_f32()).collect();
+        // Convert FP16 LE bytes → f32 in a single pass (avoids intermediate Vec<f16>)
+        let f32_values: Vec<f32> = raw_bytes
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
         candle_core::Tensor::from_vec(f32_values, &[num_tokens, hidden_dim], &candle_core::Device::Cpu)
             .map_err(|e| SwarmError::Inference(format!("Vision tensor from vec: {e}")))
     }
@@ -568,9 +571,10 @@ impl PipelineExecutor {
         };
 
         // Token generation loop
+        let mut prompt_bytes_opt = Some(prompt_bytes);
         for seq_num in 0..max_tokens {
             let activations = if seq_num == 0 {
-                prompt_bytes.clone()
+                prompt_bytes_opt.take().unwrap()
             } else {
                 // For subsequent tokens, encode the last generated token ID as i64 LE bytes
                 // so the first segment can embed it directly.
@@ -787,7 +791,7 @@ impl PipelineExecutor {
                     &self.shared_state.credit_balance,
                     &self.shared_state.db,
                     total_earned,
-                    false,
+                    true,
                 )
                 .await
                 {

@@ -56,13 +56,11 @@ impl Keystore {
     }
 
     fn save_encrypted(key: &SigningKey, passphrase: &str, path: &Path) -> Result<(), SwarmError> {
-        let mut rng = rand::thread_rng();
-
-        // Generate salt and nonce
+        // Generate salt and nonce using cryptographic RNG
         let mut salt = [0u8; 16];
-        rng.fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut salt);
         let mut nonce_bytes = [0u8; 12];
-        rng.fill_bytes(&mut nonce_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
 
         // Derive encryption key with Argon2id
         let mut derived_key = [0u8; 32];

@@ -107,14 +107,14 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        tracing::info!("DIAG: codec read_request waiting for tag");
+        tracing::trace!("DIAG: codec read_request waiting for tag");
         let mut tag_buf = [0u8; 1];
         io.read_exact(&mut tag_buf).await?;
 
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
-        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_request header");
+        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_request header");
 
         if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
@@ -160,14 +160,14 @@ impl request_response::Codec for SwarmCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        tracing::info!("DIAG: codec read_response waiting for tag");
+        tracing::trace!("DIAG: codec read_response waiting for tag");
         let mut tag_buf = [0u8; 1];
         io.read_exact(&mut tag_buf).await?;
 
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
-        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_response header");
+        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response header");
 
         if len > MAX_MESSAGE_SIZE {
             return Err(io::Error::new(
@@ -178,7 +178,7 @@ impl request_response::Codec for SwarmCodec {
 
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        tracing::info!(tag = tag_buf[0], len, "DIAG: codec read_response done");
+        tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response done");
 
         match tag_buf[0] {
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
@@ -237,9 +237,9 @@ impl request_response::Codec for SwarmCodec {
             }
         };
         let frame_len = frame.len();
-        tracing::info!(frame_len, "DIAG: codec write_request start");
+        tracing::trace!(frame_len, "DIAG: codec write_request start");
         io.write_all(&frame).await?;
-        tracing::info!(frame_len, "DIAG: codec write_request done");
+        tracing::trace!(frame_len, "DIAG: codec write_request done");
         // Do NOT call io.close() here — the request_response handler manages stream
         // lifecycle (close + read_response). Closing in the codec corrupts the QUIC
         // stream state and silently prevents message delivery.
@@ -275,9 +275,9 @@ impl request_response::Codec for SwarmCodec {
             }
         };
         let frame_len = frame.len();
-        tracing::info!(frame_len, "DIAG: codec write_response start");
+        tracing::trace!(frame_len, "DIAG: codec write_response start");
         io.write_all(&frame).await?;
-        tracing::info!(frame_len, "DIAG: codec write_response done");
+        tracing::trace!(frame_len, "DIAG: codec write_response done");
         // Do NOT call io.close() here — the request_response handler manages stream
         // lifecycle. Closing in the codec corrupts QUIC stream state.
         Ok(())
