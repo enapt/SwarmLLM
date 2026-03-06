@@ -32,6 +32,8 @@ pub struct AppState {
     pub network_tx: Option<mpsc::Sender<NetworkCommand>>,
     /// Full daemon shared state for admin endpoints.
     pub shared_state: Arc<SharedState>,
+    /// IP-based rate limiter.
+    pub rate_limiter: middleware::RateLimiter,
 }
 
 /// Build the Axum router with all routes.
@@ -177,11 +179,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health/ready", get(metrics::health_ready))
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
-        // Middleware (layers run bottom-to-top: CORS first, then auth, then body limit, then handler)
+        // Middleware (layers run bottom-to-top: CORS first, then security headers, then rate limit, then auth, then body limit, then handler)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB request body limit (VLM images can be 20MB+)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::rate_limit_middleware,
         ))
         .layer(middleware::cors_layer(state.config.node.listen_port))
         .layer(axum::middleware::from_fn(middleware::security_headers))
@@ -206,6 +212,10 @@ pub async fn run_server(
         SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
 
     let state = AppState {
+        rate_limiter: middleware::RateLimiter::new(
+            config.api.rate_limit_rpm.unwrap_or(60),
+            config.api.rate_limit_admin_rpm.unwrap_or(200),
+        ),
         config,
         db,
         executor,
@@ -240,6 +250,10 @@ pub async fn run_server_with_state(
     let port = shared_state.config.node.listen_port;
     let mut shutdown_rx = shared_state.shutdown_rx();
     let state = AppState {
+        rate_limiter: middleware::RateLimiter::new(
+            shared_state.config.api.rate_limit_rpm.unwrap_or(60),
+            shared_state.config.api.rate_limit_admin_rpm.unwrap_or(200),
+        ),
         config: shared_state.config.clone(),
         db: shared_state.db.clone(),
         executor: shared_state.executor.clone(),

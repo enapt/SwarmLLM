@@ -44,6 +44,9 @@ pub(crate) struct KvCacheEntry {
     /// Per-layer KV cache. Index corresponds to layer index within the model segment.
     /// Each `KvCache` pre-allocates a buffer and appends new K/V without `Tensor::cat`.
     pub(crate) layers: Vec<Option<KvCache>>,
+    /// Per-layer SSM state for Qwen 3.5 hybrid models (delta net recurrent state + conv state).
+    /// None for non-SSM layers. Only populated for Qwen35Ssm layer variants.
+    pub(crate) ssm_states: Vec<Option<SsmState>>,
     /// When this entry was last accessed.
     pub(crate) last_accessed: std::time::Instant,
 }
@@ -82,6 +85,7 @@ impl KvCacheStore {
             .entry(key.to_string())
             .or_insert_with(|| KvCacheEntry {
                 layers: vec![None; num_layers],
+                ssm_states: vec![None; num_layers],
                 last_accessed: std::time::Instant::now(),
             })
     }
@@ -886,6 +890,10 @@ pub enum ModelArch {
     Glm4,
     /// Llama 4 Scout/Maverick — iRoPE (NoPE every 4th layer) + MoE
     Llama4,
+    /// Qwen 3.5 dense — hybrid attention + Gated Delta Network (SSM) layers
+    Qwen35,
+    /// Qwen 3.5 MoE — hybrid attention + SSM layers with mixture-of-experts FFN
+    Qwen35Moe,
     /// Architecture not recognized — falls back to Llama-like behavior
     Unknown(String),
 }
@@ -904,6 +912,8 @@ impl ModelArch {
             "deepseek2" => ModelArch::DeepSeek2,
             "glm4" => ModelArch::Glm4,
             "llama4" => ModelArch::Llama4,
+            "qwen35" => ModelArch::Qwen35,
+            "qwen35moe" | "qwen3_5moe" => ModelArch::Qwen35Moe,
             other => ModelArch::Unknown(other.to_string()),
         }
     }
@@ -912,7 +922,12 @@ impl ModelArch {
     pub fn use_rope_contiguous(&self) -> bool {
         matches!(
             self,
-            ModelArch::Qwen2 | ModelArch::DeepSeek2 | ModelArch::Glm4 | ModelArch::Llama4
+            ModelArch::Qwen2
+                | ModelArch::DeepSeek2
+                | ModelArch::Glm4
+                | ModelArch::Llama4
+                | ModelArch::Qwen35
+                | ModelArch::Qwen35Moe
         )
     }
 
@@ -939,7 +954,13 @@ impl ModelArch {
         &[
             "llama", "qwen2", "qwen3", "qwen2moe", "gemma", "gemma2",
             "phi3", "mistral", "starcoder2", "deepseek2", "glm4", "llama4",
+            "qwen35", "qwen35moe",
         ]
+    }
+
+    /// Whether this architecture uses hybrid attention + SSM (Gated Delta Network) layers.
+    pub fn is_hybrid_ssm(&self) -> bool {
+        matches!(self, ModelArch::Qwen35 | ModelArch::Qwen35Moe)
     }
 }
 
@@ -956,6 +977,8 @@ impl std::fmt::Display for ModelArch {
             ModelArch::DeepSeek2 => write!(f, "deepseek2"),
             ModelArch::Glm4 => write!(f, "glm4"),
             ModelArch::Llama4 => write!(f, "llama4"),
+            ModelArch::Qwen35 => write!(f, "qwen35"),
+            ModelArch::Qwen35Moe => write!(f, "qwen35moe"),
             ModelArch::Unknown(s) => write!(f, "{s}"),
         }
     }
@@ -1430,6 +1453,101 @@ enum LayerVariant {
         attention_norm: RmsNorm,
         ffn_norm: RmsNorm,
     },
+    /// Qwen 3.5 full-attention layer (every 4th layer)
+    Qwen35Attn {
+        weights: Qwen35AttnWeights,
+        ffn: FfnVariant,
+        attention_norm: RmsNorm,
+        post_attention_norm: RmsNorm,
+    },
+    /// Qwen 3.5 linear-attention (Gated Delta Network / SSM) layer
+    Qwen35Ssm {
+        weights: DeltaNetWeights,
+        ffn: FfnVariant,
+        attention_norm: RmsNorm,
+        post_attention_norm: RmsNorm,
+    },
+}
+
+/// Qwen 3.5 full-attention layer weights.
+/// Similar to standard attention but with output gating from Q projection.
+#[derive(Debug, Clone)]
+struct Qwen35AttnWeights {
+    /// Fused QKV + gate projection: hidden → (q_dim + k_dim + v_dim + gate_dim)
+    wqkv: Option<QMatMul>,
+    /// Separate Q/K/V projections (used when fused QKV not available)
+    wq: Option<QMatMul>,
+    wk: Option<QMatMul>,
+    wv: Option<QMatMul>,
+    wo: QMatMul,
+    /// Output gate weights (sigmoid applied before O projection)
+    attn_gate: Tensor,
+    /// Q/K head normalization (RmsNorm per-head before RoPE)
+    q_norm: Option<RmsNorm>,
+    k_norm: Option<RmsNorm>,
+    n_head: usize,
+    n_kv_head: usize,
+    head_dim: usize,
+    cos: Tensor,
+    sin: Tensor,
+    neg_inf: Tensor,
+    /// Partial RoPE: only first `rope_dim` of head_dim get rotated
+    rope_dim: usize,
+}
+
+/// Gated Delta Network (SSM) layer weights for Qwen 3.5 linear-attention layers.
+///
+/// Forward pass:
+/// 1. Project input → Q, K, V, Z (gating) via fused projection
+/// 2. Apply 1D causal convolution (conv1d with kernel_size typically 4)
+/// 3. Compute state transition: alpha = softplus(ssm_alpha + ssm_dt), beta = sigmoid(ssm_beta)
+/// 4. Run delta net scan: state = alpha * state + beta * (v ⊗ k), output = state @ q
+/// 5. Apply gated normalization: norm(output) * silu(z)
+/// 6. Project through ssm_out
+#[derive(Debug, Clone)]
+struct DeltaNetWeights {
+    /// Fused QKV+Z projection: hidden → (q_dim + k_dim + v_dim + z_dim)
+    wqkv: Option<QMatMul>,
+    /// Separate Q/K/V projections (used when fused QKV not available)
+    wq: Option<QMatMul>,
+    wk: Option<QMatMul>,
+    wv: Option<QMatMul>,
+    /// SSM state transition parameter A (decay): [hidden, conv_kernel_dim]
+    ssm_alpha: Tensor,
+    /// SSM input gate B: [hidden, conv_kernel_dim]
+    ssm_beta: Tensor,
+    /// Delta time-step parameter: enables input-dependent state transitions
+    ssm_dt: QMatMul,
+    /// 1D causal convolution kernel: [n_heads, 1, conv_kernel_dim]
+    ssm_conv1d: Tensor,
+    /// Gated output normalization
+    ssm_norm: RmsNorm,
+    /// Output projection: recurrent_dim → hidden
+    ssm_out: QMatMul,
+    /// Number of Q heads for the linear attention
+    n_head: usize,
+    /// Number of K heads (may differ from Q)
+    n_kv_head: usize,
+    /// Number of V heads (may differ from K in Qwen 3.5)
+    n_v_head: usize,
+    /// Key head dimension
+    key_head_dim: usize,
+    /// Value head dimension
+    value_head_dim: usize,
+    /// Convolution kernel size (typically 4)
+    conv_kernel_dim: usize,
+}
+
+/// Per-request SSM (delta net) recurrent state for Qwen 3.5 hybrid models.
+/// Analogous to KV-cache for attention layers, but stores conv state + recurrent state.
+#[derive(Debug, Clone)]
+pub(crate) struct SsmState {
+    /// 1D convolution buffer: [batch, n_heads * head_dim, conv_kernel_dim - 1]
+    /// Stores the last (kernel_size - 1) inputs for causal conv.
+    pub conv_state: Tensor,
+    /// Recurrent state matrix: [batch, n_kv_heads, value_head_dim, key_head_dim]
+    /// The running "memory" of the delta network.
+    pub recurrent_state: Tensor,
 }
 
 /// FFN variant for DeepSeek layers — either dense or MoE.
@@ -4772,9 +4890,9 @@ impl SplitModel {
         // Get or create the per-request cache entry, extract the layer caches,
         // then drop the DashMap guard before running the (potentially slow) forward pass.
         // Use mem::take instead of clone to avoid copying the KV cache Vec.
-        let mut layer_kv_caches: Vec<Option<KvCache>> = {
+        let (mut layer_kv_caches, mut layer_ssm_states): (Vec<Option<KvCache>>, Vec<Option<SsmState>>) = {
             let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            std::mem::take(&mut entry.layers)
+            (std::mem::take(&mut entry.layers), std::mem::take(&mut entry.ssm_states))
         };
 
         // Detect pre-populated prefix cache entries (KV already present from prefix
@@ -4877,13 +4995,19 @@ impl SplitModel {
                     layer_in =
                         (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
+                LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
+                    return Err(SwarmError::Internal(
+                        "Qwen 3.5 inference is not yet implemented".into(),
+                    ));
+                }
             }
         }
 
-        // Write the updated KV-caches back to the store (reuses cache_key — zero alloc).
+        // Write the updated KV-caches and SSM states back to the store.
         {
             let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
             entry.layers = layer_kv_caches;
+            entry.ssm_states = layer_ssm_states;
             entry.last_accessed = std::time::Instant::now();
         }
 
@@ -5006,6 +5130,13 @@ impl SplitModel {
             LayerVariant::DeepSeek { .. } => {
                 return Err(SwarmError::Internal(
                     "Tensor parallelism is not supported for DeepSeek MoE/MLA layers. \
+                     Use pipeline parallelism (shard splitting) instead."
+                        .into(),
+                ));
+            }
+            LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
+                return Err(SwarmError::Internal(
+                    "Tensor parallelism is not supported for Qwen 3.5 layers. \
                      Use pipeline parallelism (shard splitting) instead."
                         .into(),
                 ));
@@ -5393,6 +5524,11 @@ impl SplitModel {
                     };
                     batched =
                         (&ffn_out + &residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                }
+                LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
+                    return Err(SwarmError::Internal(
+                        "Qwen 3.5 batched inference is not yet implemented".into(),
+                    ));
                 }
             }
         }

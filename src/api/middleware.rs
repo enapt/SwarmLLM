@@ -1,8 +1,13 @@
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::Instant;
+
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use dashmap::DashMap;
 use tower_http::cors::CorsLayer;
 
 use crate::api::server::AppState;
@@ -59,7 +64,111 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         axum::http::header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'",
+        ),
+    );
     response
+}
+
+/// Bucket category for rate limiting — each category has its own token bucket per IP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BucketKind {
+    Api,
+    Admin,
+}
+
+/// Token-bucket rate limiter keyed by client IP address.
+///
+/// Each IP gets separate buckets for API and admin endpoints that refill
+/// at their respective `rpm` rates per minute.
+#[derive(Clone)]
+pub struct RateLimiter {
+    /// Map from (IP, bucket_kind) → (tokens_remaining, last_refill_time)
+    buckets: Arc<DashMap<(IpAddr, BucketKind), (u64, Instant)>>,
+    /// Requests per minute for normal endpoints (`/v1/`, `/api/chat`)
+    pub rpm: u64,
+    /// Requests per minute for admin endpoints (`/api/admin/`)
+    pub admin_rpm: u64,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter with the given limits.
+    pub fn new(rpm: u64, admin_rpm: u64) -> Self {
+        Self {
+            buckets: Arc::new(DashMap::new()),
+            rpm,
+            admin_rpm,
+        }
+    }
+
+    /// Try to consume one token for the given IP and path.
+    /// Returns `true` if allowed, `false` if rate-limited.
+    fn try_acquire(&self, ip: IpAddr, path: &str) -> bool {
+        let (kind, limit) = if path.starts_with("/api/admin/") {
+            (BucketKind::Admin, self.admin_rpm)
+        } else if path.starts_with("/v1/") || path.starts_with("/api/chat") {
+            (BucketKind::Api, self.rpm)
+        } else {
+            // Non-rate-limited paths (health, static, frontend)
+            return true;
+        };
+
+        let now = Instant::now();
+        let key = (ip, kind);
+        let mut entry = self.buckets.entry(key).or_insert((limit, now));
+        let (ref mut tokens, ref mut last_refill) = *entry;
+
+        // Refill tokens based on elapsed time
+        let elapsed = now.duration_since(*last_refill);
+        let refill = (elapsed.as_secs_f64() / 60.0 * limit as f64) as u64;
+        if refill > 0 {
+            *tokens = (*tokens + refill).min(limit);
+            *last_refill = now;
+        }
+
+        if *tokens > 0 {
+            *tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Rate-limiting middleware.
+///
+/// Returns HTTP 429 Too Many Requests when a client exceeds their per-minute
+/// request budget. Limits are configured via `rate_limit_rpm` (for `/v1/` and
+/// `/api/chat` endpoints) and `rate_limit_admin_rpm` (for `/api/admin/`).
+pub async fn rate_limit_middleware(
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let limiter = &state.rate_limiter;
+
+    if !limiter.try_acquire(addr.ip(), &path) {
+        tracing::warn!(
+            ip = %addr.ip(),
+            path = %path,
+            "Rate limit exceeded"
+        );
+        let body = serde_json::json!({
+            "error": {
+                "message": "Rate limit exceeded. Please slow down.",
+                "type": "rate_limit_error",
+                "code": 429
+            }
+        });
+        return (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    }
+
+    next.run(req).await
 }
 
 /// Request logging middleware using tracing.
@@ -310,5 +419,59 @@ mod tests {
             "/api/admin/models/test-model/auto-manage",
             &get
         ));
+    }
+
+    #[test]
+    fn rate_limiter_allows_within_budget() {
+        let limiter = RateLimiter::new(5, 10);
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        // First 5 requests should be allowed
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(ip, "/v1/chat/completions"));
+        }
+        // 6th request should be denied
+        assert!(!limiter.try_acquire(ip, "/v1/chat/completions"));
+    }
+
+    #[test]
+    fn rate_limiter_separate_admin_budget() {
+        let limiter = RateLimiter::new(2, 5);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        // Exhaust normal budget
+        assert!(limiter.try_acquire(ip, "/v1/models"));
+        assert!(limiter.try_acquire(ip, "/v1/models"));
+        assert!(!limiter.try_acquire(ip, "/v1/models"));
+        // Admin budget is separate — still available
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(ip, "/api/admin/stats"));
+        }
+        assert!(!limiter.try_acquire(ip, "/api/admin/stats"));
+    }
+
+    #[test]
+    fn rate_limiter_skips_non_api_paths() {
+        let limiter = RateLimiter::new(1, 1);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // Non-API paths are not rate-limited
+        for _ in 0..100 {
+            assert!(limiter.try_acquire(ip, "/health"));
+            assert!(limiter.try_acquire(ip, "/static/js/app.js"));
+            assert!(limiter.try_acquire(ip, "/admin"));
+        }
+    }
+
+    #[test]
+    fn rate_limiter_per_ip_isolation() {
+        let limiter = RateLimiter::new(2, 10);
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        // Exhaust ip1 budget
+        assert!(limiter.try_acquire(ip1, "/v1/chat/completions"));
+        assert!(limiter.try_acquire(ip1, "/v1/chat/completions"));
+        assert!(!limiter.try_acquire(ip1, "/v1/chat/completions"));
+        // ip2 still has full budget
+        assert!(limiter.try_acquire(ip2, "/v1/chat/completions"));
+        assert!(limiter.try_acquire(ip2, "/v1/chat/completions"));
+        assert!(!limiter.try_acquire(ip2, "/v1/chat/completions"));
     }
 }

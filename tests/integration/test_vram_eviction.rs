@@ -28,6 +28,10 @@ async fn spawn_test_server() -> (String, String) {
     let api_key = shared_state.api_key.clone();
 
     let state = AppState {
+        rate_limiter: swarmllm::api::middleware::RateLimiter::new(
+            config.api.rate_limit_rpm.unwrap_or(60),
+            config.api.rate_limit_admin_rpm.unwrap_or(200),
+        ),
         config,
         db,
         executor,
