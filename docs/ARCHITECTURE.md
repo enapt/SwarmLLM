@@ -236,7 +236,10 @@ The SplitModel loader detects the model architecture from GGUF metadata
 | Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
 | FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
 | Context length | 4096 (default) | 131072 | 32768 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
-| Special | — | NoPE every 4th layer | — | Logit softcap | — | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| Special | — | NoPE every 4th layer | — | Logit softcap | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| E2E verified | ✅ | — | ✅ | ✅ (Gemma2) | ✅ | — | — | — | — |
+
+> **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
 ### DeepSeek-V2/V3 MoE + MLA Support
 
@@ -270,6 +273,8 @@ SwarmLLM supports multimodal inference via `src/inference/vision.rs`:
 - **LLaVA** — CLIP vision encoder + LLM backbone, image patches projected into token space
 - **Qwen2-VL** — Native vision-language architecture with dynamic resolution
 - Images are pre-processed and encoded into vision tokens that are concatenated with text tokens before the LLM forward pass
+- **mmproj GGUF loading** — `load_from_mmproj_gguf()` loads CLIP ViT weights directly from llama.cpp-compatible mmproj GGUF files (verified with LLaVA-v1.5-7B mmproj: 577 vision tokens × 4096 LLM dim)
+- **Status**: Vision encoder load + image encoding verified; pipeline wiring (router→vision→text model) pending
 
 ### BPE Tokenizer
 
@@ -370,6 +375,7 @@ LoRA (Low-Rank Adaptation) adapters are supported via `src/model/lora.rs`:
 - Low-rank weight updates applied at inference time without modifying base model weights
 - Multiple adapters can be loaded simultaneously and selected per request
 - Adapter files stored alongside model shards in the model directory
+- **Verified** with Qwen2.5-Coder-7B + rank-16 LoRA adapter; output distribution changes confirmed
 
 ## Credit System
 
