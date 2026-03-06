@@ -2335,22 +2335,48 @@ impl PipelineExecutor {
 
             if let Some(tp_rank) = local_tp_rank {
                 // We are in the TP group — compute our partial result
-                let mut model = model_arc.lock().await;
-                let partial = model.forward_tp_layer(
-                    &current_activations,
-                    abs_layer,
-                    index_pos,
-                    tp_rank,
-                    tp_size,
-                    kv_cache_store,
-                    &req_id_str,
-                )?;
+                let partial = {
+                    let mut model = model_arc.lock().await;
+                    model.forward_tp_layer(
+                        &current_activations,
+                        abs_layer,
+                        index_pos,
+                        tp_rank,
+                        tp_size,
+                        kv_cache_store,
+                        &req_id_str,
+                    )?
+                };
 
-                // For now: if this is the only local TP participant, just use partial + residual
-                // Full AllReduce with remote nodes would send partial to each remote TP node,
-                // collect their partials, and sum. This is the local-only TP path.
-                // TODO: implement remote AllReduce for multi-node TP
-                current_activations = (partial + &residual)
+                // Compress partial tensor for AllReduce
+                let partial_bytes = split::tensor_to_bytes(&partial)
+                    .map_err(|e| SwarmError::Internal(format!("Serialize TP partial: {e}")))?;
+                let shape: Vec<u32> = partial.dims().iter().map(|&d| d as u32).collect();
+                let compressed = zstd::encode_all(std::io::Cursor::new(&partial_bytes), 1)
+                    .map_err(|e| SwarmError::Internal(format!("Compress TP partial: {e}")))?;
+
+                // AllReduce: send partial to coordinator, wait for reduced result
+                let resp = crate::inference::allreduce::allreduce_sum(
+                    &self.shared_state,
+                    &self.network_tx,
+                    &self.shared_state.allreduce_registry,
+                    request_id,
+                    abs_layer as u32,
+                    tp_group,
+                    tp_rank,
+                    compressed,
+                    shape,
+                )
+                .await?;
+
+                // Decompress reduced tensor
+                let reduced_bytes = zstd::decode_all(std::io::Cursor::new(&resp.reduced_data))
+                    .map_err(|e| SwarmError::Internal(format!("Decompress AllReduce: {e}")))?;
+                let reduced = split::bytes_to_tensor(&reduced_bytes)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize AllReduce: {e}")))?;
+
+                // Add residual connection
+                current_activations = (reduced + &residual)
                     .map_err(|e| SwarmError::Internal(format!("Residual add: {e}")))?;
             } else {
                 // We're not in the TP group — run full (non-TP) layer
