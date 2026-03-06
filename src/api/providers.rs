@@ -125,15 +125,15 @@ fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo>
 }
 
 /// Lazily-initialized shared reqwest client for provider proxying.
-static PROVIDER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 fn get_provider_client() -> &'static reqwest::Client {
-    PROVIDER_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+    &PROVIDER_CLIENT
 }
 
 /// Proxy an OpenAI-compatible chat completion request to a cloud provider.

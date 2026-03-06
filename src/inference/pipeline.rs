@@ -2395,10 +2395,8 @@ fn decode_bpe_text(text: &str) -> String {
 
 /// Reverse the GPT-2 byte-to-unicode mapping for a Unicode codepoint.
 fn gpt2_unicode_to_byte(cp: u32) -> u8 {
-    use std::sync::OnceLock;
-    static LOOKUP: OnceLock<Vec<u8>> = OnceLock::new();
-
-    let table = LOOKUP.get_or_init(|| {
+    use std::sync::LazyLock;
+    static LOOKUP: LazyLock<Vec<u8>> = LazyLock::new(|| {
         // Build the reverse mapping once: the GPT-2 encoder assigns unicode codepoints
         // to bytes that aren't in the "printable" set. The mapping is:
         // printable bytes (33-126, 161-172, 174-255) → themselves
@@ -2413,6 +2411,7 @@ fn gpt2_unicode_to_byte(cp: u32) -> u8 {
         }
         non_printable
     });
+    let table = &*LOOKUP;
 
     // non_printable[i] maps to U+0100+i
     let offset = cp.wrapping_sub(0x0100) as usize;

@@ -963,10 +963,10 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
 /// assemble a complete pipeline across multiple nodes.
 pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     // Short-lived cache (100ms TTL) to avoid repeated ModelId/ShardId allocations per API request
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<std::sync::Mutex<(String, std::time::Instant, bool)>> = OnceLock::new();
-    let cache = CACHE
-        .get_or_init(|| std::sync::Mutex::new((String::new(), std::time::Instant::now(), false)));
+    use std::sync::LazyLock;
+    static CACHE: LazyLock<std::sync::Mutex<(String, std::time::Instant, bool)>> =
+        LazyLock::new(|| std::sync::Mutex::new((String::new(), std::time::Instant::now(), false)));
+    let cache = &*CACHE;
     if let Ok(entry) = cache.lock() {
         if entry.0 == model_name && entry.1.elapsed() < std::time::Duration::from_millis(100) {
             return entry.2;
@@ -1115,18 +1115,18 @@ fn is_private_ip(ip: &str) -> bool {
 /// Forward a chat completion request to a peer's HTTP API.
 /// Lazily-initialized shared reqwest client for peer forwarding.
 /// Avoids creating a new TLS + connection pool on every request.
-static PEER_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static PEER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(
+            INFERENCE_FORWARD_TIMEOUT_SECS,
+        ))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 fn get_peer_client() -> &'static reqwest::Client {
-    PEER_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(
-                INFERENCE_FORWARD_TIMEOUT_SECS,
-            ))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+    &PEER_CLIENT
 }
 
 async fn forward_to_peer(

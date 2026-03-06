@@ -3080,11 +3080,9 @@ async fn handle_layer_forward(
                         1024
                     };
                     let num_tokens = num_f16 / hidden_dim;
-                    let f32_values: Vec<f32> = (0..num_f16)
-                        .map(|i| {
-                            half::f16::from_le_bytes([raw_bytes[i * 2], raw_bytes[i * 2 + 1]])
-                                .to_f32()
-                        })
+                    let f32_values: Vec<f32> = raw_bytes
+                        .chunks_exact(2)
+                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
                         .collect();
                     candle_core::Tensor::from_vec(
                         f32_values,
