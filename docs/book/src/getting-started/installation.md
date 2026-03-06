@@ -56,7 +56,7 @@ docker run -p 8800:8800 -v swarmllm-data:/root/.local/share/swarmllm ghcr.io/swa
 
 ### Building from Source
 
-Requires Rust 1.75+:
+Requires Rust 1.80+:
 
 ```bash
 git clone https://github.com/swarmllm/swarmllm.git

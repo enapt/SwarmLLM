@@ -205,7 +205,7 @@ docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm:cuda
 ### Building from Source
 
 ```bash
-# Requirements: Rust 1.75+, cmake (for llama.cpp, optional)
+# Requirements: Rust 1.80+, cmake (for llama.cpp, optional)
 git clone https://github.com/enapt/SwarmLLM.git
 cd SwarmLLM
 
