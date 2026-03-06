@@ -163,7 +163,7 @@ impl PatchEmbedding {
             .map_err(|e| SwarmError::Inference(format!("Weight transpose: {e}")))?;
 
         let projected = patches
-            .matmul(&weight_t)
+            .broadcast_matmul(&weight_t)
             .map_err(|e| SwarmError::Inference(format!("Patch projection: {e}")))?;
 
         let projected = projected
@@ -315,6 +315,8 @@ pub struct VisionEncoder {
     patch_embed: PatchEmbedding,
     blocks: Vec<VisionTransformerBlock>,
     final_ln: candle_nn::LayerNorm,
+    /// Optional pre-layernorm applied after patch embedding, before transformer blocks.
+    pub pre_ln: Option<candle_nn::LayerNorm>,
     config: VisionConfig,
 }
 
@@ -329,6 +331,7 @@ impl VisionEncoder {
             patch_embed,
             blocks,
             final_ln,
+            pre_ln: None,
             config,
         }
     }
@@ -339,6 +342,13 @@ impl VisionEncoder {
     /// Output: (B, num_patches + 1, vision_hidden_size) vision features
     pub fn forward(&self, images: &Tensor) -> Result<Tensor, SwarmError> {
         let mut x = self.patch_embed.forward(images)?;
+
+        // Apply pre-layernorm if present (CLIP models have this)
+        if let Some(ref pre_ln) = self.pre_ln {
+            x = pre_ln
+                .forward(&x)
+                .map_err(|e| SwarmError::Inference(format!("Vision pre_ln: {e}")))?;
+        }
 
         for (i, block) in self.blocks.iter().enumerate() {
             x = block
@@ -547,7 +557,7 @@ pub fn load_from_mmproj_gguf(
     let image_size = get_u32("clip.vision.image_size")?;
     let patch_size = get_u32("clip.vision.patch_size")?;
     let hidden_size = get_u32("clip.vision.embedding_length")? as usize;
-    let num_heads = get_u32("clip.vision.head_count")? as usize;
+    let num_heads = get_u32("clip.vision.attention.head_count")? as usize;
     let num_layers = get_u32("clip.vision.block_count")? as usize;
     // Get projection dim from mm.0.weight shape or default to hidden_size
     let projection_dim = ct
@@ -605,21 +615,70 @@ pub fn load_from_mmproj_gguf(
         }};
     }
 
+    // Layer norm epsilon from metadata (default 1e-5)
+    let ln_eps = ct
+        .metadata
+        .get("clip.vision.attention.layer_norm_epsilon")
+        .and_then(|v| v.to_f32().ok())
+        .map(|v| v as f64)
+        .unwrap_or(1e-5);
+
     // ── Patch embedding ──
-    let patch_proj_weight = load!("v.patch_embd.weight");
+    // GGUF stores conv2d weight as [kH, kW, C_in, C_out] but PatchEmbedding
+    // expects (hidden_dim, patch_dim) where patch_dim = 3 * ps * ps.
+    // We need to reshape [14, 14, 3, 1024] → (1024, 14*14*3) = (hidden, patch_dim)
+    let patch_proj_raw = load!("v.patch_embd.weight");
+    let patch_proj_weight = {
+        let dims = patch_proj_raw.dims().to_vec();
+        let total_elements: usize = dims.iter().product();
+        let ps = patch_size as usize;
+        let patch_dim = 3 * ps * ps;
+        tracing::info!(?dims, total_elements, hidden_size, patch_dim, "patch_embd.weight raw shape");
+
+        // The weight is a conv2d kernel. Regardless of how many dims candle gives us,
+        // we need to reshape to (hidden_size, patch_dim) for our manual patch projection.
+        // GGUF stores [kH, kW, C_in, C_out] which may be loaded as 2D [kH, kW*C_in*C_out]
+        // or 4D. Either way, total elements = hidden_size * patch_dim.
+        assert_eq!(
+            total_elements,
+            hidden_size * patch_dim,
+            "patch_embd size mismatch: {total_elements} vs {}",
+            hidden_size * patch_dim
+        );
+        patch_proj_raw
+            .reshape(&[hidden_size, patch_dim])
+            .map_err(|e| SwarmError::Inference(format!("patch_embd reshape: {e}")))?
+    };
     let patch_proj_bias = load_opt!("v.patch_embd.bias")
         .unwrap_or_else(|| Tensor::zeros(&[hidden_size], DType::F32, device).unwrap());
     let cls_token = load!("v.class_embd")
         .reshape(&[1, 1, hidden_size])
         .map_err(|e| SwarmError::Inference(format!("cls_reshape: {e}")))?;
-    let position_embedding = load!("v.position_embd.weight");
-    // position_embedding shape is typically (num_patches+1, hidden) — reshape to (1, N, H)
-    let num_pos = position_embedding
-        .dim(0)
-        .map_err(|e| SwarmError::Inference(format!("pos_dim0: {e}")))?;
-    let position_embedding = position_embedding
-        .reshape(&[1, num_pos, hidden_size])
-        .map_err(|e| SwarmError::Inference(format!("pos_reshape: {e}")))?;
+
+    // Position embedding: GGUF shape [hidden, num_pos] → need (1, num_pos, hidden)
+    let position_embedding_raw = load!("v.position_embd.weight");
+    let pos_dims = position_embedding_raw.dims().to_vec();
+    tracing::debug!(?pos_dims, "position_embd.weight raw shape");
+    let position_embedding = if pos_dims.len() == 2 && pos_dims[0] == hidden_size {
+        // Shape is (hidden, num_pos) — transpose to (num_pos, hidden)
+        let transposed = position_embedding_raw
+            .t()
+            .and_then(|t| t.contiguous())
+            .map_err(|e| SwarmError::Inference(format!("pos_transpose: {e}")))?;
+        let num_pos = transposed
+            .dim(0)
+            .map_err(|e| SwarmError::Inference(format!("pos_dim0: {e}")))?;
+        transposed
+            .reshape(&[1, num_pos, hidden_size])
+            .map_err(|e| SwarmError::Inference(format!("pos_reshape: {e}")))?
+    } else {
+        let num_pos = position_embedding_raw
+            .dim(0)
+            .map_err(|e| SwarmError::Inference(format!("pos_dim0: {e}")))?;
+        position_embedding_raw
+            .reshape(&[1, num_pos, hidden_size])
+            .map_err(|e| SwarmError::Inference(format!("pos_reshape: {e}")))?
+    };
 
     let patch_embed = PatchEmbedding::new(
         patch_proj_weight,
@@ -629,17 +688,26 @@ pub fn load_from_mmproj_gguf(
         patch_size as usize,
     );
 
+    // ── Pre layer norm (optional, applied before transformer blocks) ──
+    let pre_ln = if ct.tensor_infos.contains_key("v.pre_ln.weight") {
+        let w = load!("v.pre_ln.weight");
+        let b = load!("v.pre_ln.bias");
+        Some(candle_nn::LayerNorm::new(w, b, ln_eps))
+    } else {
+        None
+    };
+
     // ── Transformer blocks ──
     let mut blocks = Vec::with_capacity(num_layers);
     for i in 0..num_layers {
         // Layer norms
         let ln1_w = load!(&format!("v.blk.{i}.ln1.weight"));
         let ln1_b = load!(&format!("v.blk.{i}.ln1.bias"));
-        let ln1 = candle_nn::LayerNorm::new(ln1_w, ln1_b, 1e-5);
+        let ln1 = candle_nn::LayerNorm::new(ln1_w, ln1_b, ln_eps);
 
         let ln2_w = load!(&format!("v.blk.{i}.ln2.weight"));
         let ln2_b = load!(&format!("v.blk.{i}.ln2.bias"));
-        let ln2 = candle_nn::LayerNorm::new(ln2_w, ln2_b, 1e-5);
+        let ln2 = candle_nn::LayerNorm::new(ln2_w, ln2_b, ln_eps);
 
         // Attention — mmproj has separate Q/K/V, we concat into fused QKV
         let q_w = load!(&format!("v.blk.{i}.attn_q.weight"));
@@ -691,14 +759,24 @@ pub fn load_from_mmproj_gguf(
         ));
     }
 
-    // ── Post layer norm ──
-    let post_ln_w = load!("v.post_ln.weight");
-    let post_ln_b = load!("v.post_ln.bias");
-    let final_ln = candle_nn::LayerNorm::new(post_ln_w, post_ln_b, 1e-5);
+    // ── Post layer norm (optional — not all CLIP models have it) ──
+    let final_ln = if ct.tensor_infos.contains_key("v.post_ln.weight") {
+        let post_ln_w = load!("v.post_ln.weight");
+        let post_ln_b = load!("v.post_ln.bias");
+        candle_nn::LayerNorm::new(post_ln_w, post_ln_b, ln_eps)
+    } else {
+        // Identity-like layer norm: weight=1, bias=0
+        let ones = Tensor::ones(&[hidden_size], DType::F32, device)
+            .map_err(|e| SwarmError::Inference(format!("final_ln ones: {e}")))?;
+        let zeros = Tensor::zeros(&[hidden_size], DType::F32, device)
+            .map_err(|e| SwarmError::Inference(format!("final_ln zeros: {e}")))?;
+        candle_nn::LayerNorm::new(ones, zeros, ln_eps)
+    };
 
     tracing::info!(num_blocks = blocks.len(), "Vision encoder blocks loaded");
 
-    let encoder = VisionEncoder::new(patch_embed, blocks, final_ln, config);
+    let mut encoder = VisionEncoder::new(patch_embed, blocks, final_ln, config);
+    encoder.pre_ln = pre_ln;
 
     // ── Multimodal projection (2-layer MLP: mm.0 → GELU → mm.2) ──
     let mm0_w = load!("mm.0.weight");
