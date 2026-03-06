@@ -506,6 +506,219 @@ pub fn collect_images(messages: &[crate::types::ChatMessage]) -> Vec<&ImageData>
     messages.iter().flat_map(|m| m.images.iter()).collect()
 }
 
+// ── mmproj GGUF Loading ──
+
+/// Load a VisionModule from a LLaVA-style mmproj GGUF file.
+///
+/// The mmproj GGUF contains the CLIP ViT encoder weights and multimodal projection
+/// weights. Tensor names follow the llama.cpp convention:
+///
+/// - `v.patch_embd.weight` — patch embedding conv projection
+/// - `v.class_embd` — CLS token
+/// - `v.position_embd.weight` — positional embeddings
+/// - `v.blk.N.attn_q.weight/bias`, `v.blk.N.attn_k.weight/bias`, `v.blk.N.attn_v.weight/bias`
+/// - `v.blk.N.attn_out.weight/bias` — attention output projection
+/// - `v.blk.N.ln1.weight/bias`, `v.blk.N.ln2.weight/bias` — layer norms
+/// - `v.blk.N.ffn_down.weight/bias`, `v.blk.N.ffn_up.weight/bias` — MLP
+/// - `v.post_ln.weight/bias` — post layer norm
+/// - `mm.0.weight/bias`, `mm.2.weight/bias` — multimodal projection (2-layer MLP with GELU)
+pub fn load_from_mmproj_gguf(
+    path: &std::path::Path,
+    device: &Device,
+) -> Result<VisionModule, SwarmError> {
+    use candle_core::DType;
+
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        SwarmError::Inference(format!("Failed to open mmproj GGUF: {e}"))
+    })?;
+
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
+        SwarmError::Inference(format!("Failed to parse mmproj GGUF: {e}"))
+    })?;
+
+    // Extract vision config from GGUF metadata
+    let get_u32 = |key: &str| -> Result<u32, SwarmError> {
+        ct.metadata
+            .get(key)
+            .and_then(|v| v.to_u32().ok())
+            .ok_or_else(|| SwarmError::Inference(format!("Missing metadata: {key}")))
+    };
+
+    let image_size = get_u32("clip.vision.image_size")?;
+    let patch_size = get_u32("clip.vision.patch_size")?;
+    let hidden_size = get_u32("clip.vision.embedding_length")? as usize;
+    let num_heads = get_u32("clip.vision.head_count")? as usize;
+    let num_layers = get_u32("clip.vision.block_count")? as usize;
+    // Get projection dim from mm.0.weight shape or default to hidden_size
+    let projection_dim = ct
+        .tensor_infos
+        .get("mm.0.weight")
+        .map(|t| t.shape.dims()[0])
+        .unwrap_or(hidden_size);
+
+    // Get LLM hidden dim from mm.2.weight output shape
+    let llm_hidden_dim = ct
+        .tensor_infos
+        .get("mm.2.weight")
+        .map(|t| t.shape.dims()[0])
+        .ok_or_else(|| {
+            SwarmError::Inference("Missing mm.2.weight — cannot determine LLM hidden dim".into())
+        })?;
+
+    let config = VisionConfig {
+        image_size,
+        patch_size,
+        vision_hidden_size: hidden_size as u32,
+        vision_num_layers: num_layers as u32,
+        vision_num_heads: num_heads as u32,
+        projection_dim: projection_dim as u32,
+    };
+
+    tracing::info!(
+        image_size,
+        patch_size,
+        hidden_size,
+        num_heads,
+        num_layers,
+        projection_dim,
+        llm_hidden_dim,
+        "Loading mmproj vision encoder"
+    );
+
+    // Use a macro to avoid closure borrow issues with &mut file
+    macro_rules! load {
+        ($name:expr) => {{
+            let qt = ct
+                .tensor(&mut file, $name, device)
+                .map_err(|e| SwarmError::Inference(format!("{}: {e}", $name)))?;
+            qt.dequantize(device)
+                .map_err(|e| SwarmError::Inference(format!("{}: {e}", $name)))?
+        }};
+    }
+    macro_rules! load_opt {
+        ($name:expr) => {{
+            if ct.tensor_infos.contains_key($name) {
+                Some(load!($name))
+            } else {
+                None
+            }
+        }};
+    }
+
+    // ── Patch embedding ──
+    let patch_proj_weight = load!("v.patch_embd.weight");
+    let patch_proj_bias = load_opt!("v.patch_embd.bias")
+        .unwrap_or_else(|| Tensor::zeros(&[hidden_size], DType::F32, device).unwrap());
+    let cls_token = load!("v.class_embd")
+        .reshape(&[1, 1, hidden_size])
+        .map_err(|e| SwarmError::Inference(format!("cls_reshape: {e}")))?;
+    let position_embedding = load!("v.position_embd.weight");
+    // position_embedding shape is typically (num_patches+1, hidden) — reshape to (1, N, H)
+    let num_pos = position_embedding
+        .dim(0)
+        .map_err(|e| SwarmError::Inference(format!("pos_dim0: {e}")))?;
+    let position_embedding = position_embedding
+        .reshape(&[1, num_pos, hidden_size])
+        .map_err(|e| SwarmError::Inference(format!("pos_reshape: {e}")))?;
+
+    let patch_embed = PatchEmbedding::new(
+        patch_proj_weight,
+        patch_proj_bias,
+        cls_token,
+        position_embedding,
+        patch_size as usize,
+    );
+
+    // ── Transformer blocks ──
+    let mut blocks = Vec::with_capacity(num_layers);
+    for i in 0..num_layers {
+        // Layer norms
+        let ln1_w = load!(&format!("v.blk.{i}.ln1.weight"));
+        let ln1_b = load!(&format!("v.blk.{i}.ln1.bias"));
+        let ln1 = candle_nn::LayerNorm::new(ln1_w, ln1_b, 1e-5);
+
+        let ln2_w = load!(&format!("v.blk.{i}.ln2.weight"));
+        let ln2_b = load!(&format!("v.blk.{i}.ln2.bias"));
+        let ln2 = candle_nn::LayerNorm::new(ln2_w, ln2_b, 1e-5);
+
+        // Attention — mmproj has separate Q/K/V, we concat into fused QKV
+        let q_w = load!(&format!("v.blk.{i}.attn_q.weight"));
+        let k_w = load!(&format!("v.blk.{i}.attn_k.weight"));
+        let v_w = load!(&format!("v.blk.{i}.attn_v.weight"));
+        let qkv_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)
+            .map_err(|e| SwarmError::Inference(format!("qkv_weight_cat: {e}")))?;
+
+        let qkv_bias = if ct
+            .tensor_infos
+            .contains_key(&format!("v.blk.{i}.attn_q.bias"))
+        {
+            let q_b = load!(&format!("v.blk.{i}.attn_q.bias"));
+            let k_b = load!(&format!("v.blk.{i}.attn_k.bias"));
+            let v_b = load!(&format!("v.blk.{i}.attn_v.bias"));
+            Some(
+                Tensor::cat(&[&q_b, &k_b, &v_b], 0)
+                    .map_err(|e| SwarmError::Inference(format!("qkv_bias_cat: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        let attn_qkv = Linear::new(qkv_weight, qkv_bias);
+
+        // Attention output projection
+        let attn_out_w = load!(&format!("v.blk.{i}.attn_out.weight"));
+        let attn_out_b = load_opt!(&format!("v.blk.{i}.attn_out.bias"));
+        let attn_proj = Linear::new(attn_out_w, attn_out_b);
+
+        // MLP
+        let fc1_w = load!(&format!("v.blk.{i}.ffn_down.weight"));
+        let fc1_b = load_opt!(&format!("v.blk.{i}.ffn_down.bias"));
+        let mlp_fc1 = Linear::new(fc1_w, fc1_b);
+
+        let fc2_w = load!(&format!("v.blk.{i}.ffn_up.weight"));
+        let fc2_b = load_opt!(&format!("v.blk.{i}.ffn_up.bias"));
+        let mlp_fc2 = Linear::new(fc2_w, fc2_b);
+
+        blocks.push(VisionTransformerBlock::new(
+            ln1,
+            attn_qkv,
+            attn_proj,
+            ln2,
+            mlp_fc1,
+            mlp_fc2,
+            num_heads,
+            hidden_size,
+        ));
+    }
+
+    // ── Post layer norm ──
+    let post_ln_w = load!("v.post_ln.weight");
+    let post_ln_b = load!("v.post_ln.bias");
+    let final_ln = candle_nn::LayerNorm::new(post_ln_w, post_ln_b, 1e-5);
+
+    tracing::info!(num_blocks = blocks.len(), "Vision encoder blocks loaded");
+
+    let encoder = VisionEncoder::new(patch_embed, blocks, final_ln, config);
+
+    // ── Multimodal projection (2-layer MLP: mm.0 → GELU → mm.2) ──
+    let mm0_w = load!("mm.0.weight");
+    let mm0_b = load_opt!("mm.0.bias");
+    let mm2_w = load!("mm.2.weight");
+    let mm2_b = load_opt!("mm.2.bias");
+
+    let proj1 = Linear::new(mm0_w, mm0_b);
+    let proj2 = Linear::new(mm2_w, mm2_b);
+    let projection = MultimodalProjection::new(proj1, proj2, llm_hidden_dim);
+
+    tracing::info!("VisionModule loaded from mmproj GGUF");
+
+    Ok(VisionModule {
+        encoder,
+        projection,
+        device: device.clone(),
+    })
+}
+
 // ── Tests ──
 
 #[cfg(test)]
