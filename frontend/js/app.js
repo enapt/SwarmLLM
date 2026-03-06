@@ -120,6 +120,7 @@ var SwarmLLM = (function() {
       chat.saveSessions();
       chat.renderSessionList();
       chat.renderMessages();
+      chat.updateChatHeader();
       ui.switchTab('chat');
     },
 
@@ -129,6 +130,7 @@ var SwarmLLM = (function() {
       localStorage.setItem(ACTIVE_SESSION_KEY, id);
       chat.renderSessionList();
       chat.renderMessages();
+      chat.updateChatHeader();
     },
 
     deleteSession: function(id, e) {
@@ -161,18 +163,64 @@ var SwarmLLM = (function() {
           var d = new Date(s.created);
           timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
-        var modelStr = s.model ? formatModelDisplayName(s.model) : '';
-        var metaLine = (timeStr || modelStr) ? '<span class="session-meta">' + escapeHtml(timeStr) + (modelStr ? ' \u00b7 ' + escapeHtml(modelStr) : '') + '</span>' : '';
-        div.innerHTML = '<div class="session-info"><span class="session-title">' + escapeHtml(title) + '</span>' + metaLine + '</div>' +
+        var modelBadge = s.model ? '<span class="session-model-badge" title="' + escapeHtml(s.model) + '">' + escapeHtml(formatModelDisplayName(s.model)) + '</span>' : '';
+        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
+        var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
+        div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
           '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
         list.appendChild(div);
       });
+    },
+
+    renameSession: function(id, titleEl) {
+      if (!sessions[id]) return;
+      var current = sessions[id].title;
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'session-title-input';
+      input.value = current;
+      input.maxLength = 80;
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+      var done = function() {
+        var val = input.value.trim();
+        if (val && val !== current) {
+          sessions[id].title = val;
+          chat.saveSessions();
+        }
+        chat.renderSessionList();
+        chat.updateChatHeader();
+      };
+      input.addEventListener('blur', done);
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { input.value = current; input.blur(); }
+      });
+    },
+
+    updateChatHeader: function() {
+      var header = document.getElementById('chat-session-header');
+      if (!header) return;
+      if (!currentSessionId || !sessions[currentSessionId]) {
+        header.classList.remove('visible');
+        header.innerHTML = '';
+        return;
+      }
+      var s = sessions[currentSessionId];
+      var modelName = s.model ? formatModelDisplayName(s.model) : 'No model';
+      header.classList.add('visible');
+      header.innerHTML =
+        '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
+        '<span class="chat-session-model">' + escapeHtml(modelName) + '</span>';
     },
 
     renderMessages: function() {
       var container = document.getElementById('chat-messages');
       var empty = document.getElementById('chat-empty');
       container.innerHTML = '';
+
+      chat.updateChatHeader();
 
       if (!currentSessionId || !sessions[currentSessionId]) {
         container.appendChild(createEmptyState());
@@ -232,6 +280,10 @@ var SwarmLLM = (function() {
       var startTime = performance.now();
 
       var model = document.getElementById('model-select').value || currentModel || 'local';
+      // Update session model to reflect what's actually being used
+      session.model = model;
+      chat.updateChatHeader();
+      chat.renderSessionList();
       // Truncate chat history to last 50 messages to prevent context overflow
       var recentMessages = session.messages.slice(-50).map(function(m) {
         return { role: m.role, content: m.content };
@@ -3298,6 +3350,17 @@ var SwarmLLM = (function() {
       }
     });
 
+    // Double-click to rename session titles in sidebar
+    document.addEventListener('dblclick', function(e) {
+      var target = e.target;
+      var renameId = target.getAttribute('data-rename-session');
+      if (renameId) {
+        e.stopPropagation();
+        e.preventDefault();
+        chat.renameSession(renameId, target);
+      }
+    });
+
     // Delegated handlers for dynamically generated elements (CSP-safe)
     document.addEventListener('click', function(e) {
       var target = e.target;
@@ -3311,6 +3374,12 @@ var SwarmLLM = (function() {
       // Session delete button
       var delId = target.getAttribute('data-delete-session');
       if (delId) { e.stopPropagation(); chat.deleteSession(delId, e); return; }
+
+      // Chat header title click to rename
+      if (target.id === 'chat-header-title' && currentSessionId) {
+        chat.renameSession(currentSessionId, target);
+        return;
+      }
 
       // Model action buttons
       var selectId = target.getAttribute('data-select-model');
