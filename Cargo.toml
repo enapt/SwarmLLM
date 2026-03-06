@@ -9,7 +9,7 @@ repository = "https://github.com/enapt/SwarmLLM"
 homepage = "https://github.com/enapt/SwarmLLM"
 keywords = ["llm", "p2p", "inference", "distributed", "decentralized"]
 categories = ["network-programming", "science"]
-rust-version = "1.75"
+rust-version = "1.80"
 
 [[bin]]
 name = "swarmllm"
@@ -97,9 +97,9 @@ base64 = "0.22"
 dirs = "6"
 bytes = "1"
 include_dir = "0.7"
-sysinfo = "0.33"
+sysinfo = "0.38"
 half = "2"
-fancy-regex = "0.14"
+fancy-regex = "0.17"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
