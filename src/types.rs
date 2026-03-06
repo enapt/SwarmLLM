@@ -111,6 +111,13 @@ pub enum ModelArchitecture {
         num_experts: u32,
         experts_per_token: u32,
     },
+    /// Qwen 3.5 dense: hybrid attention + Gated Delta Network (SSM) layers.
+    Qwen35,
+    /// Qwen 3.5 MoE: hybrid attention + SSM with mixture-of-experts FFN.
+    Qwen35Moe {
+        num_experts: u32,
+        experts_per_token: u32,
+    },
 }
 
 /// Vision encoder configuration for multimodal models.

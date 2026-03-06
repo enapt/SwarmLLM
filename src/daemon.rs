@@ -3378,6 +3378,11 @@ fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitect
     };
     match arch_str.as_str() {
         "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
+        "qwen35" => crate::types::ModelArchitecture::Qwen35,
+        "qwen35moe" | "qwen3_5moe" => crate::types::ModelArchitecture::Qwen35Moe {
+            num_experts: 0,
+            experts_per_token: 0,
+        },
         "mistral" => crate::types::ModelArchitecture::Mistral,
         "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
         // All remaining supported transformer architectures map to Llama
