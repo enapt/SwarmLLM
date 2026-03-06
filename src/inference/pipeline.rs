@@ -1465,18 +1465,88 @@ impl PipelineExecutor {
             .as_ref()
             .and_then(|id| self.shared_state.adapter_registry.get(id));
 
+        // VLM: encode images if present on first segment prefill
+        let all_images: Vec<&crate::types::ImageData> =
+            crate::inference::vision::collect_images(&self.request.messages);
+        let vision_embeddings = if is_first
+            && sequence_num == 0
+            && !all_images.is_empty()
+        {
+            // Look up or load vision module for this model
+            let model_id = &segment.shard_id.model_id;
+            let vision_mod = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
+                Some(vm.value().clone())
+            } else {
+                // Try to load mmproj.gguf from the model directory
+                let shard_store =
+                    crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+                let model_dir = shard_store.models_dir().join(&model_id.0);
+                let mmproj_path = model_dir.join("mmproj.gguf");
+                if mmproj_path.exists() {
+                    let device = split_model.device().clone();
+                    match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device) {
+                        Ok(vm) => {
+                            let vm = std::sync::Arc::new(vm);
+                            self.shared_state
+                                .vision_modules
+                                .insert(model_id.clone(), vm.clone());
+                            tracing::info!(model = %model_id, "Loaded VLM vision module from mmproj.gguf");
+                            Some(vm)
+                        }
+                        Err(e) => {
+                            tracing::warn!(model = %model_id, error = %e, "Failed to load mmproj.gguf");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(vm) = vision_mod {
+                let owned_images: Vec<crate::types::ImageData> =
+                    all_images.iter().map(|img| (*img).clone()).collect();
+                let embeddings = tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
+                tracing::info!(
+                    request_id = %self.request.id,
+                    image_count = owned_images.len(),
+                    embedding_shape = ?embeddings.dims(),
+                    "VLM: encoded images for multimodal forward"
+                );
+                Some(embeddings)
+            } else {
+                tracing::warn!(
+                    request_id = %self.request.id,
+                    "Request has images but no VLM module available — ignoring images"
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         // Run the forward pass with per-request KV-cache isolation.
         // CRITICAL: block_in_place() tells Tokio to move other tasks off this thread
         // before the CPU-bound forward pass (~700-1000ms). Without this, the blocked
         // thread starves yamux, preventing outbound substream opens for tensor forwards.
         let output = tokio::task::block_in_place(|| {
-            split_model.forward_with_lora(
-                &input_tensor,
-                effective_index_pos,
-                &self.shared_state.kv_cache_store,
-                &request_id_str,
-                lora_adapter.as_deref(),
-            )
+            if let Some(ref vis_emb) = vision_embeddings {
+                split_model.forward_multimodal(
+                    &input_tensor,
+                    effective_index_pos,
+                    &self.shared_state.kv_cache_store,
+                    &request_id_str,
+                    Some(vis_emb),
+                )
+            } else {
+                split_model.forward_with_lora(
+                    &input_tensor,
+                    effective_index_pos,
+                    &self.shared_state.kv_cache_store,
+                    &request_id_str,
+                    lora_adapter.as_deref(),
+                )
+            }
         })?;
 
         // Track stats (credit persistence is batched at end of request)

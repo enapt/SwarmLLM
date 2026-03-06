@@ -188,6 +188,10 @@ pub struct SharedState {
     /// peer from shard_holders but the peer_registry entry was removed on disconnect
     /// and hasn't been re-created by identify yet.
     pub peer_id_map: DashMap<NodeId, Vec<u8>>,
+    /// Loaded VLM vision modules (mmproj encoders) keyed by model ID.
+    /// Populated when an mmproj.gguf is found alongside a model's shards.
+    pub vision_modules:
+        DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -436,6 +440,7 @@ impl SharedState {
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
             peer_id_map: DashMap::new(),
+            vision_modules: DashMap::new(),
             shutdown_tx,
         });
 

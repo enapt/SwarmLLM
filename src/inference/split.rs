@@ -5206,6 +5206,11 @@ impl SplitModel {
         self.max_seq_len
     }
 
+    /// Return the device this model is loaded on.
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     /// Return the EOS token IDs loaded from GGUF metadata.
     pub fn eos_tokens(&self) -> &[u32] {
         &self.eos_tokens
