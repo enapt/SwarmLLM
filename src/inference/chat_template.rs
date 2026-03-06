@@ -597,7 +597,7 @@ pub fn vicuna_fallback(messages: &[ChatMessage]) -> String {
     let sys = messages.iter().find(|m| matches!(m.role, Role::System));
     if let Some(s) = sys {
         prompt.push_str(&s.content);
-        prompt.push_str(" ");
+        prompt.push(' ');
     }
     for msg in messages {
         match msg.role {

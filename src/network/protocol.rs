@@ -473,6 +473,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         model_id,
         layer_range,
         tp_meta: None,
+        vision_embeddings: None,
         sender_peer_bytes: None,
     })
 }
@@ -786,6 +787,7 @@ pub fn decode_layer_forward_encrypted(
         model_id,
         layer_range: (layer_start, layer_end),
         tp_meta: None,
+        vision_embeddings: None,
         sender_peer_bytes: None,
     };
 
@@ -982,6 +984,7 @@ mod tests {
             model_id: test_model_id(),
             layer_range: (0, 4),
             tp_meta: None,
+            vision_embeddings: None,
             sender_peer_bytes: None,
         };
 
@@ -1012,6 +1015,7 @@ mod tests {
                 model_id: test_model_id(),
                 layer_range: (0, 2),
                 tp_meta: None,
+                vision_embeddings: None,
                 sender_peer_bytes: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
@@ -1038,6 +1042,7 @@ mod tests {
             model_id: test_model_id(),
             layer_range: (0, 28),
             tp_meta: None,
+            vision_embeddings: None,
             sender_peer_bytes: None,
         };
 
@@ -1058,6 +1063,7 @@ mod tests {
             model_id: test_model_id(),
             layer_range: (10, 14),
             tp_meta: None,
+            vision_embeddings: None,
             sender_peer_bytes: None,
         };
 
@@ -1083,6 +1089,7 @@ mod tests {
             model_id: test_model_id(),
             layer_range: (0, 2),
             tp_meta: None,
+            vision_embeddings: None,
             sender_peer_bytes: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1240,6 +1247,7 @@ mod tests {
             model_id: test_model_id(),
             layer_range: (2, 8),
             tp_meta: None,
+            vision_embeddings: None,
             sender_peer_bytes: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();

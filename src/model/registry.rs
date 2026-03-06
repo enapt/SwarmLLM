@@ -4,7 +4,7 @@ use dashmap::DashMap;
 
 use crate::error::SwarmError;
 use crate::storage::db::Database;
-use crate::types::{ModelId, ModelManifest, NodeId, ShardId};
+use crate::types::{ModelId, ModelManifest, NodeId, ShardId, MMPROJ_SHARD_INDEX};
 
 /// Thread-safe registry of known models and shard locations.
 ///
@@ -49,6 +49,14 @@ impl ModelRegistry {
         if let Some(mut holders) = self.shard_holders.get_mut(shard_id) {
             holders.remove(node_id);
         }
+    }
+
+    /// Get nodes that hold the mmproj (vision encoder) for a model.
+    pub fn mmproj_holders(&self, model_id: &ModelId) -> Vec<NodeId> {
+        self.shard_holders(&ShardId {
+            model_id: model_id.clone(),
+            index: MMPROJ_SHARD_INDEX,
+        })
     }
 
     /// Get all nodes that hold a specific shard.
@@ -184,6 +192,7 @@ mod tests {
             publisher: NodeId([0u8; 32]),
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
+            mmproj: None,
         };
 
         registry.register_manifest(manifest.clone());
@@ -250,9 +259,81 @@ mod tests {
             publisher: NodeId([0u8; 32]),
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
+            mmproj: None,
         });
 
         assert_eq!(registry.model_count(), 1);
         assert_eq!(registry.models().len(), 1);
+    }
+
+    #[test]
+    fn sentinel_shard_is_mmproj() {
+        let shard = ShardId {
+            model_id: ModelId("test".into()),
+            index: MMPROJ_SHARD_INDEX,
+        };
+        assert!(shard.is_mmproj());
+
+        let regular = ShardId {
+            model_id: ModelId("test".into()),
+            index: 0,
+        };
+        assert!(!regular.is_mmproj());
+    }
+
+    #[test]
+    fn mmproj_for_creates_sentinel() {
+        let shard = ShardId::mmproj_for(ModelId("test".into()));
+        assert_eq!(shard.index, MMPROJ_SHARD_INDEX);
+        assert!(shard.is_mmproj());
+        assert_eq!(shard.model_id, ModelId("test".into()));
+    }
+
+    #[test]
+    fn mmproj_holders_tracking() {
+        let registry = ModelRegistry::new();
+        let model_id = ModelId("vlm".into());
+        let node_a = NodeId([1u8; 32]);
+        let node_b = NodeId([2u8; 32]);
+
+        // Initially no holders
+        assert!(registry.mmproj_holders(&model_id).is_empty());
+
+        // Register mmproj sentinel shard
+        let sentinel = ShardId::mmproj_for(model_id.clone());
+        registry.record_shard_holder(sentinel.clone(), node_a.clone());
+        assert_eq!(registry.mmproj_holders(&model_id).len(), 1);
+
+        registry.record_shard_holder(sentinel.clone(), node_b.clone());
+        assert_eq!(registry.mmproj_holders(&model_id).len(), 2);
+
+        // Remove one holder
+        registry.remove_shard_holder(&sentinel, &node_a);
+        let holders = registry.mmproj_holders(&model_id);
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0], node_b);
+    }
+
+    #[test]
+    fn shard_announce_includes_mmproj_sentinel() {
+        let registry = ModelRegistry::new();
+        let model_id = ModelId("vlm".into());
+        let node = NodeId([1u8; 32]);
+
+        // Register regular shard and mmproj sentinel
+        registry.record_shard_holder(
+            ShardId { model_id: model_id.clone(), index: 0 },
+            node.clone(),
+        );
+        registry.record_shard_holder(
+            ShardId::mmproj_for(model_id.clone()),
+            node.clone(),
+        );
+
+        let entries = registry.all_shard_entries();
+        assert_eq!(entries.len(), 2);
+
+        let has_mmproj = entries.iter().any(|(sid, _)| sid.is_mmproj());
+        assert!(has_mmproj);
     }
 }

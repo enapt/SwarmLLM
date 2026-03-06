@@ -215,6 +215,7 @@ impl AcquisitionManager {
                             publisher: NodeId([0u8; 32]),
                             publish_date: chrono::Utc::now(),
                             license: String::new(),
+                            mmproj: None,
                         },
                         status,
                         shard_bytes: HashMap::new(),

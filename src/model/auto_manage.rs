@@ -601,6 +601,39 @@ impl AutoShardManager {
                     score,
                 });
             }
+
+            // ── T7: mmproj as download candidate for VLM models ──
+            if let Some(ref mmproj_info) = manifest.mmproj {
+                let mmproj_shard_id = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: crate::types::MMPROJ_SHARD_INDEX,
+                };
+                let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
+                let mmproj_path = self
+                    .shared_state
+                    .config
+                    .node
+                    .data_dir
+                    .join("models")
+                    .join(&manifest.id.0)
+                    .join("mmproj.gguf");
+
+                if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
+                    let holder_count = mmproj_holders.len();
+                    // mmproj gets a high priority bonus — every VLM node benefits from having it
+                    let rarity_bonus = if holder_count == 0 { 10.0 } else { 3.0 / (holder_count as f64 + 1.0) };
+                    let mmproj_score = model_popularity * rarity_bonus * vram_fitness * 5.0; // 5x bonus for mmproj
+
+                    candidates.push(ShardCandidate {
+                        model_id: manifest.id.clone(),
+                        model_name: manifest.name.clone(),
+                        shard_index: crate::types::MMPROJ_SHARD_INDEX,
+                        shard_size_bytes: mmproj_info.size_bytes,
+                        holder_count,
+                        score: mmproj_score,
+                    });
+                }
+            }
         }
 
         // Sort by score descending (best candidates first)
@@ -758,6 +791,13 @@ impl AutoShardManager {
             .data_dir
             .join("models")
             .join(&candidate.model_id.0);
+
+        // ── T8: mmproj full-file download (not byte-range) ──
+        if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
+            self.trigger_mmproj_download(candidate, model_dir, permit)
+                .await;
+            return;
+        }
 
         // Check if we already have the shard file locally.
         // Guard: only treat it as complete if there is NO active download for this
@@ -1223,6 +1263,117 @@ impl AutoShardManager {
         }
     }
 
+    /// Download mmproj (vision encoder) as a full file from HuggingFace.
+    /// Unlike text shards which use byte-range downloads, mmproj is a separate GGUF file.
+    async fn trigger_mmproj_download(
+        &self,
+        candidate: &ShardCandidate,
+        model_dir: std::path::PathBuf,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) {
+        let mmproj_path = model_dir.join("mmproj.gguf");
+        if mmproj_path.exists() {
+            // Already on disk — just register the sentinel shard
+            let node_id = self.shared_state.identity.node_id().clone();
+            let shard_id = ShardId {
+                model_id: candidate.model_id.clone(),
+                index: crate::types::MMPROJ_SHARD_INDEX,
+            };
+            self.shared_state
+                .model_registry
+                .record_shard_holder(shard_id, node_id);
+            tracing::info!(model = %candidate.model_id, "mmproj already on disk, registered sentinel shard");
+            return;
+        }
+
+        // Look up mmproj_filename from HfSource
+        let mmproj_filename = self
+            .shared_state
+            .hf_sources
+            .get(&candidate.model_id)
+            .and_then(|s| s.mmproj_filename.clone());
+
+        let Some(filename) = mmproj_filename else {
+            tracing::debug!(
+                model = %candidate.model_id,
+                "No mmproj_filename in HfSource — cannot download mmproj"
+            );
+            return;
+        };
+
+        let repo_id = self
+            .shared_state
+            .hf_sources
+            .get(&candidate.model_id)
+            .map(|s| s.repo_id.clone());
+
+        let Some(repo_id) = repo_id else {
+            return;
+        };
+
+        let shared = self.shared_state.clone();
+        let model_id = candidate.model_id.clone();
+        let net_tx = self.network_tx.clone();
+
+        tracing::info!(
+            model = %model_id,
+            repo = %repo_id,
+            filename = %filename,
+            "AutoShardManager: downloading mmproj from HuggingFace"
+        );
+
+        tokio::spawn(async move {
+            let _permit = permit;
+            let (ptx, _prx) =
+                tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(32);
+
+            match crate::model::huggingface::download_model(
+                &repo_id,
+                &filename,
+                &model_dir,
+                Some(ptx),
+            )
+            .await
+            {
+                Ok(_path) => {
+                    tracing::info!(
+                        model = %model_id,
+                        "AutoShardManager: mmproj downloaded from HF"
+                    );
+                    // Register sentinel shard
+                    let node_id = shared.identity.node_id().clone();
+                    let sid = crate::types::ShardId {
+                        model_id: model_id.clone(),
+                        index: crate::types::MMPROJ_SHARD_INDEX,
+                    };
+                    shared
+                        .model_registry
+                        .record_shard_holder(sid.clone(), node_id.clone());
+
+                    // Broadcast shard announce so peers know we hold mmproj
+                    let announce = crate::types::SwarmMessage::ShardAnnounce(
+                        crate::types::ShardAnnounce {
+                            node_id,
+                            shards: vec![sid],
+                            timestamp: chrono::Utc::now(),
+                        },
+                    );
+                    let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
+
+                    // Notify dashboard
+                    let _ = shared.models_changed_tx.send(());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        model = %model_id,
+                        error = %e,
+                        "AutoShardManager: mmproj download failed"
+                    );
+                }
+            }
+        });
+    }
+
     /// Register a shard file that already exists on disk.
     fn register_local_shard(&self, candidate: &ShardCandidate) {
         tracing::debug!(
@@ -1442,6 +1593,47 @@ impl AutoShardManager {
                     score,
                 });
             }
+
+            // ── T9: mmproj pruning with higher min_replicas floor ──
+            // mmproj needs wider availability for VLM requests, so use a higher floor.
+            if manifest.mmproj.is_some() {
+                let mmproj_shard_id = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: crate::types::MMPROJ_SHARD_INDEX,
+                };
+                let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
+                if mmproj_holders.contains(&local_node_id) {
+                    let mmproj_path = self
+                        .shared_state
+                        .config
+                        .node
+                        .data_dir
+                        .join("models")
+                        .join(&manifest.id.0)
+                        .join("mmproj.gguf");
+                    if mmproj_path.exists() {
+                        // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
+                        let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
+                        let mmproj_holder_count = mmproj_holders.len();
+                        if mmproj_holder_count > mmproj_min as usize && pressure_urgent {
+                            let mmproj_size = manifest
+                                .mmproj
+                                .as_ref()
+                                .map(|m| m.size_bytes)
+                                .unwrap_or(0);
+                            prune_candidates.push(PruneCandidate {
+                                model_id: manifest.id.clone(),
+                                model_name: manifest.name.clone(),
+                                shard_index: crate::types::MMPROJ_SHARD_INDEX,
+                                shard_size_bytes: mmproj_size,
+                                holder_count: mmproj_holder_count,
+                                target_replicas: mmproj_min,
+                                score: 0.1, // Very low score — only prune under extreme pressure
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         // Sort by score descending (most prunable first)
@@ -1463,8 +1655,18 @@ impl AutoShardManager {
                 continue;
             }
 
-            // Actually delete the shard file
-            let shard_path = shard_store.shard_path(&candidate.model_id, candidate.shard_index);
+            // Actually delete the shard file (or mmproj.gguf for sentinel)
+            let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
+                self.shared_state
+                    .config
+                    .node
+                    .data_dir
+                    .join("models")
+                    .join(&candidate.model_id.0)
+                    .join("mmproj.gguf")
+            } else {
+                shard_store.shard_path(&candidate.model_id, candidate.shard_index)
+            };
             if shard_path.exists() {
                 if let Err(e) = std::fs::remove_file(&shard_path) {
                     tracing::warn!(

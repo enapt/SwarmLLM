@@ -150,6 +150,205 @@ impl PipelineExecutor {
         }
     }
 
+    /// T14: Pre-compute vision embeddings before the text pipeline.
+    /// Encodes images locally if this node has mmproj, otherwise sends to a remote node.
+    /// Returns zstd-compressed FP16 bytes, or None if no images / no encoder available.
+    async fn precompute_vision_embeddings(&self) -> Result<Option<Vec<u8>>, SwarmError> {
+        let images: Vec<crate::types::ImageData> =
+            crate::inference::vision::collect_images(&self.request.messages)
+                .into_iter()
+                .cloned()
+                .collect();
+        if images.is_empty() {
+            return Ok(None);
+        }
+
+        let model_id = &self.request.model_id;
+
+        // T15: Select vision node — prefer local > first-segment node > any holder
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let mmproj_holders = self.shared_state.model_registry.mmproj_holders(model_id);
+
+        // Check if we have mmproj locally
+        let has_local = mmproj_holders.contains(&local_node_id)
+            || self.shared_state.vision_modules.contains_key(model_id);
+
+        if has_local {
+            // Encode locally
+            let vision_module = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
+                vm.value().clone()
+            } else {
+                let model_dir = self
+                    .shared_state
+                    .config
+                    .node
+                    .data_dir
+                    .join("models")
+                    .join(&model_id.0);
+                let mmproj_path = model_dir.join("mmproj.gguf");
+                let vm = crate::inference::vision::load_from_mmproj_gguf(
+                    &mmproj_path,
+                    &candle_core::Device::Cpu,
+                )?;
+                let vm = std::sync::Arc::new(vm);
+                self.shared_state
+                    .vision_modules
+                    .insert(model_id.clone(), vm.clone());
+                vm
+            };
+
+            let embeddings =
+                tokio::task::block_in_place(|| vision_module.encode_images(&images))?;
+            let compressed = self.compress_vision_embeddings(&embeddings)?;
+
+            tracing::info!(
+                request_id = %self.request.id,
+                image_count = images.len(),
+                compressed_bytes = compressed.len(),
+                "Pre-computed vision embeddings locally"
+            );
+            return Ok(Some(compressed));
+        }
+
+        // No local mmproj — try remote encoding
+        if mmproj_holders.is_empty() {
+            return Err(SwarmError::VisionEncoderUnavailable(model_id.clone()));
+        }
+
+        // Pick the best remote node: prefer first-segment node, then any
+        let first_seg_node = self.assignment.segments.first().map(|s| &s.node_id);
+        let remote_node = if let Some(first) = first_seg_node {
+            if mmproj_holders.contains(first) {
+                first.clone()
+            } else {
+                mmproj_holders[0].clone()
+            }
+        } else {
+            mmproj_holders[0].clone()
+        };
+
+        tracing::info!(
+            request_id = %self.request.id,
+            remote_node = %remote_node,
+            "Sending VisionEncodeRequest to remote mmproj holder"
+        );
+
+        // Compress image as JPEG for wire transfer
+        let first_image = &images[0];
+        let jpeg_bytes = self.compress_image_jpeg(first_image)?;
+
+        // Register response channel
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.shared_state
+            .pending_vision_results
+            .insert(self.request.id, tx);
+
+        // Send VisionEncodeRequest
+        let req = crate::types::VisionEncodeRequest {
+            request_id: self.request.id,
+            model_id: model_id.clone(),
+            image_data: jpeg_bytes,
+        };
+        let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeRequest(req));
+        self.network_tx
+            .send(msg)
+            .await
+            .map_err(|e| SwarmError::Network(format!("Failed to send VisionEncodeRequest: {e}")))?;
+
+        // Wait for response with timeout
+        let timeout = std::time::Duration::from_secs(120);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => {
+                tracing::info!(
+                    request_id = %self.request.id,
+                    num_tokens = resp.num_tokens,
+                    hidden_dim = resp.hidden_dim,
+                    compressed_bytes = resp.embeddings.len(),
+                    "Received VisionEncodeResponse from remote node"
+                );
+                Ok(Some(resp.embeddings))
+            }
+            Ok(Err(_)) => {
+                Err(SwarmError::Inference("Vision encode channel dropped".into()))
+            }
+            Err(_) => {
+                self.shared_state
+                    .pending_vision_results
+                    .remove(&self.request.id);
+                Err(SwarmError::InferenceTimeout(120))
+            }
+        }
+    }
+
+    /// Compress vision embeddings tensor to zstd-compressed FP16 bytes.
+    fn compress_vision_embeddings(
+        &self,
+        embeddings: &candle_core::Tensor,
+    ) -> Result<Vec<u8>, SwarmError> {
+        let fp16 = embeddings
+            .to_dtype(candle_core::DType::F16)
+            .map_err(|e| SwarmError::Inference(format!("FP16 conversion: {e}")))?;
+        let data: Vec<half::f16> = fp16
+            .flatten_all()
+            .map_err(|e| SwarmError::Inference(format!("Flatten: {e}")))?
+            .to_vec1()
+            .map_err(|e| SwarmError::Inference(format!("to_vec1: {e}")))?;
+        let raw_bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3)
+            .map_err(|e| SwarmError::Inference(format!("zstd compress: {e}")))
+    }
+
+    /// Decompress zstd-compressed FP16 vision embeddings back to a Tensor.
+    fn decompress_vision_embeddings(
+        &self,
+        compressed: &[u8],
+    ) -> Result<candle_core::Tensor, SwarmError> {
+        let raw_bytes = zstd::decode_all(std::io::Cursor::new(compressed))
+            .map_err(|e| SwarmError::Inference(format!("zstd decompress vision: {e}")))?;
+        // Raw bytes are FP16 LE — convert to f16 values
+        let num_f16 = raw_bytes.len() / 2;
+        let f16_values: Vec<half::f16> = (0..num_f16)
+            .map(|i| half::f16::from_le_bytes([raw_bytes[i * 2], raw_bytes[i * 2 + 1]]))
+            .collect();
+        // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
+        // Infer hidden_dim from common sizes, fall back to sqrt-ish heuristic.
+        let hidden_dim = if num_f16 % 4096 == 0 {
+            4096
+        } else if num_f16 % 2048 == 0 {
+            2048
+        } else if num_f16 % 1024 == 0 {
+            1024
+        } else {
+            return Err(SwarmError::Inference(format!(
+                "Cannot infer vision embedding shape from {} values",
+                num_f16
+            )));
+        };
+        let num_tokens = num_f16 / hidden_dim;
+        // Convert f16 → f32 for the tensor
+        let f32_values: Vec<f32> = f16_values.iter().map(|f| f.to_f32()).collect();
+        candle_core::Tensor::from_vec(f32_values, &[num_tokens, hidden_dim], &candle_core::Device::Cpu)
+            .map_err(|e| SwarmError::Inference(format!("Vision tensor from vec: {e}")))
+    }
+
+    /// Compress an ImageData to JPEG for wire transfer.
+    fn compress_image_jpeg(&self, img: &crate::types::ImageData) -> Result<Vec<u8>, SwarmError> {
+        use image::ImageEncoder;
+        let rgb_image = image::RgbImage::from_raw(img.width, img.height, img.rgb_bytes.clone())
+            .ok_or_else(|| SwarmError::Inference("Invalid image dimensions".into()))?;
+        let mut buf = Vec::new();
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+        encoder
+            .write_image(
+                &rgb_image,
+                img.width,
+                img.height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .map_err(|e| SwarmError::Inference(format!("JPEG encode: {e}")))?;
+        Ok(buf)
+    }
+
     /// Build chat prompt using the template from the loaded model (if available).
     async fn build_prompt(&self) -> String {
         // Try to get template from the specific model's GGUF header (not the singleton loaded_model_info
@@ -344,6 +543,30 @@ impl PipelineExecutor {
         // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
         let mut accumulated_text = String::new();
 
+        // T14: Pre-compute vision embeddings before the token generation loop.
+        // This decouples vision encoding from the text pipeline — any node with
+        // mmproj can encode, and the embeddings travel with LayerForward.
+        let precomputed_vision: Option<Vec<u8>> = if !crate::inference::vision::collect_images(
+            &self.request.messages,
+        )
+        .is_empty()
+        {
+            match self.precompute_vision_embeddings().await {
+                Ok(Some(bytes)) => Some(bytes),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        error = %e,
+                        "Vision pre-computation failed, proceeding without images"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Token generation loop
         for seq_num in 0..max_tokens {
             let activations = if seq_num == 0 {
@@ -366,8 +589,14 @@ impl PipelineExecutor {
 
             // Forward through each segment
             let fwd_start = std::time::Instant::now();
+            // Attach pre-computed vision on first forward only
+            let vision_for_forward = if seq_num == 0 {
+                precomputed_vision.clone()
+            } else {
+                None
+            };
             match self
-                .forward_through_segments(request_id, seq_num, index_pos, activations)
+                .forward_through_segments(request_id, seq_num, index_pos, activations, vision_for_forward)
                 .await
             {
                 Ok(result) => {
@@ -897,6 +1126,7 @@ impl PipelineExecutor {
         sequence_num: u32,
         index_pos: usize,
         initial_activations: Vec<u8>,
+        precomputed_vision: Option<Vec<u8>>,
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
         let num_segments = self.assignment.segments.len();
@@ -949,7 +1179,13 @@ impl PipelineExecutor {
             // If this is the local node, process locally (no clone needed)
             if segment.node_id == *self.shared_state.identity.node_id() {
                 let result = self
-                    .process_local_segment(segment, sequence_num, index_pos, &activations)
+                    .process_local_segment(
+                        segment,
+                        sequence_num,
+                        index_pos,
+                        &activations,
+                        if idx == 0 { precomputed_vision.as_deref() } else { None },
+                    )
                     .await?;
                 tracing::debug!(
                     request_id = %request_id,
@@ -971,6 +1207,12 @@ impl PipelineExecutor {
                 activations = result.activations;
             } else {
                 // Only clone activations when sending over the network
+                // T17: Attach vision embeddings on first forward (seq_num==0, first segment)
+                let vision_for_wire = if idx == 0 && sequence_num == 0 {
+                    precomputed_vision.clone()
+                } else {
+                    None
+                };
                 let forward = LayerForward {
                     request_id,
                     sequence_num,
@@ -979,6 +1221,7 @@ impl PipelineExecutor {
                     format: TensorFormat::FP32,
                     model_id: segment.shard_id.model_id.clone(),
                     layer_range: segment.layer_range,
+                    vision_embeddings: vision_for_wire,
                     sender_peer_bytes: None,
                     tp_meta: None,
                 };
@@ -1129,6 +1372,7 @@ impl PipelineExecutor {
         sequence_num: u32,
         index_pos: usize,
         activation_bytes: &[u8],
+        precomputed_vision_bytes: Option<&[u8]>,
     ) -> Result<LayerResult, SwarmError> {
         use crate::inference::split::{self, SplitModel};
 
@@ -1549,61 +1793,78 @@ impl PipelineExecutor {
             .as_ref()
             .and_then(|id| self.shared_state.adapter_registry.get(id));
 
-        // VLM: encode images if present on first segment prefill
+        // T16: VLM vision embeddings — use pre-computed if available, fall back to local encoding
         let all_images: Vec<&crate::types::ImageData> =
             crate::inference::vision::collect_images(&self.request.messages);
-        let vision_embeddings = if is_first
-            && sequence_num == 0
-            && !all_images.is_empty()
-        {
-            // Look up or load vision module for this model
-            let model_id = &segment.shard_id.model_id;
-            let vision_mod = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
-                Some(vm.value().clone())
-            } else {
-                // Try to load mmproj.gguf from the model directory
-                let shard_store =
-                    crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-                let model_dir = shard_store.models_dir().join(&model_id.0);
-                let mmproj_path = model_dir.join("mmproj.gguf");
-                if mmproj_path.exists() {
-                    let device = split_model.device().clone();
-                    match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device) {
-                        Ok(vm) => {
-                            let vm = std::sync::Arc::new(vm);
-                            self.shared_state
-                                .vision_modules
-                                .insert(model_id.clone(), vm.clone());
-                            tracing::info!(model = %model_id, "Loaded VLM vision module from mmproj.gguf");
-                            Some(vm)
-                        }
-                        Err(e) => {
-                            tracing::warn!(model = %model_id, error = %e, "Failed to load mmproj.gguf");
-                            None
-                        }
+        let vision_embeddings = if is_first && sequence_num == 0 && !all_images.is_empty() {
+            if let Some(compressed_bytes) = precomputed_vision_bytes {
+                // Decompress pre-computed embeddings from wire format (zstd FP16)
+                match self.decompress_vision_embeddings(compressed_bytes) {
+                    Ok(tensor) => {
+                        tracing::info!(
+                            request_id = %self.request.id,
+                            shape = ?tensor.dims(),
+                            "Using pre-computed vision embeddings"
+                        );
+                        Some(tensor)
                     }
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = %self.request.id,
+                            error = %e,
+                            "Failed to decompress pre-computed vision embeddings, falling back to local"
+                        );
+                        None
+                    }
+                }
+            } else {
+                // Fall back to local encoding (original behavior)
+                let model_id = &segment.shard_id.model_id;
+                let vision_mod = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
+                    Some(vm.value().clone())
                 } else {
+                    let shard_store =
+                        crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+                    let model_dir = shard_store.models_dir().join(&model_id.0);
+                    let mmproj_path = model_dir.join("mmproj.gguf");
+                    if mmproj_path.exists() {
+                        let device = split_model.device().clone();
+                        match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device) {
+                            Ok(vm) => {
+                                let vm = std::sync::Arc::new(vm);
+                                self.shared_state
+                                    .vision_modules
+                                    .insert(model_id.clone(), vm.clone());
+                                tracing::info!(model = %model_id, "Loaded VLM vision module from mmproj.gguf");
+                                Some(vm)
+                            }
+                            Err(e) => {
+                                tracing::warn!(model = %model_id, error = %e, "Failed to load mmproj.gguf");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some(vm) = vision_mod {
+                    let owned_images: Vec<crate::types::ImageData> =
+                        all_images.iter().map(|img| (*img).clone()).collect();
+                    let embeddings = tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
+                    tracing::info!(
+                        request_id = %self.request.id,
+                        image_count = owned_images.len(),
+                        embedding_shape = ?embeddings.dims(),
+                        "VLM: encoded images for multimodal forward (local fallback)"
+                    );
+                    Some(embeddings)
+                } else {
+                    tracing::warn!(
+                        request_id = %self.request.id,
+                        "Request has images but no VLM module available — ignoring images"
+                    );
                     None
                 }
-            };
-
-            if let Some(vm) = vision_mod {
-                let owned_images: Vec<crate::types::ImageData> =
-                    all_images.iter().map(|img| (*img).clone()).collect();
-                let embeddings = tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
-                tracing::info!(
-                    request_id = %self.request.id,
-                    image_count = owned_images.len(),
-                    embedding_shape = ?embeddings.dims(),
-                    "VLM: encoded images for multimodal forward"
-                );
-                Some(embeddings)
-            } else {
-                tracing::warn!(
-                    request_id = %self.request.id,
-                    "Request has images but no VLM module available — ignoring images"
-                );
-                None
             }
         } else {
             None
@@ -1849,6 +2110,7 @@ impl PipelineExecutor {
                     model_id: backup.shard_id.model_id.clone(),
                     layer_range: backup.layer_range,
                     tp_meta: None,
+                    vision_embeddings: None,
                     sender_peer_bytes: None,
                 };
 

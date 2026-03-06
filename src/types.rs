@@ -44,6 +44,19 @@ pub struct ModelManifest {
     pub publisher: NodeId,
     pub publish_date: chrono::DateTime<chrono::Utc>,
     pub license: String,
+    /// Vision encoder (mmproj) metadata. Present only for VLM models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj: Option<MmprojInfo>,
+}
+
+/// Metadata for a VLM vision encoder (mmproj GGUF file).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MmprojInfo {
+    pub size_bytes: u64,
+    pub hash: Blake3Hash,
+    /// HuggingFace filename for the mmproj GGUF (e.g. "llava-v1.5-7b-mmproj-model-f16.gguf").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_filename: Option<String>,
 }
 
 impl ModelManifest {
@@ -156,6 +169,25 @@ pub struct ShardTensorEntry {
 pub struct ShardId {
     pub model_id: ModelId,
     pub index: u32,
+}
+
+/// Sentinel shard index for mmproj (vision encoder) files.
+/// Using u32::MAX avoids collisions with text model shard indices (0..N).
+pub const MMPROJ_SHARD_INDEX: u32 = u32::MAX;
+
+impl ShardId {
+    /// Whether this shard ID refers to a mmproj (vision encoder) file.
+    pub fn is_mmproj(&self) -> bool {
+        self.index == MMPROJ_SHARD_INDEX
+    }
+
+    /// Create a ShardId for the mmproj of a given model.
+    pub fn mmproj_for(model_id: ModelId) -> Self {
+        Self {
+            model_id,
+            index: MMPROJ_SHARD_INDEX,
+        }
+    }
 }
 
 // ---- Node Capabilities ----
@@ -465,6 +497,10 @@ pub enum SwarmMessage {
     // Peer Exchange (PEX) — exchange known peer addresses on connection
     PeerExchangeRequest,
     PeerExchangeResponse(PeerExchangeResponse),
+
+    // Vision — distributed mmproj encoding
+    VisionEncodeRequest(VisionEncodeRequest),
+    VisionEncodeResponse(VisionEncodeResponse),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -496,6 +532,11 @@ pub struct LayerForward {
     /// only the specified single layer using its TP rank/size for head and MLP slicing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tp_meta: Option<TensorParallelMeta>,
+    /// Pre-computed vision embeddings (zstd-compressed FP16).
+    /// Attached to the first LayerForward (seq_num==0) when the request contains images.
+    /// Shape: (num_image_tokens, hidden_dim) — typically (577, 4096) for LLaVA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_embeddings: Option<Vec<u8>>,
     /// Populated locally after receiving from the network — not serialized over the wire.
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]
@@ -507,6 +548,25 @@ pub enum TensorFormat {
     FP16,
     FP32,
     INT8,
+}
+
+/// Request to encode an image into vision embeddings on a remote node that holds mmproj.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VisionEncodeRequest {
+    pub request_id: uuid::Uuid,
+    pub model_id: ModelId,
+    /// JPEG-compressed image bytes (resized to vision encoder input, typically 336x336).
+    pub image_data: Vec<u8>,
+}
+
+/// Response carrying pre-computed vision embeddings from the mmproj holder.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VisionEncodeResponse {
+    pub request_id: uuid::Uuid,
+    /// Zstd-compressed FP16 tensor: (num_image_tokens, hidden_dim).
+    pub embeddings: Vec<u8>,
+    pub num_tokens: u32,
+    pub hidden_dim: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -570,6 +630,9 @@ pub struct HfSourceGossip {
     pub repo_id: String,
     pub filename: String,
     pub publisher: NodeId,
+    /// Filename of the mmproj GGUF on HuggingFace (for VLM models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_filename: Option<String>,
 }
 
 /// Peer Exchange response — a list of known peer multiaddrs.
@@ -958,6 +1021,7 @@ mod tests {
             publisher: NodeId([0u8; 32]),
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
+            mmproj: None,
         }
     }
 

@@ -507,6 +507,16 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 state.shared_state.hf_sources.contains_key(&mid_check)
                     || state.shared_state.hf_probe_cache.contains_key(&mid_check)
             };
+            let mmproj_info = {
+                let mid_mmproj = crate::types::ModelId(info.name.clone());
+                let holders = state.shared_state.model_registry.mmproj_holders(&mid_mmproj);
+                let local_has = holders.contains(local_node_id);
+                serde_json::json!({
+                    "available": !holders.is_empty(),
+                    "local": local_has,
+                    "holders": holders.len(),
+                })
+            };
             models.push(serde_json::json!({
                 "id": model_id,
                 "name": info.name,
@@ -524,6 +534,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "has_manifest": has_manifest,
                 "has_header": has_header,
                 "probed": probed,
+                "mmproj": mmproj_info,
             }));
         } // else: stale loaded model, files deleted
     }
@@ -646,6 +657,15 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
         let probed = state.shared_state.hf_sources.contains_key(&m.id)
             || state.shared_state.hf_probe_cache.contains_key(&m.id);
+        let mmproj_info_reg = {
+            let holders = state.shared_state.model_registry.mmproj_holders(&m.id);
+            let local_has = holders.contains(&local_node_id);
+            serde_json::json!({
+                "available": !holders.is_empty(),
+                "local": local_has,
+                "holders": holders.len(),
+            })
+        };
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
@@ -666,6 +686,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "probed": probed,
             "acquisition": acq_state,
             "acquisition_progress": acq_progress,
+            "mmproj": mmproj_info_reg,
         }));
     }
 
@@ -1717,6 +1738,7 @@ pub async fn hf_download_shards(
         let hf_source = crate::daemon::HfSource {
             repo_id: repo_id.clone(),
             filename: filename.clone(),
+            mmproj_filename: None,
         };
         download_shared.hf_sources.insert(
             crate::types::ModelId(model_id_str.clone()),
@@ -1740,6 +1762,7 @@ pub async fn hf_download_shards(
                     repo_id: repo_id.clone(),
                     filename: filename.clone(),
                     publisher: download_shared.identity.node_id().clone(),
+                    mmproj_filename: None,
                 });
             let _ = ntx
                 .send(crate::types::NetworkCommand::Broadcast(gossip_msg))
@@ -2131,6 +2154,7 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         publisher: node_id.clone(),
         publish_date: chrono::Utc::now(),
         license: "Unknown".to_string(),
+        mmproj: None,
     };
     manifest.manifest_hash = manifest.compute_hash();
 

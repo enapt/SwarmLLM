@@ -28,6 +28,8 @@ pub enum SwarmError {
     InferenceTimeout(u64),
     #[error("No model loaded")]
     NoModelLoaded,
+    #[error("No vision encoder (mmproj) available for model {0}")]
+    VisionEncoderUnavailable(ModelId),
 
     // Shards
     #[error("Shard verification failed: expected {expected}, got {actual}")]
@@ -115,6 +117,11 @@ impl IntoResponse for ApiError {
                 "rate_limit_error",
             ),
             SwarmError::InsufficientCapacity(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                self.0.to_string(),
+                "server_error",
+            ),
+            SwarmError::VisionEncoderUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
                 "server_error",

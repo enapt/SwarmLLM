@@ -269,6 +269,7 @@ mod tests {
             publisher: NodeId([0u8; 32]),
             publish_date: chrono::Utc::now(),
             license: "MIT".into(),
+            mmproj: None,
         }
     }
 

@@ -192,6 +192,12 @@ pub struct SharedState {
     /// Populated when an mmproj.gguf is found alongside a model's shards.
     pub vision_modules:
         DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
+    /// Pending VisionEncodeResponse channels for distributed vision encoding.
+    /// Keyed by request_id. Pipeline registers a oneshot sender before sending
+    /// VisionEncodeRequest to a remote mmproj holder; the network dispatcher fires it
+    /// when the VisionEncodeResponse arrives.
+    pub pending_vision_results:
+        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::VisionEncodeResponse>>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -249,6 +255,9 @@ impl ChannelMetricsSet {
 pub struct HfSource {
     pub repo_id: String,
     pub filename: String,
+    /// Filename of the mmproj GGUF on HuggingFace (for VLM models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_filename: Option<String>,
 }
 
 /// Cached result from probing a HuggingFace GGUF file.
@@ -441,6 +450,7 @@ impl SharedState {
             models_changed_tx: broadcast::channel(16).0,
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
+            pending_vision_results: DashMap::new(),
             shutdown_tx,
         });
 
@@ -903,6 +913,34 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to scan local shards");
+            }
+        }
+
+        // Register local mmproj files as sentinel shards.
+        {
+            let models_dir = self.config.node.data_dir.join("models");
+            if models_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&models_dir) {
+                    let node_id = shared_state.identity.node_id().clone();
+                    for entry in entries.flatten() {
+                        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            continue;
+                        }
+                        let mmproj_path = entry.path().join("mmproj.gguf");
+                        if mmproj_path.exists() {
+                            let model_id_str = entry.file_name().to_string_lossy().to_string();
+                            let model_id = crate::types::ModelId(model_id_str.clone());
+                            let mmproj_sid = ShardId::mmproj_for(model_id);
+                            shared_state
+                                .model_registry
+                                .record_shard_holder(mmproj_sid, node_id.clone());
+                            tracing::info!(
+                                model = %model_id_str,
+                                "Registered local mmproj.gguf as vision encoder shard"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -1653,6 +1691,23 @@ async fn dispatch_network_messages(
                                     }
                                 }
                             }
+                            // T13: VisionEncodeRequest — encode image using local mmproj
+                            SwarmMessage::VisionEncodeRequest(req) => {
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+                                tokio::spawn(async move {
+                                    handle_vision_encode_request(ss, ntx, req).await;
+                                });
+                            }
+                            // T13: VisionEncodeResponse — fire pending oneshot
+                            SwarmMessage::VisionEncodeResponse(resp) => {
+                                if let Some((_, tx)) = shared_state
+                                    .pending_vision_results
+                                    .remove(&resp.request_id)
+                                {
+                                    let _ = tx.send(resp);
+                                }
+                            }
                             msg @ SwarmMessage::InferenceRequest(_)
                             | msg @ SwarmMessage::PipelineAssignment(_)
                             | msg @ SwarmMessage::InferenceError(_) => {
@@ -1918,6 +1973,7 @@ async fn dispatch_network_messages(
                                     let source = crate::daemon::HfSource {
                                         repo_id: gossip.repo_id.clone(),
                                         filename: gossip.filename.clone(),
+                                        mmproj_filename: gossip.mmproj_filename.clone(),
                                     };
                                     shared_state.hf_sources.insert(mid.clone(), source.clone());
                                     // Persist to sled
@@ -2223,6 +2279,7 @@ pub fn generate_and_register_local_manifest(
         publisher: node_id.clone(),
         publish_date: chrono::Utc::now(),
         license: "Unknown".to_string(),
+        mmproj: None,
     };
     manifest.manifest_hash = manifest.compute_hash();
 
@@ -2400,6 +2457,7 @@ fn regenerate_manifest_from_header(
         publisher: crate::types::NodeId([0u8; 32]),
         publish_date: chrono::Utc::now(),
         license: "Unknown".to_string(),
+        mmproj: None,
     };
     manifest.manifest_hash = manifest.compute_hash();
 
@@ -3009,6 +3067,42 @@ async fn handle_layer_forward(
         }
     };
 
+    // Decompress vision embeddings from LayerForward if present
+    let vision_tensor: Option<candle_core::Tensor> =
+        if let Some(ref compressed) = forward.vision_embeddings {
+            match zstd::decode_all(std::io::Cursor::new(compressed)) {
+                Ok(raw_bytes) => {
+                    let num_f16 = raw_bytes.len() / 2;
+                    let hidden_dim = if num_f16 % 4096 == 0 {
+                        4096
+                    } else if num_f16 % 2048 == 0 {
+                        2048
+                    } else {
+                        1024
+                    };
+                    let num_tokens = num_f16 / hidden_dim;
+                    let f32_values: Vec<f32> = (0..num_f16)
+                        .map(|i| {
+                            half::f16::from_le_bytes([raw_bytes[i * 2], raw_bytes[i * 2 + 1]])
+                                .to_f32()
+                        })
+                        .collect();
+                    candle_core::Tensor::from_vec(
+                        f32_values,
+                        &[num_tokens, hidden_dim],
+                        &candle_core::Device::Cpu,
+                    )
+                    .ok()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // Run the forward pass with per-request KV-cache isolation.
     // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
     // split_model.forward() is CPU-bound (hundreds of ms for LLM inference) and
@@ -3016,14 +3110,26 @@ async fn handle_layer_forward(
     // updates and causing substream stalling on the next request_response exchange.
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            let output = split_model
-                .forward(
-                    &input_tensor,
-                    forward.index_pos as usize,
-                    &shared_state.kv_cache_store,
-                    &req_id_str,
-                )
-                .map_err(|e| format!("Forward: {e}"))?;
+            let output = if let Some(ref vis_emb) = vision_tensor {
+                split_model
+                    .forward_multimodal(
+                        &input_tensor,
+                        forward.index_pos as usize,
+                        &shared_state.kv_cache_store,
+                        &req_id_str,
+                        Some(vis_emb),
+                    )
+                    .map_err(|e| format!("Forward multimodal: {e}"))?
+            } else {
+                split_model
+                    .forward(
+                        &input_tensor,
+                        forward.index_pos as usize,
+                        &shared_state.kv_cache_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward: {e}"))?
+            };
 
             if is_last {
                 let token_id =
@@ -3095,6 +3201,136 @@ async fn handle_layer_forward(
         .await
     {
         tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
+    }
+}
+
+/// Handle a VisionEncodeRequest: encode the image using local mmproj and respond.
+async fn handle_vision_encode_request(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    req: crate::types::VisionEncodeRequest,
+) {
+    let model_id = &req.model_id;
+    tracing::info!(
+        request_id = %req.request_id,
+        model = %model_id,
+        image_bytes = req.image_data.len(),
+        "Handling VisionEncodeRequest"
+    );
+
+    // Load or get the vision module
+    let vision_module = if let Some(entry) = shared_state.vision_modules.get(model_id) {
+        entry.value().clone()
+    } else {
+        // Try to load mmproj on-demand
+        let model_dir = shared_state
+            .config
+            .node
+            .data_dir
+            .join("models")
+            .join(&model_id.0);
+        let mmproj_path = model_dir.join("mmproj.gguf");
+        if !mmproj_path.exists() {
+            tracing::warn!(
+                request_id = %req.request_id,
+                model = %model_id,
+                "VisionEncodeRequest received but no mmproj.gguf found"
+            );
+            return;
+        }
+        match crate::inference::vision::load_from_mmproj_gguf(
+            &mmproj_path,
+            &candle_core::Device::Cpu,
+        ) {
+            Ok(module) => {
+                let module = Arc::new(module);
+                shared_state
+                    .vision_modules
+                    .insert(model_id.clone(), module.clone());
+                module
+            }
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %req.request_id,
+                    error = %e,
+                    "Failed to load mmproj for VisionEncodeRequest"
+                );
+                return;
+            }
+        }
+    };
+
+    // Decode JPEG image into ImageData
+    let img = match image::load_from_memory(&req.image_data) {
+        Ok(dyn_img) => {
+            let rgb = dyn_img.to_rgb8();
+            let (w, h) = rgb.dimensions();
+            crate::types::ImageData {
+                rgb_bytes: rgb.into_raw(),
+                width: w,
+                height: h,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Failed to decode image in VisionEncodeRequest"
+            );
+            return;
+        }
+    };
+
+    // Encode image to vision embeddings (CPU-bound)
+    let encode_result = tokio::task::block_in_place(|| vision_module.encode_images(&[img]));
+    match encode_result {
+        Ok(embeddings) => {
+            // Compress embeddings with zstd for wire transfer
+            let (num_tokens, hidden_dim) = embeddings.dims2().unwrap_or((0, 0));
+            let raw_bytes: Vec<u8> = embeddings
+                .to_dtype(candle_core::DType::F16)
+                .and_then(|t| t.to_vec2::<half::f16>())
+                .map(|v: Vec<Vec<half::f16>>| {
+                    let mut bytes = Vec::with_capacity(num_tokens * hidden_dim * 2);
+                    for row in v {
+                        for f in row {
+                            bytes.extend_from_slice(&f.to_le_bytes());
+                        }
+                    }
+                    bytes
+                })
+                .unwrap_or_default();
+            let compressed =
+                zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3).unwrap_or(raw_bytes);
+
+            let response = crate::types::VisionEncodeResponse {
+                request_id: req.request_id,
+                embeddings: compressed,
+                num_tokens: num_tokens as u32,
+                hidden_dim: hidden_dim as u32,
+            };
+
+            tracing::info!(
+                request_id = %req.request_id,
+                num_tokens,
+                hidden_dim,
+                compressed_bytes = response.embeddings.len(),
+                "VisionEncodeRequest completed, sending response"
+            );
+
+            // Send response back via gossip (directed messages use the same path)
+            let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response));
+            if let Err(e) = network_tx.send(msg).await {
+                tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Vision encoding failed"
+            );
+        }
     }
 }
 

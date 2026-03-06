@@ -217,6 +217,7 @@ impl HealthMonitor {
                     repo_id: hf_source.repo_id.clone(),
                     filename: hf_source.filename.clone(),
                     publisher: our_id.clone(),
+                    mmproj_filename: hf_source.mmproj_filename.clone(),
                 };
                 let msg = NetworkCommand::Broadcast(SwarmMessage::HfSourceGossip(gossip));
                 if let Err(e) = self.network_tx.send(msg).await {
