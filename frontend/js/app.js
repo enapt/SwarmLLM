@@ -128,6 +128,18 @@ var SwarmLLM = (function() {
       if (!sessions[id]) return;
       currentSessionId = id;
       localStorage.setItem(ACTIVE_SESSION_KEY, id);
+
+      // Auto-select the session's model if it's still available
+      var s = sessions[id];
+      if (s.model) {
+        var allIds = _modelDropdownData.map(function(m) { return m.id; });
+        if (allIds.indexOf(s.model) !== -1) {
+          selectModelDropdown(s.model, { silent: true });
+        } else if (s.messages.length > 0) {
+          showToast('Model "' + formatModelDisplayName(s.model) + '" is no longer available. Session is read-only until model returns.', 'warning');
+        }
+      }
+
       chat.renderSessionList();
       chat.renderMessages();
       chat.updateChatHeader();
@@ -209,10 +221,14 @@ var SwarmLLM = (function() {
       }
       var s = sessions[currentSessionId];
       var modelName = s.model ? formatModelDisplayName(s.model) : 'No model';
+      var allIds = _modelDropdownData.map(function(m) { return m.id; });
+      var available = !s.model || allIds.indexOf(s.model) !== -1;
+      var badgeClass = 'chat-session-model' + (available ? '' : ' unavailable');
+      var badgeTitle = available ? s.model : 'Model no longer available';
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
-        '<span class="chat-session-model">' + escapeHtml(modelName) + '</span>';
+        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>';
     },
 
     renderMessages: function() {
@@ -244,6 +260,15 @@ var SwarmLLM = (function() {
       if (!currentModel) {
         ui.showBanner('warning', 'No model available — download a model first');
         return;
+      }
+
+      // Check if session model is still available
+      if (currentSessionId && sessions[currentSessionId] && sessions[currentSessionId].model) {
+        var allIds = _modelDropdownData.map(function(m) { return m.id; });
+        if (allIds.indexOf(sessions[currentSessionId].model) === -1) {
+          ui.showBanner('warning', 'Model "' + formatModelDisplayName(sessions[currentSessionId].model) + '" is no longer available. Start a new session with a different model.');
+          return;
+        }
       }
 
       var input = document.getElementById('chat-input');
@@ -279,11 +304,13 @@ var SwarmLLM = (function() {
       document.getElementById('send-btn').disabled = true;
       var startTime = performance.now();
 
-      var model = document.getElementById('model-select').value || currentModel || 'local';
-      // Update session model to reflect what's actually being used
-      session.model = model;
-      chat.updateChatHeader();
-      chat.renderSessionList();
+      // Use session's bound model (set at creation), fall back to current selection
+      var model = session.model || currentModel || 'local';
+      if (!session.model) {
+        session.model = model;
+        chat.updateChatHeader();
+        chat.renderSessionList();
+      }
       // Truncate chat history to last 50 messages to prevent context overflow
       var recentMessages = session.messages.slice(-50).map(function(m) {
         return { role: m.role, content: m.content };
@@ -1883,13 +1910,15 @@ var SwarmLLM = (function() {
       // Render custom dropdown
       renderModelDropdown(groups, hasAny);
 
-      // Restore saved selection
+      // Restore saved selection — prioritize current session's model
       if (hasAny) {
+        var allIds = _modelDropdownData.map(function(m) { return m.id; });
+        var sessionModel = currentSessionId && sessions[currentSessionId] ? sessions[currentSessionId].model : null;
         var savedModel = null;
         try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
-        var allIds = _modelDropdownData.map(function(m) { return m.id; });
-        var found = savedModel && allIds.indexOf(savedModel) !== -1;
-        selectModelDropdown(found ? savedModel : allIds[0]);
+        var preferred = sessionModel || savedModel;
+        var found = preferred && allIds.indexOf(preferred) !== -1;
+        selectModelDropdown(found ? preferred : allIds[0], { silent: true });
       } else {
         currentModel = '';
         updateModelDropdownLabel('No model loaded');
@@ -1945,7 +1974,9 @@ var SwarmLLM = (function() {
     });
   }
 
-  function selectModelDropdown(modelId) {
+  function selectModelDropdown(modelId, opts) {
+    opts = opts || {};
+    var prevModel = currentModel;
     currentModel = modelId;
     document.getElementById('model-select').value = modelId;
     try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
@@ -1966,6 +1997,21 @@ var SwarmLLM = (function() {
       trigger.classList.remove('flash');
       void trigger.offsetWidth; // force reflow to restart animation
       trigger.classList.add('flash');
+    }
+
+    // If model changed while in a session with messages, auto-start new session
+    if (!opts.silent && prevModel && prevModel !== modelId && currentSessionId && sessions[currentSessionId]) {
+      var s = sessions[currentSessionId];
+      if (s.messages.length > 0) {
+        chat.newSession();
+        showToast('New session started for ' + formatModelDisplayName(modelId), 'info');
+      } else {
+        // Empty session — just update its model
+        s.model = modelId;
+        chat.saveSessions();
+        chat.updateChatHeader();
+        chat.renderSessionList();
+      }
     }
   }
 

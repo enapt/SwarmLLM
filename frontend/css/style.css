@@ -911,6 +911,11 @@ input[type="range"]::-webkit-slider-thumb {
   letter-spacing: 0.02em;
   margin-left: auto;
 }
+.chat-session-model.unavailable {
+  color: var(--red, #f44);
+  background: color-mix(in srgb, var(--red, #f44) 10%, transparent);
+  border-color: color-mix(in srgb, var(--red, #f44) 30%, transparent);
+}
 
 .chat-messages {
   flex: 1;
