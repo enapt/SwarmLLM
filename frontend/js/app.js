@@ -683,7 +683,7 @@ var SwarmLLM = (function() {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
             var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
-            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + title + '">' + label + lockIcon + '</div>';
+            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
@@ -2267,8 +2267,8 @@ var SwarmLLM = (function() {
       var freed = formatBytes(e.freed_bytes || 0);
       var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
       html += '<div class="prune-event-row" style="display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem">' +
-        '<span>' + escapeHtml(e.model_name || e.model_id) + ' shard ' + e.shard_index + '</span>' +
-        '<span class="text-muted">' + freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts + '</span>' +
+        '<span>' + escapeHtml(e.model_name || e.model_id) + ' shard ' + escapeHtml(String(e.shard_index)) + '</span>' +
+        '<span class="text-muted">' + escapeHtml(freed) + ' \u2022 ' + escapeHtml(String(e.holder_count_before)) + '\u2192' + escapeHtml(String(e.holder_count_after)) + ' \u2022 ' + escapeHtml(ts) + '</span>' +
       '</div>';
     });
     el.innerHTML = html;
@@ -3285,7 +3285,7 @@ var SwarmLLM = (function() {
             for (var i = 0; i < Math.min(mids.length, 5); i++) {
               var mName = formatModelDisplayName(mids[i]);
               if (mName.length > 22) mName = mName.substring(0, 22) + '...';
-              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mName) + '</span><span class="mono">' + info.models[mids[i]] + '</span></div>';
+              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mName) + '</span><span class="mono">' + escapeHtml(String(info.models[mids[i]])) + '</span></div>';
             }
             if (mids.length > 5) html += '<div class="text-muted">+' + (mids.length - 5) + ' more</div>';
             html += '</div>';

@@ -259,6 +259,11 @@ pub struct InferenceConfig {
     /// Default: 32.
     #[serde(default = "default_prefix_cache_entries")]
     pub prefix_cache_max_entries: usize,
+    /// When true, KV-cache multi-turn sessions do NOT persist the `cached_prompt`
+    /// field to the database — prompts stay in-memory only and are lost on restart.
+    /// This prevents user prompts from being written to disk. Default: false.
+    #[serde(default)]
+    pub privacy_mode: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -439,6 +444,14 @@ pub struct ApiConfig {
     /// Disabled by default — enable only for trusted research environments.
     #[serde(default)]
     pub expose_hidden_states: bool,
+    /// Rate limit (requests per minute) for `/v1/` and `/api/chat` endpoints.
+    /// Default: 60.
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u64>,
+    /// Rate limit (requests per minute) for `/api/admin/` endpoints.
+    /// Default: 200.
+    #[serde(default)]
+    pub rate_limit_admin_rpm: Option<u64>,
 }
 
 /// Configuration for automatic shard management.
@@ -835,6 +848,7 @@ impl Default for InferenceConfig {
             batch_timeout_ms: default_batch_timeout_ms(),
             max_split_model_memory_mb: None,
             prefix_cache_max_entries: default_prefix_cache_entries(),
+            privacy_mode: false,
         }
     }
 }

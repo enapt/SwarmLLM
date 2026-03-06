@@ -366,7 +366,12 @@ impl KvCacheManager {
     /// Called during graceful shutdown so sessions can be restored on next startup.
     /// Only multi-turn sessions (those with a non-empty cached_prompt) are worth
     /// persisting — ephemeral single-request sessions won't be reused.
-    pub fn save_to_db(&self, db: &Database) -> Result<usize, SwarmError> {
+    ///
+    /// When `privacy_mode` is true, the `cached_prompt` field is replaced with an
+    /// empty string so user prompts are never written to disk. The session metadata
+    /// (pipeline, token count, holders) is still persisted for operational use, but
+    /// prefix matching will not work after restart.
+    pub fn save_to_db(&self, db: &Database, privacy_mode: bool) -> Result<usize, SwarmError> {
         db.clear_tree("kv_sessions")?;
 
         let mut saved = 0;
@@ -386,7 +391,11 @@ impl KvCacheManager {
                     pipeline: session.pipeline.clone(),
                     cached_tokens: session.cached_tokens,
                     cache_holders: session.cache_holders.clone(),
-                    cached_prompt: session.cached_prompt.clone(),
+                    cached_prompt: if privacy_mode {
+                        String::new()
+                    } else {
+                        session.cached_prompt.clone()
+                    },
                     last_accessed: last_accessed_system,
                     ttl_secs: self.ttl.as_secs(),
                 };
@@ -786,7 +795,7 @@ mod tests {
             "How are you?".to_string(),
         );
 
-        let saved = mgr.save_to_db(&db).unwrap();
+        let saved = mgr.save_to_db(&db, false).unwrap();
         assert_eq!(saved, 2);
 
         let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
@@ -810,7 +819,7 @@ mod tests {
         let pipeline = make_pipeline(id);
         mgr.register_multi_turn("user-sess-1", id, pipeline, 50, "Hello".to_string());
 
-        let saved = mgr.save_to_db(&db).unwrap();
+        let saved = mgr.save_to_db(&db, false).unwrap();
         assert_eq!(saved, 1);
 
         std::thread::sleep(Duration::from_millis(1100));
@@ -832,7 +841,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
 
-        let saved = mgr.save_to_db(&db).unwrap();
+        let saved = mgr.save_to_db(&db, false).unwrap();
         assert_eq!(saved, 0);
     }
 
@@ -845,19 +854,52 @@ mod tests {
         let pipeline = make_pipeline(id);
         mgr.register_multi_turn("sess-1", id, pipeline, 50, "Hello".to_string());
 
-        mgr.save_to_db(&db).unwrap();
+        mgr.save_to_db(&db, false).unwrap();
 
         let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
         let id2 = uuid::Uuid::new_v4();
         let pipeline2 = make_pipeline(id2);
         mgr2.register_multi_turn("sess-2", id2, pipeline2, 75, "Goodbye".to_string());
 
-        mgr2.save_to_db(&db).unwrap();
+        mgr2.save_to_db(&db, false).unwrap();
 
         let mut mgr3 = KvCacheManager::new(Duration::from_secs(600));
         let restored = mgr3.restore_from_db(&db).unwrap();
         assert_eq!(restored, 1);
         assert!(mgr3.get_internal_id("sess-2").is_some());
         assert!(mgr3.get_internal_id("sess-1").is_none());
+    }
+
+    #[test]
+    fn privacy_mode_strips_cached_prompt() {
+        let db = Database::open_temp().unwrap();
+
+        let mut mgr = KvCacheManager::new(Duration::from_secs(600));
+        let id = uuid::Uuid::new_v4();
+        let pipeline = make_pipeline(id);
+        mgr.register_multi_turn(
+            "private-sess",
+            id,
+            pipeline,
+            100,
+            "Secret user prompt".to_string(),
+        );
+
+        // Save with privacy_mode = true
+        let saved = mgr.save_to_db(&db, true).unwrap();
+        assert_eq!(saved, 1);
+
+        // Restore and verify the cached_prompt is empty (no prefix match possible)
+        let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
+        let restored = mgr2.restore_from_db(&db).unwrap();
+        assert_eq!(restored, 1);
+
+        // Session metadata was restored but prefix matching won't work
+        // because cached_prompt was stripped
+        let active = vec![NodeId([1u8; 32]), NodeId([2u8; 32])];
+        match mgr2.check_multi_turn_reuse("private-sess", "Secret user prompt more", &active) {
+            CacheReuse::Miss => {} // Expected: empty cached_prompt => miss
+            CacheReuse::Hit { .. } => panic!("Expected miss when privacy_mode stripped prompt"),
+        }
     }
 }

@@ -30,6 +30,7 @@ max_concurrent_requests = 10
 gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
 max_batch_size = 1             # 1 = no batching (sequential); >1 enables batching for both local and remote forwards (pipeline bubble filling)
 batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
+privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error
@@ -48,6 +49,8 @@ keep_versions = 3
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
 expose_hidden_states = false      # Expose /v1/internal/hidden-states for research (requires auth)
+# rate_limit_rpm = 60            # Max requests/min for /v1/ and /api/chat endpoints (default: 60)
+# rate_limit_admin_rpm = 200     # Max requests/min for /api/admin/ endpoints (default: 200)
 
 [model]
 shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommended)

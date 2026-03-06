@@ -189,7 +189,8 @@ impl InferenceRouter {
                     if *self.shutdown_rx.borrow() {
                         tracing::info!("InferenceRouter shutting down");
                         // Persist multi-turn sessions for next startup
-                        match self.kv_cache.save_to_db(&self.shared_state.db) {
+                        let privacy_mode = self.shared_state.config.inference.privacy_mode;
+                        match self.kv_cache.save_to_db(&self.shared_state.db, privacy_mode) {
                             Ok(count) => {
                                 tracing::info!(count, "Saved KV-cache sessions for next startup");
                             }
