@@ -253,21 +253,27 @@ impl VisionTransformerBlock {
             .reshape(&[b, seq_len, self.num_heads, self.head_dim])
             .map_err(map_err("vit_q_reshape"))?
             .transpose(1, 2)
-            .map_err(map_err("vit_q_transpose"))?;
+            .map_err(map_err("vit_q_transpose"))?
+            .contiguous()
+            .map_err(map_err("vit_q_contiguous"))?;
         let k = qkv
             .narrow(2, hidden_dim, hidden_dim)
             .map_err(map_err("vit_k"))?
             .reshape(&[b, seq_len, self.num_heads, self.head_dim])
             .map_err(map_err("vit_k_reshape"))?
             .transpose(1, 2)
-            .map_err(map_err("vit_k_transpose"))?;
+            .map_err(map_err("vit_k_transpose"))?
+            .contiguous()
+            .map_err(map_err("vit_k_contiguous"))?;
         let v = qkv
             .narrow(2, 2 * hidden_dim, hidden_dim)
             .map_err(map_err("vit_v"))?
             .reshape(&[b, seq_len, self.num_heads, self.head_dim])
             .map_err(map_err("vit_v_reshape"))?
             .transpose(1, 2)
-            .map_err(map_err("vit_v_transpose"))?;
+            .map_err(map_err("vit_v_transpose"))?
+            .contiguous()
+            .map_err(map_err("vit_v_contiguous"))?;
 
         // Scaled dot-product attention (no causal mask — ViT uses full attention)
         let scale = (self.head_dim as f64).sqrt();
@@ -283,6 +289,8 @@ impl VisionTransformerBlock {
         let attn_output = attn_output
             .transpose(1, 2)
             .map_err(map_err("vit_attn_transpose"))?
+            .contiguous()
+            .map_err(map_err("vit_attn_contiguous"))?
             .reshape(&[b, seq_len, hidden_dim])
             .map_err(map_err("vit_attn_reshape"))?;
 
@@ -429,6 +437,12 @@ pub struct VisionModule {
 }
 
 impl VisionModule {
+    /// Number of tokens produced per image (patches + CLS token).
+    /// For CLIP ViT-L/14 @ 336px: (336/14)^2 + 1 = 577.
+    pub fn num_image_tokens(&self) -> usize {
+        self.encoder.num_vision_tokens()
+    }
+
     /// Process images from a multimodal request and produce LLM-space embeddings.
     ///
     /// Returns a tensor of shape (total_image_tokens, llm_hidden_dim) ready to be
@@ -475,26 +489,30 @@ impl VisionModule {
 
 /// Merge vision embeddings with text token embeddings for multimodal forward pass.
 ///
+/// Merge vision embeddings into text embeddings.
+///
 /// Given:
 /// - `text_embeddings`: (1, text_seq_len, hidden_dim) from tok_embeddings
 /// - `vision_embeddings`: (num_image_tokens, hidden_dim) from vision encoder
-/// - `image_token_positions`: indices in the text sequence where `<image>` placeholder tokens are
+/// - `image_positions`: indices in the text sequence where `<image>` placeholder tokens are
 ///
-/// Returns: (1, text_seq_len + num_image_tokens - num_placeholders, hidden_dim)
+/// If `image_positions` contains exactly one position, replaces that token's embedding
+/// with all vision embeddings (expanding 1 token → num_image_tokens). This matches
+/// LLaVA's training where `<image>` marks the insertion point.
 ///
-/// For the simple case (LLaVA-style), we prepend vision embeddings before the text.
+/// Falls back to prepending vision tokens if no positions are given.
+///
+/// Returns: (1, new_seq_len, hidden_dim)
 pub fn merge_vision_text_embeddings(
     text_embeddings: &Tensor,
     vision_embeddings: &Tensor,
-    _image_positions: &[usize],
+    image_positions: &[usize],
 ) -> Result<Tensor, SwarmError> {
     let map_err = |msg: &'static str| {
         move |e: candle_core::Error| SwarmError::Inference(format!("{msg}: {e}"))
     };
 
-    // Simple prepend strategy: vision tokens come first, then text tokens
-    // This matches LLaVA's approach when the model doesn't have explicit <image> tokens
-    let (_, _text_seq, hidden) = text_embeddings.dims3().map_err(map_err("text_dims"))?;
+    let (_, text_seq, hidden) = text_embeddings.dims3().map_err(map_err("text_dims"))?;
     let num_vision = vision_embeddings.dim(0).map_err(map_err("vision_dim0"))?;
 
     // Reshape vision: (num_image_tokens, hidden_dim) → (1, num_image_tokens, hidden_dim)
@@ -502,8 +520,42 @@ pub fn merge_vision_text_embeddings(
         .reshape(&[1, num_vision, hidden])
         .map_err(map_err("vision_reshape"))?;
 
-    // Concatenate: (1, num_vision + text_seq, hidden_dim)
-    Tensor::cat(&[&vision_3d, text_embeddings], 1).map_err(map_err("vision_text_cat"))
+    if image_positions.len() == 1 {
+        // Replace <image> token at the given position with vision embeddings
+        let pos = image_positions[0];
+        if pos >= text_seq {
+            return Err(SwarmError::Inference(format!(
+                "image token position {pos} out of range (text_seq={text_seq})"
+            )));
+        }
+
+        let mut parts: Vec<Tensor> = Vec::new();
+
+        // Text before <image>
+        if pos > 0 {
+            let before = text_embeddings
+                .narrow(1, 0, pos)
+                .map_err(map_err("narrow_before"))?;
+            parts.push(before);
+        }
+
+        // Vision embeddings replacing the <image> token
+        parts.push(vision_3d);
+
+        // Text after <image>
+        if pos + 1 < text_seq {
+            let after = text_embeddings
+                .narrow(1, pos + 1, text_seq - pos - 1)
+                .map_err(map_err("narrow_after"))?;
+            parts.push(after);
+        }
+
+        let refs: Vec<&Tensor> = parts.iter().collect();
+        Tensor::cat(&refs, 1).map_err(map_err("vision_text_cat_replace"))
+    } else {
+        // Fallback: prepend vision tokens before text tokens
+        Tensor::cat(&[&vision_3d, text_embeddings], 1).map_err(map_err("vision_text_cat"))
+    }
 }
 
 /// Check if a list of chat messages contains any images.

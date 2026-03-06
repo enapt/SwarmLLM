@@ -711,6 +711,119 @@ impl BpeTokenizer {
     }
 }
 
+/// Unified tokenizer that wraps either our BPE tokenizer or the HuggingFace
+/// `tokenizers` crate (for sentencepiece/unigram models like LLaMA).
+pub enum SplitTokenizer {
+    Bpe(BpeTokenizer),
+    HfUnigram {
+        inner: tokenizers::Tokenizer,
+        /// Vocab for decode_token lookups
+        vocab: Vec<String>,
+    },
+}
+
+impl SplitTokenizer {
+    /// Build from GGUF BPE merges (existing path).
+    pub fn from_bpe(tokens: &[String], merges: &[String], pre_type: &str, model: &str) -> Self {
+        Self::Bpe(BpeTokenizer::from_gguf(tokens, merges, pre_type, model))
+    }
+
+    /// Build a sentencepiece/unigram tokenizer from GGUF vocab + scores
+    /// using the HuggingFace `tokenizers` crate.
+    pub fn from_sentencepiece(tokens: &[String], scores: &[f32]) -> Self {
+        use tokenizers::models::unigram::Unigram;
+        use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
+
+        // Build (token, score) pairs for the Unigram model
+        let vocab: Vec<(String, f64)> = tokens
+            .iter()
+            .zip(scores.iter())
+            .map(|(t, &s)| (t.clone(), s as f64))
+            .collect();
+
+        // Find <unk> token ID (required by Unigram)
+        let unk_id = tokens.iter().position(|t| t == "<unk>");
+
+        // Detect byte_fallback: LLaMA-style models have <0xNN> tokens
+        let byte_fallback = tokens.iter().any(|t| t.starts_with("<0x") && t.ends_with('>'));
+
+        let unigram = Unigram::from(vocab, unk_id, byte_fallback)
+            .expect("Failed to build Unigram tokenizer from GGUF vocab");
+
+        let mut tokenizer = tokenizers::Tokenizer::new(unigram);
+
+        // SentencePiece uses ▁ (U+2581) as space replacement
+        let metaspace = Metaspace::new('▁', PrependScheme::Always, true);
+        tokenizer.with_pre_tokenizer(Some(metaspace));
+
+        tracing::info!(
+            vocab_size = tokens.len(),
+            unk_id = ?unk_id,
+            byte_fallback = byte_fallback,
+            "Built HF Unigram tokenizer from GGUF sentencepiece vocab"
+        );
+
+        Self::HfUnigram {
+            inner: tokenizer,
+            vocab: tokens.to_vec(),
+        }
+    }
+
+    /// Encode text to token IDs.
+    pub fn encode(&self, text: &str) -> Vec<i64> {
+        match self {
+            Self::Bpe(bpe) => bpe.encode(text),
+            Self::HfUnigram { inner, .. } => {
+                match inner.encode(text, false) {
+                    Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "HF tokenizer encode failed, falling back to bytes");
+                        text.bytes().map(|b| b as i64).collect()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Decode a single token string back to UTF-8 bytes.
+    pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
+        match self {
+            Self::Bpe(bpe) => bpe.decode_token(token_str),
+            Self::HfUnigram { .. } => {
+                // Handle byte fallback tokens like <0x0A>
+                if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6
+                {
+                    if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+                        return vec![byte];
+                    }
+                }
+                // Special tokens → empty
+                if token_str.starts_with('<') && token_str.ends_with('>') {
+                    return vec![];
+                }
+                // ▁ → space, everything else is raw UTF-8
+                token_str.replace('\u{2581}', " ").into_bytes()
+            }
+        }
+    }
+
+    /// Whether this tokenizer uses SentencePiece encoding.
+    pub fn is_sentencepiece(&self) -> bool {
+        match self {
+            Self::Bpe(bpe) => bpe.is_sentencepiece(),
+            Self::HfUnigram { .. } => true,
+        }
+    }
+
+    /// Return a reference to the byte decoder mapping (for BPE caching).
+    pub fn byte_decoder(&self) -> HashMap<char, u8> {
+        match self {
+            Self::Bpe(bpe) => bpe.byte_decoder().clone(),
+            Self::HfUnigram { .. } => HashMap::new(),
+        }
+    }
+}
+
 /// Build the GPT-2 byte encoder mapping.
 /// Maps each byte (0-255) to a unicode character such that:
 /// - Printable bytes map to themselves (as unicode chars)
@@ -1880,8 +1993,8 @@ pub struct SplitModel {
     device: Device,
     /// Vocabulary from GGUF (token ID → string), for decoding generated tokens.
     vocabulary: Option<Vec<String>>,
-    /// BPE tokenizer built from GGUF merges table.
-    tokenizer: Option<BpeTokenizer>,
+    /// Tokenizer (BPE or sentencepiece/unigram) built from GGUF metadata.
+    tokenizer: Option<SplitTokenizer>,
     /// EOS token IDs loaded from GGUF metadata.
     eos_tokens: Vec<u32>,
     /// Chat template from GGUF `tokenizer.chat_template` (Jinja2 format).
@@ -3308,12 +3421,34 @@ impl SplitModel {
                     tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF"
                 );
-                Some(BpeTokenizer::from_gguf(
+                Some(SplitTokenizer::from_bpe(
                     vocab,
                     &merges_raw,
                     &pre_type,
                     &tokenizer_model,
                 ))
+            } else if tokenizer_model == "llama" {
+                // Sentencepiece-based model (LLaMA family without BPE merges).
+                let scores: Vec<f32> = ct
+                    .metadata
+                    .get("tokenizer.ggml.scores")
+                    .and_then(|v| v.to_vec().ok())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.to_f32().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !scores.is_empty() {
+                    tracing::info!(
+                        vocab_size = vocab.len(),
+                        scores = scores.len(),
+                        "Building HF Unigram tokenizer from GGUF sentencepiece data"
+                    );
+                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -4386,12 +4521,34 @@ impl SplitModel {
                     tokenizer_model = %tokenizer_model,
                     "Loaded BPE tokenizer from GGUF header"
                 );
-                Some(BpeTokenizer::from_gguf(
+                Some(SplitTokenizer::from_bpe(
                     vocab,
                     &merges_raw,
                     &pre_type,
                     &tokenizer_model,
                 ))
+            } else if tokenizer_model == "llama" {
+                // Sentencepiece-based model from GGUF header
+                let scores: Vec<f32> = ct
+                    .metadata
+                    .get("tokenizer.ggml.scores")
+                    .and_then(|v| v.to_vec().ok())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.to_f32().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !scores.is_empty() {
+                    tracing::info!(
+                        vocab_size = vocab.len(),
+                        scores = scores.len(),
+                        "Building HF Unigram tokenizer from GGUF header sentencepiece data"
+                    );
+                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -4903,9 +5060,15 @@ impl SplitModel {
 
     /// Forward pass for multimodal (vision + text) inference.
     ///
-    /// If this is the first segment and `vision_embeddings` is provided, the
-    /// vision embeddings are prepended to the text token embeddings before
-    /// entering the transformer layers. Otherwise falls back to regular `forward`.
+    /// If this is the first segment and `vision_embeddings` is provided, the input
+    /// is expected to contain TWO segments of token IDs separated by a marker:
+    /// `[before_image_tokens...][MARKER=-1][after_image_tokens...]`
+    ///
+    /// The marker value -1 (as i64) indicates where vision embeddings should be
+    /// inserted. Each part is embedded separately, then concatenated:
+    /// `[before_emb][vision_emb][after_emb]`
+    ///
+    /// This matches llama.cpp's LLaVA approach of splitting the prompt at `<image>`.
     ///
     /// `vision_embeddings` shape: (num_image_tokens, hidden_dim)
     pub fn forward_multimodal(
@@ -4920,26 +5083,106 @@ impl SplitModel {
 
         match (is_first, vision_embeddings) {
             (true, Some(vision_emb)) => {
-                // First segment with vision: embed text tokens, merge with vision, then forward
                 let input_dev = input
                     .to_device(&self.device)
                     .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
 
-                let text_embeddings = self
+                // Read the token IDs to find the -1 marker
+                let token_ids: Vec<i64> = input_dev
+                    .flatten_all()
+                    .map_err(|e| SwarmError::Internal(format!("flatten: {e}")))?
+                    .to_vec1()
+                    .map_err(|e| SwarmError::Internal(format!("to_vec1: {e}")))?;
+
+                let marker_pos = token_ids.iter().position(|&id| id == -1);
+
+                let tok_emb_layer = self
                     .tok_embeddings
                     .as_ref()
-                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
-                    .forward(&input_dev)
-                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
+                    .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?;
 
-                // Merge: prepend vision tokens before text tokens
-                let merged = crate::inference::vision::merge_vision_text_embeddings(
-                    &text_embeddings,
-                    vision_emb,
-                    &[],
-                )?;
+                let merged = if let Some(pos) = marker_pos {
+                    // Split at marker: embed before and after separately, insert vision between
+                    let num_vision = vision_emb.dim(0)
+                        .map_err(|e| SwarmError::Internal(format!("vision dim: {e}")))?;
+                    let hidden = vision_emb.dim(1)
+                        .map_err(|e| SwarmError::Internal(format!("vision dim1: {e}")))?;
 
-                // Now run through layers with the merged hidden states.
+                    // All parts must be (1, seq, hidden) for cat along dim 1
+                    let vision_3d = vision_emb
+                        .reshape(&[1, num_vision, hidden])
+                        .map_err(|e| SwarmError::Internal(format!("vision reshape: {e}")))?;
+
+                    let mut parts: Vec<Tensor> = Vec::new();
+
+                    // Embed tokens before <image>
+                    if pos > 0 {
+                        let before_ids = Tensor::new(&token_ids[..pos], &self.device)
+                            .map_err(|e| SwarmError::Internal(format!("before tensor: {e}")))?
+                            .reshape(&[1, pos])
+                            .map_err(|e| SwarmError::Internal(format!("before reshape: {e}")))?;
+                        let before_emb = tok_emb_layer.forward(&before_ids)
+                            .map_err(|e| SwarmError::Internal(format!("before embed: {e}")))?;
+                        // Ensure 3D: (1, pos, hidden)
+                        let before_3d = if before_emb.dims().len() == 2 {
+                            before_emb.unsqueeze(0)
+                                .map_err(|e| SwarmError::Internal(format!("before unsqueeze: {e}")))?
+                        } else {
+                            before_emb
+                        };
+                        parts.push(before_3d);
+                    }
+
+                    // Insert vision embeddings
+                    parts.push(vision_3d);
+
+                    // Embed tokens after <image>
+                    let after_len = token_ids.len() - pos - 1;
+                    if after_len > 0 {
+                        let after_ids = Tensor::new(&token_ids[pos + 1..], &self.device)
+                            .map_err(|e| SwarmError::Internal(format!("after tensor: {e}")))?
+                            .reshape(&[1, after_len])
+                            .map_err(|e| SwarmError::Internal(format!("after reshape: {e}")))?;
+                        let after_emb = tok_emb_layer.forward(&after_ids)
+                            .map_err(|e| SwarmError::Internal(format!("after embed: {e}")))?;
+                        let after_3d = if after_emb.dims().len() == 2 {
+                            after_emb.unsqueeze(0)
+                                .map_err(|e| SwarmError::Internal(format!("after unsqueeze: {e}")))?
+                        } else {
+                            after_emb
+                        };
+                        parts.push(after_3d);
+                    }
+
+                    let refs: Vec<&Tensor> = parts.iter().collect();
+                    tracing::info!(
+                        request_id,
+                        marker_pos = pos,
+                        before_tokens = pos,
+                        after_tokens = after_len,
+                        vision_tokens = num_vision,
+                        "VLM: inserting vision embeddings at <image> position"
+                    );
+                    Tensor::cat(&refs, 1)
+                        .map_err(|e| SwarmError::Internal(format!("merge cat: {e}")))?
+                } else {
+                    // No marker found — fallback to prepending vision before text
+                    let text_embeddings = tok_emb_layer.forward(&input_dev)
+                        .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
+                    crate::inference::vision::merge_vision_text_embeddings(
+                        &text_embeddings,
+                        vision_emb,
+                        &[],
+                    )?
+                };
+
+                tracing::info!(
+                    request_id,
+                    merged_seq_len = ?merged.dims(),
+                    "VLM: merged embeddings ready for transformer"
+                );
+
+                // Run through layers with merged hidden states.
                 // Temporarily remove tok_embeddings so forward() treats input as hidden states.
                 let tok_emb = self.tok_embeddings.take();
                 let result = self.forward(&merged, index_pos, kv_cache_store, request_id);
@@ -5191,8 +5434,8 @@ impl SplitModel {
         self.vocabulary.as_ref()
     }
 
-    /// Return a reference to the BPE tokenizer, if available.
-    pub fn tokenizer(&self) -> Option<&BpeTokenizer> {
+    /// Return a reference to the tokenizer, if available.
+    pub fn tokenizer(&self) -> Option<&SplitTokenizer> {
         self.tokenizer.as_ref()
     }
 

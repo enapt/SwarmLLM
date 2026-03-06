@@ -152,13 +152,37 @@ impl PipelineExecutor {
 
     /// Build chat prompt using the template from the loaded model (if available).
     async fn build_prompt(&self) -> String {
+        // Try to get template from the specific model's GGUF header (not the singleton loaded_model_info
+        // which may hold a different model's info).
+        let model_id = &self.request.model_id;
+        let shard_store =
+            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+        let header_path = shard_store.models_dir().join(&model_id.0).join("gguf_header.bin");
+        if let Some((tmpl, bos, eos)) = template_from_header(&header_path) {
+            let prompt = chat_template::build_prompt_with_model(
+                &self.request.messages,
+                tmpl.as_deref(),
+                &bos,
+                &eos,
+                Some(&model_id.0),
+            );
+            tracing::info!(
+                model = %model_id,
+                prompt_len = prompt.len(),
+                prompt_preview = %&prompt[..prompt.len().min(200)],
+                "DIAG: build_prompt from header"
+            );
+            return prompt;
+        }
+        // Fall back to loaded_model_info (singleton, may be wrong model)
         let info = self.shared_state.loaded_model_info.read().await;
         match info.as_ref() {
-            Some(i) => chat_template::build_prompt(
+            Some(i) => chat_template::build_prompt_with_model(
                 &self.request.messages,
                 i.chat_template.as_deref(),
                 &i.bos_token,
                 &i.eos_token,
+                Some(&model_id.0),
             ),
             None => chat_template::chatml_fallback(&self.request.messages),
         }
@@ -361,8 +385,29 @@ impl PipelineExecutor {
                     // cached decoder for lock-free per-token decoding.
                     if seq_num == 0 {
                         let (ptc, eos, decoder) = self.extract_model_cache(&prompt).await;
-                        index_pos = ptc;
-                        prompt_token_count = Some(ptc);
+                        // For VLM: the <image> token (1 tok) was replaced by N vision
+                        // tokens per image. The vision module produces
+                        // (image_size/patch_size)^2 + 1 tokens per image. Look up the
+                        // actual count from the cached vision module if available.
+                        let has_images = crate::inference::vision::has_images(&self.request.messages);
+                        let vision_expand = if has_images {
+                            let model_id = &self.assignment.segments[0].shard_id.model_id;
+                            self.shared_state
+                                .vision_modules
+                                .get(model_id)
+                                .map(|vm| {
+                                    let num_patches = vm.value().num_image_tokens();
+                                    let num_images: usize = self.request.messages.iter()
+                                        .map(|m| m.images.len()).sum();
+                                    // Each <image> token (1) is replaced by num_patches tokens
+                                    num_patches * num_images - num_images
+                                })
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        index_pos = ptc + vision_expand;
+                        prompt_token_count = Some(ptc + vision_expand);
                         cached_eos = Some(eos);
                         cached_decoder = Some(decoder);
                     } else {
@@ -589,9 +634,17 @@ impl PipelineExecutor {
         if let Some(model_arc) = model_arc {
             let model = model_arc.lock().await;
 
-            // 1. Prompt token count
+            // 1. Prompt token count (excluding <image> sub-tokens which get replaced)
+            let image_placeholder = crate::inference::chat_template::IMAGE_PLACEHOLDER;
             let ptc = if let Some(tokenizer) = model.tokenizer() {
-                tokenizer.encode(prompt).len()
+                if let Some(img_pos) = prompt.find(image_placeholder) {
+                    // VLM: count tokens for before + after parts (excluding <image> text)
+                    let before = &prompt[..img_pos];
+                    let after = &prompt[img_pos + image_placeholder.len()..];
+                    tokenizer.encode(before).len() + tokenizer.encode(after).len()
+                } else {
+                    tokenizer.encode(prompt).len()
+                }
             } else {
                 prompt.chars().count() / 4
             };
@@ -604,7 +657,7 @@ impl PipelineExecutor {
                 let (byte_decoder, is_sentencepiece, has_tokenizer) =
                     if let Some(tokenizer) = model.tokenizer() {
                         (
-                            tokenizer.byte_decoder().clone(),
+                            tokenizer.byte_decoder(),
                             tokenizer.is_sentencepiece(),
                             true,
                         )
@@ -733,7 +786,7 @@ impl PipelineExecutor {
     ) -> Option<(
         Vec<u32>,
         CachedDecoder,
-        Option<crate::inference::split::BpeTokenizer>,
+        Option<crate::inference::split::SplitTokenizer>,
     )> {
         use candle_core::quantized::gguf_file;
 
@@ -785,12 +838,31 @@ impl PipelineExecutor {
             .unwrap_or_else(|| "gpt2".to_string());
 
         let tokenizer = if !merges_raw.is_empty() {
-            Some(crate::inference::split::BpeTokenizer::from_gguf(
+            Some(crate::inference::split::SplitTokenizer::from_bpe(
                 &vocab,
                 &merges_raw,
                 &pre_type,
                 &tokenizer_model,
             ))
+        } else if tokenizer_model == "llama" {
+            // Sentencepiece model — build HF Unigram tokenizer from scores
+            let scores: Vec<f32> = ct
+                .metadata
+                .get("tokenizer.ggml.scores")
+                .and_then(|v| v.to_vec().ok())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.to_f32().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !scores.is_empty() {
+                Some(crate::inference::split::SplitTokenizer::from_sentencepiece(
+                    &vocab, &scores,
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -798,7 +870,7 @@ impl PipelineExecutor {
         let decoder = if let Some(ref tok) = tokenizer {
             CachedDecoder {
                 vocab: vocab.clone(),
-                byte_decoder: tok.byte_decoder().clone(),
+                byte_decoder: tok.byte_decoder(),
                 is_sentencepiece: tok.is_sentencepiece(),
                 has_tokenizer: true,
             }
@@ -1284,8 +1356,19 @@ impl PipelineExecutor {
             if sequence_num == 0 {
                 // Prefill: activation_bytes contain the prompt text from execute_distributed.
                 let prompt = String::from_utf8_lossy(activation_bytes);
+                let image_placeholder = crate::inference::chat_template::IMAGE_PLACEHOLDER;
                 let all_tokens: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
-                    tokenizer.encode(&prompt)
+                    if let Some(img_pos) = prompt.find(image_placeholder) {
+                        // VLM: split prompt at <image>, tokenize parts, insert -1 marker
+                        let before = &prompt[..img_pos];
+                        let after = &prompt[img_pos + image_placeholder.len()..];
+                        let mut tokens = tokenizer.encode(before);
+                        tokens.push(-1); // marker for vision embedding insertion
+                        tokens.extend(tokenizer.encode(after));
+                        tokens
+                    } else {
+                        tokenizer.encode(&prompt)
+                    }
                 } else {
                     prompt.bytes().map(|b| b as i64).collect()
                 };
@@ -1556,6 +1639,23 @@ impl PipelineExecutor {
 
         if is_last {
             // Last segment: output is logits → sample token
+            // Debug: log top-5 logits for VLM diagnostics
+            if vision_embeddings.is_some() || sequence_num == 0 {
+                if let Ok(logits_1d) = output.flatten_all() {
+                    let logits_vec: Vec<f32> = logits_1d.to_vec1().unwrap_or_default();
+                    if logits_vec.len() > 10 {
+                        let mut indexed: Vec<(usize, f32)> = logits_vec.iter().copied().enumerate().collect();
+                        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let top5: Vec<String> = indexed.iter().take(5).map(|(i, v)| format!("{i}:{v:.2}")).collect();
+                        tracing::info!(
+                            request_id = %self.request.id,
+                            top5 = %top5.join(", "),
+                            vocab_size = logits_vec.len(),
+                            "DIAG: VLM top logits before sampling"
+                        );
+                    }
+                }
+            }
             let token_id = split::sample_token_with_params(&output, &self.request.sampling_params)?;
 
             // EOS detection: use tokens loaded from GGUF metadata
