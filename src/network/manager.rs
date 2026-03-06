@@ -440,31 +440,41 @@ impl NetworkManager {
                         let fallback = protocol::decode_message(&message.data);
                         match &fallback {
                             Ok(msg) => {
-                                // Only allow safe message types through plaintext fallback.
-                                // ShardAnnounce, CreditGossip, etc. require sealed gossip to
-                                // prevent unauthenticated injection attacks.
-                                let is_safe = matches!(
+                                // Allow gossip messages through plaintext fallback when
+                                // the crypto session hasn't been established yet (e.g. at
+                                // startup before key exchange completes).
+                                // Only point-to-point inference messages are rejected
+                                // without a seal — gossip is self-reported and verified
+                                // at consumption time (BLAKE3 for shards, dual-sig for
+                                // credit txns).
+                                // TODO: enforce sealed gossip once session establishment
+                                // is reliably fast (pre-connection key exchange).
+                                let is_unsafe = matches!(
                                     msg,
-                                    SwarmMessage::HealthPing { .. }
-                                        | SwarmMessage::HealthPong { .. }
+                                    SwarmMessage::InferenceRequest(_)
+                                        | SwarmMessage::SealedInferenceRequest(_)
+                                        | SwarmMessage::LayerForward(_)
+                                        | SwarmMessage::LayerResult(_)
+                                        | SwarmMessage::StreamingToken(_)
                                 );
-                                if is_safe {
-                                    tracing::debug!(
-                                        seal_error = %seal_err,
-                                        source = ?message.source,
-                                        "DIAG: gossip plaintext fallback (safe message type)"
-                                    );
-                                } else {
+                                if is_unsafe {
                                     tracing::warn!(
                                         seal_error = %seal_err,
                                         source = ?message.source,
-                                        "Rejecting unauthenticated gossip — seal required for this message type"
+                                        "Rejecting unauthenticated gossip — seal required for inference messages"
                                     );
+                                    Err(serde_json::Error::io(std::io::Error::new(
+                                        std::io::ErrorKind::PermissionDenied,
+                                        "Unsealed gossip rejected for inference message type",
+                                    )))
+                                } else {
+                                    tracing::debug!(
+                                        seal_error = %seal_err,
+                                        source = ?message.source,
+                                        "DIAG: gossip plaintext fallback (non-inference message)"
+                                    );
+                                    fallback
                                 }
-                                if is_safe { fallback } else { Err(serde_json::Error::io(std::io::Error::new(
-                                    std::io::ErrorKind::PermissionDenied,
-                                    "Unsealed gossip rejected for non-safe message type",
-                                ))) }
                             }
                             Err(_) => fallback,
                         }
