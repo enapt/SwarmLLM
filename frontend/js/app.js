@@ -1410,6 +1410,8 @@ var SwarmLLM = (function() {
           if (input) input.value = '';
         });
         settings.loadProviders();
+        loadModels();
+        loadModeIndicator();
         ui.showBanner('success', 'Provider keys saved');
       } catch (e) {
         ui.showBanner('error', 'Failed to save provider keys: ' + (e.message || 'network error'));
@@ -1456,6 +1458,8 @@ var SwarmLLM = (function() {
           badge.textContent = 'Configured';
           badge.style.color = 'var(--green)';
           ui.showBanner('success', name + ' API key verified');
+          loadModels();
+          loadModeIndicator();
         } else {
           var err = await testResp.text();
           badge.textContent = 'Error';
@@ -1733,6 +1737,7 @@ var SwarmLLM = (function() {
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
           window._modelsChangedTimer = setTimeout(function() {
             loadModels();
+            loadModeIndicator();
             dashboard.loadInitial();
           }, 1000);
         }

@@ -3447,6 +3447,9 @@ pub async fn update_providers(
 
     tracing::info!("Cloud provider configuration updated");
 
+    // Notify WebSocket clients so model list and mode indicator refresh immediately
+    let _ = state.shared_state.models_changed_tx.send(());
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "anthropic": config.anthropic.is_some(),
