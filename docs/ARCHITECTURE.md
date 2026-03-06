@@ -272,9 +272,9 @@ Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`
 SwarmLLM supports multimodal inference via `src/inference/vision.rs`:
 - **LLaVA** — CLIP vision encoder + LLM backbone, image patches projected into token space
 - **Qwen2-VL** — Native vision-language architecture with dynamic resolution
-- Images are pre-processed and encoded into vision tokens that are concatenated with text tokens before the LLM forward pass
+- Images are pre-processed, encoded into vision tokens, and inserted at the `<image>` token position in the prompt (matching llama.cpp's approach: prompt split at `<image>`, before/after tokenized separately, vision embeddings inserted at exact position)
 - **mmproj GGUF loading** — `load_from_mmproj_gguf()` loads CLIP ViT weights directly from llama.cpp-compatible mmproj GGUF files (verified with LLaVA-v1.5-7B mmproj: 577 vision tokens × 4096 LLM dim)
-- **Status**: Vision encoder load + image encoding verified; pipeline wiring (router→vision→text model) pending
+- **Status**: Full E2E verified — LLaVA-v1.5-7B: base64 image → CLIP vision encoder (577 tokens × 4096 dim) → position-aware embedding insertion at `<image>` → 7B text model → correct output. CPU-only (~4min prefill, ~1.8s/token)
 
 ### BPE Tokenizer
 
