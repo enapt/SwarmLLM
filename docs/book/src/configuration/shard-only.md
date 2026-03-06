@@ -7,7 +7,7 @@ SwarmLLM supports **shard-only operation** — a node only needs individual shar
 A model directory in shard-only mode:
 
 ```
-~/.swarmllm/models/qwen2.5-coder-7b/
+~/.local/share/swarmllm/models/qwen2.5-coder-7b/
 ├── manifest.json        # Model metadata + shard layout
 ├── gguf_header.bin      # First ~6MB of GGUF (metadata + tensor index)
 ├── shard_000.bin        # 512MB shard

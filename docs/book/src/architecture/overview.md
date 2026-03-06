@@ -33,8 +33,8 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 ## Key Design Decisions
 
 - **Config priority:** CLI flags > env vars (`SWARMLLM_` prefix) > config.toml > defaults
-- **Data directory:** `~/.swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
-- **Same port** for P2P (QUIC/UDP) and HTTP (TCP)
+- **Data directory:** `~/.local/share/swarmllm/` (Linux), `~/Library/Application Support/swarmllm/` (macOS), `%APPDATA%\swarmllm\` (Windows)
+- **Port layout:** HTTP API on TCP:port, P2P TCP on port+10 (Noise+Yamux), P2P QUIC on UDP:port
 - **Shard-only:** Nodes never need a full GGUF. Shards are downloaded individually.
 - **No blockchain:** Credit system uses dual-signed transactions, not a token or chain
 

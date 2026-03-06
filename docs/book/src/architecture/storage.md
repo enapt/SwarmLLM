@@ -3,7 +3,7 @@
 ## Data Directory Layout
 
 ```
-~/.swarmllm/
+~/.local/share/swarmllm/
 ├── config.toml          # User configuration
 ├── identity.key         # Ed25519 keypair
 ├── api_key              # Bearer token (auto-generated)

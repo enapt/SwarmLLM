@@ -111,7 +111,7 @@ Nodes on the same network discover each other automatically via mDNS. Just start
 ./swarmllm run -p 8800
 
 # Node 2
-./swarmllm run -p 8801 -d ~/.swarmllm-node2
+./swarmllm run -p 8801 -d ~/.local/share/swarmllm-node2
 ```
 
 ### Across Networks

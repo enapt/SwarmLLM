@@ -1,5 +1,5 @@
 [node]
-# data_dir = "~/.swarmllm"    # Platform default
+# data_dir = "~/.local/share/swarmllm"    # Platform default
 listen_port = 8800
 contribution = "minimal"       # "minimal", "moderate", "maximum" — change in dashboard
 

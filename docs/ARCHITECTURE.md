@@ -480,7 +480,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 ## Data Directory
 
 ```
-~/.swarmllm/
+~/.local/share/swarmllm/
 ├── config.toml          # User configuration
 ├── identity.key         # Ed25519 keypair (optionally encrypted)
 ├── db.redb              # redb database (migrated from sled db/ directory)
@@ -692,7 +692,7 @@ Nodes can operate with just shard files + manifest.json + gguf_header.bin (~6MB)
 without needing the full multi-GB GGUF file:
 
 ```
-~/.swarmllm/models/qwen2.5-coder-7b/
+~/.local/share/swarmllm/models/qwen2.5-coder-7b/
 ├── manifest.json        # Model metadata + shard layout
 ├── gguf_header.bin      # First ~6MB of GGUF (metadata + tensor index)
 ├── shard_000.bin        # 512MB shard
