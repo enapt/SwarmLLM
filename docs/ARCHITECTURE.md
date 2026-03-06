@@ -39,6 +39,8 @@ Single Rust binary, three simultaneous functions:
 │  │  broadcast::Sender<()>          — models changed      │  │
 │  │  RwLock<VecDeque<PruneEvent>>   — prune history      │  │
 │  │  DashMap<ShardId, bool>         — locked shards      │  │
+│  │  DashMap<Uuid, oneshot::Sender>  — pending vision    │  │
+│  │  DashMap<ModelId, VisionModule>  — vision modules    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -275,6 +277,35 @@ SwarmLLM supports multimodal inference via `src/inference/vision.rs`:
 - Images are pre-processed, encoded into vision tokens, and inserted at the `<image>` token position in the prompt (matching llama.cpp's approach: prompt split at `<image>`, before/after tokenized separately, vision embeddings inserted at exact position)
 - **mmproj GGUF loading** — `load_from_mmproj_gguf()` loads CLIP ViT weights directly from llama.cpp-compatible mmproj GGUF files (verified with LLaVA-v1.5-7B mmproj: 577 vision tokens × 4096 LLM dim)
 - **Status**: Full E2E verified — LLaVA-v1.5-7B: base64 image → CLIP vision encoder (577 tokens × 4096 dim) → position-aware embedding insertion at `<image>` → 7B text model → correct output. CPU-only (~4min prefill, ~1.8s/token)
+
+#### Distributed mmproj
+
+The mmproj (vision encoder, ~600MB) is modeled as a **sentinel shard** (`index = u32::MAX`) within the existing shard infrastructure. Vision encoding is a **pre-processing step** decoupled from the text pipeline — no single node needs both the vision encoder and a text shard.
+
+```
+API Request (with image)
+    │
+    ▼
+Router: does any node have mmproj?
+    │
+    ├── Local node has mmproj → encode locally
+    ├── Remote node has mmproj → VisionEncodeRequest → get embeddings back
+    └── Nobody has mmproj → HTTP 503 (VisionEncoderUnavailable)
+    │
+    ▼
+Pre-computed embeddings (577 × 4096 = ~9.4MB, zstd+FP16 compressed)
+    │
+    ▼
+Text Pipeline (unchanged): embeddings travel with LayerForward
+```
+
+**Key design decisions:**
+- Sentinel shard index (`u32::MAX`) reuses all ShardId infrastructure (registry, announcements, auto-manage, pruning)
+- `VisionEncodeRequest` / `VisionEncodeResponse` network messages for remote encoding (JPEG-compressed images on wire)
+- `LayerForward.vision_embeddings: Option<Vec<u8>>` carries zstd-compressed FP16 embeddings on first forward
+- Vision node selection: prefer local → first-segment node → any mmproj holder
+- `precompute_vision_embeddings()` runs once before the token generation loop
+- Auto-manage: 5x priority bonus for mmproj download, higher pruning floor (min 3 replicas), only prunes under extreme pressure (>0.95)
 
 ### BPE Tokenizer
 
@@ -516,6 +547,7 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - **VRAM estimation**: `model_size × 1.15` (quantized weights + ~15% KV-cache overhead)
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
 - **Budget limits**: max_storage_mb, max_shards_per_cycle (2), skips in-progress acquisitions
+- **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
 - **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`
 
 ### Smart Shard Pruning

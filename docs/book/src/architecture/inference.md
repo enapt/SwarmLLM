@@ -57,6 +57,23 @@ The SplitModel loader reads `general.architecture` from GGUF metadata:
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
 - **PagedAttention** — Block-pool KV-cache allocation (CUDA-only, `paged-attn` feature)
 
+## Vision Language Models (VLM)
+
+### Distributed mmproj
+
+The mmproj (vision encoder) is modeled as a sentinel shard (`index = u32::MAX`) decoupled from the text pipeline. Any node with mmproj can encode images — the router selects local → first-segment → any holder.
+
+```
+Image → JPEG compress → VisionEncodeRequest (remote) or encode locally
+    → zstd+FP16 compressed embeddings
+    → attached to first LayerForward (vision_embeddings field)
+    → text pipeline processes as normal
+```
+
+Key types: `VisionEncodeRequest`, `VisionEncodeResponse`, `LayerForward.vision_embeddings`.
+
+If no node has mmproj loaded, the API returns HTTP 503 (`VisionEncoderUnavailable`).
+
 ## Tensor Wire Format
 
 ```

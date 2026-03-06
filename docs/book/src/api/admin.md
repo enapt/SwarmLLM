@@ -25,7 +25,7 @@ Gracefully shut down the node. Localhost only, Bearer auth required.
 ## Model Management
 
 ### GET /api/admin/models
-List models with shard status, VRAM estimates, and acquisition state.
+List models with shard status, VRAM estimates, and acquisition state. Each model includes an `mmproj` field with `available` (bool), `local` (bool), and `holders` (count) for VLM vision encoder status.
 
 ### POST /api/admin/models/:id/add
 Trigger model acquisition from the network.

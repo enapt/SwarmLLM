@@ -41,6 +41,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | ApiServer | AcquisitionManager | AcquisitionCommand |
 | AutoShardManager | AcquisitionManager | AcquisitionCommand |
 | CreditLedger | NetworkManager | CreditGossip, CreditTransaction |
+| MessageDispatcher | (spawned task) | VisionEncodeRequest → handler → VisionEncodeResponse |
 
 ### Broadcast Channels
 

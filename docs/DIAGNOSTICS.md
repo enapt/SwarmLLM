@@ -363,11 +363,15 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
 
-### Vision (vision.rs)
+### Vision (vision.rs + pipeline.rs + daemon.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
 | DEBUG | `DIAG: encode_images` | `image_count`, `elapsed_ms` |
+| INFO  | `DIAG: precompute_vision_embeddings` | `local`/`remote`, `node`, `elapsed_ms` |
+| INFO  | `DIAG: handle_vision_encode_request` | `model_id`, `image_bytes`, `elapsed_ms` |
+| DEBUG | `DIAG: select_vision_node` | `local`, `first_segment`, `any_holder` |
+| WARN  | `DIAG: vision encode timeout` | `node`, `timeout_secs` |
 
 ### Paged KV-Cache (paged_kv.rs)
 
@@ -575,9 +579,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/daemon.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
 
-## Coverage Statistics (2026-03-04)
+## Coverage Statistics (2026-03-06)
 
-**197 DIAG lines across 53/79 source files (67%).**
+**~202 DIAG lines across 53/79 source files (67%).**
 
 The 26 uncovered files are `mod.rs` re-exports (13), `types.rs` / `error.rs` data definitions (3), `main.rs` / `lib.rs` / `config.rs` entry points (3), `assets.rs` / `ui/mod.rs` static files (2), and utility files with no decision/timing points (5).
 
