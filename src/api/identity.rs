@@ -58,6 +58,8 @@ pub async fn set_nickname(
         .nickname_registry
         .insert(record.node_id.clone(), record.clone());
 
+    tracing::debug!(nickname = %record.nickname, "DIAG: set_nickname persisted");
+
     // Gossip to network
     if let Some(ref ntx) = state.network_tx {
         let msg = SwarmMessage::NicknameGossip(NicknameGossip {
@@ -143,6 +145,7 @@ pub async fn leaderboard(
     let limit = query.limit.min(200);
     let peer_count = state.shared_state.peer_registry.len();
 
+    tracing::debug!(peer_count, limit, "DIAG: leaderboard query");
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     // Add self (always included)

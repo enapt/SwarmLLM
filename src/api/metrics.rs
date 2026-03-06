@@ -12,6 +12,7 @@ use crate::api::server::AppState;
 /// Exposes key node metrics for Prometheus scraping. No auth required
 /// (convention for metrics endpoints).
 pub async fn metrics(State(state): State<AppState>) -> Response {
+    tracing::debug!("DIAG: metrics scrape");
     let shared = &state.shared_state;
     let mut buf = String::with_capacity(2048);
 
@@ -77,6 +78,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 pub async fn health_ready(State(state): State<AppState>) -> Response {
     let shared = &state.shared_state;
     let ready = shared.is_ready.load(Ordering::Acquire);
+    tracing::debug!(ready, "DIAG: health_ready probe");
 
     // Subsystem status: all true once is_ready is set (they're spawned atomically)
     let subsystems = serde_json::json!({

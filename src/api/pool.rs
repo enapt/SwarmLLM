@@ -35,6 +35,7 @@ pub async fn pool_create(
     State(state): State<AppState>,
     Json(body): Json<PoolCreateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!(name = %body.name, "DIAG: pool_create request");
     // Validate pool name length
     if body.name.trim().is_empty() || body.name.len() > 64 {
         return Err(ApiError(crate::error::SwarmError::Config(
@@ -72,6 +73,7 @@ pub async fn pool_invite(
     Json(body): Json<PoolInviteRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let node_id = parse_node_id(&body.node_id)?;
+    tracing::info!("DIAG: pool_invite request");
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     send_pool_command(
@@ -360,6 +362,8 @@ pub async fn pool_rates_set(
         .get(&pool_id)
         .map(|r| r.value().clone())
         .unwrap_or_else(|| state.config.pool.credit_rates.clone());
+
+    tracing::info!(pool_id = %pool_id_hex, "DIAG: pool_rates_set request");
 
     let new_rates = CreditRateConfig {
         inference_serve: body.inference_serve.unwrap_or(current.inference_serve),

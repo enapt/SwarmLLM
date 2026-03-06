@@ -217,11 +217,12 @@ pub async fn messages(
         messages = req.messages.len(),
         stream = req.stream,
         max_tokens = req.max_tokens,
-        "Anthropic Messages API request"
+        "DIAG: anthropic messages request"
     );
 
     // Fast-path: connectivity probes (Claude Code sends max_tokens=1 pings)
     if is_connectivity_probe(&req) {
+        tracing::debug!(request_id = %request_id, "DIAG: anthropic connectivity probe — fast path");
         let response = MessagesResponse {
             id: request_id,
             response_type: "message",
@@ -294,6 +295,13 @@ pub async fn messages(
         .next()
         .map(|e| e.value().is_complete)
         .unwrap_or(false);
+
+    tracing::debug!(
+        request_id = %request_id,
+        has_local_split_model,
+        network_available,
+        "DIAG: anthropic inference path resolution"
+    );
 
     if has_local_split_model {
         let (tmpl, bos, eos) = {
@@ -401,7 +409,7 @@ pub async fn messages(
             let api_key = entry.api_key.clone();
             drop(config);
 
-            tracing::info!(model = %req.model, "Proxying to Anthropic cloud API");
+            tracing::info!(model = %req.model, "DIAG: anthropic proxying to cloud API");
             let body = serde_json::to_value(&ProxyMessagesRequest {
                 model: &req.model,
                 max_tokens: req.max_tokens,

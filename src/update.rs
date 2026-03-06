@@ -77,6 +77,7 @@ impl UpdateChecker {
 
     /// Check GitHub for a newer release. Returns `Some(UpdateInfo)` if an update is available.
     pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>, SwarmError> {
+        tracing::debug!("DIAG: check_for_update starting");
         let current = env!("CARGO_PKG_VERSION");
         let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
 
@@ -103,6 +104,8 @@ impl UpdateChecker {
             .map_err(|e| SwarmError::Network(format!("Failed to parse release JSON: {e}")))?;
 
         let latest_tag = release.tag_name.trim_start_matches('v').to_string();
+
+        tracing::debug!(current, latest = %latest_tag, "DIAG: check_for_update version compare");
 
         if !is_newer_version(current, &latest_tag) {
             // Update last_checked even when no update is found
@@ -239,6 +242,7 @@ impl UpdateChecker {
     /// Apply the downloaded update: atomic rename of binaries.
     /// Does NOT restart the daemon — the user must restart manually.
     pub fn apply_update(&self, tmp_path: &std::path::Path) -> Result<(), SwarmError> {
+        tracing::info!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
             return Err(SwarmError::Internal(
                 "Update file not found — download first".to_string(),

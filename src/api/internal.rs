@@ -30,8 +30,15 @@ pub async fn hidden_states(
     State(state): State<AppState>,
     Json(req): Json<HiddenStateRequest>,
 ) -> Result<Json<HiddenStateResponse>, ApiError> {
+    tracing::debug!(
+        layers = ?req.return_layers,
+        prompt_len = req.prompt.len(),
+        "DIAG: hidden_states request"
+    );
+
     // Gate: feature must be enabled in config
     if !state.config.api.expose_hidden_states {
+        tracing::debug!("DIAG: hidden_states gate denied — endpoint disabled");
         return Err(ApiError(crate::error::SwarmError::Inference(
             "Hidden states endpoint is disabled. Set api.expose_hidden_states = true in config."
                 .to_string(),

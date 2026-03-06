@@ -859,6 +859,13 @@ impl Config {
         cli_gpu_layers: Option<u32>,
         cli_bootstrap: Vec<String>,
     ) -> Result<Self, SwarmError> {
+        tracing::debug!(
+            config_path = ?config_path,
+            cli_port = ?cli_port,
+            cli_data_dir = ?cli_data_dir,
+            "DIAG: config load_or_create starting"
+        );
+
         // 1. Start with defaults
         let mut config = Self::default();
 
@@ -980,6 +987,12 @@ impl Config {
 
         // Validate
         config.validate()?;
+
+        tracing::debug!(
+            port = config.node.listen_port,
+            data_dir = %config.node.data_dir.display(),
+            "DIAG: config load_or_create complete"
+        );
 
         Ok(config)
     }

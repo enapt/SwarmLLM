@@ -179,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_daemon(cli: Cli, no_update_check: bool) -> anyhow::Result<()> {
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Starting SwarmLLM");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "DIAG: daemon starting");
 
     // Load config
     let mut config = Config::load_or_create(
