@@ -3457,6 +3457,90 @@ pub async fn update_providers(
     })))
 }
 
+/// GET /api/admin/provider-models — List well-known models for configured providers.
+///
+/// Returns a flat list of popular models for each provider that has an API key configured.
+/// The frontend uses this to populate the model selector with cloud models alongside local ones.
+pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let config = state.shared_state.providers_config.read().await;
+    let mut models = Vec::new();
+
+    if config.openai.is_some() {
+        for (id, name) in [
+            ("gpt-4o", "GPT-4o"),
+            ("gpt-4o-mini", "GPT-4o Mini"),
+            ("gpt-4.1", "GPT-4.1"),
+            ("gpt-4.1-mini", "GPT-4.1 Mini"),
+            ("gpt-4.1-nano", "GPT-4.1 Nano"),
+            ("o3-mini", "o3 Mini"),
+        ] {
+            models.push(serde_json::json!({
+                "id": id, "name": name, "provider": "openai"
+            }));
+        }
+    }
+
+    if config.anthropic.is_some() {
+        for (id, name) in [
+            ("claude-opus-4-6", "Claude Opus 4.6"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+        ] {
+            models.push(serde_json::json!({
+                "id": id, "name": name, "provider": "anthropic"
+            }));
+        }
+    }
+
+    if config.deepseek.is_some() {
+        for (id, name) in [
+            ("deepseek-chat", "DeepSeek Chat"),
+            ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ] {
+            models.push(serde_json::json!({
+                "id": id, "name": name, "provider": "deepseek"
+            }));
+        }
+    }
+
+    if config.mistral.is_some() {
+        for (id, name) in [
+            ("mistral-large-latest", "Mistral Large"),
+            ("mistral-small-latest", "Mistral Small"),
+            ("codestral-latest", "Codestral"),
+        ] {
+            models.push(serde_json::json!({
+                "id": id, "name": name, "provider": "mistral"
+            }));
+        }
+    }
+
+    if config.groq.is_some() {
+        for (id, name) in [
+            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+            ("llama-3.1-8b-instant", "Llama 3.1 8B"),
+            ("gemma2-9b-it", "Gemma 2 9B"),
+        ] {
+            models.push(serde_json::json!({
+                "id": id, "name": name, "provider": "groq"
+            }));
+        }
+    }
+
+    // Include custom providers with their default model if set
+    for custom in &config.custom {
+        if let Some(ref model) = custom.default_model {
+            models.push(serde_json::json!({
+                "id": format!("{}:{}", custom.name, model),
+                "name": model,
+                "provider": custom.name,
+            }));
+        }
+    }
+
+    Json(serde_json::json!({ "models": models }))
+}
+
 // ========================================================================
 // Update / Version Endpoints
 // ========================================================================

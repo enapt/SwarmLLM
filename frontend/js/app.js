@@ -1715,9 +1715,18 @@ var SwarmLLM = (function() {
   // ========================================================================
   async function loadModels() {
     try {
-      // Fetch admin model list to check readiness status
+      // Fetch admin model list + provider models in parallel
       var adminResp = await fetch('/api/admin/models');
       var adminModels = adminResp.ok ? await adminResp.json() : [];
+
+      var providerModels = [];
+      try {
+        var pmResp = await fetch('/api/admin/provider-models');
+        if (pmResp.ok) {
+          var pmData = await pmResp.json();
+          providerModels = pmData.models || [];
+        }
+      } catch (e) {}
 
       // Build set of ready model IDs (status: loaded, ready, or all shards available)
       var readySet = {};
@@ -1727,25 +1736,62 @@ var SwarmLLM = (function() {
         if (isReady) readySet[m.id] = true;
       });
 
-      // Build model selector from admin model list (auth-exempt)
       var sel = document.getElementById('model-select');
       sel.innerHTML = '';
 
       var readyModels = adminModels.filter(function(m) { return readySet[m.id]; });
+      var hasAny = readyModels.length > 0 || providerModels.length > 0;
 
-      if (readyModels.length > 0) {
+      if (hasAny) {
         var savedModel = null;
         try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
-        var found = savedModel && readyModels.some(function(m) { return m.id === savedModel; });
-        currentModel = found ? savedModel : readyModels[0].id;
-        readyModels.forEach(function(m) {
-          var opt = document.createElement('option');
-          opt.value = m.id;
-          var displayName = formatModelDisplayName(m.name || m.id);
-          opt.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '...' : displayName;
-          opt.title = m.id;
-          sel.appendChild(opt);
-        });
+
+        // Add local/network models
+        if (readyModels.length > 0) {
+          var localGroup = document.createElement('optgroup');
+          localGroup.label = '\u{1F4BB} Local / Network Models';
+          readyModels.forEach(function(m) {
+            var opt = document.createElement('option');
+            opt.value = m.id;
+            var displayName = formatModelDisplayName(m.name || m.id);
+            opt.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '...' : displayName;
+            opt.title = m.id;
+            localGroup.appendChild(opt);
+          });
+          sel.appendChild(localGroup);
+        }
+
+        // Add cloud provider models (grouped by provider)
+        if (providerModels.length > 0) {
+          var byProvider = {};
+          providerModels.forEach(function(m) {
+            var p = m.provider || 'cloud';
+            if (!byProvider[p]) byProvider[p] = [];
+            byProvider[p].push(m);
+          });
+          var providerLabels = {
+            openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+            mistral: 'Mistral', groq: 'Groq'
+          };
+          Object.keys(byProvider).forEach(function(p) {
+            var group = document.createElement('optgroup');
+            group.label = '\u2601\uFE0F ' + (providerLabels[p] || p) + ' (cloud)';
+            byProvider[p].forEach(function(m) {
+              var opt = document.createElement('option');
+              opt.value = m.id;
+              opt.textContent = m.name || m.id;
+              opt.title = m.id + ' \u2014 routed to ' + (providerLabels[p] || p) + ' API (not shared on network)';
+              group.appendChild(opt);
+            });
+            sel.appendChild(group);
+          });
+        }
+
+        // Restore saved selection
+        var allIds = readyModels.map(function(m) { return m.id; })
+          .concat(providerModels.map(function(m) { return m.id; }));
+        var found = savedModel && allIds.indexOf(savedModel) !== -1;
+        currentModel = found ? savedModel : allIds[0];
         sel.value = currentModel;
       } else if (adminModels.length > 0) {
         currentModel = '';
@@ -1755,7 +1801,7 @@ var SwarmLLM = (function() {
         sel.innerHTML = '<option value="">No model loaded</option>';
       }
       syncMobileModelSelect();
-      updateChatAvailability(readyModels.length > 0);
+      updateChatAvailability(hasAny);
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
@@ -3277,7 +3323,7 @@ var SwarmLLM = (function() {
       }
     }
     if (emptyState && !hasModels) {
-      emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser to start chatting</p>' +
+      emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser or configure a cloud provider in Settings to start chatting</p>' +
         '<button class="btn btn-primary" onclick="SwarmLLM.openModelBrowser && SwarmLLM.openModelBrowser()">Browse Models</button>';
     }
   }

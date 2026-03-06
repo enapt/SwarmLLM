@@ -124,6 +124,7 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/network-map"
                 | "/api/admin/network-code"
                 | "/api/admin/providers"
+                | "/api/admin/provider-models"
                 | "/api/admin/schedule"
         ) || path.starts_with("/api/admin/hf/source/")
             || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
@@ -253,6 +254,7 @@ mod tests {
         assert!(is_exempt_request("/api/admin/network-map", &get));
         assert!(is_exempt_request("/api/admin/network-code", &get));
         assert!(is_exempt_request("/api/admin/schedule", &get));
+        assert!(is_exempt_request("/api/admin/provider-models", &get));
         assert!(is_exempt_request("/api/identity/nickname", &get));
         assert!(is_exempt_request("/api/pool/state", &get));
     }
