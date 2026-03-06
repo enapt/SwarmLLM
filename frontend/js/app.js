@@ -1902,6 +1902,14 @@ var SwarmLLM = (function() {
     items.forEach(function(el) {
       el.classList.toggle('selected', el.getAttribute('data-value') === modelId);
     });
+
+    // Flash the trigger to confirm selection
+    var trigger = document.getElementById('model-dropdown-trigger');
+    if (trigger) {
+      trigger.classList.remove('flash');
+      void trigger.offsetWidth; // force reflow to restart animation
+      trigger.classList.add('flash');
+    }
   }
 
   function updateModelDropdownLabel(text) {
@@ -3523,14 +3531,13 @@ var SwarmLLM = (function() {
   // Operation Mode Indicator
   // ========================================================================
   function updateModeIndicator(statsData, providerData) {
+    var indicator = document.getElementById('mode-indicator');
     var dot = document.getElementById('mode-dot');
     var label = document.getElementById('mode-label');
     var detail = document.getElementById('mode-detail');
     if (!dot || !label || !detail) return;
 
     var peers = statsData ? (statsData.peers || 0) : 0;
-    // hosted_shards comes from /api/admin/stats but NOT from WebSocket stats_update
-    // Fall back to checking if any model cards show as active/ready
     var hostedShards = statsData ? (statsData.hosted_shards || 0) : 0;
     if (hostedShards === 0) {
       var el = document.getElementById('hosted-shards');
@@ -3538,7 +3545,6 @@ var SwarmLLM = (function() {
     }
     var hasLocalModel = hostedShards > 0;
 
-    // Determine configured cloud providers
     var cloudProviders = [];
     if (providerData && providerData.providers) {
       providerData.providers.forEach(function(p) {
@@ -3546,37 +3552,50 @@ var SwarmLLM = (function() {
       });
     }
 
-    if (peers > 0 && hasLocalModel) {
-      // Full swarm mode
+    // Build detail chips
+    var chips = [];
+    if (hasLocalModel) chips.push('<span class="mode-chip chip-local">' + hostedShards + ' shard' + (hostedShards !== 1 ? 's' : '') + ' local</span>');
+    if (peers > 0) chips.push('<span class="mode-chip chip-peer">' + peers + ' peer' + (peers !== 1 ? 's' : '') + '</span>');
+    cloudProviders.forEach(function(p) {
+      chips.push('<span class="mode-chip chip-cloud">' + capitalize(p) + '</span>');
+    });
+
+    // Remove old mode classes
+    if (indicator) indicator.className = 'mode-indicator mb-2';
+
+    if (peers > 0 && hasLocalModel && cloudProviders.length > 0) {
+      dot.className = 'mode-dot swarm';
+      label.textContent = 'Full Hybrid';
+      if (indicator) indicator.classList.add('mode-hybrid');
+    } else if (peers > 0 && hasLocalModel) {
       dot.className = 'mode-dot swarm';
       label.textContent = 'Swarm Mode';
-      detail.textContent = peers + ' peer' + (peers !== 1 ? 's' : '') + ' connected';
+      if (indicator) indicator.classList.add('mode-swarm');
     } else if (peers > 0 && !hasLocalModel) {
-      // Connected but no local model — using swarm for inference
       dot.className = 'mode-dot swarm';
       label.textContent = 'Swarm (remote)';
-      detail.textContent = 'No local shards — using ' + peers + ' peer' + (peers !== 1 ? 's' : '');
+      if (indicator) indicator.classList.add('mode-swarm');
     } else if (hasLocalModel && cloudProviders.length > 0) {
-      // Local model + cloud providers
       dot.className = 'mode-dot swarm';
       label.textContent = 'Hybrid Mode';
-      detail.textContent = 'Local + ' + cloudProviders.map(capitalize).join(', ');
+      if (indicator) indicator.classList.add('mode-hybrid');
     } else if (hasLocalModel) {
-      // Local only, standalone
       dot.className = 'mode-dot offline';
       label.textContent = 'Standalone';
-      detail.textContent = 'Local inference only — no peers';
+      if (indicator) indicator.classList.add('mode-offline');
+      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Local inference only</span>');
     } else if (cloudProviders.length > 0) {
-      // Cloud gateway only
       dot.className = 'mode-dot cloud';
       label.textContent = 'Cloud Gateway';
-      detail.textContent = cloudProviders.map(capitalize).join(', ');
+      if (indicator) indicator.classList.add('mode-cloud');
     } else {
-      // Nothing configured
       dot.className = 'mode-dot offline';
       label.textContent = 'Not Ready';
-      detail.textContent = 'No models or providers configured';
+      if (indicator) indicator.classList.add('mode-offline');
+      chips = ['<span class="mode-chip chip-none">No models or providers configured</span>'];
     }
+
+    detail.innerHTML = chips.join(' ');
   }
 
   // Cache provider data so we can update mode indicator on stats updates
