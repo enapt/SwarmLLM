@@ -435,15 +435,83 @@ impl PipelineScheduler {
     /// AllReduce communication between layers requires low latency.
     fn detect_tp_groups(
         &self,
-        _segments: &[PipelineSegment],
-        _candidates: &[NodeCandidate],
+        segments: &[PipelineSegment],
+        candidates: &[NodeCandidate],
         _manifest: &ModelManifest,
     ) -> Vec<TensorParallelGroup> {
-        // Multi-node TP requires AllReduce, which is not yet implemented.
-        // Forming TP groups would produce wrong hidden states (each node computes
-        // a partial result but there is no reduction step to combine them).
-        // Disabled until AllReduce lands — always return empty.
-        Vec::new()
+        let local_id = self.shared_state.identity.node_id().clone();
+        let max_tp_size = 4; // Cap TP group size
+
+        let mut groups = Vec::new();
+
+        for segment in segments {
+            // Only form TP groups for segments assigned to us (local node)
+            if segment.node_id != local_id {
+                continue;
+            }
+
+            // Find LAN peers that can serve the same layer range
+            let mut tp_nodes = vec![local_id.clone()];
+
+            for candidate in candidates {
+                if candidate.node_id == local_id {
+                    continue;
+                }
+                if tp_nodes.len() >= max_tp_size {
+                    break;
+                }
+
+                // Must cover the same layer range
+                let covers = candidate.available_ranges.iter().any(|r| {
+                    r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1
+                });
+                if !covers {
+                    continue;
+                }
+
+                // Must be a LAN peer (low latency for AllReduce)
+                let is_lan = self
+                    .shared_state
+                    .peer_registry
+                    .get(&candidate.node_id)
+                    .map(|p| p.is_lan_peer)
+                    .unwrap_or(false);
+                if !is_lan {
+                    continue;
+                }
+
+                // Latency must be under 10ms for effective TP
+                if candidate.latency_ms > 10 {
+                    continue;
+                }
+
+                tp_nodes.push(candidate.node_id.clone());
+            }
+
+            // Need at least 2 nodes for tensor parallelism
+            if tp_nodes.len() >= 2 {
+                let shard_ids: Vec<_> = candidates
+                    .iter()
+                    .filter(|c| tp_nodes.contains(&c.node_id))
+                    .map(|c| c.shard_id.clone())
+                    .collect();
+
+                tracing::info!(
+                    layers = ?(segment.layer_range.0..segment.layer_range.1),
+                    tp_size = tp_nodes.len(),
+                    nodes = ?tp_nodes.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+                    "Formed tensor-parallel group"
+                );
+
+                groups.push(TensorParallelGroup {
+                    nodes: tp_nodes,
+                    layer_range: segment.layer_range,
+                    shard_ids,
+                });
+            }
+        }
+
+        groups
     }
 
     /// Find standby (backup) nodes for each pipeline segment.
@@ -882,9 +950,13 @@ mod tests {
             .assemble_pipeline(&ModelId("tp-model".into()), &local_id)
             .unwrap();
 
-        // TP is disabled until AllReduce is implemented, so no TP groups formed
+        // AllReduce is now implemented — LAN peer forms a TP group
         assert_eq!(assignment.segments.len(), 1);
-        assert_eq!(assignment.tp_groups.len(), 0);
+        assert_eq!(assignment.tp_groups.len(), 1);
+        assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
+        assert!(assignment.tp_groups[0].nodes.contains(&local_id));
+        assert!(assignment.tp_groups[0].nodes.contains(&node_b));
+        assert_eq!(assignment.tp_groups[0].layer_range, (0, 32));
     }
 
     #[test]
