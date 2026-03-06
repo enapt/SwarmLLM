@@ -205,6 +205,9 @@ pub struct SharedState {
     /// Coordinator collects partials from all TP ranks, sums them, and responds.
     pub pending_tp_partials:
         DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
+    /// AllReduce response registry — pipeline executors register here to receive
+    /// reduced tensors after the coordinator completes the allreduce.
+    pub allreduce_registry: Arc<crate::inference::allreduce::AllReduceRegistry>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -532,6 +535,7 @@ impl SharedState {
             vision_modules: DashMap::new(),
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),
+            allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
             shutdown_tx,
         });
 
@@ -2191,7 +2195,9 @@ async fn dispatch_network_messages(
                                                         reduced_data,
                                                         shape,
                                                     };
-                                                    // Broadcast response to all TP participants
+                                                    // Deliver to local registry (coordinator is also a TP rank)
+                                                    ss.allreduce_registry.deliver(resp.clone());
+                                                    // Broadcast response to remote TP participants
                                                     let msg = SwarmMessage::TpAllReduceResponse(resp);
                                                     let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
                                                 }
@@ -2209,29 +2215,13 @@ async fn dispatch_network_messages(
                                 }
                             }
                             // Tensor-parallel AllReduce response: deliver to waiting pipeline
-                            SwarmMessage::TpAllReduceResponse(ref resp) => {
-                                let _key = (resp.request_id, resp.layer_idx);
-                                // Route to pending channel if a local pipeline is waiting
-                                if let Some((_, tx)) = shared_state
-                                    .pending_layer_results
-                                    .remove(&resp.request_id)
-                                {
-                                    // The pipeline will receive this as a LayerResult with the
-                                    // reduced activations. For now, log that we got it.
-                                    tracing::debug!(
-                                        request_id = %resp.request_id,
-                                        layer_idx = resp.layer_idx,
-                                        "AllReduce response received but LayerResult routing TBD"
-                                    );
-                                    // Re-insert since we're not consuming it yet
-                                    shared_state.pending_layer_results.insert(resp.request_id, tx);
-                                }
-                                // Store for pipeline consumption via a dedicated pending map
-                                // (will be wired in C4: execute_tp_segment)
+                            SwarmMessage::TpAllReduceResponse(resp) => {
+                                let delivered = shared_state.allreduce_registry.deliver(resp.clone());
                                 tracing::debug!(
                                     request_id = %resp.request_id,
                                     layer_idx = resp.layer_idx,
                                     reduced_bytes = resp.reduced_data.len(),
+                                    delivered,
                                     "AllReduce response received"
                                 );
                             }

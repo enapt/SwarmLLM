@@ -1,3 +1,4 @@
+pub mod allreduce;
 pub mod chat_template;
 pub mod executor;
 pub mod json_grammar;

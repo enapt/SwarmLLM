@@ -1339,6 +1339,8 @@ impl NetworkManager {
             NetworkCommand::SendTensorResult { .. } => "SendTensorResult",
             NetworkCommand::SendStreamingToken { .. } => "SendStreamingToken",
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
+            NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
+            NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -1369,6 +1371,26 @@ impl NetworkManager {
             } => {
                 self.handle_send_shard_request(target_peer_bytes, request);
             }
+            NetworkCommand::SendAllReduceRequest {
+                target_peer_bytes,
+                request,
+            } => {
+                self.handle_send_rr_message(
+                    target_peer_bytes,
+                    SwarmMessage::TpAllReduceRequest(request),
+                    "AllReduceRequest",
+                );
+            }
+            NetworkCommand::SendAllReduceResponse {
+                target_peer_bytes,
+                response,
+            } => {
+                self.handle_send_rr_message(
+                    target_peer_bytes,
+                    SwarmMessage::TpAllReduceResponse(response),
+                    "AllReduceResponse",
+                );
+            }
         }
     }
 
@@ -1387,6 +1409,8 @@ impl NetworkManager {
             }
             SwarmMessage::NicknameGossip(_) => crate::network::protocol::TOPIC_IDENTITY,
             SwarmMessage::PoolMessage(_) => crate::network::protocol::TOPIC_POOLS,
+            // AllReduce responses broadcast to TP group via gossip (small group, LAN-local)
+            SwarmMessage::TpAllReduceResponse(_) => crate::network::protocol::TOPIC_HEALTH,
             // Inference and credit transaction messages go via request_response, not gossipsub
             _ => return,
         };
@@ -1949,6 +1973,29 @@ impl NetworkManager {
         };
 
         let msg = SwarmMessage::StreamingToken(token);
+        let req = SwarmRequest::Message(Box::new(msg));
+        self.swarm
+            .behaviour_mut()
+            .request_response
+            .send_request(&peer_id, req);
+    }
+
+    /// Send an arbitrary SwarmMessage to a specific peer via request_response.
+    /// Used for AllReduce and other point-to-point messages.
+    fn handle_send_rr_message(
+        &mut self,
+        target_peer_bytes: Vec<u8>,
+        msg: SwarmMessage,
+        label: &str,
+    ) {
+        let peer_id = match libp2p::PeerId::from_bytes(&target_peer_bytes) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, label, "Invalid peer ID bytes for rr message");
+                return;
+            }
+        };
+
         let req = SwarmRequest::Message(Box::new(msg));
         self.swarm
             .behaviour_mut()

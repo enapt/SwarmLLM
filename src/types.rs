@@ -800,6 +800,16 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         request: ShardRequest,
     },
+    /// Send an AllReduce partial to the TP coordinator.
+    SendAllReduceRequest {
+        target_peer_bytes: Vec<u8>,
+        request: TpAllReduceRequest,
+    },
+    /// Send an AllReduce response to a specific TP rank.
+    SendAllReduceResponse {
+        target_peer_bytes: Vec<u8>,
+        response: TpAllReduceResponse,
+    },
 }
 
 // ---- Rebalancing ----
