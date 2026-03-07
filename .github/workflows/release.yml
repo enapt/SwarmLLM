@@ -38,12 +38,6 @@ jobs:
             binary: swarmllm
             archive: swarmllm-macos-aarch64.tar.gz
             features: ""
-          - name: macOS x86_64
-            runner: macos-14
-            target: x86_64-apple-darwin
-            binary: swarmllm
-            archive: swarmllm-macos-x86_64.tar.gz
-            features: ""
           - name: Windows x86_64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -56,8 +50,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -79,13 +71,13 @@ jobs:
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        run: cargo build --release ${{ matrix.features }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           mkdir -p staging
-          cp target/${{ matrix.target }}/release/${{ matrix.binary }} staging/
+          cp target/release/${{ matrix.binary }} staging/
           cp config/default.toml staging/
           cp INSTALL.txt staging/
           cp LICENSE-* staging/
@@ -97,7 +89,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" staging/
+          Copy-Item "target/release/${{ matrix.binary }}" staging/
           Copy-Item "config/default.toml" staging/
           Copy-Item "INSTALL.txt" staging/
           Copy-Item LICENSE-* staging/
