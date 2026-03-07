@@ -69,7 +69,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: "12.4.0"
-          method: local
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
 
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
@@ -105,6 +106,7 @@ jobs:
   release:
     name: Publish Release
     needs: build
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
