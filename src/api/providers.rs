@@ -69,12 +69,20 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     {
         return resolve_by_name("mistral", config);
     }
-    // NVIDIA NIM models use nvidia/ or nim/ prefixes, or well-known NIM model names
+    // NVIDIA NIM models use org/model format (meta/, nvidia/, google/, microsoft/, etc.)
     if lower.starts_with("nvidia/") || lower.starts_with("nim/") {
         return resolve_by_name("nvidia_nim", config);
     }
     // Nemotron models are NVIDIA-specific
     if lower.contains("nemotron") && config.nvidia_nim.is_some() {
+        return resolve_by_name("nvidia_nim", config);
+    }
+    // NIM uses org/model format (e.g. meta/llama-3.1-8b-instruct). If NIM is configured
+    // and the model has an org/ prefix that didn't match another provider, route to NIM.
+    if config.nvidia_nim.is_some()
+        && lower.contains('/')
+        && !lower.starts_with("accounts/") // fireworks uses accounts/ prefix
+    {
         return resolve_by_name("nvidia_nim", config);
     }
     if lower.starts_with("llama-") && config.groq.is_some() {

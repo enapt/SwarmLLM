@@ -641,13 +641,15 @@ pub async fn chat_completions(
         if matches_request {
             cached_name
         } else {
-            // Look up from manifest registry for the requested model
+            // Look up from manifest registry for the requested model.
+            // Do NOT fall back to cached_name — if the requested model doesn't
+            // match the loaded model, we must return None so cloud provider
+            // routing works correctly.
             state
                 .shared_state
                 .model_registry
                 .get_manifest(&crate::types::ModelId(req.model.clone()))
                 .map(|m| m.name.clone())
-                .or(cached_name)
         }
     };
 
@@ -705,6 +707,17 @@ pub async fn chat_completions(
                     "Forwarding request to peer"
                 );
                 return forward_to_peer(&peer_url, &req, req.stream).await;
+            }
+        }
+
+        // Cloud provider fast-path: if the model matches a configured cloud provider,
+        // route immediately without cold-start waiting. Cloud models are never local.
+        {
+            let body = serde_json::to_value(&req).unwrap_or_default();
+            if let Some(response) =
+                crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
+            {
+                return Ok(response);
             }
         }
 

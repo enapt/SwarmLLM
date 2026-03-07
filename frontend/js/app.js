@@ -2065,7 +2065,7 @@ var SwarmLLM = (function() {
 
   async function fetchProviderHealth() {
     try {
-      var resp = await fetch('/api/admin/provider-health');
+      var resp = await authFetch('/api/admin/provider-health');
       if (!resp.ok) return;
       var data = await resp.json();
       var now = Date.now();
