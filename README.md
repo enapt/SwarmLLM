@@ -34,7 +34,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
 
-See the full [Getting Started Guide](docs/guide/GETTING_STARTED.md) for platform-specific instructions.
+See the full [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
 
 **Or use Docker:**
 
@@ -87,7 +87,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Multi-Provider Gateway** — Route requests to cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq) when the model isn't available locally. Native Anthropic Messages API at `/v1/messages`. Model prefix routing or explicit `provider:model` syntax
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
-- **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers on the same subnet, complementing pipeline parallelism for WAN
+- **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA, Qwen2-VL) and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
@@ -169,13 +169,14 @@ Credits determine your priority tier:
 
 ## Supported Models
 
-SwarmLLM supports 10 transformer architectures via native candle inference with GGUF quantization:
+SwarmLLM supports 11 transformer architectures via native candle inference with GGUF quantization:
 
 | Architecture | Examples | Special Features |
 |-------------|----------|-----------------|
 | **Llama** | Llama 2/3, CodeLlama, TinyLlama | Interleaved RoPE, GQA |
 | **Llama 4** | Llama 4 Scout (17B), Maverick (400B) | iRoPE (NoPE every 4th layer), MoE |
 | **Qwen2** | Qwen2.5-Coder-7B/32B | QKV biases, 32k context |
+| **Qwen 3.5** | Qwen3.5-3B/14B/32B | Hybrid SSM+attention (Gated Delta Networks) |
 | **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
 | **GLM-4** | GLM-4-9B, GLM-4.7 MoE | Partial RoPE, extreme GQA (16:1) |
 | **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Contiguous RoPE |
@@ -270,7 +271,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start`, `theme` |
 
-See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full reference.
+See the [Configuration Guide](docs/book/src/configuration.md) for the full reference.
 
 ## Platform Support
 
@@ -307,21 +308,21 @@ See the [Configuration Guide](docs/guide/CONFIGURATION.md) for the full referenc
 | **E2E Encryption** | X25519 + ChaCha20 + forward secrecy | None | None | Minimal |
 | **Incentives** | Credit tiers (no token) | None | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (LAN) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model Architectures** | 10 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4) | 4 | 6+ | Any |
+| **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5) | 4 | 6+ | Any |
 | **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
 | **Multi-Provider Gateway** | Yes (OpenAI, Anthropic, etc.) | No | No | No |
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 525 tests | Limited | Limited | Varies |
+| **Test Suite** | 609 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 
 ## Documentation
 
-- **[Getting Started](docs/guide/GETTING_STARTED.md)** — Download, install, and start chatting in minutes
-- **[Configuration](docs/guide/CONFIGURATION.md)** — All config options, environment variables, CLI flags
-- **[Troubleshooting](docs/guide/TROUBLESHOOTING.md)** — Common issues and solutions
+- **[Getting Started](docs/book/src/getting-started.md)** — Download, install, and start chatting in minutes
+- **[Configuration](docs/book/src/configuration.md)** — All config options, environment variables, CLI flags
+- **[Troubleshooting](docs/book/src/troubleshooting.md)** — Common issues and solutions
 - **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
 
 ## License
