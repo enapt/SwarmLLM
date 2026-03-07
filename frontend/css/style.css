@@ -936,6 +936,7 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .chat-empty .chat-empty-icon { font-size: 2.5rem; opacity: 0.4; }
 
+/* ---- Chat Layout: Linear (default) ---- */
 .chat-msg {
   max-width: 740px;
   margin: 0 auto 16px;
@@ -964,6 +965,63 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .chat-msg.assistant .msg-role { color: var(--accent); }
 .chat-msg .msg-content { white-space: pre-wrap; word-wrap: break-word; }
+
+/* ---- Chat Layout: Messenger (bubbles) ---- */
+.chat-messages.chat-messenger .chat-msg {
+  max-width: 75%;
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  clear: both;
+}
+.chat-messages.chat-messenger .chat-msg.user {
+  margin-left: auto;
+  margin-right: 0;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 18px 18px 4px 18px;
+}
+.chat-messages.chat-messenger .chat-msg.user .msg-role {
+  color: rgba(255,255,255,0.6);
+}
+.chat-messages.chat-messenger .chat-msg.user .msg-content {
+  color: #fff;
+}
+.chat-messages.chat-messenger .chat-msg.assistant {
+  margin-right: auto;
+  margin-left: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 18px 18px 18px 4px;
+}
+.chat-messages.chat-messenger .chat-msg .msg-role {
+  font-size: 0.6rem;
+  margin-bottom: 4px;
+}
+.chat-messages.chat-messenger .chat-msg .msg-timer {
+  font-size: 0.6rem;
+  margin-top: 4px;
+}
+
+/* Chat layout toggle button */
+.chat-layout-toggle {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all var(--transition);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.chat-layout-toggle:hover { color: var(--text-primary); border-color: var(--border-light); }
+.chat-layout-toggle.active { color: var(--accent); border-color: var(--accent); }
 kbd {
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -1819,3 +1877,20 @@ kbd {
 
 /* #15: Shard legend above grid */
 .shard-legend-mini { font-size: 0.65rem; margin-bottom: 4px; opacity: 0.8; }
+
+/* Reasoning block (DeepSeek R1 / thinking models) */
+.reasoning-block {
+  margin-bottom: 8px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-primary); overflow: hidden;
+}
+.reasoning-block summary {
+  padding: 6px 12px; font-size: 0.75rem; color: var(--text-muted); cursor: pointer;
+  font-weight: 600; user-select: none;
+}
+.reasoning-block summary:hover { color: var(--text-secondary); }
+.reasoning-block .reasoning-content {
+  padding: 8px 12px; font-size: 0.75rem; color: var(--text-secondary);
+  white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow-y: auto;
+  margin: 0; background: transparent; border: none; border-top: 1px solid var(--border);
+}
+.response-text { white-space: pre-wrap; word-wrap: break-word; }

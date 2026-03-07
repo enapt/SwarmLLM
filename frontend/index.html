@@ -385,7 +385,13 @@
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn">Send</button>
             </div>
-            <div class="token-counter" id="token-counter"></div>
+            <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
+              <div class="token-counter" id="token-counter"></div>
+              <button class="chat-layout-toggle" id="chat-layout-toggle" title="Switch chat layout">
+                <span id="chat-layout-icon">&#9776;</span>
+                <span id="chat-layout-label">Linear</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

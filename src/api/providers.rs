@@ -179,9 +179,12 @@ fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo>
 }
 
 /// Lazily-initialized shared reqwest client for provider proxying.
+/// Uses a long timeout (5 min) because reasoning models (DeepSeek R1, etc.)
+/// can take 60-120s before the first token arrives.
 static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
@@ -259,9 +262,17 @@ pub async fn proxy_openai_compatible(
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, url = %url, "Provider proxy request failed");
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Provider proxy failed: {e}"
-            )))
+            let msg = if e.is_timeout() {
+                "Provider request timed out. The model may be slow to respond — try again or use a different model.".to_string()
+            } else if e.is_connect() {
+                "Could not connect to provider API. Check your internet connection.".to_string()
+            } else {
+                format!("Provider request failed: {e}")
+            };
+            ApiError(crate::error::SwarmError::ProviderError {
+                status: 504,
+                body: msg,
+            })
         })?;
 
     if !resp.status().is_success() {

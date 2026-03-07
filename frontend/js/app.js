@@ -20,6 +20,7 @@ var SwarmLLM = (function() {
   var SESSIONS_KEY = 'swarmllm_sessions';
   var ACTIVE_SESSION_KEY = 'swarmllm_active_session';
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
+  var CHAT_LAYOUT_KEY = 'swarmllm_chat_layout';
 
   // Clear stale chat sessions on each page load (dev mode)
   try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
@@ -329,6 +330,7 @@ var SwarmLLM = (function() {
       };
 
       var fullContent = '';
+      var reasoningContent = '';
 
       try {
         var resp = await authFetch('/v1/chat/completions', {
@@ -358,6 +360,7 @@ var SwarmLLM = (function() {
         var reader = resp.body.getReader();
         var decoder = new TextDecoder();
         var buffer = '';
+        var thinkingEl = null;
 
         while (true) {
           var result = await reader.read();
@@ -377,10 +380,36 @@ var SwarmLLM = (function() {
               var chunk = JSON.parse(payload);
               if (chunk.choices && chunk.choices[0] && chunk.choices[0].delta) {
                 var delta = chunk.choices[0].delta;
+                // Handle reasoning_content (DeepSeek R1, reasoning models)
+                if (delta.reasoning_content) {
+                  if (!cleared) { contentEl.textContent = ''; cleared = true; }
+                  if (!thinkingEl) {
+                    thinkingEl = document.createElement('details');
+                    thinkingEl.className = 'reasoning-block';
+                    thinkingEl.innerHTML = '<summary>Reasoning...</summary><pre class="reasoning-content"></pre>';
+                    thinkingEl.open = true;
+                    contentEl.appendChild(thinkingEl);
+                  }
+                  reasoningContent += delta.reasoning_content;
+                  thinkingEl.querySelector('.reasoning-content').textContent = reasoningContent;
+                  chat.scrollToBottom();
+                }
                 if (delta.content) {
                   if (!cleared) { contentEl.textContent = ''; cleared = true; }
+                  // Close thinking block when content starts
+                  if (thinkingEl && thinkingEl.open) {
+                    thinkingEl.open = false;
+                    thinkingEl.querySelector('summary').textContent = 'Reasoning (' + reasoningContent.length + ' chars)';
+                  }
                   fullContent += delta.content;
-                  contentEl.textContent = fullContent;
+                  // Append text after thinking block
+                  var textNode = contentEl.querySelector('.response-text');
+                  if (!textNode) {
+                    textNode = document.createElement('div');
+                    textNode.className = 'response-text';
+                    contentEl.appendChild(textNode);
+                  }
+                  textNode.textContent = fullContent;
                   chat.scrollToBottom();
                 }
               }
@@ -388,7 +417,7 @@ var SwarmLLM = (function() {
           }
         }
 
-        if (!cleared && !fullContent) {
+        if (!cleared && !fullContent && !reasoningContent) {
           contentEl.textContent = 'No response received. The model may still be loading \u2014 try again in a moment.';
           contentEl.classList.add('chat-error');
         }
@@ -3502,6 +3531,7 @@ var SwarmLLM = (function() {
     // Chat
     on('send-btn', 'click', function() { chat.send(); });
     on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
+    on('chat-layout-toggle', 'click', function() { toggleChatLayout(); });
 
     // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
@@ -3937,11 +3967,45 @@ var SwarmLLM = (function() {
     updateModeIndicator(statsData, providerData);
   }
 
+  // ========================================================================
+  // Chat Layout Toggle (Linear / Messenger)
+  // ========================================================================
+  function toggleChatLayout() {
+    var container = document.getElementById('chat-messages');
+    var btn = document.getElementById('chat-layout-toggle');
+    var icon = document.getElementById('chat-layout-icon');
+    var label = document.getElementById('chat-layout-label');
+    if (!container) return;
+    var isMessenger = container.classList.toggle('chat-messenger');
+    if (icon) icon.innerHTML = isMessenger ? '&#9900;' : '&#9776;';
+    if (label) label.textContent = isMessenger ? 'Messenger' : 'Linear';
+    if (btn) btn.classList.toggle('active', isMessenger);
+    try { localStorage.setItem(CHAT_LAYOUT_KEY, isMessenger ? 'messenger' : 'linear'); } catch(e) {}
+    chat.scrollToBottom();
+  }
+
+  function initChatLayout() {
+    try {
+      var saved = localStorage.getItem(CHAT_LAYOUT_KEY);
+      if (saved === 'messenger') {
+        var container = document.getElementById('chat-messages');
+        var icon = document.getElementById('chat-layout-icon');
+        var label = document.getElementById('chat-layout-label');
+        var btn = document.getElementById('chat-layout-toggle');
+        if (container) container.classList.add('chat-messenger');
+        if (icon) icon.innerHTML = '&#9900;';
+        if (label) label.textContent = 'Messenger';
+        if (btn) btn.classList.add('active');
+      }
+    } catch(e) {}
+  }
+
   function init() {
     bindEvents();
     initCollapsiblePanels();
     initModelDropdown();
     initMobileModelSync();
+    initChatLayout();
 
     inputEl = document.getElementById('chat-input');
     if (inputEl) {
