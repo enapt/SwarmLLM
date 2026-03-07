@@ -177,11 +177,7 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     )
 }
 
-async fn handle_tools_call(
-    state: &AppState,
-    id: Option<Value>,
-    params: Value,
-) -> JsonRpcResponse {
+async fn handle_tools_call(state: &AppState, id: Option<Value>, params: Value) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -302,10 +298,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
     };
 
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let cmd = crate::inference::router::RouterCommand::Submit {
-        request,
-        result_tx,
-    };
+    let cmd = crate::inference::router::RouterCommand::Submit { request, result_tx };
 
     if router_tx.send(cmd).await.is_err() {
         return JsonRpcResponse::error(id, INTERNAL_ERROR, "Failed to send inference request");

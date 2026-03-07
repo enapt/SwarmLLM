@@ -1114,7 +1114,8 @@ pub async fn hf_search(
             let network_replicas = {
                 let mut unique_peers = std::collections::HashSet::new();
                 for f in &files {
-                    let model_id_str = f.filename
+                    let model_id_str = f
+                        .filename
                         .trim_end_matches(".gguf")
                         .to_lowercase()
                         .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
@@ -1123,7 +1124,8 @@ pub async fn hf_search(
                         .collect::<Vec<_>>()
                         .join("-");
                     let mid = crate::types::ModelId(model_id_str);
-                    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
+                    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries()
+                    {
                         if shard_id.model_id == mid {
                             for h in &holders {
                                 unique_peers.insert(h.clone());
