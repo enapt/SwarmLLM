@@ -1267,6 +1267,33 @@ kbd {
 .health-slow { background: rgba(244,67,54,0.15); color: var(--red); }
 .health-warn { background: rgba(255,193,7,0.2); color: var(--orange); }
 .health-down { background: rgba(244,67,54,0.15); color: var(--red); }
+
+/* ---- Provider badges strip (top banner) ---- */
+.provider-strip {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+  padding: 6px 0; margin-bottom: 8px;
+}
+.provider-strip.hidden { display: none; }
+.provider-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: 20px; padding: 5px 12px 5px 8px;
+  font-size: 0.78rem; font-weight: 500; color: var(--text-primary);
+  transition: all var(--transition); cursor: default;
+}
+.provider-badge:hover { border-color: var(--border-light); background: var(--bg-hover); }
+.provider-badge.badge-active { border-color: rgba(34,197,94,0.35); box-shadow: 0 0 8px rgba(34,197,94,0.1); }
+.provider-badge .pb-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.provider-badge .pb-icon svg { width: 18px; height: 18px; }
+.provider-badge .pb-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.provider-badge .pb-dot.dot-fast { background: var(--green); box-shadow: 0 0 4px rgba(34,197,94,0.5); }
+.provider-badge .pb-dot.dot-ok { background: var(--orange); box-shadow: 0 0 4px rgba(245,158,11,0.4); }
+.provider-badge .pb-dot.dot-slow { background: var(--red); }
+.provider-badge .pb-dot.dot-down { background: var(--text-muted); }
+.provider-badge .pb-latency { font-size: 0.68rem; color: var(--text-secondary); font-family: var(--font-mono); }
+
 .model-status-badge { display: inline-block; font-size: 0.6rem; font-weight: 600; padding: 0 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; }
 
 /* Unload button outline variant */

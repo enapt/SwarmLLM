@@ -2131,7 +2131,75 @@ var SwarmLLM = (function() {
     healthTimer = setInterval(fetchProviderHealth, intervalSec * 1000);
   }
 
+  // --- Provider badge icons (inline SVG, 18x18) ---
+  var providerIcons = {
+    anthropic: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10.5 2L5 16h2.5l1.2-3h4.6l1.2 3H17L11.5 2h-1zm.5 3.5L13.5 12h-5L11 5.5z" fill="currentColor"/></svg>',
+    openai: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 1.5a7.5 7.5 0 100 15 7.5 7.5 0 000-15zm0 2l3.9 2.25v4.5L9 12.5 5.1 10.25v-4.5L9 3.5zm0 1.73L6.6 6.75v3.5L9 11.77l2.4-1.52v-3.5L9 5.23z" fill="currentColor"/></svg>',
+    deepseek: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2C5.5 2 3 5 3 8c0 2.5 1.5 4 3 5l1 3h4l1-3c1.5-1 3-2.5 3-5 0-3-2.5-6-6-6zm-1 6.5a1 1 0 11-2 0 1 1 0 012 0zm4 0a1 1 0 11-2 0 1 1 0 012 0z" fill="currentColor"/></svg>',
+    mistral: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 5h14M2 9h14M2 13h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="5" cy="5" r="1.2" fill="currentColor"/><circle cx="13" cy="9" r="1.2" fill="currentColor"/><circle cx="8" cy="13" r="1.2" fill="currentColor"/></svg>',
+    groq: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2l1.5 5H16l-4 3.5 1.5 5.5L9 12.5 4.5 16 6 10.5 2 7h5.5L9 2z" fill="currentColor"/></svg>',
+    nvidia_nim: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 14V7l3-3 3 3v2l3-3 3 3v5" stroke="#76b900" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>',
+    cerebras: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/><rect x="6" y="6" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1" fill="none"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/></svg>',
+    sambanova: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 12c2-4 4-6 7-6s5 2 7 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/><path d="M2 9c2-3 4-5 7-5s5 2 7 5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none" opacity="0.5"/></svg>',
+    fireworks: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2v4M9 12v4M2 9h4M12 9h4M4 4l3 3M11 11l3 3M14 4l-3 3M7 11l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/></svg>',
+    together: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="13" cy="5" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="9" cy="13" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M6.5 6.5L8 11.5M11.5 6.5L10 11.5M7 5h4" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>',
+    deepinfra: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="3" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="4" y="11" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="6.5" cy="5" r="0.8" fill="currentColor"/><circle cx="6.5" cy="13" r="0.8" fill="currentColor"/><path d="M9 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+  };
+
+  var providerDisplayNames = {
+    anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek',
+    mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
+    cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks',
+    together: 'Together', deepinfra: 'DeepInfra'
+  };
+
+  function updateProviderBannerBadges() {
+    var strip = document.getElementById('provider-badges');
+    if (!strip) return;
+    var configured = Object.keys(providerHealth);
+    if (configured.length === 0) {
+      strip.classList.add('hidden');
+      return;
+    }
+    strip.classList.remove('hidden');
+    strip.innerHTML = '';
+    configured.sort().forEach(function(p) {
+      var h = providerHealth[p];
+      var badge = document.createElement('div');
+      badge.className = 'provider-badge' + (h.status === 'up' ? ' badge-active' : '');
+      var dotClass = 'dot-down';
+      var latencyText = '';
+      if (h.status === 'up') {
+        dotClass = h.latency_ms < 500 ? 'dot-fast' : h.latency_ms < 2000 ? 'dot-ok' : 'dot-slow';
+        latencyText = h.latency_ms + 'ms';
+      } else if (h.status === 'rate_limited') {
+        dotClass = 'dot-ok';
+        latencyText = 'Limited';
+      } else if (h.status === 'timeout') {
+        dotClass = 'dot-slow';
+        latencyText = 'Timeout';
+      } else if (h.status === 'auth_error') {
+        latencyText = 'Auth err';
+      } else if (h.status === 'overloaded') {
+        dotClass = 'dot-ok';
+        latencyText = 'Busy';
+      } else {
+        latencyText = 'Down';
+      }
+      var iconHtml = providerIcons[p] || '';
+      var name = providerDisplayNames[p] || p;
+      badge.innerHTML = '<span class="pb-icon">' + iconHtml + '</span>' +
+        '<span class="pb-name">' + escapeHtml(name) + '</span>' +
+        '<span class="pb-dot ' + dotClass + '"></span>' +
+        (latencyText ? '<span class="pb-latency">' + escapeHtml(latencyText) + '</span>' : '');
+      badge.title = name + ': ' + h.status + (h.detail ? ' — ' + h.detail : '') + (h.latency_ms ? ' (' + h.latency_ms + 'ms)' : '');
+      strip.appendChild(badge);
+    });
+  }
+
   function updateProviderHealthBadges() {
+    // Update top banner badges
+    updateProviderBannerBadges();
     // Update dashboard provider cards
     Object.keys(providerHealth).forEach(function(p) {
       var h = providerHealth[p];
