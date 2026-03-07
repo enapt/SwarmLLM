@@ -525,7 +525,7 @@ impl PipelineExecutor {
         let prompt_bytes = prompt.as_bytes().to_vec();
 
         let mut generated_tokens: Vec<u32> = Vec::new();
-        let mut finish_reason = "stop".to_string();
+        let mut finish_reason = String::new();
 
         // Cumulative position for RoPE / KV-cache
         let mut index_pos: usize = 0;
@@ -834,7 +834,11 @@ impl PipelineExecutor {
             content: generated_text,
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
             completion_tokens: clean_tokens.len() as u32,
-            finish_reason,
+            finish_reason: if finish_reason.is_empty() {
+                "stop".to_string()
+            } else {
+                finish_reason
+            },
             session_id: self.request.session_id.clone(),
         })
     }

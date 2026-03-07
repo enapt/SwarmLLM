@@ -504,15 +504,7 @@ impl PoolManager {
             }
         };
 
-        // SEC-C2 + SEC-I7: Owner co-signs the credit forward (verifies member sig internally)
-        if let Err(e) =
-            crypto::cosign_credit_forward(&self.shared_state.identity, &mut forward, &member_key)
-        {
-            tracing::warn!(from = %forward.from_node_id, error = %e, "Failed to cosign credit forward");
-            return;
-        }
-
-        // Verify sender is an actual pool member before crediting owner
+        // Verify sender is an actual pool member BEFORE co-signing
         {
             let state = self.shared_state.pool_state.read().await;
             if let Some(ref ps) = *state {
@@ -525,6 +517,14 @@ impl PoolManager {
                 tracing::warn!("Credit forward received but no pool state — rejecting");
                 return;
             }
+        }
+
+        // SEC-C2 + SEC-I7: Owner co-signs the credit forward (verifies member sig internally)
+        if let Err(e) =
+            crypto::cosign_credit_forward(&self.shared_state.identity, &mut forward, &member_key)
+        {
+            tracing::warn!(from = %forward.from_node_id, error = %e, "Failed to cosign credit forward");
+            return;
         }
 
         // Store in audit log

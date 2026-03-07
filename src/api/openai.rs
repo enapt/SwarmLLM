@@ -682,7 +682,9 @@ pub async fn chat_completions(
     // Nodes are NOT required to have all shards. Any node can initiate inference
     // as long as the network collectively covers all layers.
     // The `x-swarm-forwarded` header prevents infinite forwarding loops between nodes.
-    let is_forwarded = headers.get("x-swarm-forwarded").is_some();
+    // Only trust this header from internal requests (authenticated with internal token).
+    let is_forwarded = headers.get("x-swarm-internal-token").is_some()
+        && headers.get("x-swarm-forwarded").is_some();
 
     if model_name.is_none() {
         // Priority 1: Check if all layers are covered across the network for
@@ -1018,26 +1020,18 @@ fn find_peer_with_model(state: &AppState, model: &str) -> Option<String> {
 /// shard has at least one holder somewhere in the network so the pipeline scheduler can
 /// assemble a complete pipeline across multiple nodes.
 pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
-    // Short-lived cache (100ms TTL) to avoid repeated ModelId/ShardId allocations per API request
+    // Short-lived per-model cache (100ms TTL) to avoid repeated ModelId/ShardId allocations
     use std::sync::LazyLock;
-    static CACHE: LazyLock<std::sync::Mutex<(String, std::time::Instant, bool)>> =
-        LazyLock::new(|| std::sync::Mutex::new((String::new(), std::time::Instant::now(), false)));
-    let cache = &*CACHE;
-    if let Ok(entry) = cache.lock() {
-        if entry.0 == model_name && entry.1.elapsed() < std::time::Duration::from_millis(100) {
-            return entry.2;
+    static CACHE: LazyLock<dashmap::DashMap<String, (std::time::Instant, bool)>> =
+        LazyLock::new(dashmap::DashMap::new);
+    if let Some(entry) = CACHE.get(model_name) {
+        if entry.0.elapsed() < std::time::Duration::from_millis(100) {
+            return entry.1;
         }
     }
 
     let result = all_shards_available_inner(state, model_name);
-
-    if let Ok(mut entry) = cache.lock() {
-        entry.0.clear();
-        entry.0.push_str(model_name);
-        entry.1 = std::time::Instant::now();
-        entry.2 = result;
-    }
-
+    CACHE.insert(model_name.to_string(), (std::time::Instant::now(), result));
     result
 }
 

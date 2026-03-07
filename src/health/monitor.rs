@@ -308,6 +308,24 @@ impl HealthMonitor {
             }
         }
 
+        // pending_tp_partials: remove entries older than 60 seconds (stale AllReduce collectors)
+        let stale_tp: Vec<_> = self
+            .shared_state
+            .pending_tp_partials
+            .iter()
+            .filter(|entry| entry.value().created_at.elapsed().as_secs() > 60)
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_tp.is_empty() {
+            tracing::info!(
+                count = stale_tp.len(),
+                "DIAG: cleaning up stale pending_tp_partials"
+            );
+            for key in stale_tp {
+                self.shared_state.pending_tp_partials.remove(&key);
+            }
+        }
+
         // streaming_token_txs: remove entries where the receiver has been dropped
         let stale_stream: Vec<_> = self
             .shared_state

@@ -122,10 +122,28 @@ impl VoteTally {
 ///
 /// Looks up or creates the tally for the voted manifest, records the vote,
 /// and returns the current verdict if the vote changed the outcome.
+/// Verifies the voter's Ed25519 signature before counting the vote.
 pub fn process_vote(
     tallies: &DashMap<Blake3Hash, VoteTally>,
     vote: ModelVote,
 ) -> Result<Option<VoteVerdict>, SwarmError> {
+    // Verify Ed25519 signature before counting
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&vote.voter.0)
+        .map_err(|e| SwarmError::Internal(format!("Invalid voter key: {e}")))?;
+    let mut payload = Vec::with_capacity(32 + 1 + 8);
+    payload.extend_from_slice(&vote.model_manifest_hash);
+    payload.push(if vote.vote { 1 } else { 0 });
+    payload.extend_from_slice(&vote.weight.to_le_bytes());
+    let sig: [u8; 64] = vote
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| SwarmError::Internal("Invalid vote signature length".into()))?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig);
+    verifying_key
+        .verify_strict(&payload, &signature)
+        .map_err(|_| SwarmError::Internal("Vote signature verification failed".into()))?;
+
     let mut tally = tallies
         .entry(vote.model_manifest_hash)
         .or_insert_with(|| VoteTally::new(vote.model_manifest_hash));
@@ -151,6 +169,26 @@ mod tests {
             vote,
             weight,
             signature: vec![],
+        }
+    }
+
+    /// Create a vote with a real Ed25519 signature for process_vote tests.
+    fn make_signed_vote(vote: bool, weight: u64) -> ModelVote {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let voter = NodeId(signing_key.verifying_key().to_bytes());
+        let manifest_hash = [0xAB; 32];
+        let mut payload = Vec::with_capacity(32 + 1 + 8);
+        payload.extend_from_slice(&manifest_hash);
+        payload.push(if vote { 1 } else { 0 });
+        payload.extend_from_slice(&weight.to_le_bytes());
+        let signature = signing_key.sign(&payload).to_bytes().to_vec();
+        ModelVote {
+            voter,
+            model_manifest_hash: manifest_hash,
+            vote,
+            weight,
+            signature,
         }
     }
 
@@ -215,10 +253,19 @@ mod tests {
     #[test]
     fn process_vote_creates_tally() {
         let tallies = DashMap::new();
-        let vote = make_vote(1, true, 1000);
+        let vote = make_signed_vote(true, 1000);
         let result = process_vote(&tallies, vote);
         assert!(result.is_ok());
         assert_eq!(tallies.len(), 1);
+    }
+
+    #[test]
+    fn process_vote_rejects_invalid_signature() {
+        let tallies = DashMap::new();
+        let vote = make_vote(1, true, 1000); // unsigned
+        let result = process_vote(&tallies, vote);
+        assert!(result.is_err());
+        assert_eq!(tallies.len(), 0);
     }
 
     #[test]
