@@ -7,9 +7,9 @@
 /ip4/203.0.113.50/udp/8800/quic-v1/p2p/12D3KooW...
 ```
 
-**Firewall:** SwarmLLM needs **UDP port 8800** open.
-- **Linux:** `sudo ufw allow 8800/udp`
-- **Windows:** Windows Defender Firewall > Inbound Rules > New > Port > UDP > 8800
+**Firewall:** SwarmLLM needs **TCP port 8810** (P2P) and optionally **UDP port 8800** (QUIC) open.
+- **Linux:** `sudo ufw allow 8810/tcp && sudo ufw allow 8800/udp`
+- **Windows:** Windows Defender Firewall > Inbound Rules > New > Port > TCP 8810 + UDP 8800
 - **macOS:** System Settings > Network > Firewall > allow SwarmLLM
 
 **Same LAN?** Use local IP (e.g., `192.168.1.x`). LAN peers should be found automatically via mDNS.
@@ -60,5 +60,5 @@ rm -rf ~/.local/share/swarmllm/db
 
 ## Still Stuck?
 
-- Check [GitHub Issues](https://github.com/swarmllm/swarmllm/issues)
+- Check [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
 - Open a new issue with: OS, hardware, `./swarmllm version`, and logs from `-vv`

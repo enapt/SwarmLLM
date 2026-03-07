@@ -79,26 +79,7 @@ sudo systemctl enable --now swarmllm
 
 ## Docker
 
-```bash
-docker run -d \
-  --name swarmllm \
-  --restart unless-stopped \
-  -p 8800:8800/tcp \
-  -p 8800:8800/udp \
-  -v swarmllm-data:/root/.local/share/swarmllm \
-  ghcr.io/swarmllm/swarmllm:latest
-```
-
-For GPU support (NVIDIA):
-```bash
-docker run -d \
-  --gpus all \
-  --name swarmllm \
-  -p 8800:8800/tcp \
-  -p 8800:8800/udp \
-  -v swarmllm-data:/root/.local/share/swarmllm \
-  ghcr.io/swarmllm/swarmllm:latest-cuda
-```
+> Docker images are planned but not yet published. For now, build from source or use pre-built binaries from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases).
 
 ## Multi-Node Cluster
 
@@ -140,16 +121,18 @@ For a dedicated split-inference setup across multiple machines:
 
 ## Firewall
 
-Open UDP port 8800 for P2P and TCP port 8800 for HTTP:
+Open TCP port 8800 (HTTP API), TCP port 8810 (P2P), and optionally UDP port 8800 (QUIC):
 
 ```bash
 # Linux (ufw)
-sudo ufw allow 8800/udp
-sudo ufw allow 8800/tcp
+sudo ufw allow 8800/tcp    # HTTP API
+sudo ufw allow 8810/tcp    # P2P (Noise+Yamux, primary transport)
+sudo ufw allow 8800/udp    # P2P (QUIC, optional)
 
 # Linux (iptables)
-sudo iptables -A INPUT -p udp --dport 8800 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 8800 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 8810 -j ACCEPT
+sudo iptables -A INPUT -p udp --dport 8800 -j ACCEPT
 ```
 
 ## Reverse Proxy (Optional)

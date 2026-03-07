@@ -2,7 +2,7 @@
 
 ## Download
 
-Download the right file for your system from the [GitHub Releases page](https://github.com/swarmllm/swarmllm/releases/latest):
+Download the right file for your system from the [GitHub Releases page](https://github.com/enapt/SwarmLLM/releases/latest):
 
 | Your Computer | File Name |
 |---|---|
@@ -10,6 +10,7 @@ Download the right file for your system from the [GitHub Releases page](https://
 | **Mac** (M1/M2/M3/M4) | `swarmllm-macos-aarch64.tar.gz` |
 | **Mac** (older Intel) | `swarmllm-macos-x86_64.tar.gz` |
 | **Linux** (most distros) | `swarmllm-linux-x86_64.tar.gz` |
+| **Linux** (NVIDIA GPU) | `swarmllm-linux-x86_64-cuda.tar.gz` |
 
 > **Not sure which Mac?** Apple menu > "About This Mac." If it says "Apple M1" (or M2/M3/etc.), pick Apple Silicon. If it says "Intel," pick Intel.
 
@@ -48,26 +49,25 @@ chmod +x swarmllm
 ./swarmllm run
 ```
 
-### Docker
-
-```bash
-docker run -p 8800:8800 -v swarmllm-data:/root/.local/share/swarmllm ghcr.io/swarmllm/swarmllm:latest
-```
-
 ### Building from Source
 
 Requires Rust 1.80+:
 
 ```bash
-git clone https://github.com/swarmllm/swarmllm.git
-cd swarmllm
+git clone https://github.com/enapt/SwarmLLM.git
+cd SwarmLLM
 cargo build --release
 ./target/release/swarmllm run
 ```
 
-For GPU (CUDA) support:
+For CUDA GPU support:
 ```bash
-cargo build --release --features cuda
+cargo build --release --features candle-cuda
+```
+
+For Apple Silicon (Metal):
+```bash
+cargo build --release --features metal
 ```
 
 ## Open the Dashboard

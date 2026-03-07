@@ -44,6 +44,6 @@ Only nodes with the same `gossip_network_id` can communicate.
 
 ## Firewall
 
-SwarmLLM needs **TCP port 8810** (P2P) and optionally **UDP port 8800** (QUIC) open. If you're behind a router, either:
-- Set up port forwarding (UDP 8800 to your machine's local IP)
+SwarmLLM needs **TCP port 8810** (P2P primary transport) and optionally **UDP port 8800** (QUIC) open. If you're behind a router, either:
+- Set up port forwarding (TCP 8810 + UDP 8800 to your machine's local IP)
 - Rely on SwarmLLM's built-in relay (works automatically in most cases)

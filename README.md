@@ -34,13 +34,16 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 
 Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
 
+Available binaries:
+| Platform | File |
+|----------|------|
+| Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` |
+| Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` |
+| macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` |
+| macOS Intel | `swarmllm-macos-x86_64.tar.gz` |
+| Windows | `swarmllm-windows-x86_64.zip` |
+
 See the full [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
-
-**Or use Docker:**
-
-```bash
-docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
-```
 
 **Or use the API directly:**
 
@@ -58,6 +61,22 @@ curl http://localhost:8800/v1/chat/completions \
     "stream": true
   }'
 ```
+
+**Or use with Claude Code / Cursor (MCP):**
+
+Add SwarmLLM as an MCP server and your AI coding agent gains access to every model in the swarm — local, distributed across peers, or cloud-fallback:
+
+```json
+{
+  "mcpServers": {
+    "swarmllm": {
+      "url": "http://localhost:8800/mcp"
+    }
+  }
+}
+```
+
+The agent can then call `chat` (inference with any available model) and `models` (list all models in the network).
 
 ## Connecting to the Network
 
@@ -87,7 +106,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Cloud Fallback (Optional)** — Optionally route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi) as a fallback. The swarm is the primary way to run models for free
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
-- **MCP Server** — Native Model Context Protocol server for AI agent frameworks (Claude Code, Cursor, custom agents). Tools: `chat`, `models`. Resources: `swarmllm://status`
+- **MCP Server** — Native Model Context Protocol server that exposes the entire swarm model catalog to AI agent frameworks. Point Claude Code, Cursor, or any MCP-compatible agent at your SwarmLLM node and it gains access to every model in the network — local, distributed, and cloud-fallback — through `chat` and `models` tools
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA, Qwen2-VL) and per-request LoRA adapter loading
@@ -193,35 +212,29 @@ Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
 
 ### Pre-built Binaries (Recommended)
 
-Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) — available for Linux, macOS (Intel & Apple Silicon), and Windows. CUDA-accelerated Linux builds included.
-
-### Docker
-
-```bash
-# Single node
-docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
-
-# With NVIDIA GPU
-docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm:cuda
-```
+Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) — available for Linux (CPU and CUDA), macOS (Intel and Apple Silicon), and Windows. Extract and run `./swarmllm run`.
 
 ### Building from Source
 
 ```bash
-# Requirements: Rust 1.80+, cmake (for llama.cpp, optional)
+# Requirements: Rust 1.80+
 git clone https://github.com/enapt/SwarmLLM.git
 cd SwarmLLM
 
-# CPU-only build (no model loading)
+# CPU-only build (candle inference engine)
 cargo build --release
 
-# With llama.cpp inference support
+# With CUDA GPU acceleration (candle + flash attention + paged attention)
+cargo build --release --features candle-cuda
+
+# With llama.cpp backend (optional, requires cmake + libclang)
 cargo build --release --features llama
 
-# With GPU acceleration
-cargo build --release --features cuda    # NVIDIA
-cargo build --release --features metal   # Apple Silicon
-cargo build --release --features rocm    # AMD
+# Full CUDA build (candle + llama.cpp + flash/paged attention)
+cargo build --release --features cuda
+
+# Apple Silicon (Metal)
+cargo build --release --features metal
 ```
 
 ## CLI
@@ -304,17 +317,18 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 
 | Feature | SwarmLLM | Petals | Exo | Bittensor |
 |---------|----------|--------|-----|-----------|
-| **Language** | Rust (single binary) | Python | Python | Python + Substrate |
-| **Deployment** | Download & run | pip install | pip install | pip + blockchain setup |
+| **Language** | Rust (single ~31MB binary) | Python | Python | Python + Substrate |
+| **Install** | Download & run | pip install | pip install | pip + blockchain setup |
 | **Scale** | Internet-scale (NAT traversal, DHT, relay) | Internet (volunteer) | LAN only | Internet (blockchain) |
 | **E2E Encryption** | X25519 + ChaCha20 + forward secrecy | None | None | Minimal |
 | **Incentives** | Credit tiers (no token) | None | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (LAN) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5) | 4 | 6+ | Any |
+| **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5) | ~4 | ~6 | Any |
 | **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
 | **Cloud Fallback** | 12 providers (optional) | No | No | No |
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
-| **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
+| **API Compatibility** | OpenAI + Anthropic + MCP | PyTorch | OpenAI basic | Subnet-defined |
+| **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
 | **Test Suite** | 643 tests | Limited | Limited | Varies |
 
