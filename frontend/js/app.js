@@ -56,6 +56,9 @@ var SwarmLLM = (function() {
       if (lbView) lbView.style.display = tab === 'leaderboard' ? '' : 'none';
       var mapView = document.getElementById('view-network-map');
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
+      // Show sidebar only on chat tab
+      var sidebar = document.getElementById('sidebar');
+      if (sidebar) sidebar.style.display = tab === 'chat' ? '' : 'none';
       if (tab === 'chat') {
         chat.scrollToBottom();
         document.getElementById('chat-input').focus();
@@ -90,6 +93,8 @@ var SwarmLLM = (function() {
 
     openModelBrowser: function() {
       document.getElementById('model-browser-modal').classList.remove('hidden');
+      var input = document.getElementById('hf-search-input');
+      if (input) setTimeout(function() { input.focus(); }, 100);
     },
 
     closeModelBrowser: function() {
@@ -161,7 +166,7 @@ var SwarmLLM = (function() {
       var list = document.getElementById('session-list');
       var sorted = Object.values(sessions).sort(function(a, b) { return b.created - a.created; });
       if (sorted.length === 0) {
-        list.innerHTML = '<div class="text-muted" style="padding:12px;font-size:0.8rem">No sessions yet</div>';
+        list.innerHTML = '<div class="text-muted" style="padding:12px;font-size:0.8rem">No chats yet. Type a message below to start.</div>';
         return;
       }
       list.innerHTML = '';
@@ -384,11 +389,13 @@ var SwarmLLM = (function() {
         }
 
         if (!cleared && !fullContent) {
-          contentEl.textContent = 'No response received. The model may still be loading.';
+          contentEl.textContent = 'No response received. The model may still be loading \u2014 try again in a moment.';
+          contentEl.classList.add('chat-error');
         }
       } catch (e) {
         if (!fullContent) {
-          contentEl.textContent = 'Error: Connection failed.';
+          contentEl.textContent = 'Connection failed \u2014 check that the server is running and try again.';
+          contentEl.classList.add('chat-error');
         }
       }
 
@@ -1565,7 +1572,7 @@ var SwarmLLM = (function() {
             body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
           });
         } else {
-          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant', nvidia_nim: 'nvidia/mistral-nemo-minitron-8b-8k-instruct', cerebras: 'cerebras:llama-3.1-8b', sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct', fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct', together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo', deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct' };
+          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant', nvidia_nim: 'meta/llama-3.1-8b-instruct', cerebras: 'cerebras:llama-3.1-8b', sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct', fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct', together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo', deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct' };
           testResp = await authFetch('/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2980,7 +2987,8 @@ var SwarmLLM = (function() {
     div.id = 'chat-empty';
     div.innerHTML = '<div class="chat-empty-icon">&#11088;</div>' +
       '<div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>' +
-      '<div>Send a message to start a conversation</div>';
+      '<div style="color:var(--text-muted);margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
+      '<div style="color:var(--text-muted);font-size:0.8rem;margin-top:4px">Select a model from the dropdown above \u2022 Press <kbd>Shift+Enter</kbd> for new line</div>';
     return div;
   }
 
@@ -3439,6 +3447,11 @@ var SwarmLLM = (function() {
     on('send-btn', 'click', function() { chat.send(); });
     on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
 
+    // "Start Chatting" button in mode indicator (delegated since it's dynamically created)
+    document.addEventListener('click', function(e) {
+      if (e.target.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
+    });
+
     // Network discovery — share popover toggle
     on('btn-share-network', 'click', function(e) {
       e.stopPropagation();
@@ -3681,7 +3694,9 @@ var SwarmLLM = (function() {
     }
     if (emptyState && !hasModels) {
       emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser or configure a cloud provider in Settings to start chatting</p>' +
-        '<button class="btn btn-primary" onclick="SwarmLLM.openModelBrowser && SwarmLLM.openModelBrowser()">Browse Models</button>';
+        '<button class="btn btn-primary" id="chat-empty-browse">Browse Models</button>';
+      var browseBtn = document.getElementById('chat-empty-browse');
+      if (browseBtn) browseBtn.addEventListener('click', function() { ui.openModelBrowser(); });
     }
   }
 
@@ -3793,7 +3808,12 @@ var SwarmLLM = (function() {
       dot.className = 'mode-dot offline';
       label.textContent = 'Not Ready';
       if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none">No models or providers configured</span>'];
+      chips = ['<span class="mode-chip chip-none">No models or providers configured \u2014 open Settings to add an API key</span>'];
+    }
+
+    // Add quick-action button
+    if (cloudProviders.length > 0 && !hasLocalModel) {
+      chips.push('<button class="btn btn-sm btn-primary" data-goto-chat="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Start Chatting \u2192</button>');
     }
 
     detail.innerHTML = chips.join(' ');
@@ -3828,6 +3848,10 @@ var SwarmLLM = (function() {
       inputEl.addEventListener('input', autoResizeInput);
       inputEl.addEventListener('input', updateTokenCounter);
     }
+
+    // Hide sidebar on non-chat pages (default is dashboard)
+    var sidebar = document.getElementById('sidebar');
+    if (sidebar && activeTab !== 'chat') sidebar.style.display = 'none';
 
     chat.loadSessions();
     chat.renderSessionList();
@@ -3865,9 +3889,10 @@ var SwarmLLM = (function() {
       if (!panel) return;
 
       var phase = data.phase || 'seedling';
+      var phaseLabels = { seedling: 'Solo node', growing: 'Connecting', established: 'Connected' };
       var badge = document.getElementById('network-phase-badge');
       if (badge) {
-        badge.textContent = phase;
+        badge.textContent = phaseLabels[phase] || phase;
         badge.className = 'badge ' + (phase === 'established' ? 'badge-green' : phase === 'growing' ? 'badge-blue' : 'badge-orange');
       }
 
@@ -3938,5 +3963,6 @@ var SwarmLLM = (function() {
     copyNetworkCode: copyNetworkCode,
     joinNetwork: joinNetwork,
     openModelBrowser: function() { ui.openModelBrowser(); },
+    switchTab: function(t) { ui.switchTab(t); },
   };
 })();

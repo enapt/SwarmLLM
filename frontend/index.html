@@ -381,7 +381,7 @@
           </div>
           <div class="chat-input-area">
             <div class="chat-input-wrap">
-              <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+              <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn">Send</button>
             </div>
             <div class="token-counter" id="token-counter"></div>
@@ -454,7 +454,7 @@
               <button class="btn btn-sm" id="btn-share-network" title="Share your network code" style="display:flex;align-items:center;gap:4px">
                 <span style="font-size:1rem">&#128279;</span> Share Network Code
               </button>
-              <span class="badge" id="network-phase-badge">seedling</span>
+              <span class="badge" id="network-phase-badge">Solo node</span>
             </div>
             <div class="share-popover" id="share-popover">
               <label style="font-weight:600;margin-bottom:6px">Your Network Code</label>
@@ -570,7 +570,7 @@
               <div class="form-group">
                 <label>Connected Peers</label>
                 <div id="peers-list">
-                  <div class="text-muted" style="font-size:0.85rem">No peers connected (standalone mode)</div>
+                  <div class="text-muted" style="font-size:0.85rem">No peers connected yet. Share your Network Code to connect with others, or use cloud providers for inference.</div>
                 </div>
               </div>
             </div>
