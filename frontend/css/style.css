@@ -1700,3 +1700,122 @@ kbd {
 .share-popover.show { display: block; }
 .share-popover label { font-size: 0.8rem; margin-bottom: 4px; display: block; }
 .share-popover .text-muted { font-size: 0.7rem; }
+
+/* ─── UX Improvements ─── */
+
+/* #6: Wizard step buttons (keyboard accessible) */
+.wizard-step {
+  border: none; cursor: pointer; font-family: var(--font-sans);
+}
+.wizard-step:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* #7: Contribution slider hints */
+.contribution-hint {
+  display: block; font-size: 0.65rem; color: var(--text-muted); font-weight: 400; line-height: 1.2;
+}
+
+/* #13: Stat help icons */
+.stat-help {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--bg-tertiary); color: var(--text-muted);
+  font-size: 0.55rem; font-weight: 700; cursor: help;
+  vertical-align: middle; margin-left: 2px; border: 1px solid var(--border);
+}
+.stat-help:hover { color: var(--text-primary); border-color: var(--border-light); }
+
+/* #14: Mode indicator help text */
+.mode-indicator .mode-help {
+  font-size: 0.7rem; color: var(--text-muted); margin-left: 4px; font-weight: 400;
+}
+
+/* #17: Shard cells pointer cursor */
+.shard-cell { cursor: pointer; }
+.shard-cell:hover { opacity: 0.8; }
+
+/* #21: Token counter tooltips */
+.token-counter { cursor: help; }
+
+/* #22: Icon button labels on touch */
+@media (hover: none) {
+  .btn-shutdown::after { content: ' Off'; font-size: 0.7rem; }
+  #btn-open-settings::after { content: ' Settings'; font-size: 0.7rem; }
+}
+
+/* #23: Chat error with retry */
+.chat-error-actions { margin-top: 8px; }
+.chat-error-actions .btn { font-size: 0.75rem; padding: 3px 10px; }
+
+/* #25: Auto-manage gear icon larger */
+.model-gear-btn {
+  font-size: 1.1rem !important; padding: 2px 6px !important;
+  cursor: pointer; opacity: 0.6; transition: opacity 0.15s;
+}
+.model-gear-btn:hover { opacity: 1; }
+
+/* #26: Shard cell patterns for colorblind */
+.shard-cell.local::after { content: 'L'; position: absolute; font-size: 0.5rem; opacity: 0.7; }
+.shard-cell.peer::after { content: 'P'; position: absolute; font-size: 0.5rem; opacity: 0.7; }
+.shard-cell { position: relative; }
+
+/* #28: Form error messages */
+.form-error {
+  display: block; font-size: 0.72rem; color: var(--red); margin-top: 2px;
+}
+.form-error.hidden { display: none; }
+
+/* #29: Button visual hierarchy */
+.btn-outline {
+  background: transparent; border: 1px solid var(--border-light);
+  color: var(--text-secondary);
+}
+.btn-outline:hover { border-color: var(--text-muted); color: var(--text-primary); }
+
+/* #31: Chat tab prominence */
+.tab-btn-chat { position: relative; }
+.tab-btn-chat:not(.active)::before {
+  content: ''; position: absolute; right: 2px; top: 4px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); opacity: 0.7;
+}
+
+/* #35: Model name ellipsis */
+.model-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%;
+}
+
+/* #4: Password toggle */
+.password-toggle {
+  background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 0.75rem; padding: 2px 6px;
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+}
+.password-toggle:hover { color: var(--text-primary); }
+.provider-key-wrap { position: relative; }
+.provider-key-wrap input { padding-right: 50px; }
+
+/* #19: Network map empty regions */
+.map-region { stroke-dasharray: none; }
+.map-region[style*="var(--bg-tertiary)"] { stroke: var(--border-light); stroke-width: 0.8; }
+
+/* #30: Collapsed panels */
+.panel-header[data-collapse] { cursor: pointer; user-select: none; }
+.panel-header[data-collapse]::after {
+  content: '\25BC'; font-size: 0.6rem; opacity: 0.5; margin-left: auto; transition: transform 0.2s;
+}
+.panel-header.collapsed::after { transform: rotate(-90deg); }
+.panel-body.collapsed { display: none; }
+
+/* #36: Provider status states */
+.badge-error { background: var(--red-dim); color: var(--red); }
+.badge-testing { background: var(--orange-dim); color: var(--orange); }
+
+/* #24: Session rename hint */
+.session-title { cursor: text; }
+.session-item:hover .session-title { text-decoration-style: dotted; text-decoration-line: underline; text-underline-offset: 2px; }
+
+/* #15: Shard legend above grid */
+.shard-legend-mini { font-size: 0.65rem; margin-bottom: 4px; opacity: 0.8; }

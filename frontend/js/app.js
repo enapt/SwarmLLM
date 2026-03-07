@@ -347,7 +347,7 @@ var SwarmLLM = (function() {
               if (errJson.error.hint) friendlyMsg += '\n\nHint: ' + errJson.error.hint;
             }
           } catch (e) {}
-          contentEl.textContent = friendlyMsg;
+          contentEl.innerHTML = escapeHtml(friendlyMsg) + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">Retry</button></div>';
           contentEl.classList.add('chat-error');
           isStreaming = false;
           document.getElementById('send-btn').disabled = false;
@@ -711,7 +711,10 @@ var SwarmLLM = (function() {
           if (peerDlCount > 0) legendParts.push('<span class="leg-peer-dl">Peer DL (' + peerDlCount + ')</span>');
           if (queuedCount > 0) legendParts.push('<span class="leg-queued">Queued (' + queuedCount + ')</span>');
           if (missingCount > 0) legendParts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
-          if (legendParts.length > 0) shardHtml += '<div class="shard-legend" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>';
+          if (legendParts.length > 0) {
+            // Insert legend both above (compact) and below (detailed) the grid
+            shardHtml = '<div class="shard-legend shard-legend-mini" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>' + shardHtml;
+          }
         }
 
         // Download progress bar — segmented by shard with ETA
@@ -1353,6 +1356,37 @@ var SwarmLLM = (function() {
           if (isOn) settings.loadStorageInfo();
         });
       }
+      // Nickname inline validation
+      var nickInput = document.getElementById('settings-nickname');
+      var nickError = document.getElementById('nickname-error');
+      if (nickInput && nickError) {
+        nickInput.addEventListener('input', function() {
+          var val = nickInput.value;
+          var valid = !val || /^[a-zA-Z0-9_-]+$/.test(val);
+          nickError.classList.toggle('hidden', valid);
+          nickInput.style.borderColor = valid ? '' : 'var(--red)';
+        });
+      }
+      // Add show/hide toggle to provider password fields
+      document.querySelectorAll('#provider-cards input[type="password"]').forEach(function(input) {
+        var wrap = document.createElement('div');
+        wrap.className = 'provider-key-wrap';
+        wrap.style.cssText = 'position:relative;width:100%;margin-bottom:4px';
+        input.parentNode.insertBefore(wrap, input);
+        wrap.appendChild(input);
+        input.style.marginBottom = '0';
+        var toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'password-toggle';
+        toggle.textContent = 'Show';
+        toggle.setAttribute('aria-label', 'Toggle password visibility');
+        toggle.addEventListener('click', function() {
+          var isPass = input.type === 'password';
+          input.type = isPass ? 'text' : 'password';
+          toggle.textContent = isPass ? 'Hide' : 'Show';
+        });
+        wrap.appendChild(toggle);
+      });
     },
 
     load: async function() {
@@ -1553,7 +1587,7 @@ var SwarmLLM = (function() {
         return;
       }
       badge.textContent = 'Testing...';
-      badge.style.color = 'var(--text-muted)';
+      badge.className = 'badge badge-testing';
       try {
         // Save the key first, then test
         var saveBody = {};
@@ -1580,26 +1614,33 @@ var SwarmLLM = (function() {
           });
         }
         if (testResp.ok) {
-          badge.textContent = 'Configured';
-          badge.style.color = 'var(--green)';
+          badge.textContent = '\u2713 Active';
+          badge.className = 'badge provider-badge-active';
           ui.showBanner('success', name + ' API key verified');
+          var testCard = badge.closest('.provider-card');
+          if (testCard) testCard.classList.add('provider-active');
           loadModels();
           loadModeIndicator();
         } else {
           var err = await testResp.text();
-          badge.textContent = 'Error';
-          badge.style.color = 'var(--red)';
-          ui.showBanner('error', name + ' test failed: ' + (err || testResp.status));
+          var friendlyErr = err;
+          try { var ej = JSON.parse(err); friendlyErr = (ej.error && ej.error.message) || err; } catch(pe) {}
+          badge.textContent = '\u2717 Failed';
+          badge.className = 'badge badge-error';
+          ui.showBanner('error', name + ' test failed: ' + friendlyErr);
         }
         input.value = '';
       } catch (e) {
-        badge.textContent = 'Error';
-        badge.style.color = 'var(--red)';
+        badge.textContent = '\u2717 Error';
+        badge.className = 'badge badge-error';
         ui.showBanner('error', name + ' test failed: ' + e.message);
       }
     },
 
     save: async function() {
+      var saveBtn = document.getElementById('btn-save-settings');
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving...'; }
+
       var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
       var config = {
         contribution: document.getElementById('settings-contribution').value,
@@ -1630,6 +1671,8 @@ var SwarmLLM = (function() {
       await identity.saveNickname();
       // Save provider keys if any were entered
       await settings.saveProviders();
+
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Settings'; }
     }
   };
 
@@ -1648,9 +1691,9 @@ var SwarmLLM = (function() {
       document.getElementById('contribution-slider').addEventListener('input', function() {
         var levels = ['Minimal', 'Moderate', 'Maximum'];
         var descs = [
-          'Low impact: uses minimal resources. Best for shared or low-spec machines.',
-          'Balanced: uses ~50% of available resources. Good for most users.',
-          'Full power: uses all available resources. Best for dedicated nodes.',
+          'Low impact: <5% CPU, limited storage. Best for shared or low-spec machines.',
+          'Balanced: ~25% CPU, moderate storage. Good for most users.',
+          'Full power: 75%+ CPU, 50%+ storage. Best for dedicated nodes.',
         ];
         var val = parseInt(this.value, 10);
         document.getElementById('contribution-label').textContent = levels[val];
@@ -1701,13 +1744,16 @@ var SwarmLLM = (function() {
           body.classList.remove('hidden');
           indicator.classList.add('active');
           indicator.classList.remove('done');
+          indicator.setAttribute('aria-selected', 'true');
         } else if (i < setup.currentStep) {
           body.classList.add('hidden');
           indicator.classList.remove('active');
           indicator.classList.add('done');
+          indicator.setAttribute('aria-selected', 'false');
         } else {
           body.classList.add('hidden');
           indicator.classList.remove('active', 'done');
+          indicator.setAttribute('aria-selected', 'false');
         }
       }
       var connectors = document.querySelectorAll('.wizard-connector');
@@ -1971,7 +2017,7 @@ var SwarmLLM = (function() {
         selectModelDropdown(found ? preferred : allIds[0], { silent: true });
       } else {
         currentModel = '';
-        updateModelDropdownLabel('No model loaded');
+        updateModelDropdownLabel('Select model...');
       }
 
       syncMobileModelSelect();
@@ -1987,7 +2033,7 @@ var SwarmLLM = (function() {
     list.innerHTML = '';
 
     if (!hasAny) {
-      list.innerHTML = '<div class="model-dropdown-empty">No models available</div>';
+      list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Download a model or add a cloud provider in Settings</span></div>';
       return;
     }
 
@@ -3009,9 +3055,9 @@ var SwarmLLM = (function() {
     if (!text) { el.textContent = ''; el.className = 'token-counter'; return; }
     var tokens = Math.ceil(text.length / 4);
     el.textContent = '~' + tokens + ' tokens';
-    if (tokens > 7000) { el.className = 'token-counter danger'; }
-    else if (tokens > 3000) { el.className = 'token-counter warn'; }
-    else { el.className = 'token-counter'; }
+    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = 'Warning: very long input, may exceed model context window'; }
+    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = 'Getting long \u2014 some models may truncate'; }
+    else { el.className = 'token-counter'; el.title = 'Estimated token count (4 chars \u2248 1 token)'; }
   }
 
   // ========================================================================
@@ -3075,7 +3121,7 @@ var SwarmLLM = (function() {
         var entries = data.leaderboard || [];
 
         if (entries.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">No data yet</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Leaderboard empty. No nodes have earned credits yet. Serve inference to earn credits.</td></tr>';
           return;
         }
 
@@ -3174,7 +3220,7 @@ var SwarmLLM = (function() {
       for (var i = 0; i < codes.length; i++) {
         var code = escapeHtml(codes[i]);
         var d = escapeHtml(networkMap.paths[codes[i]] || '');
-        svg += '<path id="region-' + code + '" d="' + d + '" fill="var(--bg-tertiary)" stroke="var(--border)" stroke-width="0.5" class="map-region" data-code="' + code + '"/>';
+        svg += '<path id="region-' + code + '" d="' + d + '" fill="var(--bg-tertiary)" stroke="var(--border-light)" stroke-width="0.8" class="map-region" data-code="' + code + '"/>';
       }
       svg += '</svg>';
       container.innerHTML = svg;
@@ -3404,6 +3450,16 @@ var SwarmLLM = (function() {
     // Setup wizard
     on('btn-prev', 'click', function() { setup.prevStep(); });
     on('btn-next', 'click', function() { setup.nextStep(); });
+    // Wizard step indicators — clickable to jump to completed steps
+    document.querySelectorAll('.wizard-step[data-step]').forEach(function(stepBtn) {
+      stepBtn.addEventListener('click', function() {
+        var target = parseInt(stepBtn.getAttribute('data-step'), 10);
+        if (target < setup.currentStep) {
+          setup.currentStep = target;
+          setup.updateUI();
+        }
+      });
+    });
 
     // Settings modal
     on('btn-close-settings', 'click', function() { ui.closeSettings(); });
@@ -3447,9 +3503,11 @@ var SwarmLLM = (function() {
     on('send-btn', 'click', function() { chat.send(); });
     on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
 
-    // "Start Chatting" button in mode indicator (delegated since it's dynamically created)
+    // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
       if (e.target.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
+      if (e.target.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
+      if (e.target.getAttribute('data-goto-settings')) { ui.openSettings(); }
     });
 
     // Network discovery — share popover toggle
@@ -3468,7 +3526,7 @@ var SwarmLLM = (function() {
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
 
-    // Escape key closes open modals and shard context menu
+    // Escape key closes open modals and shard context menu; Tab traps focus in modals
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
         shardMenu.hide();
@@ -3476,6 +3534,18 @@ var SwarmLLM = (function() {
         var modelModal = document.getElementById('model-browser-modal');
         if (settingsModal && !settingsModal.classList.contains('hidden')) { ui.closeSettings(); }
         else if (modelModal && !modelModal.classList.contains('hidden')) { ui.closeModelBrowser(); }
+      }
+      // Focus trap for open modals
+      if (e.key === 'Tab') {
+        var openModal = document.querySelector('.modal-overlay:not(.hidden) .modal');
+        if (openModal) {
+          var focusable = openModal.querySelectorAll('button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])');
+          if (focusable.length > 0) {
+            var first = focusable[0], last = focusable[focusable.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+          }
+        }
       }
     });
 
@@ -3589,6 +3659,24 @@ var SwarmLLM = (function() {
       var amSave = target.getAttribute('data-am-save');
       if (amSave) { saveAutoManagePolicy(amSave); return; }
 
+      // Chat retry button
+      if (target.getAttribute('data-retry-chat')) {
+        // Remove the error message and re-send the last user message
+        var errMsg = target.closest('.chat-msg');
+        if (errMsg) errMsg.remove();
+        if (currentSessionId && sessions[currentSessionId]) {
+          var msgs = sessions[currentSessionId].messages;
+          // Pop the last user message, put it back in input, and re-send
+          if (msgs.length > 0 && msgs[msgs.length - 1].role === 'user') {
+            var lastUserMsg = msgs.pop();
+            chat.saveSessions();
+            document.getElementById('chat-input').value = lastUserMsg.content;
+            chat.send();
+          }
+        }
+        return;
+      }
+
       // Close shard context menu on any other click
       shardMenu.hide();
     });
@@ -3693,10 +3781,13 @@ var SwarmLLM = (function() {
       }
     }
     if (emptyState && !hasModels) {
-      emptyState.innerHTML = '<p>No models available</p><p>Download a model from the Model Browser or configure a cloud provider in Settings to start chatting</p>' +
-        '<button class="btn btn-primary" id="chat-empty-browse">Browse Models</button>';
-      var browseBtn = document.getElementById('chat-empty-browse');
-      if (browseBtn) browseBtn.addEventListener('click', function() { ui.openModelBrowser(); });
+      emptyState.innerHTML = '<div class="chat-empty-icon">&#128229;</div>' +
+        '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">No Models Available</div>' +
+        '<div style="color:var(--text-muted);margin:8px 0">Download a model or add a cloud provider API key to start chatting</div>' +
+        '<div style="display:flex;gap:8px;margin-top:12px">' +
+          '<button class="btn btn-primary" data-goto-browse="1">Browse Models</button>' +
+          '<button class="btn" data-goto-settings="1">Add API Key</button>' +
+        '</div>';
     }
   }
 
@@ -3779,37 +3870,46 @@ var SwarmLLM = (function() {
     // Remove old mode classes
     if (indicator) indicator.className = 'mode-indicator mb-2';
 
+    var modeHelp = '';
     if (peers > 0 && hasLocalModel && cloudProviders.length > 0) {
       dot.className = 'mode-dot swarm';
       label.textContent = 'Full Hybrid';
+      modeHelp = 'Local + peer + cloud inference';
       if (indicator) indicator.classList.add('mode-hybrid');
     } else if (peers > 0 && hasLocalModel) {
       dot.className = 'mode-dot swarm';
       label.textContent = 'Swarm Mode';
+      modeHelp = 'Running inference locally and with peers';
       if (indicator) indicator.classList.add('mode-swarm');
     } else if (peers > 0 && !hasLocalModel) {
       dot.className = 'mode-dot swarm';
       label.textContent = 'Swarm (remote)';
+      modeHelp = 'Using peer nodes for inference (no local model)';
       if (indicator) indicator.classList.add('mode-swarm');
     } else if (hasLocalModel && cloudProviders.length > 0) {
       dot.className = 'mode-dot swarm';
       label.textContent = 'Hybrid Mode';
+      modeHelp = 'Local inference + cloud API fallback';
       if (indicator) indicator.classList.add('mode-hybrid');
     } else if (hasLocalModel) {
       dot.className = 'mode-dot offline';
       label.textContent = 'Standalone';
+      modeHelp = 'Local inference only';
       if (indicator) indicator.classList.add('mode-offline');
       if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Local inference only</span>');
     } else if (cloudProviders.length > 0) {
       dot.className = 'mode-dot cloud';
       label.textContent = 'Cloud Gateway';
+      modeHelp = 'Routing requests to cloud providers';
       if (indicator) indicator.classList.add('mode-cloud');
     } else {
       dot.className = 'mode-dot offline';
       label.textContent = 'Not Ready';
+      modeHelp = '';
       if (indicator) indicator.classList.add('mode-offline');
       chips = ['<span class="mode-chip chip-none">No models or providers configured \u2014 open Settings to add an API key</span>'];
     }
+    if (modeHelp) label.title = modeHelp;
 
     // Add quick-action button
     if (cloudProviders.length > 0 && !hasLocalModel) {
@@ -3861,7 +3961,7 @@ var SwarmLLM = (function() {
     settings.init();
     settings.loadApiKey();
     dashboard.loadInitial();
-    loadModels();
+    loadModels().then(function() { syncMobileModelSelect(); });
     loadPruneHistory();
     loadSchedule();
     loadModeIndicator();
@@ -3911,11 +4011,13 @@ var SwarmLLM = (function() {
 
   function copyNetworkCode() {
     var input = document.getElementById('my-network-code');
+    var btn = document.getElementById('btn-copy-network-code');
     if (input && input.value) {
       navigator.clipboard.writeText(input.value).then(function() {
-        ui.showBanner('success', 'Network code copied to clipboard');
+        if (btn) { btn.textContent = 'Copied!'; btn.style.color = 'var(--green)'; setTimeout(function() { btn.textContent = 'Copy'; btn.style.color = ''; }, 2000); }
+        showToast('Network code copied to clipboard', 'success');
       }).catch(function() {
-        ui.showBanner('error', 'Failed to copy — try selecting and copying manually');
+        ui.showBanner('error', 'Failed to copy \u2014 try selecting and copying manually');
       });
     }
   }

@@ -13,20 +13,20 @@
   <div class="ws-banner" id="ws-banner"></div>
 
   <!-- Setup wizard modal (first-run only) -->
-  <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-label="Setup Wizard">
+  <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="modal">
       <div class="modal-header">
-        <h2>Welcome to SwarmLLM</h2>
+        <h2 id="setup-title">Welcome to SwarmLLM</h2>
         <span class="text-muted">First-Run Setup</span>
       </div>
-      <div class="wizard-steps" id="step-indicators">
-        <div class="wizard-step active" data-step="1">1</div>
+      <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
+        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Hardware Detection">1</button>
         <div class="wizard-connector"></div>
-        <div class="wizard-step" data-step="2">2</div>
+        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Resource Contribution">2</button>
         <div class="wizard-connector"></div>
-        <div class="wizard-step" data-step="3">3</div>
+        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Model Selection">3</button>
         <div class="wizard-connector"></div>
-        <div class="wizard-step" data-step="4">4</div>
+        <button class="wizard-step" data-step="4" role="tab" aria-selected="false" aria-label="Step 4: Review">4</button>
       </div>
       <div class="wizard-body" id="step-1">
         <h3>Hardware Detection</h3>
@@ -49,11 +49,11 @@
         <p class="text-muted mb-2">How much of your resources should SwarmLLM use?</p>
         <div class="form-group mt-2">
           <div class="flex-between mb-1">
-            <span>Minimal</span>
+            <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
             <span class="mono" id="contribution-label">Minimal</span>
-            <span>Maximum</span>
+            <span>Maximum<span class="contribution-hint">75%+ CPU</span></span>
           </div>
-          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0">
+          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" aria-label="Resource contribution level">
         </div>
         <div class="mt-2 text-muted" id="contribution-desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
@@ -90,14 +90,14 @@
   </div>
 
   <!-- Settings modal -->
-  <div class="modal-overlay hidden" id="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="modal-overlay hidden" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal">
       <div class="modal-header">
-        <h2>Settings</h2>
-        <button class="btn btn-ghost btn-sm" id="btn-close-settings">&times;</button>
+        <h2 id="settings-title">Settings</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-close-settings" aria-label="Close settings">&times;</button>
       </div>
       <div class="form-group">
-        <label>API Key</label>
+        <label for="settings-api-key">API Key</label>
         <div class="flex gap-1" style="align-items:center">
           <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
           <button class="btn btn-sm" id="btn-copy-api-key" title="Copy API key">Copy</button>
@@ -105,19 +105,20 @@
         <span class="text-muted" style="font-size:0.75rem">Bearer token for API authentication</span>
       </div>
       <div class="form-group">
-        <label>Nickname</label>
+        <label for="settings-nickname">Nickname</label>
         <input type="text" id="settings-nickname" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
         <span class="text-muted" style="font-size:0.75rem">1-32 chars, letters/numbers/underscore/dash only</span>
+        <span class="form-error hidden" id="nickname-error">Only letters, numbers, underscore, and dash allowed</span>
       </div>
       <div class="form-group">
-        <label>Visibility</label>
+        <label for="settings-visibility">Visibility</label>
         <select id="settings-visibility">
           <option value="anonymous">Anonymous (show node ID only)</option>
           <option value="nickname">Nickname (show name to peers)</option>
         </select>
       </div>
       <div class="form-group">
-        <label>Contribution Level</label>
+        <label for="settings-contribution">Contribution Level</label>
         <select id="settings-contribution">
           <option value="minimal">Minimal</option>
           <option value="moderate" selected>Moderate</option>
@@ -125,11 +126,11 @@
         </select>
       </div>
       <div class="form-group">
-        <label>Max Concurrent Requests</label>
+        <label for="settings-max-requests">Max Concurrent Requests</label>
         <input type="number" id="settings-max-requests" value="10" min="1" max="100">
       </div>
       <div class="form-group">
-        <label>Auto-Manage Shards</label>
+        <label for="settings-auto-shards">Auto-Manage Shards</label>
         <select id="settings-auto-shards">
           <option value="off">Off</option>
           <option value="on">On - Auto-download popular shards</option>
@@ -272,11 +273,11 @@
   </div>
 
   <!-- Model browser modal -->
-  <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-label="Model Browser">
+  <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-labelledby="model-browser-title">
     <div class="modal modal-lg">
       <div class="modal-header">
-        <h2>Browse Models</h2>
-        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser">&times;</button>
+        <h2 id="model-browser-title">Browse Models</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" aria-label="Close model browser">&times;</button>
       </div>
       <div class="model-browser-search">
         <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, mistral)...">
@@ -315,7 +316,7 @@
       <div class="logo">SwarmLLM</div>
     </div>
     <div class="header-center">
-      <button class="tab-btn" data-tab="chat">Chat</button>
+      <button class="tab-btn tab-btn-chat" data-tab="chat">Chat</button>
       <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
       <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map">Network Map</button>
@@ -324,7 +325,7 @@
       <div class="model-selector">
         <div class="model-dropdown" id="model-dropdown">
           <button class="model-dropdown-trigger" id="model-dropdown-trigger" title="Active model">
-            <span id="model-dropdown-label">No model loaded</span>
+            <span id="model-dropdown-label">Select model...</span>
             <span class="model-dropdown-arrow">&#9662;</span>
           </button>
           <div class="model-dropdown-panel" id="model-dropdown-panel">
@@ -333,15 +334,15 @@
           </div>
         </div>
         <input type="hidden" id="model-select" value="" />
-        <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models">+</button>
+        <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models" aria-label="Browse models">+</button>
       </div>
-      <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings">&#9881;</button>
+      <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
       </div>
-      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Shutdown node">&#9211;</button>
+      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Shutdown node" aria-label="Shutdown node">&#9211;</button>
     </div>
   </header>
 
@@ -367,7 +368,7 @@
       <!-- Chat view -->
       <div class="view" id="view-chat" style="display:none">
         <div class="mobile-model-bar">
-          <select id="mobile-model-select" title="Active model"><option value="">No model loaded</option></select>
+          <select id="mobile-model-select" title="Active model" aria-label="Active model"><option value="">Select model...</option></select>
           <button class="btn btn-sm" id="btn-mobile-browse" title="Browse models">+</button>
         </div>
         <div class="chat-container">
@@ -404,46 +405,46 @@
 
           <!-- Stat strip — compact single row -->
           <div class="stat-strip mb-2" id="stats-row">
-            <div class="stat-card">
+            <div class="stat-card" title="Connected P2P nodes in the swarm network">
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-peers">0</div>
-                <div class="stat-label">Peers <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label">Peers <span class="stat-help" title="Other SwarmLLM nodes connected to you">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
               </div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" title="Credits earned by serving inference to others">
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-credits">0</div>
-                <div class="stat-label">Credits</div>
+                <div class="stat-label">Credits <span class="stat-help" title="Earned by serving inference to peers, spent on requests">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-requests-made">0</div>
-                <div class="stat-label">Requests</div>
+                <div class="stat-label">Requests <span class="stat-help" title="Chat requests you've made (local + cloud + swarm)">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Full inference requests completed by this node">
+            <div class="stat-card" title="Full inference requests completed by this node for others">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-served">0</div>
-                <div class="stat-label">Served</div>
+                <div class="stat-label">Served <span class="stat-help" title="Inference requests you completed for other nodes">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Layer forward passes processed (earns credits)">
+            <div class="stat-card" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-forwards">0</div>
-                <div class="stat-label">Forwards</div>
+                <div class="stat-label">Forwards <span class="stat-help" title="Individual layer computations done for the network (earns credits)">?</span></div>
               </div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" title="Currently running inference requests">
               <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-active">0</div>
-                <div class="stat-label">Active</div>
+                <div class="stat-label">Active <span class="stat-help" title="Inference requests currently being processed">?</span></div>
               </div>
             </div>
           </div>
@@ -458,14 +459,15 @@
             </div>
             <div class="share-popover" id="share-popover">
               <label style="font-weight:600;margin-bottom:6px">Your Network Code</label>
-              <div style="display:flex;gap:0.5rem;margin-bottom:8px">
-                <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1">
+              <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px">Send this to a friend so they can connect to your node</div>
+              <div style="display:flex;gap:0.5rem;margin-bottom:10px">
+                <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your network code">
                 <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
               </div>
-              <div class="text-muted" style="margin-bottom:10px">Share this code with a friend to connect your nodes</div>
-              <label style="font-weight:600;margin-bottom:4px">Join Network</label>
+              <label style="font-weight:600;margin-bottom:4px">Friend's Network Code</label>
+              <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px">Paste a code from another SwarmLLM user to connect</div>
               <div style="display:flex;gap:0.5rem">
-                <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste a friend's code" style="font-size:0.7rem;flex:1">
+                <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste code here..." style="font-size:0.7rem;flex:1" aria-label="Friend's network code">
                 <button class="btn btn-sm btn-primary" id="btn-join-network">Join</button>
               </div>
               <div class="text-muted" id="join-status" style="margin-top:4px"></div>
@@ -579,20 +581,20 @@
           <!-- Shard Pruning & Schedule -->
           <div class="grid grid-2 mt-2">
             <div class="panel">
-              <div class="panel-header" data-collapse="prune-body">
+              <div class="panel-header collapsed" data-collapse="prune-body">
                 <h2>Prune History</h2>
               </div>
-              <div class="panel-body" id="prune-body">
+              <div class="panel-body collapsed" id="prune-body">
                 <div id="prune-history-list">
                   <div class="text-muted" style="font-size:0.85rem">No prune events yet</div>
                 </div>
               </div>
             </div>
             <div class="panel">
-              <div class="panel-header" data-collapse="schedule-body">
+              <div class="panel-header collapsed" data-collapse="schedule-body">
                 <h2>Resource Schedule</h2>
               </div>
-              <div class="panel-body" id="schedule-body">
+              <div class="panel-body collapsed" id="schedule-body">
                 <div id="schedule-form">
                   <div class="text-muted" style="font-size:0.85rem">Loading...</div>
                 </div>
@@ -651,7 +653,7 @@
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
-                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Loading...</td></tr>
+                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Loading leaderboard...</td></tr>
               </tbody>
             </table>
           </div>
