@@ -3133,7 +3133,7 @@ var SwarmLLM = (function() {
         else if (stateName === 'complete') { stateLabel = 'Complete'; stateClass = 'done'; }
         else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
           stateLabel = 'Failed'; stateClass = 'fail';
-          if (typeof dl.state === 'object' && dl.state.failed) stateLabel = 'Failed: ' + (dl.state.failed.reason || '').substring(0, 40);
+          if (typeof dl.state === 'object' && dl.state.failed) stateLabel = 'Failed: ' + escapeHtml((dl.state.failed.reason || '').substring(0, 40));
         }
 
         var sourceLabel = dl.source === 'huggingface' ? 'HF' : 'Network';
@@ -3545,7 +3545,7 @@ var SwarmLLM = (function() {
         var html = '';
         for (var i = 0; i < entries.length; i++) {
           var e = entries[i];
-          var tierClass = (e.tier || 'silver').toLowerCase();
+          var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
           html += '<tr>'
             + '<td class="mono">' + (e.rank || i+1) + '</td>'
             + '<td>' + (e.display_name !== e.node_id ? escapeHtml(e.display_name) + ' <span class="text-muted mono" style="font-size:0.75rem">' + escapeHtml(e.node_id) + '</span>' : '<span class="mono">' + escapeHtml(e.node_id) + '</span>') + '</td>'

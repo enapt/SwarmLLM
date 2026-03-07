@@ -72,6 +72,7 @@ impl JsonRpcResponse {
 // JSON-RPC error codes
 const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
 // ---- MCP handler ----
@@ -184,7 +185,7 @@ async fn handle_tools_call(state: &AppState, id: Option<Value>, params: Value) -
     match tool_name {
         "chat" => tool_chat(state, id, arguments).await,
         "models" => tool_models(state, id).await,
-        _ => JsonRpcResponse::error(id, METHOD_NOT_FOUND, format!("Unknown tool: {tool_name}")),
+        _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
 }
 
@@ -213,7 +214,7 @@ async fn handle_resources_read(
 
     match uri {
         "swarmllm://status" => resource_status(state, id).await,
-        _ => JsonRpcResponse::error(id, METHOD_NOT_FOUND, format!("Unknown resource: {uri}")),
+        _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown resource: {uri}")),
     }
 }
 
@@ -230,14 +231,14 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
     let model = match args.get("model").and_then(|v| v.as_str()) {
         Some(m) => m.to_string(),
         None => {
-            return JsonRpcResponse::error(id, PARSE_ERROR, "Missing required field: model");
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: model");
         }
     };
 
     let messages = match args.get("messages").and_then(|v| v.as_array()) {
         Some(msgs) => msgs.clone(),
         None => {
-            return JsonRpcResponse::error(id, PARSE_ERROR, "Missing required field: messages");
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: messages");
         }
     };
 
@@ -271,7 +272,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         .collect();
 
     if chat_messages.is_empty() {
-        return JsonRpcResponse::error(id, PARSE_ERROR, "No valid messages provided");
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "No valid messages provided");
     }
 
     let request = crate::types::InferenceRequest {
