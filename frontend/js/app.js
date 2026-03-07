@@ -21,6 +21,11 @@ var SwarmLLM = (function() {
   var ACTIVE_SESSION_KEY = 'swarmllm_active_session';
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
   var CHAT_LAYOUT_KEY = 'swarmllm_chat_layout';
+  var HEALTH_INTERVAL_KEY = 'swarmllm_health_interval';
+
+  // Provider health state: { provider: { status, latency_ms, detail, last_checked } }
+  var providerHealth = {};
+  var healthTimer = null;
 
   // Clear stale chat sessions on each page load (dev mode)
   try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
@@ -892,42 +897,118 @@ var SwarmLLM = (function() {
           byProvider[p].push(cm);
         });
 
+        // Helper: get context length from model meta
+        function getCtxLen(cm) {
+          if (!cm.meta) return 0;
+          return cm.meta.context_length || cm.meta.context_window || cm.meta.max_model_len || 0;
+        }
+
+        // Helper: sort models by criteria
+        function sortCloudModels(models, sortBy) {
+          var sorted = models.slice();
+          if (sortBy === 'ctx-desc') {
+            sorted.sort(function(a, b) { return getCtxLen(b) - getCtxLen(a); });
+          } else if (sortBy === 'ctx-asc') {
+            sorted.sort(function(a, b) { return getCtxLen(a) - getCtxLen(b); });
+          } else {
+            // A-Z by name
+            sorted.sort(function(a, b) {
+              var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+              return na < nb ? -1 : na > nb ? 1 : 0;
+            });
+          }
+          return sorted;
+        }
+
+        // Helper: render model tag HTML
+        function renderCloudTag(cm) {
+          var metaChip = '';
+          if (cm.meta) {
+            var parts = [];
+            if (cm.meta.owned_by) parts.push(cm.meta.owned_by);
+            var ctx = getCtxLen(cm);
+            if (ctx > 0) {
+              var ctxK = ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString();
+              parts.push(ctxK + ' ctx');
+            }
+            if (parts.length > 0) metaChip = ' <span class="cloud-tag-meta">' + escapeHtml(parts.join(' \u00b7 ')) + '</span>';
+          }
+          var tooltip = cm.meta ? escapeHtml(cm.id + '\n' + JSON.stringify(cm.meta, null, 2)) : escapeHtml(cm.id);
+          return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + tooltip + '">' + escapeHtml(cm.name || cm.id) + metaChip + '</span>';
+        }
+
+        // Helper: render tags into container with limit
+        function renderTagsInto(container, models, tagId) {
+          var CLOUD_TAG_LIMIT = 12;
+          var tagHtmlArr = models.map(renderCloudTag);
+          var hasMore = tagHtmlArr.length > CLOUD_TAG_LIMIT;
+          var visible = hasMore ? tagHtmlArr.slice(0, CLOUD_TAG_LIMIT) : tagHtmlArr;
+          var hidden = hasMore ? tagHtmlArr.slice(CLOUD_TAG_LIMIT) : [];
+          container.innerHTML = visible.join('') +
+            (hasMore ? '<span class="cloud-tags-hidden" id="' + tagId + '" style="display:none">' + hidden.join('') + '</span>' +
+              '<button class="btn btn-sm cloud-show-more" data-toggle-tags="' + tagId + '" data-show-label="Show all ' + models.length + ' models" style="margin:4px 0;font-size:0.7rem">' +
+              'Show all ' + models.length + ' models</button>' : '');
+        }
+
         Object.keys(byProvider).forEach(function(p) {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
-          var modelTagsArr = pModels.map(function(cm) {
-            var metaChip = '';
-            if (cm.meta) {
-              var parts = [];
-              if (cm.meta.owned_by) parts.push(cm.meta.owned_by);
-              if (cm.meta.context_length || cm.meta.context_window) parts.push((cm.meta.context_length || cm.meta.context_window).toLocaleString() + ' ctx');
-              if (parts.length > 0) metaChip = ' <span style="opacity:0.5;font-size:0.65rem">' + escapeHtml(parts.join(' · ')) + '</span>';
-            }
-            var tooltip = cm.meta ? escapeHtml(cm.id + '\n' + JSON.stringify(cm.meta, null, 2)) : escapeHtml(cm.id);
-            return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + tooltip + '">' + escapeHtml(cm.name || cm.id) + metaChip + '</span>';
-          });
-
-          var CLOUD_TAG_LIMIT = 12;
-          var hasMore = modelTagsArr.length > CLOUD_TAG_LIMIT;
-          var visibleTags = hasMore ? modelTagsArr.slice(0, CLOUD_TAG_LIMIT) : modelTagsArr;
-          var hiddenTags = hasMore ? modelTagsArr.slice(CLOUD_TAG_LIMIT) : [];
+          // Default sort: A-Z
+          var sorted = sortCloudModels(pModels, 'az');
           var tagId = 'cloud-tags-' + p;
+          var filterId = 'cloud-filter-' + p;
+          var sortId = 'cloud-sort-' + p;
 
           var card = document.createElement('div');
           card.className = 'model-card cloud-model';
-          card.innerHTML =
+          card.setAttribute('data-provider', p);
+
+          var headerHtml =
             '<div class="model-header">' +
               '<span class="model-name">' + escapeHtml(pLabel) + '</span>' +
               '<span><span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
               '<span style="color:var(--green);font-weight:600;font-size:0.8rem;margin-left:8px">Connected</span></span>' +
-            '</div>' +
-            '<div class="cloud-model-tags">' + visibleTags.join('') +
-              (hasMore ? '<span class="cloud-tags-hidden" id="' + tagId + '" style="display:none">' + hiddenTags.join('') + '</span>' +
-                '<button class="btn btn-sm cloud-show-more" data-toggle-tags="' + tagId + '" data-show-label="Show all ' + pModels.length + ' models" style="margin:4px 0;font-size:0.7rem">' +
-                'Show all ' + pModels.length + ' models</button>' : '') +
-            '</div>' +
+            '</div>';
+
+          // Sort + filter controls
+          var controlsHtml = pModels.length > 5 ?
+            '<div class="cloud-model-controls">' +
+              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="Filter models\u2026" autocomplete="off">' +
+              '<select class="cloud-model-sort" id="' + sortId + '">' +
+                '<option value="az">A\u2013Z</option>' +
+                '<option value="ctx-desc">Context \u2193</option>' +
+                '<option value="ctx-asc">Context \u2191</option>' +
+              '</select>' +
+            '</div>' : '';
+
+          card.innerHTML = headerHtml + controlsHtml +
+            '<div class="cloud-model-tags" id="cloud-tags-wrap-' + p + '"></div>' +
             '<div class="model-meta"><span style="color:var(--text-muted);font-size:0.75rem">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</span></div>';
           list.appendChild(card);
+
+          var tagsContainer = document.getElementById('cloud-tags-wrap-' + p);
+          if (tagsContainer) renderTagsInto(tagsContainer, sorted, tagId);
+
+          // Wire up filter + sort if controls exist
+          if (pModels.length > 5) {
+            var filterEl = document.getElementById(filterId);
+            var sortEl = document.getElementById(sortId);
+            function refreshTags() {
+              var query = (filterEl ? filterEl.value : '').toLowerCase().trim();
+              var sortBy = sortEl ? sortEl.value : 'az';
+              var filtered = pModels;
+              if (query) {
+                filtered = pModels.filter(function(cm) {
+                  var text = ((cm.name || '') + ' ' + cm.id + ' ' + (cm.meta && cm.meta.owned_by ? cm.meta.owned_by : '')).toLowerCase();
+                  return text.indexOf(query) !== -1;
+                });
+              }
+              var s = sortCloudModels(filtered, sortBy);
+              renderTagsInto(tagsContainer, s, tagId + '-f');
+            }
+            if (filterEl) filterEl.addEventListener('input', refreshTags);
+            if (sortEl) sortEl.addEventListener('change', refreshTags);
+          }
         });
       }
     },
@@ -1385,6 +1466,12 @@ var SwarmLLM = (function() {
           if (isOn) settings.loadStorageInfo();
         });
       }
+      // Load saved health interval
+      var healthIntervalEl = document.getElementById('settings-health-interval');
+      if (healthIntervalEl) {
+        try { var saved = localStorage.getItem(HEALTH_INTERVAL_KEY); if (saved) healthIntervalEl.value = saved; } catch(e) {}
+      }
+
       // Nickname inline validation
       var nickInput = document.getElementById('settings-nickname');
       var nickError = document.getElementById('nickname-error');
@@ -1696,6 +1783,13 @@ var SwarmLLM = (function() {
         ui.showBanner('error', 'Error: ' + e.message);
       }
 
+      // Save health check interval to localStorage and restart polling
+      var healthIntervalEl = document.getElementById('settings-health-interval');
+      if (healthIntervalEl) {
+        try { localStorage.setItem(HEALTH_INTERVAL_KEY, healthIntervalEl.value); } catch(e) {}
+        startHealthPolling();
+      }
+
       // Save nickname if provided
       await identity.saveNickname();
       // Save provider keys if any were entered
@@ -1964,6 +2058,101 @@ var SwarmLLM = (function() {
     pollTimers.push(setInterval(loadModels, 30000));
   }
 
+  // Provider health probe — lightweight ping to each configured provider
+  function getHealthInterval() {
+    try { var v = parseInt(localStorage.getItem(HEALTH_INTERVAL_KEY)); return v > 0 ? v : 30; } catch(e) { return 30; }
+  }
+
+  async function fetchProviderHealth() {
+    try {
+      var resp = await fetch('/api/admin/provider-health');
+      if (!resp.ok) return;
+      var data = await resp.json();
+      var now = Date.now();
+      (data.providers || []).forEach(function(p) {
+        providerHealth[p.provider] = {
+          status: p.status,
+          latency_ms: p.latency_ms,
+          detail: p.detail || '',
+          last_checked: now
+        };
+      });
+      updateProviderHealthBadges();
+    } catch (e) { /* health probe is non-critical */ }
+  }
+
+  function startHealthPolling() {
+    if (healthTimer) clearInterval(healthTimer);
+    var intervalSec = getHealthInterval();
+    if (intervalSec <= 0) return; // disabled
+    fetchProviderHealth(); // immediate first check
+    healthTimer = setInterval(fetchProviderHealth, intervalSec * 1000);
+  }
+
+  function updateProviderHealthBadges() {
+    // Update dashboard provider cards
+    Object.keys(providerHealth).forEach(function(p) {
+      var h = providerHealth[p];
+      var badge = document.getElementById('health-badge-' + p);
+      if (!badge) {
+        // Find the provider card header and append badge
+        var card = document.querySelector('.cloud-model[data-provider="' + p + '"]');
+        if (!card) return;
+        var header = card.querySelector('.model-header');
+        if (!header) return;
+        badge = document.createElement('span');
+        badge.id = 'health-badge-' + p;
+        badge.className = 'provider-health-badge';
+        header.querySelector('span:last-child').appendChild(badge);
+      }
+      var statusIcon, statusClass;
+      if (h.status === 'up') {
+        statusIcon = h.latency_ms + 'ms';
+        statusClass = h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow';
+      } else if (h.status === 'rate_limited') {
+        statusIcon = 'Rate limited';
+        statusClass = 'health-warn';
+      } else if (h.status === 'timeout') {
+        statusIcon = 'Timeout';
+        statusClass = 'health-down';
+      } else if (h.status === 'auth_error') {
+        statusIcon = 'Auth error';
+        statusClass = 'health-down';
+      } else if (h.status === 'overloaded') {
+        statusIcon = 'Overloaded';
+        statusClass = 'health-warn';
+      } else {
+        statusIcon = 'Error';
+        statusClass = 'health-down';
+      }
+      badge.className = 'provider-health-badge ' + statusClass;
+      badge.textContent = statusIcon;
+      badge.title = h.status + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
+    });
+
+    // Update model dropdown items with latency hints
+    Object.keys(providerHealth).forEach(function(p) {
+      var h = providerHealth[p];
+      var groupEl = document.querySelector('.model-dropdown-group[data-group="' + p + '"]');
+      if (!groupEl) return;
+      var existingBadge = groupEl.querySelector('.provider-health-badge');
+      if (!existingBadge) {
+        var header = groupEl.querySelector('.model-dropdown-group-header');
+        if (!header) return;
+        existingBadge = document.createElement('span');
+        existingBadge.className = 'provider-health-badge';
+        header.appendChild(existingBadge);
+      }
+      if (h.status === 'up') {
+        existingBadge.className = 'provider-health-badge ' + (h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow');
+        existingBadge.textContent = h.latency_ms + 'ms';
+      } else {
+        existingBadge.className = 'provider-health-badge health-down';
+        existingBadge.textContent = h.status === 'rate_limited' ? 'Limited' : h.status === 'timeout' ? 'Slow' : 'Down';
+      }
+    });
+  }
+
   // ========================================================================
   // Model loading + selection
   // ========================================================================
@@ -2026,6 +2215,11 @@ var SwarmLLM = (function() {
             var item = { id: m.id, name: m.name || m.id, group: p, provider: p };
             if (m.meta) item.meta = m.meta;
             return item;
+          });
+          // Sort A-Z by name for consistent ordering
+          items.sort(function(a, b) {
+            var na = a.name.toLowerCase(), nb = b.name.toLowerCase();
+            return na < nb ? -1 : na > nb ? 1 : 0;
           });
           groups.push({ key: p, label: (providerLabels[p] || p) + ' (cloud)', items: items });
           _modelDropdownData = _modelDropdownData.concat(items);
@@ -4034,6 +4228,9 @@ var SwarmLLM = (function() {
 
     // Start polling as fallback — will be paused once WebSocket connects
     startPolling();
+
+    // Start provider health probe (default every 30s, configurable)
+    startHealthPolling();
   }
 
   // Start when DOM is ready

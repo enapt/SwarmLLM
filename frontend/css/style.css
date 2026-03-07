@@ -1254,6 +1254,19 @@ kbd {
 .cloud-model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 .cloud-model-tag { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px; font-size: 0.78rem; color: var(--text-primary); cursor: pointer; transition: all 0.15s; }
 .cloud-model-tag:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
+.cloud-tag-meta { opacity: 0.5; font-size: 0.65rem; }
+.cloud-model-tag:hover .cloud-tag-meta { opacity: 0.8; }
+.cloud-model-controls { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.cloud-model-filter { flex: 1; max-width: 220px; padding: 4px 8px; font-size: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); outline: none; }
+.cloud-model-filter:focus { border-color: var(--accent); }
+.cloud-model-sort { padding: 4px 6px; font-size: 0.72rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); cursor: pointer; outline: none; }
+.cloud-model-sort:focus { border-color: var(--accent); }
+.provider-health-badge { display: inline-block; font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
+.health-fast { background: rgba(76,175,80,0.15); color: var(--green); }
+.health-ok { background: rgba(255,193,7,0.15); color: var(--orange); }
+.health-slow { background: rgba(244,67,54,0.15); color: var(--red); }
+.health-warn { background: rgba(255,193,7,0.2); color: var(--orange); }
+.health-down { background: rgba(244,67,54,0.15); color: var(--red); }
 
 /* Unload button outline variant */
 .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }

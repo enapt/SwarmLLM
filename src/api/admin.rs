@@ -3660,6 +3660,131 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
     Json(serde_json::json!({ "models": models }))
 }
 
+/// GET /api/admin/provider-health — Lightweight health probe for configured providers.
+///
+/// Sends a tiny chat completion request (max_tokens=1) to one model per provider
+/// to measure latency and confirm availability. Returns per-provider status.
+pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let config = state.shared_state.providers_config.read().await;
+
+    // Build (provider_name, base_url, api_key, test_model) tuples
+    let mut probes: Vec<(&str, String, String, String)> = Vec::new();
+
+    let candidates: &[(&str, Option<&crate::config::ProviderEntry>, &str)] = &[
+        ("openai", config.openai.as_ref(), "gpt-4o-mini"),
+        ("anthropic", config.anthropic.as_ref(), "claude-haiku-4-5-20251001"),
+        ("deepseek", config.deepseek.as_ref(), "deepseek-chat"),
+        ("mistral", config.mistral.as_ref(), "mistral-small-latest"),
+        ("groq", config.groq.as_ref(), "llama-3.1-8b-instant"),
+        ("nvidia_nim", config.nvidia_nim.as_ref(), "meta/llama-3.1-8b-instruct"),
+        ("cerebras", config.cerebras.as_ref(), "llama-3.3-70b"),
+        ("sambanova", config.sambanova.as_ref(), "Meta-Llama-3.1-8B-Instruct"),
+        ("fireworks", config.fireworks.as_ref(), "accounts/fireworks/models/llama-v3p1-8b-instruct"),
+        ("together", config.together.as_ref(), "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"),
+        ("deepinfra", config.deepinfra.as_ref(), "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+    ];
+
+    for &(name, ref entry, test_model) in candidates {
+        if let Some(e) = entry {
+            if let Some(base) = crate::api::providers::provider_base_url(name) {
+                probes.push((name, base.to_string(), e.api_key.clone(), test_model.to_string()));
+            }
+        }
+    }
+
+    drop(config);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let probes_futures = probes.into_iter().map(|(name, base_url, api_key, test_model)| {
+        let client = client.clone();
+        async move {
+            let url = if name == "anthropic" {
+                format!("{}/messages", base_url)
+            } else {
+                format!("{}/chat/completions", base_url)
+            };
+
+            let body = if name == "anthropic" {
+                serde_json::json!({
+                    "model": test_model,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}]
+                })
+            } else {
+                serde_json::json!({
+                    "model": test_model,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": false
+                })
+            };
+
+            let start = std::time::Instant::now();
+            let result = if name == "anthropic" {
+                client.post(&url)
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .json(&body).send().await
+            } else {
+                client.post(&url)
+                    .header("authorization", format!("Bearer {}", api_key))
+                    .header("content-type", "application/json")
+                    .json(&body).send().await
+            };
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(resp) => {
+                    let status_code = resp.status().as_u16();
+                    let (status, detail) = if resp.status().is_success() {
+                        ("up".to_string(), String::new())
+                    } else if status_code == 401 || status_code == 403 {
+                        ("auth_error".to_string(), "Invalid API key".to_string())
+                    } else if status_code == 429 {
+                        ("rate_limited".to_string(), "Rate limited".to_string())
+                    } else if status_code == 503 || status_code == 502 {
+                        ("overloaded".to_string(), "Service overloaded".to_string())
+                    } else {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        let short = if body_text.len() > 100 { body_text[..100].to_string() } else { body_text };
+                        (format!("error_{}", status_code), short)
+                    };
+                    serde_json::json!({
+                        "provider": name,
+                        "status": status,
+                        "latency_ms": latency_ms,
+                        "detail": detail,
+                    })
+                }
+                Err(e) => {
+                    let status = if e.is_timeout() {
+                        "timeout"
+                    } else if e.is_connect() {
+                        "unreachable"
+                    } else {
+                        "error"
+                    };
+                    serde_json::json!({
+                        "provider": name,
+                        "status": status,
+                        "latency_ms": latency_ms,
+                        "detail": e.to_string(),
+                    })
+                }
+            }
+        }
+    });
+
+    let results = futures::future::join_all(probes_futures).await;
+    Json(serde_json::json!({ "providers": results }))
+}
+
 // ========================================================================
 // Update / Version Endpoints
 // ========================================================================

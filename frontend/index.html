@@ -263,6 +263,10 @@
             <label>Max Disk (MB)</label>
             <input type="number" id="settings-disk" value="50000" min="1000">
           </div>
+          <div class="form-group">
+            <label for="settings-health-interval">Provider Health Check Interval (seconds, 0 = off)</label>
+            <input type="number" id="settings-health-interval" value="30" min="0" max="3600" step="5">
+          </div>
         </div>
       </details>
       <div class="mt-2" style="display:flex;gap:8px;align-items:center">
