@@ -938,9 +938,14 @@ impl NetworkManager {
                             if peer.is_lan_peer {
                                 peer.is_lan_peer = false;
                                 drop(peer);
-                                self.shared_state
+                                let _ = self
+                                    .shared_state
                                     .lan_peer_count
-                                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                    .fetch_update(
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        |v| v.checked_sub(1),
+                                    );
                             }
                         }
                     }

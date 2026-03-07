@@ -3355,6 +3355,15 @@ pub async fn register_adapter(
             .join(&path)
     };
 
+    // Reject path traversal attempts (e.g. "../../../etc/passwd")
+    for component in resolved.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(ApiError(crate::error::SwarmError::Internal(
+                "Path traversal not allowed in adapter path".to_string(),
+            )));
+        }
+    }
+
     if !resolved.exists() {
         return Err(ApiError(crate::error::SwarmError::Internal(format!(
             "Adapter file not found: {}",

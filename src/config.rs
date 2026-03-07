@@ -1062,6 +1062,11 @@ impl Config {
                 "session_timeout_seconds must be > 0".to_string(),
             ));
         }
+        if self.inference.max_batch_size == 0 {
+            return Err(SwarmError::Config(
+                "max_batch_size must be >= 1".to_string(),
+            ));
+        }
         if self.inference.speculative_gamma == 0 {
             return Err(SwarmError::Config(
                 "speculative_gamma must be > 0".to_string(),

@@ -583,6 +583,26 @@ pub fn chatml_fallback(messages: &[ChatMessage]) -> String {
     prompt
 }
 
+/// Build a Gemma-formatted prompt (for Gemma 1/2 models).
+///
+/// Gemma uses `<start_of_turn>role\ncontent<end_of_turn>` format.
+pub fn gemma_fallback(messages: &[ChatMessage]) -> String {
+    let mut prompt = String::from("<bos>");
+    for msg in messages {
+        let role = match msg.role {
+            Role::System | Role::User => "user",
+            Role::Assistant => "model",
+            Role::Tool => "user",
+        };
+        prompt.push_str(&format!(
+            "<start_of_turn>{}\n{}<end_of_turn>\n",
+            role, msg.content
+        ));
+    }
+    prompt.push_str("<start_of_turn>model\n");
+    prompt
+}
+
 /// The `<image>` placeholder token used by LLaVA to mark where vision embeddings go.
 pub const IMAGE_PLACEHOLDER: &str = "<image>";
 
@@ -694,6 +714,11 @@ pub fn build_prompt_with_model(
             tracing::debug!(template_matched = true, "DIAG: chat template applied");
             return result;
         }
+        // Template failed — try architecture-specific fallbacks before ChatML
+        if tmpl.contains("start_of_turn") {
+            tracing::warn!(fallback = "gemma", "DIAG: chat template failed, using gemma fallback");
+            return gemma_fallback(messages);
+        }
         tracing::warn!(
             fallback = "chatml",
             "DIAG: chat template failed, using fallback"
@@ -709,6 +734,14 @@ pub fn build_prompt_with_model(
                     "DIAG: no chat template, using vicuna fallback"
                 );
                 return vicuna_fallback(messages);
+            }
+            if name_lower.contains("gemma") {
+                tracing::debug!(
+                    model_name = name,
+                    fallback = "gemma",
+                    "DIAG: no chat template, using gemma fallback"
+                );
+                return gemma_fallback(messages);
             }
         }
         tracing::debug!(

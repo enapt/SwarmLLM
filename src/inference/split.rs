@@ -510,15 +510,13 @@ impl BpeTokenizer {
         let pre_tok_re = fancy_regex::Regex::new(pattern)
             .unwrap_or_else(|_| fancy_regex::Regex::new(r"[^\s]+|\s+").unwrap());
 
-        // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>)
+        // Collect special tokens (e.g., <|im_start|>, <|im_end|>, <s>, </s>, <unk>,
+        // <bos>, <eos>, <start_of_turn>, <end_of_turn>)
         let mut special_tokens: Vec<(String, u32)> = token_to_id
             .iter()
             .filter(|(t, _)| {
                 (t.starts_with("<|") && t.ends_with("|>"))
-                    || *t == "<s>"
-                    || *t == "</s>"
-                    || *t == "<unk>"
-                    || *t == "<pad>"
+                    || (t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 20)
             })
             .map(|(t, &id)| (t.clone(), id))
             .collect();
@@ -771,6 +769,22 @@ impl SplitTokenizer {
         // SentencePiece uses ▁ (U+2581) as space replacement
         let metaspace = Metaspace::new('▁', PrependScheme::Always, true);
         tokenizer.with_pre_tokenizer(Some(metaspace));
+
+        // Register control/special tokens (e.g. <bos>, <eos>, <start_of_turn>, <end_of_turn>)
+        // so the tokenizer handles them as single tokens instead of splitting them.
+        let special_toks: Vec<tokenizers::AddedToken> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 20
+            })
+            .map(|(_, t)| tokenizers::AddedToken::from(t.clone(), true))
+            .collect();
+        if !special_toks.is_empty() {
+            let count = special_toks.len();
+            tokenizer.add_special_tokens(&special_toks);
+            tracing::debug!(count, "Registered special tokens in HF Unigram tokenizer");
+        }
 
         tracing::info!(
             vocab_size = tokens.len(),
@@ -2512,6 +2526,8 @@ pub struct SplitModel {
     /// Pre-computed KV cache store key: "{layer_start}-{layer_end}-{total_layers}".
     /// Avoids a `format!` allocation on every forward pass.
     kv_model_key: String,
+    /// Gemma 2 final logit soft-capping value (e.g. 30.0).
+    final_logit_softcap: Option<f32>,
 }
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
@@ -3068,6 +3084,13 @@ impl SplitModel {
         let attn_logit_softcap = ct
             .metadata
             .get(&format!("{arch}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f32().ok())
+            .filter(|&v| v > 0.0);
+
+        // Gemma 2 final logit soft-capping (from GGUF metadata)
+        let final_logit_softcap = ct
+            .metadata
+            .get(&format!("{arch}.final_logit_softcapping"))
             .and_then(|v| v.to_f32().ok())
             .filter(|&v| v > 0.0);
 
@@ -4381,6 +4404,12 @@ impl SplitModel {
                     }
                 }
             }
+            "gemma" | "gemma2" => {
+                // Gemma uses token 107 (<end_of_turn>) as EOS
+                if !eos_tokens.contains(&107) {
+                    eos_tokens.push(107);
+                }
+            }
             _ => {
                 // Common fallback EOS token for LLaMA-family models
                 if !eos_tokens.contains(&2) {
@@ -4465,6 +4494,7 @@ impl SplitModel {
             eos_token,
             max_seq_len: context_length.min(2048),
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
+            final_logit_softcap,
         })
     }
 
@@ -4598,6 +4628,12 @@ impl SplitModel {
         let attn_logit_softcap = ct
             .metadata
             .get(&format!("{arch}.attn_logit_softcapping"))
+            .and_then(|v| v.to_f32().ok())
+            .filter(|&v| v > 0.0);
+
+        let final_logit_softcap = ct
+            .metadata
+            .get(&format!("{arch}.final_logit_softcapping"))
             .and_then(|v| v.to_f32().ok())
             .filter(|&v| v > 0.0);
 
@@ -5517,6 +5553,11 @@ impl SplitModel {
                     }
                 }
             }
+            "gemma" | "gemma2" => {
+                if !eos_tokens.contains(&107) {
+                    eos_tokens.push(107);
+                }
+            }
             _ => {
                 if !eos_tokens.contains(&2) {
                     eos_tokens.push(2);
@@ -5594,6 +5635,7 @@ impl SplitModel {
             eos_token,
             max_seq_len: context_length.min(2048),
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
+            final_logit_softcap,
         })
     }
 
@@ -5685,11 +5727,20 @@ impl SplitModel {
         // Determine the hidden state to start from
         let mut layer_in = if is_first {
             // First segment: input is token IDs → apply embedding
-            self.tok_embeddings
+            let mut emb = self
+                .tok_embeddings
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
                 .forward(&input)
-                .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?
+                .map_err(|e| SwarmError::Internal(format!("Embedding forward failed: {e}")))?;
+            // Gemma models scale embeddings by sqrt(hidden_dim)
+            if self.arch.use_gemma_norm() {
+                let scale = (self.hidden_dim as f64).sqrt();
+                emb = emb
+                    .affine(scale, 0.0)
+                    .map_err(|e| SwarmError::Internal(format!("Embedding scale failed: {e}")))?;
+            }
+            emb
         } else {
             // Non-first segment: input is already hidden states
             input
@@ -5852,9 +5903,17 @@ impl SplitModel {
             let x = x
                 .i((.., seq_len - 1, ..))
                 .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?;
-            let logits = output
+            let mut logits = output
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
+            // Gemma 2 final logit soft-capping: tanh(logits / cap) * cap
+            if let Some(cap) = self.final_logit_softcap {
+                logits = logits
+                    .affine(1.0 / cap as f64, 0.0)
+                    .and_then(|t| t.tanh())
+                    .and_then(|t| t.affine(cap as f64, 0.0))
+                    .map_err(|e| SwarmError::Internal(format!("final_logit_softcap: {e}")))?;
+            }
             Ok(logits)
         } else {
             // Intermediate segment: return hidden states for next segment
@@ -7254,6 +7313,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len: DEFAULT_MAX_SEQ_LEN,
             kv_model_key: String::from("0-0-0"),
+            final_logit_softcap: None,
         };
         SplitModelEntry {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(dummy_model)),
@@ -7472,6 +7532,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len,
             kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
+            final_logit_softcap: None,
         }
     }
 
@@ -7874,6 +7935,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len,
             kv_model_key: format!("0-{num_layers}-{}", num_layers + 2),
+            final_logit_softcap: None,
         }
     }
 
@@ -8263,6 +8325,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len,
             kv_model_key: String::from("0-1-3"),
+            final_logit_softcap: None,
         };
 
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
@@ -8930,6 +8993,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len,
             kv_model_key: String::from("0-2-4"),
+            final_logit_softcap: None,
         }
     }
 
@@ -9297,6 +9361,7 @@ mod tests {
             eos_token: String::new(),
             max_seq_len,
             kv_model_key: String::from("0-4-8"),
+            final_logit_softcap: None,
         };
 
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
