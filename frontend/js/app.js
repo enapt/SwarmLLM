@@ -3652,8 +3652,8 @@ var SwarmLLM = (function() {
         }
       }
 
-      document.getElementById('map-total-nodes').textContent = totalNodes;
-      document.getElementById('map-total-regions').textContent = totalRegions;
+      var statsEl = document.getElementById('map-stats-text');
+      if (statsEl) statsEl.textContent = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
       document.getElementById('map-legend-max').textContent = maxCount;
     },
 
@@ -3718,8 +3718,8 @@ var SwarmLLM = (function() {
           el.style.filter = 'drop-shadow(0 0 ' + Math.round(intensity * 6) + 'px rgba(59,130,246,' + (intensity * 0.5).toFixed(2) + '))';
         }
       }
-      document.getElementById('map-total-nodes').textContent = totalNodes;
-      document.getElementById('map-total-regions').textContent = totalRegions;
+      var statsEl = document.getElementById('map-stats-text');
+      if (statsEl) statsEl.textContent = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
       document.getElementById('map-legend-max').textContent = maxCount;
     },
 
