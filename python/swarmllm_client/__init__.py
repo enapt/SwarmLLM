@@ -41,6 +41,17 @@ from swarmllm_client.types import (
     Usage,
 )
 
+# Optional framework integrations (only available if deps are installed)
+try:
+    from swarmllm_client.integrations.langchain import ChatSwarmLLM
+except ImportError:
+    pass
+
+try:
+    from swarmllm_client.integrations.llamaindex import SwarmLLM as LlamaIndexSwarmLLM
+except ImportError:
+    pass
+
 __version__ = "0.1.0"
 __all__ = [
     "SwarmLLM",
