@@ -27,6 +27,10 @@ var SwarmLLM = (function() {
   var providerHealth = {};
   var healthTimer = null;
 
+  // Per-model availability cache: { model_id: { status, latency_ms, ts } }
+  var modelStatus = {};
+  var _modelStatusPending = {}; // track in-flight probes
+
   // Clear stale chat sessions on each page load (dev mode)
   try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
 
@@ -910,6 +914,18 @@ var SwarmLLM = (function() {
             sorted.sort(function(a, b) { return getCtxLen(b) - getCtxLen(a); });
           } else if (sortBy === 'ctx-asc') {
             sorted.sort(function(a, b) { return getCtxLen(a) - getCtxLen(b); });
+          } else if (sortBy === 'avail') {
+            // Available first (up → rate_limited → unknown → timeout/error), then by latency
+            sorted.sort(function(a, b) {
+              var sa = modelStatus[a.id], sb = modelStatus[b.id];
+              var rank = { up: 0, rate_limited: 1, timeout: 3, unavailable: 4, not_found: 5, error: 4 };
+              var ra = sa ? (rank[sa.status] !== undefined ? rank[sa.status] : 2) : 2;
+              var rb = sb ? (rank[sb.status] !== undefined ? rank[sb.status] : 2) : 2;
+              if (ra !== rb) return ra - rb;
+              // Same rank: sort by latency (lower first), unknowns last
+              var la = sa ? sa.latency_ms : 99999, lb = sb ? sb.latency_ms : 99999;
+              return la - lb;
+            });
           } else {
             // A-Z by name
             sorted.sort(function(a, b) {
@@ -978,6 +994,7 @@ var SwarmLLM = (function() {
                 '<option value="az">A\u2013Z</option>' +
                 '<option value="ctx-desc">Context \u2193</option>' +
                 '<option value="ctx-asc">Context \u2191</option>' +
+                '<option value="avail">Availability</option>' +
               '</select>' +
             '</div>' : '';
 
@@ -988,6 +1005,10 @@ var SwarmLLM = (function() {
 
           var tagsContainer = document.getElementById('cloud-tags-wrap-' + p);
           if (tagsContainer) renderTagsInto(tagsContainer, sorted, tagId);
+
+          // Probe visible models for availability (first 12)
+          var visibleIds = sorted.slice(0, 12).map(function(cm) { return cm.id; });
+          setTimeout(function() { probeModelStatus(visibleIds); }, 500);
 
           // Wire up filter + sort if controls exist
           if (pModels.length > 5) {
@@ -1007,7 +1028,14 @@ var SwarmLLM = (function() {
               renderTagsInto(tagsContainer, s, tagId + '-f');
             }
             if (filterEl) filterEl.addEventListener('input', refreshTags);
-            if (sortEl) sortEl.addEventListener('change', refreshTags);
+            if (sortEl) sortEl.addEventListener('change', function() {
+              refreshTags();
+              // When switching to availability sort, probe all visible models
+              if (sortEl.value === 'avail') {
+                var ids = pModels.map(function(cm) { return cm.id; });
+                probeModelStatus(ids.slice(0, 20));
+              }
+            });
           }
         });
       }
@@ -2149,6 +2177,75 @@ var SwarmLLM = (function() {
       } else {
         existingBadge.className = 'provider-health-badge health-down';
         existingBadge.textContent = h.status === 'rate_limited' ? 'Limited' : h.status === 'timeout' ? 'Slow' : 'Down';
+      }
+    });
+  }
+
+  // Probe individual model availability (batched, max 20 at a time)
+  function probeModelStatus(modelIds) {
+    // Filter out already-probed (within 60s) and in-flight models
+    var now = Date.now();
+    var toProbe = modelIds.filter(function(id) {
+      if (_modelStatusPending[id]) return false;
+      var cached = modelStatus[id];
+      if (cached && (now - cached.ts) < 60000) return false;
+      return true;
+    });
+    if (toProbe.length === 0) return;
+    toProbe = toProbe.slice(0, 20);
+    toProbe.forEach(function(id) { _modelStatusPending[id] = true; });
+
+    authFetch('/api/admin/provider-model-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ models: toProbe }),
+    }).then(function(resp) {
+      if (!resp.ok) return;
+      return resp.json();
+    }).then(function(data) {
+      if (!data || !data.models) return;
+      var ts = Date.now();
+      data.models.forEach(function(m) {
+        modelStatus[m.model] = { status: m.status, latency_ms: m.latency_ms, ts: ts };
+        delete _modelStatusPending[m.model];
+      });
+      updateModelStatusBadges();
+    }).catch(function() {
+      toProbe.forEach(function(id) { delete _modelStatusPending[id]; });
+    });
+  }
+
+  function modelStatusBadgeHtml(modelId) {
+    var s = modelStatus[modelId];
+    if (!s) return '';
+    if (s.status === 'up') {
+      var cls = s.latency_ms < 1000 ? 'health-fast' : s.latency_ms < 3000 ? 'health-ok' : 'health-slow';
+      return '<span class="model-status-badge ' + cls + '" title="Responded in ' + s.latency_ms + 'ms">' + s.latency_ms + 'ms</span>';
+    }
+    if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="Model timed out (5s)">Slow</span>';
+    if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="Model unavailable (503)">Down</span>';
+    if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="Model not found (404)">N/A</span>';
+    if (s.status === 'rate_limited') return '<span class="model-status-badge health-warn" title="Rate limited">Limited</span>';
+    return '<span class="model-status-badge health-down" title="Error">Err</span>';
+  }
+
+  function updateModelStatusBadges() {
+    // Update cloud model tags on dashboard
+    document.querySelectorAll('.cloud-model-tag[data-select-cloud]').forEach(function(tag) {
+      var modelId = tag.getAttribute('data-select-cloud');
+      var existing = tag.querySelector('.model-status-badge');
+      var html = modelStatusBadgeHtml(modelId);
+      if (html) {
+        if (existing) { existing.outerHTML = html; } else { tag.insertAdjacentHTML('beforeend', ' ' + html); }
+      }
+    });
+    // Update chat dropdown items
+    document.querySelectorAll('.model-dropdown-item[data-value]').forEach(function(item) {
+      var modelId = item.getAttribute('data-value');
+      var existing = item.querySelector('.model-status-badge');
+      var html = modelStatusBadgeHtml(modelId);
+      if (html) {
+        if (existing) { existing.outerHTML = html; } else { item.insertAdjacentHTML('beforeend', ' ' + html); }
       }
     });
   }

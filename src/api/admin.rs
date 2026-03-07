@@ -3785,6 +3785,101 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
     Json(serde_json::json!({ "providers": results }))
 }
 
+/// POST /api/admin/provider-model-status — Probe availability of specific cloud models.
+///
+/// Accepts `{ "models": ["model-id-1", "model-id-2", ...] }`.
+/// Sends a tiny max_tokens=1 request to each model with a 5s timeout.
+/// Returns per-model status (up/timeout/error) and latency.
+/// Capped at 20 models per request to prevent abuse.
+#[derive(Deserialize)]
+pub struct ModelStatusRequest {
+    models: Vec<String>,
+}
+
+pub async fn provider_model_status(
+    State(state): State<AppState>,
+    Json(body): Json<ModelStatusRequest>,
+) -> Json<serde_json::Value> {
+    let config = state.shared_state.providers_config.read().await;
+    let models: Vec<String> = body.models.into_iter().take(20).collect();
+
+    // Resolve provider for each model
+    let mut probes: Vec<(String, String, String)> = Vec::new(); // (model_id, base_url, api_key)
+    for model_id in &models {
+        if let Some(p) = crate::api::providers::resolve_provider(model_id, &config) {
+            if !p.is_anthropic {
+                probes.push((model_id.clone(), p.base_url.clone(), p.api_key.clone()));
+            }
+        } else if let Some(entry) = state.shared_state.provider_model_map.get(model_id.as_str()) {
+            let pname = entry.value().clone();
+            if let Some(p) = crate::api::providers::resolve_by_name(&pname, &config) {
+                if !p.is_anthropic {
+                    probes.push((model_id.clone(), p.base_url.clone(), p.api_key.clone()));
+                }
+            }
+        }
+    }
+    drop(config);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let futures = probes.into_iter().map(|(model_id, base_url, api_key)| {
+        let client = client.clone();
+        async move {
+            let url = format!("{}/chat/completions", base_url);
+            let body = serde_json::json!({
+                "model": model_id,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": false
+            });
+            let start = std::time::Instant::now();
+            let result = client.post(&url)
+                .header("authorization", format!("Bearer {}", api_key))
+                .header("content-type", "application/json")
+                .json(&body).send().await;
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    let status = if resp.status().is_success() {
+                        "up"
+                    } else if code == 429 {
+                        "rate_limited"
+                    } else if code == 404 {
+                        "not_found"
+                    } else if code == 503 || code == 502 {
+                        "unavailable"
+                    } else {
+                        "error"
+                    };
+                    serde_json::json!({
+                        "model": model_id,
+                        "status": status,
+                        "latency_ms": latency_ms,
+                    })
+                }
+                Err(e) => {
+                    let status = if e.is_timeout() { "timeout" } else { "error" };
+                    serde_json::json!({
+                        "model": model_id,
+                        "status": status,
+                        "latency_ms": latency_ms,
+                    })
+                }
+            }
+        }
+    });
+
+    let results = futures::future::join_all(futures).await;
+    Json(serde_json::json!({ "models": results }))
+}
+
 // ========================================================================
 // Update / Version Endpoints
 // ========================================================================

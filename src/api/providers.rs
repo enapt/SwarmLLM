@@ -102,7 +102,7 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     None
 }
 
-fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
+pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
     match name {
         "anthropic" => config.anthropic.as_ref().map(|e| ProviderInfo {
             name: "anthropic".into(),

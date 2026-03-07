@@ -132,6 +132,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/provider-health",
             get(admin::provider_health),
         )
+        .route(
+            "/api/admin/provider-model-status",
+            post(admin::provider_model_status),
+        )
         // Version & Updates
         .route("/api/admin/version", get(admin::version_info))
         .route("/api/admin/update/check", post(admin::check_update))
