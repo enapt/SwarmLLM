@@ -136,6 +136,15 @@ var SwarmLLM = (function() {
     },
 
     newSession: function() {
+      // If we're already on an empty session, just reuse it (update model)
+      if (currentSessionId && sessions[currentSessionId] && sessions[currentSessionId].messages.length === 0) {
+        sessions[currentSessionId].model = currentModel || '';
+        chat.saveSessions();
+        chat.renderSessionList();
+        chat.renderMessages();
+        chat.updateChatHeader();
+        return;
+      }
       var id = 'session_' + Date.now();
       sessions[id] = { id: id, title: 'New Chat', messages: [], created: Date.now(), model: currentModel || '' };
       currentSessionId = id;
@@ -893,7 +902,7 @@ var SwarmLLM = (function() {
           openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
           mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
           cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
-          together: 'Together AI', deepinfra: 'DeepInfra'
+          together: 'Together AI', deepinfra: 'DeepInfra', moonshot: 'Moonshot (Kimi)'
         };
         var divider = document.createElement('div');
         divider.className = 'cloud-models-divider';
@@ -1723,7 +1732,7 @@ var SwarmLLM = (function() {
 
     saveProviders: async function() {
       var keys = {};
-      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra'].forEach(function(name) {
+      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'].forEach(function(name) {
         var input = document.getElementById('provider-key-' + name);
         if (input && input.value) {
           keys[name + '_key'] = input.value;
@@ -1737,7 +1746,7 @@ var SwarmLLM = (function() {
           body: JSON.stringify(keys),
         });
         // Clear inputs after save and refresh status
-        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra'].forEach(function(name) {
+        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'].forEach(function(name) {
           var input = document.getElementById('provider-key-' + name);
           if (input) input.value = '';
         });
@@ -1779,7 +1788,7 @@ var SwarmLLM = (function() {
             body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
           });
         } else {
-          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant', nvidia_nim: 'meta/llama-3.1-8b-instruct', cerebras: 'cerebras:llama-3.1-8b', sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct', fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct', together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo', deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct' };
+          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant', nvidia_nim: 'meta/llama-3.1-8b-instruct', cerebras: 'cerebras:llama-3.1-8b', sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct', fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct', together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo', deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct', moonshot: 'moonshot-v1-8k' };
           testResp = await authFetch('/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2158,14 +2167,15 @@ var SwarmLLM = (function() {
     sambanova: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 12c2-4 4-6 7-6s5 2 7 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/><path d="M2 9c2-3 4-5 7-5s5 2 7 5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none" opacity="0.5"/></svg>',
     fireworks: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2v4M9 12v4M2 9h4M12 9h4M4 4l3 3M11 11l3 3M14 4l-3 3M7 11l-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/></svg>',
     together: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="5" cy="5" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="13" cy="5" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="9" cy="13" r="2" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M6.5 6.5L8 11.5M11.5 6.5L10 11.5M7 5h4" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>',
-    deepinfra: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="3" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="4" y="11" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="6.5" cy="5" r="0.8" fill="currentColor"/><circle cx="6.5" cy="13" r="0.8" fill="currentColor"/><path d="M9 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+    deepinfra: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="3" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="4" y="11" width="10" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/><circle cx="6.5" cy="5" r="0.8" fill="currentColor"/><circle cx="6.5" cy="13" r="0.8" fill="currentColor"/><path d="M9 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+    moonshot: '<svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="9" cy="9" r="6" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M11 6a4 4 0 0 0-4 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="7" cy="8" r="0.8" fill="currentColor"/></svg>'
   };
 
   var providerDisplayNames = {
     anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek',
     mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
     cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks',
-    together: 'Together', deepinfra: 'DeepInfra'
+    together: 'Together', deepinfra: 'DeepInfra', moonshot: 'Kimi'
   };
 
   function updateProviderBannerBadges() {
@@ -2383,7 +2393,7 @@ var SwarmLLM = (function() {
         openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
         mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
         cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
-        together: 'Together AI', deepinfra: 'DeepInfra'
+        together: 'Together AI', deepinfra: 'DeepInfra', moonshot: 'Moonshot (Kimi)'
       };
       var groups = [];
       _modelDropdownData = [];
@@ -3898,6 +3908,19 @@ var SwarmLLM = (function() {
         settings.testProvider(btn.getAttribute('data-test-provider'));
       });
     });
+
+    // Provider filter
+    var providerFilter = document.getElementById('provider-filter');
+    if (providerFilter) {
+      providerFilter.addEventListener('input', function() {
+        var q = this.value.toLowerCase();
+        var cards = document.querySelectorAll('#provider-cards .provider-card');
+        cards.forEach(function(card) {
+          var name = (card.querySelector('strong') || {}).textContent || '';
+          card.style.display = name.toLowerCase().indexOf(q) >= 0 ? '' : 'none';
+        });
+      });
+    }
 
     // Model browser
     on('btn-close-model-browser', 'click', function() { ui.closeModelBrowser(); });

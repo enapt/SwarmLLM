@@ -19,6 +19,7 @@ pub fn provider_base_url(name: &str) -> Option<&'static str> {
         "fireworks" => Some("https://api.fireworks.ai/inference/v1"),
         "together" => Some("https://api.together.xyz/v1"),
         "deepinfra" => Some("https://api.deepinfra.com/v1/openai"),
+        "moonshot" => Some("https://api.moonshot.cn/v1"),
         _ => None,
     }
 }
@@ -90,6 +91,9 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     }
     if lower.starts_with("gemma") && config.groq.is_some() {
         return resolve_by_name("groq", config);
+    }
+    if lower.starts_with("moonshot-") || lower.starts_with("kimi") {
+        return resolve_by_name("moonshot", config);
     }
     // Fireworks uses accounts/ prefix
     if lower.starts_with("accounts/fireworks") {
@@ -166,6 +170,12 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
         "deepinfra" => config.deepinfra.as_ref().map(|e| ProviderInfo {
             name: "deepinfra".into(),
             base_url: provider_base_url("deepinfra").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "moonshot" | "kimi" => config.moonshot.as_ref().map(|e| ProviderInfo {
+            name: "moonshot".into(),
+            base_url: provider_base_url("moonshot").unwrap().into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
@@ -440,6 +450,10 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
             "name": "deepinfra",
             "configured": config.deepinfra.is_some(),
         }),
+        serde_json::json!({
+            "name": "moonshot",
+            "configured": config.moonshot.is_some(),
+        }),
     ];
 
     for custom in &config.custom {
@@ -646,6 +660,10 @@ mod tests {
         assert_eq!(
             provider_base_url("deepinfra"),
             Some("https://api.deepinfra.com/v1/openai")
+        );
+        assert_eq!(
+            provider_base_url("moonshot"),
+            Some("https://api.moonshot.cn/v1")
         );
         assert_eq!(provider_base_url("unknown"), None);
     }

@@ -161,6 +161,9 @@
         <div class="mt-2" style="font-size:0.8rem">
           <span class="text-muted">Optional: add cloud API keys as a fallback when no swarm peers have the model you need. The swarm is the primary way to run models for free.</span>
         </div>
+        <div class="mt-2" style="margin-bottom:8px">
+          <input type="text" id="provider-filter" placeholder="Filter providers..." style="width:100%;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+        </div>
         <div id="provider-cards" class="mt-2">
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -249,6 +252,14 @@
             </div>
             <input type="password" id="provider-key-deepinfra" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="deepinfra">Test</button>
+          </div>
+          <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
+            <div class="flex-between mb-1">
+              <strong style="font-size:0.85rem">Moonshot (Kimi)</strong>
+              <span class="badge" id="provider-status-moonshot" style="font-size:0.7rem">Not set</span>
+            </div>
+            <input type="password" id="provider-key-moonshot" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
+            <button class="btn btn-sm" data-test-provider="moonshot">Test</button>
           </div>
         </div>
       </details>

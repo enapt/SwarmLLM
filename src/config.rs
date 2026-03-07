@@ -632,6 +632,8 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub deepinfra: Option<ProviderEntry>,
     #[serde(default)]
+    pub moonshot: Option<ProviderEntry>,
+    #[serde(default)]
     pub custom: Vec<CustomProvider>,
 }
 

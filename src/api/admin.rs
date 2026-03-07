@@ -3457,6 +3457,10 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
             "name": "deepinfra",
             "configured": config.deepinfra.is_some(),
         }),
+        serde_json::json!({
+            "name": "moonshot",
+            "configured": config.moonshot.is_some(),
+        }),
     ];
 
     Json(serde_json::json!({ "providers": providers }))
@@ -3486,6 +3490,8 @@ pub struct ProvidersUpdate {
     pub together_key: Option<String>,
     #[serde(default)]
     pub deepinfra_key: Option<String>,
+    #[serde(default)]
+    pub moonshot_key: Option<String>,
 }
 
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
@@ -3506,6 +3512,7 @@ pub async fn update_providers(
         ("fireworks", &body.fireworks_key),
         ("together", &body.together_key),
         ("deepinfra", &body.deepinfra_key),
+        ("moonshot", &body.moonshot_key),
     ];
     for (name, key) in all_keys {
         if let Some(k) = key {
@@ -3543,6 +3550,7 @@ pub async fn update_providers(
     update_entry(&mut config.fireworks, body.fireworks_key);
     update_entry(&mut config.together, body.together_key);
     update_entry(&mut config.deepinfra, body.deepinfra_key);
+    update_entry(&mut config.moonshot, body.moonshot_key);
 
     // Encrypt keys before persisting to database
     let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
@@ -3581,6 +3589,7 @@ pub async fn update_providers(
         "fireworks": config.fireworks.is_some(),
         "together": config.together.is_some(),
         "deepinfra": config.deepinfra.is_some(),
+        "moonshot": config.moonshot.is_some(),
     })))
 }
 
@@ -3609,6 +3618,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
         ("fireworks", config.fireworks.as_ref(), false),
         ("together", config.together.as_ref(), true),
         ("deepinfra", config.deepinfra.as_ref(), true),
+        ("moonshot", config.moonshot.as_ref(), true),
     ];
 
     for &(name, ref entry, needs_prefix) in candidates {
@@ -3781,6 +3791,11 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             "deepinfra",
             config.deepinfra.as_ref(),
             "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        ),
+        (
+            "moonshot",
+            config.moonshot.as_ref(),
+            "moonshot-v1-8k",
         ),
     ];
 

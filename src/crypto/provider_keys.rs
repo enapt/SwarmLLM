@@ -107,6 +107,7 @@ pub fn encrypt_config(
     encrypt_entry(&mut enc.fireworks, signing_key_bytes)?;
     encrypt_entry(&mut enc.together, signing_key_bytes)?;
     encrypt_entry(&mut enc.deepinfra, signing_key_bytes)?;
+    encrypt_entry(&mut enc.moonshot, signing_key_bytes)?;
     for custom in &mut enc.custom {
         custom.api_key = encrypt_key(&custom.api_key, signing_key_bytes)?;
     }
@@ -130,6 +131,7 @@ pub fn decrypt_config(
     decrypt_entry(&mut dec.fireworks, signing_key_bytes)?;
     decrypt_entry(&mut dec.together, signing_key_bytes)?;
     decrypt_entry(&mut dec.deepinfra, signing_key_bytes)?;
+    decrypt_entry(&mut dec.moonshot, signing_key_bytes)?;
     for custom in &mut dec.custom {
         custom.api_key = decrypt_key(&custom.api_key, signing_key_bytes)?;
     }
