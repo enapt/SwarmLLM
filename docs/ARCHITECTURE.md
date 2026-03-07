@@ -128,9 +128,11 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │          POST /api/admin/join-network                       │
 │    UI auto-hides once 20+ peers known                       │
 │                                                             │
-│  Layer 4: Peer Exchange (PEX)                                │
+│  Layer 4: Peer Exchange (PEX) + RTT Measurement              │
 │    On each ConnectionEstablished, exchange up to 20 known   │
 │    peer addresses. Uses request_response channel.           │
+│    RTT measured on PEX request/response round-trip.         │
+│    RTT < 5ms → auto-detect as LAN peer (enables TP).       │
 │                                                             │
 │  Layer 5: Kademlia DHT + Bootstrap                           │
 │    Existing: --bootstrap flag, Kademlia re-bootstrap 60s    │
@@ -231,15 +233,15 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 The SplitModel loader detects the model architecture from GGUF metadata
 (`general.architecture`) and applies architecture-specific behavior:
 
-| Feature | Llama | Llama 4 | Qwen2 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
-|---------|-------|---------|-------|--------------|-------|---------|------------|----------------|-------|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (iRoPE) | Contiguous (`rope`) | Contiguous | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) | Contiguous (partial) |
-| QKV biases | None | None | Yes | None | Yes | None | Yes | None (MLA projections) | Yes |
-| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
-| FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
-| Context length | 4096 (default) | 131072 | 32768 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
-| Special | — | NoPE every 4th layer | — | Logit softcap | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
-| E2E verified | ✅ | — | ✅ | ✅ (Gemma2) | ✅ | — | — | — | — |
+| Feature | Llama | Llama 4 | Qwen2 | Qwen 3.5 | Gemma/Gemma2 | Phi-3 | Mistral | Starcoder2 | DeepSeek-V2/V3 | GLM-4 |
+|---------|-------|---------|-------|-----------|--------------|-------|---------|------------|----------------|-------|
+| RoPE variant | Interleaved (`rope_i`) | Contiguous (iRoPE) | Contiguous (`rope`) | Partial (25% head_dim) | Contiguous | Su/YaRN | Interleaved | Contiguous | Contiguous (MLA split) | Contiguous (partial) |
+| QKV biases | None | None | Yes | Yes | None | Yes | None | Yes | None (MLA projections) | Yes |
+| Attention | Standard MHA/GQA | Standard GQA | Standard MHA | Standard + output gate | Standard MHA | Standard MHA | Standard GQA | Standard MHA | MLA (low-rank Q/KV) | Extreme GQA (16:1) |
+| FFN | Dense | Dense + MoE (mixed) | Dense | Dense | Dense | Dense | Dense | Dense | MoE (top-k) + shared | Dense |
+| Context length | 4096 (default) | 131072 | 32768 | 131072 | 8192 | 4096 | 32768 | 16384 | 163840 | 131072 |
+| Special | — | NoPE every 4th layer | — | Hybrid SSM+attention | Logit softcap | Fused QKV/FFN | — | — | Per-layer dense/MLA | Partial RoPE (50%) |
+| E2E verified | ✅ | — | ✅ | — | ✅ (Gemma2) | ✅ | — | — | — | — |
 
 > **Phi-3 fused tensors**: Phi-3 GGUF models store `attn_qkv.weight` (Q+K+V concatenated) and `ffn_up.weight` (gate+up concatenated, no `ffn_gate.weight`). The loader dequantizes on CPU, splits by head dimensions, and re-quantizes to Q4_0 on the target device.
 
@@ -268,6 +270,50 @@ DeepSeek models use two specialized mechanisms that differ from standard transfo
 Llama 4 introduces two novel mechanisms within the standard dense `LayerVariant`:
 - **iRoPE (interleaved RoPE)** — every 4th layer uses NoPE (no positional encoding), the rest use standard RoPE. This is handled by a per-layer flag in `LayerWeights`
 - **Mixed Dense+MoE FFN** — `FfnVariant` enum (`Dense(Mlp)` | `MoE(MoeFfn)`) allows individual layers to use either dense or MoE FFN within the same model. Top-k expert routing reuses the same `MoeFfn` struct as DeepSeek
+
+### Qwen 3.5 Hybrid SSM+Attention Support
+
+Qwen 3.5 introduces a hybrid architecture combining SSM (Gated Delta Networks) with standard attention:
+
+- **Layer pattern**: 3 SSM (DeltaNet) layers + 1 full attention layer per 4-layer group
+- **GGUF arch strings**: `"qwen35"` (dense), `"qwen35moe"` (MoE variant)
+- **SSM forward**: conv1d → delta_net_scan (recurrent) → gated_norm → output projection
+- **Attention layers**: Standard attention with sigmoid output gate + partial RoPE (25% of head_dim)
+- **State management**: `SsmState` (conv_state + recurrent_state) alongside KV-cache for attention layers
+- **Per-layer detection**: SSM vs attention determined by presence of `ssm_alpha.weight` tensor in GGUF
+
+### Tensor Parallelism (AllReduce)
+
+When multiple LAN nodes hold the same shards, tensor parallelism splits computation within each layer across nodes:
+
+```
+Node A (rank 0, coordinator)          Node B (rank 1)
+┌─────────────────────┐              ┌─────────────────────┐
+│ Load full weights   │              │ Load full weights   │
+│ Slice heads 0..N/2  │              │ Slice heads N/2..N  │
+│ forward_attn_tp()   │              │ forward_attn_tp()   │
+│ forward_tp() FFN    │              │ forward_tp() FFN    │
+│ partial output      │              │ partial output      │
+└────────┬────────────┘              └────────┬────────────┘
+         │                                     │
+         └──────────┐    ┌────────────────────┘
+                    ▼    ▼
+              AllReduce (star topology)
+              Coordinator sums partials
+              Broadcasts reduced tensor
+                    │
+              ┌─────┴─────┐
+              ▼           ▼
+         Node A        Node B
+         (continue to next layer)
+```
+
+- **Topology**: Star AllReduce — rank 0 collects partials, element-wise sums, broadcasts result
+- **LAN detection**: Auto-detected via PEX RTT measurement (< 5ms → `is_lan_peer = true`)
+- **TP group formation**: Requires `is_lan_peer` OR measured `latency_ms ≤ 10`
+- **Weight splitting**: Dynamic slicing at inference time (`forward_attn_tp` slices attention heads, `forward_tp` slices FFN intermediate dimension)
+- **Wire format**: Partials zstd-compressed, sent via `SendAllReduceRequest` / `SendAllReduceResponse` NetworkCommand variants
+- **Files**: `src/inference/allreduce.rs` (coordinator + registry), `src/inference/scheduler.rs` (TP group detection)
 
 ### Vision Language Models (VLM)
 
@@ -683,7 +729,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
   `/api/admin/hf/*` (downloads), `/api/admin/api-key`
 - **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
   read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
-- Request body size limit: 2MB (configurable via `DefaultBodyLimit`)
+- Request body size limit: 32MB (configurable via `DefaultBodyLimit`, raised from 2MB for VLM image payloads)
 - Content-Security-Policy header enforced on all responses
 
 ## Shard-Only Mode
