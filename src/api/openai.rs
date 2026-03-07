@@ -72,6 +72,21 @@ pub struct ChatCompletionRequest {
     /// Optional LoRA adapter ID for per-request fine-tuned inference (SwarmLLM extension).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_adapter: Option<String>,
+    /// Optional cache control hints for prefix caching (Anthropic-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// Cache control hints for prefix caching (Anthropic-compatible).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct CacheControl {
+    /// Cache type: "ephemeral" (session-only, default) or "persistent" (longer TTL).
+    #[serde(default)]
+    pub r#type: Option<String>,
+    /// Number of messages from the start to include in the cache prefix.
+    /// Default: all system messages.
+    #[serde(default)]
+    pub prefix_messages: Option<usize>,
 }
 
 /// OpenAI-compatible tool definition.
@@ -176,6 +191,10 @@ pub struct ApiChatMessage {
     /// Tool name (present in tool role messages).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Per-message cache control hint (Anthropic-compatible).
+    /// Messages with `{"type": "ephemeral"}` mark the cache breakpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// OpenAI-compatible content field: either a plain string or an array of content parts.
@@ -470,6 +489,12 @@ pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Number of prompt tokens used to create a new cache entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// Number of prompt tokens read from an existing cache entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1279,6 +1304,8 @@ async fn router_inference(
             prompt_tokens: output.prompt_tokens,
             completion_tokens: output.completion_tokens,
             total_tokens: output.prompt_tokens + output.completion_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         },
         session_id: output.session_id,
     };
@@ -1582,6 +1609,8 @@ async fn non_stream_response(
             prompt_tokens: result.prompt_tokens,
             completion_tokens: result.completion_tokens,
             total_tokens: result.prompt_tokens + result.completion_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         },
         session_id: None, // Direct executor path doesn't use multi-turn sessions
     };
@@ -1701,6 +1730,8 @@ async fn split_non_stream_response(
             prompt_tokens: prompt_tokens as u32,
             completion_tokens: generated.len() as u32,
             total_tokens: (prompt_tokens + generated.len()) as u32,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         },
         session_id: None,
     };
@@ -2550,6 +2581,82 @@ mod tests {
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert!(req.response_format.is_none());
+    }
+
+    #[test]
+    fn cache_control_request_deserializes() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "cache_control": {"type": "ephemeral", "prefix_messages": 2}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let cc = req.cache_control.unwrap();
+        assert_eq!(cc.r#type.as_deref(), Some("ephemeral"));
+        assert_eq!(cc.prefix_messages, Some(2));
+    }
+
+    #[test]
+    fn cache_control_persistent_type() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}],
+            "cache_control": {"type": "persistent"}
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let cc = req.cache_control.unwrap();
+        assert_eq!(cc.r#type.as_deref(), Some("persistent"));
+        assert!(cc.prefix_messages.is_none());
+    }
+
+    #[test]
+    fn cache_control_absent_is_none() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "hi"}]
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.cache_control.is_none());
+    }
+
+    #[test]
+    fn per_message_cache_control_deserializes() {
+        let json = r#"{
+            "role": "system",
+            "content": "You are helpful",
+            "cache_control": {"type": "ephemeral"}
+        }"#;
+        let msg: ApiChatMessage = serde_json::from_str(json).unwrap();
+        let cc = msg.cache_control.unwrap();
+        assert_eq!(cc.r#type.as_deref(), Some("ephemeral"));
+    }
+
+    #[test]
+    fn usage_cache_stats_serialize_when_present() {
+        let usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: Some(80),
+            cache_read_input_tokens: Some(0),
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(json.contains("\"cache_creation_input_tokens\":80"));
+        assert!(json.contains("\"cache_read_input_tokens\":0"));
+    }
+
+    #[test]
+    fn usage_cache_stats_omitted_when_none() {
+        let usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(!json.contains("cache_creation_input_tokens"));
+        assert!(!json.contains("cache_read_input_tokens"));
     }
 
     #[test]
