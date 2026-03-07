@@ -716,7 +716,10 @@ pub fn build_prompt_with_model(
         }
         // Template failed — try architecture-specific fallbacks before ChatML
         if tmpl.contains("start_of_turn") {
-            tracing::warn!(fallback = "gemma", "DIAG: chat template failed, using gemma fallback");
+            tracing::warn!(
+                fallback = "gemma",
+                "DIAG: chat template failed, using gemma fallback"
+            );
             return gemma_fallback(messages);
         }
         tracing::warn!(

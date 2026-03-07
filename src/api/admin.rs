@@ -3801,11 +3801,7 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
             config.deepinfra.as_ref(),
             "meta-llama/Meta-Llama-3.1-8B-Instruct",
         ),
-        (
-            "moonshot",
-            config.moonshot.as_ref(),
-            "moonshot-v1-8k",
-        ),
+        ("moonshot", config.moonshot.as_ref(), "moonshot-v1-8k"),
     ];
 
     for &(name, ref entry, test_model) in candidates {
