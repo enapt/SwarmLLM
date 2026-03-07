@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; font-src 'self';">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <title>SwarmLLM</title>
+  <title>SwarmLLM — The People Are The Power</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
@@ -16,8 +16,8 @@
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="modal">
       <div class="modal-header">
-        <h2 id="setup-title">Welcome to SwarmLLM</h2>
-        <span class="text-muted">First-Run Setup</span>
+        <h2 id="setup-title">Join the Swarm</h2>
+        <span class="text-muted">Combine your hardware with others to run massive AI models — for free</span>
       </div>
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
         <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Hardware Detection">1</button>
@@ -46,7 +46,7 @@
       </div>
       <div class="wizard-body hidden" id="step-2">
         <h3>Resource Contribution</h3>
-        <p class="text-muted mb-2">How much of your resources should SwarmLLM use?</p>
+        <p class="text-muted mb-2">Share your compute to help run models too large for any single machine. The more you give, the more the swarm can do.</p>
         <div class="form-group mt-2">
           <div class="flex-between mb-1">
             <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
@@ -61,7 +61,7 @@
             <input type="checkbox" id="setup-auto-manage" style="width:18px;height:18px">
             <span>Auto-manage shards</span>
           </label>
-          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Let SwarmLLM automatically download and serve popular model shards to help the network. Uses your disk within the configured limits.</span>
+          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically host popular model shards so the swarm can run bigger models. Your contribution helps everyone run AI for free.</span>
         </div>
       </div>
       <div class="wizard-body hidden" id="step-3">
@@ -135,7 +135,7 @@
           <option value="off">Off</option>
           <option value="on">On - Auto-download popular shards</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem">Automatically downloads rarest shards for popular models to help the network</span>
+        <span class="text-muted" style="font-size:0.75rem">Automatically host the rarest shards so the swarm can complete more models</span>
       </div>
       <div id="settings-storage-info" class="hidden" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:12px;border:1px solid var(--border)">
         <div class="flex-between mb-1" style="font-size:0.85rem">
@@ -157,9 +157,9 @@
         <input type="number" id="settings-auto-manage-storage" value="0" min="0">
       </div>
       <details class="settings-providers" id="settings-providers-section">
-        <summary>Cloud Providers</summary>
+        <summary>Cloud Providers (Optional Fallback)</summary>
         <div class="mt-2" style="font-size:0.8rem">
-          <span class="text-muted">Configure API keys to proxy requests to cloud providers when no local model is available.</span>
+          <span class="text-muted">Optional: add cloud API keys as a fallback when no swarm peers have the model you need. The swarm is the primary way to run models for free.</span>
         </div>
         <div id="provider-cards" class="mt-2">
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
@@ -379,9 +379,9 @@
           <div class="chat-session-header" id="chat-session-header"></div>
           <div class="chat-messages" id="chat-messages">
             <div class="chat-empty" id="chat-empty">
-              <div class="chat-empty-icon">&#11088;</div>
-              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>
-              <div>Send a message to start a conversation</div>
+              <div class="chat-empty-icon">&#11203;</div>
+              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Swarm-Powered Chat</div>
+              <div>Your message is processed across the swarm — no API tokens, no cloud fees</div>
             </div>
           </div>
           <div class="chat-input-area">
@@ -472,13 +472,13 @@
             </div>
             <div class="share-popover" id="share-popover">
               <label style="font-weight:600;margin-bottom:6px">Your Network Code</label>
-              <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px">Send this to a friend so they can connect to your node</div>
+              <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px">Send this to a friend — together you can run models neither of you could alone</div>
               <div style="display:flex;gap:0.5rem;margin-bottom:10px">
                 <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your network code">
                 <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
               </div>
               <label style="font-weight:600;margin-bottom:4px">Friend's Network Code</label>
-              <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px">Paste a code from another SwarmLLM user to connect</div>
+              <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px">Paste a code from another user to join forces</div>
               <div style="display:flex;gap:0.5rem">
                 <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste code here..." style="font-size:0.7rem;flex:1" aria-label="Friend's network code">
                 <button class="btn btn-sm btn-primary" id="btn-join-network">Join</button>
@@ -559,7 +559,7 @@
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty">
                 <div class="empty-icon">&#128229;</div>
-                <p>No models available. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download models, or <a href="#" data-goto-settings="1" style="color:var(--accent)">add a cloud API key</a> for instant access.</p>
+                <p>No models yet. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download model shards and start sharing compute with the swarm.</p>
               </div>
             </div>
           </div>
@@ -585,7 +585,7 @@
               <div class="form-group">
                 <label>Connected Peers</label>
                 <div id="peers-list">
-                  <div class="text-muted" style="font-size:0.85rem">No peers connected yet. Share your Network Code to connect with others, or use cloud providers for inference.</div>
+                  <div class="text-muted" style="font-size:0.85rem">No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.</div>
                 </div>
               </div>
             </div>

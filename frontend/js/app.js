@@ -897,7 +897,7 @@ var SwarmLLM = (function() {
         };
         var divider = document.createElement('div');
         divider.className = 'cloud-models-divider';
-        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Providers</span><span class="cloud-divider-line"></span>';
+        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Fallback</span><span class="cloud-divider-line"></span>';
         list.appendChild(divider);
 
         // Group by provider
@@ -3923,10 +3923,11 @@ var SwarmLLM = (function() {
 
     // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
-      var el = e.target.closest('[data-goto-chat],[data-goto-browse],[data-goto-settings]') || e.target;
+      var el = e.target.closest('[data-goto-chat],[data-goto-browse],[data-goto-settings],[data-goto-hf]') || e.target;
       if (el.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
       if (el.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
       if (el.getAttribute('data-goto-settings')) { ui.openSettings(true); }
+      if (el.getAttribute('data-goto-hf')) { ui.openModelBrowser(); }
     });
 
     // Network discovery — share popover toggle
@@ -4196,16 +4197,15 @@ var SwarmLLM = (function() {
       } else {
         // Check if a model is currently downloading (WI-9)
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 add a cloud API key or download a model to start';
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download model shards to join the swarm';
       }
     }
     if (emptyState && !hasModels) {
-      emptyState.innerHTML = '<div class="chat-empty-icon">&#128229;</div>' +
+      emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
         '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">No Models Available</div>' +
-        '<div style="color:var(--text-muted);margin:8px 0">Download a model or add a cloud provider API key to start chatting</div>' +
+        '<div style="color:var(--text-muted);margin:8px 0">Download model shards to start chatting — connect with peers to run models too large for one machine</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
-          '<button class="btn btn-primary" data-goto-browse="1">Browse Models</button>' +
-          '<button class="btn" data-goto-settings="1">Add API Key</button>' +
+          '<button class="btn btn-primary" data-goto-browse="1">Download Shards</button>' +
         '</div>';
     }
   }
@@ -4292,8 +4292,8 @@ var SwarmLLM = (function() {
     var modeHelp = '';
     if (peers > 0 && hasLocalModel && cloudProviders.length > 0) {
       dot.className = 'mode-dot swarm';
-      label.textContent = 'Full Hybrid';
-      modeHelp = 'Local + peer + cloud inference';
+      label.textContent = 'Swarm + Cloud';
+      modeHelp = 'Full power — swarm inference with cloud fallback';
       if (indicator) indicator.classList.add('mode-hybrid');
     } else if (peers > 0 && hasLocalModel) {
       dot.className = 'mode-dot swarm';
@@ -4307,32 +4307,32 @@ var SwarmLLM = (function() {
       if (indicator) indicator.classList.add('mode-swarm');
     } else if (hasLocalModel && cloudProviders.length > 0) {
       dot.className = 'mode-dot swarm';
-      label.textContent = 'Hybrid Mode';
-      modeHelp = 'Local inference + cloud API fallback';
+      label.textContent = 'Local + Cloud';
+      modeHelp = 'Local inference with cloud fallback — connect peers to go full swarm';
       if (indicator) indicator.classList.add('mode-hybrid');
     } else if (hasLocalModel) {
       dot.className = 'mode-dot offline';
-      label.textContent = 'Standalone';
-      modeHelp = 'Local inference only';
+      label.textContent = 'Solo Node';
+      modeHelp = 'Local inference only — connect peers to unlock bigger models';
       if (indicator) indicator.classList.add('mode-offline');
-      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Local inference only</span>');
+      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Local only \u2014 share your Network Code to join the swarm</span>');
     } else if (cloudProviders.length > 0) {
       dot.className = 'mode-dot cloud';
-      label.textContent = 'Cloud Gateway';
-      modeHelp = 'Routing requests to cloud providers';
+      label.textContent = 'Cloud Only';
+      modeHelp = 'Using cloud providers — download shards and connect peers to unlock the swarm';
       if (indicator) indicator.classList.add('mode-cloud');
     } else {
       dot.className = 'mode-dot offline';
-      label.textContent = 'Setup Needed';
-      modeHelp = 'Add a cloud API key or download a model to get started';
+      label.textContent = 'Ready to Join';
+      modeHelp = 'Download model shards and connect with peers to start';
       if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-settings="1">No models or providers configured \u2014 <u>open Settings</u> to add an API key</span>'];
+      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download shards</u> to join the swarm</span>'];
     }
     if (modeHelp) label.title = modeHelp;
 
     // Add quick-action button
-    if (cloudProviders.length > 0 && !hasLocalModel) {
-      chips.push('<button class="btn btn-sm btn-primary" data-goto-chat="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Start Chatting \u2192</button>');
+    if (cloudProviders.length > 0 && !hasLocalModel && peers === 0) {
+      chips.push('<button class="btn btn-sm" data-goto-hf="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Download Shards</button>');
     }
 
     detail.innerHTML = chips.join(' ');
