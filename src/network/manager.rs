@@ -1391,6 +1391,7 @@ impl NetworkManager {
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
             NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
             NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
+            NetworkCommand::DialAddress(_) => "DialAddress",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -1440,6 +1441,42 @@ impl NetworkManager {
                     SwarmMessage::TpAllReduceResponse(response),
                     "AllReduceResponse",
                 );
+            }
+            NetworkCommand::DialAddress(addr_str) => {
+                match addr_str.parse::<libp2p::Multiaddr>() {
+                    Ok(addr) => {
+                        tracing::info!(%addr, "Dialing peer from invite code");
+                        // Dial the original address
+                        if let Err(e) = self.swarm.dial(addr.clone()) {
+                            tracing::warn!(%addr, error = %e, "Failed to dial invite peer");
+                        }
+                        // Also try localhost variant for same-machine peers
+                        let addr_s = addr.to_string();
+                        if !addr_s.contains("/ip4/127.0.0.1/") {
+                            let localhost_addr = addr_s
+                                .split("/ip4/")
+                                .enumerate()
+                                .map(|(i, part)| {
+                                    if i == 1 {
+                                        // Replace the IP portion
+                                        let rest = part.splitn(2, '/').nth(1).unwrap_or("");
+                                        format!("127.0.0.1/{rest}")
+                                    } else {
+                                        part.to_string()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("/ip4/");
+                            if let Ok(lo_addr) = localhost_addr.parse::<libp2p::Multiaddr>() {
+                                tracing::debug!(%lo_addr, "Also trying localhost variant");
+                                let _ = self.swarm.dial(lo_addr);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(addr = %addr_str, error = %e, "Invalid multiaddr in DialAddress");
+                    }
+                }
             }
         }
     }

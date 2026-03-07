@@ -4341,27 +4341,28 @@ var SwarmLLM = (function() {
   // --- Network invite code ---
   async function loadNetworkCode() {
     try {
-      var resp = await fetch('/api/admin/network-code');
+      var resp = await authFetch('/api/admin/network-code');
       var data = await resp.json();
       var panel = document.getElementById('invite-code-panel');
       if (!panel) return;
 
       var phase = data.phase || 'seedling';
-      var phaseLabels = { seedling: 'Solo node', growing: 'Connecting', established: 'Connected' };
+      var peerCount = data.peer_count || 0;
       var badge = document.getElementById('network-phase-badge');
       if (badge) {
-        badge.textContent = phaseLabels[phase] || phase;
-        badge.className = 'badge ' + (phase === 'established' ? 'badge-green' : phase === 'growing' ? 'badge-blue' : 'badge-orange');
+        if (phase === 'established') {
+          badge.textContent = peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + ' connected';
+          badge.className = 'badge badge-green';
+        } else {
+          badge.textContent = 'No peers';
+          badge.className = 'badge badge-orange';
+        }
       }
 
-      // Show panel when network is seedling or growing, hide when established
-      if (phase === 'established') {
-        panel.style.display = 'none';
-      } else {
-        panel.style.display = '';
-        var codeInput = document.getElementById('my-network-code');
-        if (codeInput && data.code) codeInput.value = data.code;
-      }
+      // Always show the panel — users need it to share/join even when connected
+      panel.style.display = '';
+      var codeInput = document.getElementById('my-network-code');
+      if (codeInput && data.code) codeInput.value = data.code;
     } catch (e) {
       // Network code is non-critical on startup — no banner needed
     }
@@ -4385,24 +4386,26 @@ var SwarmLLM = (function() {
     var status = document.getElementById('join-status');
     if (!input || !input.value.trim()) return;
 
+    if (status) { status.textContent = 'Connecting...'; status.style.color = 'var(--text-muted)'; }
+
     try {
-      var resp = await fetch('/api/admin/join-network', {
+      var resp = await authFetch('/api/admin/join-network', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: input.value.trim() })
       });
       var data = await resp.json();
       if (resp.ok) {
-        if (status) status.textContent = 'Peer saved! Will connect on next discovery cycle.';
-        if (status) status.style.color = 'var(--green)';
+        if (status) { status.textContent = 'Connected! Peer added.'; status.style.color = 'var(--green)'; }
         input.value = '';
+        showToast('Peer connected successfully', 'success');
+        // Refresh dashboard data after a short delay to show the new peer
+        setTimeout(function() { loadNetworkCode(); }, 2000);
       } else {
-        if (status) status.textContent = data.error || 'Failed to join';
-        if (status) status.style.color = 'var(--red, #ff6464)';
+        if (status) { status.textContent = data.error || 'Failed to join'; status.style.color = 'var(--red, #ff6464)'; }
       }
     } catch (e) {
-      if (status) status.textContent = 'Network error';
-      if (status) status.style.color = 'var(--red, #ff6464)';
+      if (status) { status.textContent = 'Network error'; status.style.color = 'var(--red, #ff6464)'; }
     }
   }
 

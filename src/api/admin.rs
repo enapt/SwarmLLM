@@ -2787,28 +2787,26 @@ pub async fn network_code(State(state): State<AppState>) -> Json<serde_json::Val
         })
     };
 
-    let multiaddr_str = format!("/ip4/{best_ip}/udp/{port}/quic-v1/p2p/{peer_id_str}");
+    // Use TCP address (port+10) — more reliable across environments (WSL2, Docker, NAT).
+    // QUIC on WSL2 often fails with handshake timeouts on the virtual adapter IP.
+    let tcp_port = port + 10;
+    let multiaddr_str = format!("/ip4/{best_ip}/tcp/{tcp_port}/p2p/{peer_id_str}");
     let code = if let Ok(addr) = multiaddr_str.parse::<libp2p::Multiaddr>() {
         crate::network::discovery::encode_network_code(&addr)
     } else {
         multiaddr_str.clone()
     };
 
-    // Determine visibility phase
+    // Determine network phase
     let phase = if peer_count == 0 {
-        "seedling"
-    } else if peer_count < 20 {
-        "growing"
+        "seedling" // no peers — solo node
     } else {
-        "established"
+        "established" // 1+ peers — connected to network
     };
 
     Json(serde_json::json!({
         "code": code,
-        "multiaddr": multiaddr_str,
         "node_id": format!("{}", state.shared_state.identity.node_id()),
-        "peer_id": peer_id_str,
-        "port": port,
         "phase": phase,
         "peer_count": peer_count,
     }))
@@ -2823,35 +2821,37 @@ pub async fn join_network(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let addr_str = crate::network::discovery::decode_network_code(&body.code).map_err(ApiError)?;
 
-    // Send the address to the network manager to dial
-    if state.network_tx.is_some() {
-        tracing::info!(addr = %addr_str, "Joining network via invite code");
+    // Validate the multiaddr
+    let _addr: libp2p::Multiaddr =
+        addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
+            ApiError(crate::error::SwarmError::Network(format!(
+                "Invalid address: {e}"
+            )))
+        })?;
 
-        // Parse the multiaddr to validate
-        let _addr: libp2p::Multiaddr =
-            addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
-                ApiError(crate::error::SwarmError::Network(format!(
-                    "Invalid address: {e}"
-                )))
-            })?;
+    tracing::info!(addr = %addr_str, "Joining network via invite code");
 
-        // Save to peer cache so it persists across restarts
-        let mut cached = crate::network::peer_cache::load_peer_cache(&state.shared_state.db);
-        if !cached.contains(&addr_str) {
-            cached.push(addr_str.clone());
-            crate::network::peer_cache::save_peer_cache(&state.shared_state.db, &cached);
-        }
-
-        Ok(Json(serde_json::json!({
-            "status": "ok",
-            "address": addr_str,
-            "message": "Peer address saved. Restart the node or wait for the next discovery cycle to connect."
-        })))
-    } else {
-        Err(ApiError(crate::error::SwarmError::Network(
-            "Network manager not available".to_string(),
-        )))
+    // Save to peer cache so it persists across restarts
+    let mut cached = crate::network::peer_cache::load_peer_cache(&state.shared_state.db);
+    if !cached.contains(&addr_str) {
+        cached.push(addr_str.clone());
+        crate::network::peer_cache::save_peer_cache(&state.shared_state.db, &cached);
     }
+
+    // Dial immediately if network manager is available
+    if let Some(ref tx) = state.network_tx {
+        let _ = tx
+            .send(crate::types::NetworkCommand::DialAddress(
+                addr_str.clone(),
+            ))
+            .await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "address": addr_str,
+        "message": "Connecting to peer..."
+    })))
 }
 
 #[derive(Deserialize)]

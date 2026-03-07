@@ -810,6 +810,8 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         response: TpAllReduceResponse,
     },
+    /// Dial a multiaddr to connect to a new peer.
+    DialAddress(String),
 }
 
 // ---- Rebalancing ----

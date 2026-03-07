@@ -197,31 +197,96 @@ const INVITE_PREFIX: &str = "swarm://";
 
 /// Encode a node's listening address into a shareable network invite code.
 ///
-/// Format: `swarm://<multiaddr_base64url>`
-/// The multiaddr is base64url-encoded for safe sharing in chat, email, etc.
+/// Format: `swarm://<base64url(random_key || nonce || encrypted_multiaddr)>`
+///
+/// The multiaddr is encrypted with ChaCha20Poly1305 using a random key so
+/// the IP address is not visible in the code. The key is embedded in the code
+/// itself — anyone with the full code can decode it, but you can't extract
+/// the IP by just looking at the code (prevents casual IP harvesting).
 pub fn encode_network_code(addr: &Multiaddr) -> String {
     use base64::Engine;
-    let bytes = addr.to_string();
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes.as_bytes());
-    format!("{INVITE_PREFIX}{encoded}")
+    use chacha20poly1305::{
+        aead::{Aead, KeyInit, OsRng},
+        ChaCha20Poly1305, Nonce,
+    };
+    use rand::RngCore;
+
+    let plaintext = addr.to_string();
+
+    // Generate random 32-byte key and 12-byte nonce
+    let mut key_bytes = [0u8; 32];
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut key_bytes);
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes).expect("valid key size");
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    match cipher.encrypt(nonce, plaintext.as_bytes()) {
+        Ok(ciphertext) => {
+            // Pack: key (32) + nonce (12) + ciphertext (variable)
+            let mut packed = Vec::with_capacity(32 + 12 + ciphertext.len());
+            packed.extend_from_slice(&key_bytes);
+            packed.extend_from_slice(&nonce_bytes);
+            packed.extend_from_slice(&ciphertext);
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&packed);
+            format!("{INVITE_PREFIX}{encoded}")
+        }
+        Err(_) => {
+            // Fallback to plain base64 if encryption fails (shouldn't happen)
+            let encoded =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plaintext.as_bytes());
+            format!("{INVITE_PREFIX}{encoded}")
+        }
+    }
 }
 
 /// Decode a network invite code back into a multiaddr string.
 ///
 /// Accepts either:
-/// - `swarm://<base64url>` (invite code format)
+/// - `swarm://<encrypted_base64url>` (invite code format, encrypted)
+/// - `swarm://<plain_base64url>` (legacy plain format, auto-detected)
 /// - A raw multiaddr string (passthrough for advanced users)
 pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
     let trimmed = code.trim();
 
     if let Some(encoded) = trimmed.strip_prefix(INVITE_PREFIX) {
         use base64::Engine;
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        let packed = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded.as_bytes())
             .map_err(|e| SwarmError::Network(format!("Invalid invite code encoding: {e}")))?;
-        let addr_str = String::from_utf8(bytes)
-            .map_err(|e| SwarmError::Network(format!("Invalid invite code UTF-8: {e}")))?;
-        // Validate it parses as a multiaddr
+
+        // Encrypted format: key (32) + nonce (12) + ciphertext (16+ for tag)
+        if packed.len() >= 32 + 12 + 16 {
+            use chacha20poly1305::{aead::Aead, aead::KeyInit, ChaCha20Poly1305, Nonce};
+
+            let key_bytes = &packed[..32];
+            let nonce_bytes = &packed[32..44];
+            let ciphertext = &packed[44..];
+
+            let cipher = ChaCha20Poly1305::new_from_slice(key_bytes)
+                .map_err(|e| SwarmError::Network(format!("Invalid key in invite code: {e}")))?;
+            let nonce = Nonce::from_slice(nonce_bytes);
+
+            match cipher.decrypt(nonce, ciphertext) {
+                Ok(plaintext) => {
+                    let addr_str = String::from_utf8(plaintext).map_err(|e| {
+                        SwarmError::Network(format!("Invalid invite code UTF-8: {e}"))
+                    })?;
+                    addr_str.parse::<Multiaddr>().map_err(|e| {
+                        SwarmError::Network(format!("Invalid multiaddr in invite code: {e}"))
+                    })?;
+                    return Ok(addr_str);
+                }
+                Err(_) => {
+                    // Decryption failed — try legacy plain base64 below
+                }
+            }
+        }
+
+        // Legacy plain base64 format (or decryption failed — try plain)
+        let addr_str = String::from_utf8(packed)
+            .map_err(|e| SwarmError::Network(format!("Invalid invite code: {e}")))?;
         addr_str
             .parse::<Multiaddr>()
             .map_err(|e| SwarmError::Network(format!("Invalid multiaddr in invite code: {e}")))?;
