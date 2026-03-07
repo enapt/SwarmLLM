@@ -334,7 +334,16 @@ var SwarmLLM = (function() {
 
         if (!resp.ok) {
           var errText = await resp.text();
-          contentEl.textContent = 'Error: ' + errText;
+          var friendlyMsg = errText;
+          try {
+            var errJson = JSON.parse(errText);
+            if (errJson.error) {
+              friendlyMsg = errJson.error.message || errJson.error.detail || errText;
+              if (errJson.error.hint) friendlyMsg += '\n\nHint: ' + errJson.error.hint;
+            }
+          } catch (e) {}
+          contentEl.textContent = friendlyMsg;
+          contentEl.classList.add('chat-error');
           isStreaming = false;
           document.getElementById('send-btn').disabled = false;
           return;
@@ -847,7 +856,7 @@ var SwarmLLM = (function() {
         Object.keys(byProvider).forEach(function(p) {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
-          var modelTags = pModels.map(function(cm) {
+          var modelTagsArr = pModels.map(function(cm) {
             var metaChip = '';
             if (cm.meta) {
               var parts = [];
@@ -857,7 +866,13 @@ var SwarmLLM = (function() {
             }
             var tooltip = cm.meta ? escapeHtml(cm.id + '\n' + JSON.stringify(cm.meta, null, 2)) : escapeHtml(cm.id);
             return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + tooltip + '">' + escapeHtml(cm.name || cm.id) + metaChip + '</span>';
-          }).join('');
+          });
+
+          var CLOUD_TAG_LIMIT = 12;
+          var hasMore = modelTagsArr.length > CLOUD_TAG_LIMIT;
+          var visibleTags = hasMore ? modelTagsArr.slice(0, CLOUD_TAG_LIMIT) : modelTagsArr;
+          var hiddenTags = hasMore ? modelTagsArr.slice(CLOUD_TAG_LIMIT) : [];
+          var tagId = 'cloud-tags-' + p;
 
           var card = document.createElement('div');
           card.className = 'model-card cloud-model';
@@ -867,7 +882,11 @@ var SwarmLLM = (function() {
               '<span><span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
               '<span style="color:var(--green);font-weight:600;font-size:0.8rem;margin-left:8px">Connected</span></span>' +
             '</div>' +
-            '<div class="cloud-model-tags">' + modelTags + '</div>' +
+            '<div class="cloud-model-tags">' + visibleTags.join('') +
+              (hasMore ? '<span class="cloud-tags-hidden" id="' + tagId + '" style="display:none">' + hiddenTags.join('') + '</span>' +
+                '<button class="btn btn-sm cloud-show-more" data-toggle-tags="' + tagId + '" data-show-label="Show all ' + pModels.length + ' models" style="margin:4px 0;font-size:0.7rem">' +
+                'Show all ' + pModels.length + ' models</button>' : '') +
+            '</div>' +
             '<div class="model-meta"><span style="color:var(--text-muted);font-size:0.75rem">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</span></div>';
           list.appendChild(card);
         });
@@ -1464,11 +1483,21 @@ var SwarmLLM = (function() {
             var badge = document.getElementById('provider-status-' + p.name);
             if (badge) {
               if (p.configured) {
-                badge.textContent = 'Configured';
-                badge.style.color = 'var(--green)';
+                badge.textContent = '\u2713 Active';
+                badge.className = 'badge provider-badge-active';
               } else {
                 badge.textContent = 'Not set';
+                badge.className = 'badge';
                 badge.style.color = '';
+              }
+            }
+            // Highlight the provider card
+            var card = badge && badge.closest('.provider-card');
+            if (card) {
+              if (p.configured) {
+                card.classList.add('provider-active');
+              } else {
+                card.classList.remove('provider-active');
               }
             }
           });
@@ -3474,6 +3503,17 @@ var SwarmLLM = (function() {
 
       var cloudId = target.getAttribute('data-select-cloud');
       if (cloudId) { selectModelDropdown(cloudId); ui.showBanner('success', 'Model selected: ' + cloudId); return; }
+
+      var toggleTags = target.getAttribute('data-toggle-tags');
+      if (toggleTags) {
+        var hidden = document.getElementById(toggleTags);
+        if (hidden) {
+          var isHidden = hidden.style.display === 'none';
+          hidden.style.display = isHidden ? 'inline' : 'none';
+          target.textContent = isHidden ? 'Show less' : target.getAttribute('data-show-label') || 'Show all';
+        }
+        return;
+      }
 
       var cancelId = target.getAttribute('data-cancel-download');
       if (cancelId) { cancelDownload(cancelId); return; }

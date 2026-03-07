@@ -205,7 +205,27 @@ pub async fn try_proxy_openai(
     let config = state.shared_state.providers_config.read().await;
     let provider = match resolve_provider(model, &config) {
         Some(p) if !p.is_anthropic => p,
-        _ => return Ok(None),
+        _ => {
+            // Fallback: check provider_model_map (populated by list_provider_models)
+            if let Some(entry) = state.shared_state.provider_model_map.get(model) {
+                let provider_name = entry.value().clone();
+                match resolve_by_name(&provider_name, &config) {
+                    Some(p) if !p.is_anthropic => {
+                        drop(config);
+                        tracing::info!(
+                            provider = %p.name,
+                            model = %model,
+                            "Proxying OpenAI-compatible request to cloud provider (model map fallback)"
+                        );
+                        let response =
+                            proxy_openai_compatible(&p.base_url, &p.api_key, body, stream).await?;
+                        return Ok(Some(response));
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            return Ok(None);
+        }
     };
     drop(config);
 
@@ -246,11 +266,22 @@ pub async fn proxy_openai_compatible(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::warn!(status = %status, body = %body, "Provider returned error");
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Provider returned error status {status}: {body}"
-        ))));
+        let raw_body = resp.text().await.unwrap_or_default();
+        tracing::warn!(status = %status, body = %raw_body, "Provider returned error");
+        // Try to extract a human-readable message from the provider's JSON error
+        let friendly = serde_json::from_str::<serde_json::Value>(&raw_body)
+            .ok()
+            .and_then(|v| {
+                v.get("detail")
+                    .or_else(|| v.get("error").and_then(|e| e.get("message")))
+                    .or_else(|| v.get("message"))
+                    .and_then(|m| m.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or(raw_body);
+        return Err(ApiError(crate::error::SwarmError::ProviderError {
+            status: status.as_u16(),
+            body: friendly,
+        }));
     }
 
     if stream {

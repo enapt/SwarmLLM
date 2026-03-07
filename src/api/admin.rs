@@ -3643,6 +3643,16 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
             });
 
     let results = futures::future::join_all(fetches).await;
+    for (provider, provider_models) in &results {
+        for m in provider_models {
+            if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                state
+                    .shared_state
+                    .provider_model_map
+                    .insert(id.to_string(), provider.to_string());
+            }
+        }
+    }
     for (_provider, provider_models) in results {
         models.extend(provider_models);
     }

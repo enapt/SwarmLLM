@@ -186,6 +186,10 @@ pub struct SharedState {
     /// Broadcast channel fired when models change (shard download, load, prune).
     /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
     pub models_changed_tx: broadcast::Sender<()>,
+    /// Cached mapping of cloud provider model IDs to provider names.
+    /// Populated by `list_provider_models` so that `try_proxy_openai` can route
+    /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
+    pub provider_model_map: DashMap<String, String>,
     /// Persistent NodeId → PeerId bytes mapping. Populated by the identify handler
     /// and NEVER cleared on disconnect. Solves the race where the scheduler picks a
     /// peer from shard_holders but the peer_registry entry was removed on disconnect
@@ -533,6 +537,7 @@ impl SharedState {
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
+            provider_model_map: DashMap::new(),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
             pending_vision_results: DashMap::new(),

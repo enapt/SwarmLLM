@@ -77,6 +77,10 @@ pub enum SwarmError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    // Provider proxy
+    #[error("Provider error ({status}): {body}")]
+    ProviderError { status: u16, body: String },
+
     // Generic
     #[error("Internal error: {0}")]
     Internal(String),
@@ -146,6 +150,11 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "server_error",
             ),
+            SwarmError::ProviderError { status, ref body } => {
+                let http_status = StatusCode::from_u16(*status)
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
+                (http_status, format!("Provider error: {body}"), "server_error")
+            }
             SwarmError::Internal(ref msg) if msg.contains("Unsupported") => (
                 StatusCode::BAD_REQUEST,
                 self.0.to_string(),
