@@ -68,15 +68,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler capnproto libclang-dev
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf capnp
-
-      - name: Install system dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc capnproto -y
+          sudo apt-get install -y libssl-dev pkg-config
 
       - name: Install CUDA toolkit
         if: matrix.cuda
@@ -96,7 +88,7 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} staging/
           cp config/default.toml staging/
           cp INSTALL.txt staging/
-          [ -f LICENSE ] && cp LICENSE staging/ || true
+          cp LICENSE-* staging/
           cd staging
           tar czf ../${{ matrix.archive }} .
 
@@ -108,7 +100,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" staging/
           Copy-Item "config/default.toml" staging/
           Copy-Item "INSTALL.txt" staging/
-          if (Test-Path LICENSE) { Copy-Item LICENSE staging/ }
+          Copy-Item LICENSE-* staging/
           Compress-Archive -Path staging/* -DestinationPath ${{ matrix.archive }}
 
       - name: Upload artifact

@@ -35,7 +35,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler capnproto libclang-dev
+          sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -49,12 +49,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler capnproto libclang-dev
+          sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - name: Run unit tests
         run: cargo test --lib --bins
       - name: Run integration tests
         run: cargo test --test integration -- --test-threads=1
+      - name: Run phase 10/11 integration tests
+        run: cargo test --test integration_phase10_11 -- --test-threads=1
+      - name: Run yamux substream tests
+        run: cargo test --test yamux_substream
 
   build:
     name: Build
@@ -66,6 +70,6 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler capnproto libclang-dev
+          sudo apt-get install -y libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
