@@ -7,12 +7,18 @@ use crate::config::ProvidersConfig;
 use crate::error::ApiError;
 
 /// Known provider base URLs (OpenAI-compatible).
-fn provider_base_url(name: &str) -> Option<&'static str> {
+pub fn provider_base_url(name: &str) -> Option<&'static str> {
     match name {
         "openai" => Some("https://api.openai.com/v1"),
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "mistral" => Some("https://api.mistral.ai/v1"),
         "groq" => Some("https://api.groq.com/openai/v1"),
+        "nvidia_nim" => Some("https://integrate.api.nvidia.com/v1"),
+        "cerebras" => Some("https://api.cerebras.ai/v1"),
+        "sambanova" => Some("https://api.sambanova.ai/v1"),
+        "fireworks" => Some("https://api.fireworks.ai/inference/v1"),
+        "together" => Some("https://api.together.xyz/v1"),
+        "deepinfra" => Some("https://api.deepinfra.com/v1/openai"),
         _ => None,
     }
 }
@@ -63,12 +69,24 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     {
         return resolve_by_name("mistral", config);
     }
+    // NVIDIA NIM models use nvidia/ or nim/ prefixes, or well-known NIM model names
+    if lower.starts_with("nvidia/") || lower.starts_with("nim/") {
+        return resolve_by_name("nvidia_nim", config);
+    }
+    // Nemotron models are NVIDIA-specific
+    if lower.contains("nemotron") && config.nvidia_nim.is_some() {
+        return resolve_by_name("nvidia_nim", config);
+    }
     if lower.starts_with("llama-") && config.groq.is_some() {
         // Groq is popular for fast Llama inference
         return resolve_by_name("groq", config);
     }
     if lower.starts_with("gemma") && config.groq.is_some() {
         return resolve_by_name("groq", config);
+    }
+    // Fireworks uses accounts/ prefix
+    if lower.starts_with("accounts/fireworks") {
+        return resolve_by_name("fireworks", config);
     }
 
     // Custom providers only match via explicit `provider:model` syntax (handled above)
@@ -105,6 +123,42 @@ fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo>
         "groq" => config.groq.as_ref().map(|e| ProviderInfo {
             name: "groq".into(),
             base_url: provider_base_url("groq").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "nvidia_nim" | "nvidia" | "nim" => config.nvidia_nim.as_ref().map(|e| ProviderInfo {
+            name: "nvidia_nim".into(),
+            base_url: provider_base_url("nvidia_nim").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "cerebras" => config.cerebras.as_ref().map(|e| ProviderInfo {
+            name: "cerebras".into(),
+            base_url: provider_base_url("cerebras").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "sambanova" => config.sambanova.as_ref().map(|e| ProviderInfo {
+            name: "sambanova".into(),
+            base_url: provider_base_url("sambanova").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "fireworks" => config.fireworks.as_ref().map(|e| ProviderInfo {
+            name: "fireworks".into(),
+            base_url: provider_base_url("fireworks").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "together" => config.together.as_ref().map(|e| ProviderInfo {
+            name: "together".into(),
+            base_url: provider_base_url("together").unwrap().into(),
+            api_key: e.api_key.clone(),
+            is_anthropic: false,
+        }),
+        "deepinfra" => config.deepinfra.as_ref().map(|e| ProviderInfo {
+            name: "deepinfra".into(),
+            base_url: provider_base_url("deepinfra").unwrap().into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
@@ -311,6 +365,30 @@ pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::V
             "name": "groq",
             "configured": config.groq.is_some(),
         }),
+        serde_json::json!({
+            "name": "nvidia_nim",
+            "configured": config.nvidia_nim.is_some(),
+        }),
+        serde_json::json!({
+            "name": "cerebras",
+            "configured": config.cerebras.is_some(),
+        }),
+        serde_json::json!({
+            "name": "sambanova",
+            "configured": config.sambanova.is_some(),
+        }),
+        serde_json::json!({
+            "name": "fireworks",
+            "configured": config.fireworks.is_some(),
+        }),
+        serde_json::json!({
+            "name": "together",
+            "configured": config.together.is_some(),
+        }),
+        serde_json::json!({
+            "name": "deepinfra",
+            "configured": config.deepinfra.is_some(),
+        }),
     ];
 
     for custom in &config.custom {
@@ -389,16 +467,84 @@ mod tests {
     fn resolve_custom_provider() {
         let config = ProvidersConfig {
             custom: vec![CustomProvider {
-                name: "together".into(),
-                base_url: "https://api.together.xyz/v1".into(),
+                name: "mycloud".into(),
+                base_url: "https://api.mycloud.example/v1".into(),
                 api_key: "tok-test".into(),
                 default_model: None,
             }],
             ..Default::default()
         };
+        let p = resolve_provider("mycloud:meta-llama/Llama-3-70b", &config).unwrap();
+        assert_eq!(p.name, "mycloud");
+        assert_eq!(p.base_url, "https://api.mycloud.example/v1");
+    }
+
+    #[test]
+    fn resolve_nvidia_nim_prefix() {
+        let config = ProvidersConfig {
+            nvidia_nim: Some(ProviderEntry {
+                api_key: "nvapi-test".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
+        let p = resolve_provider("nvidia/llama-3.1-nemotron-70b-instruct", &config).unwrap();
+        assert_eq!(p.name, "nvidia_nim");
+        assert_eq!(p.base_url, "https://integrate.api.nvidia.com/v1");
+    }
+
+    #[test]
+    fn resolve_nvidia_nim_explicit() {
+        let config = ProvidersConfig {
+            nvidia_nim: Some(ProviderEntry {
+                api_key: "nvapi-test".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
+        let p = resolve_provider("nim:meta/llama-3.1-8b-instruct", &config).unwrap();
+        assert_eq!(p.name, "nvidia_nim");
+    }
+
+    #[test]
+    fn resolve_cerebras_explicit() {
+        let config = ProvidersConfig {
+            cerebras: Some(ProviderEntry {
+                api_key: "csk-test".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
+        let p = resolve_provider("cerebras:llama3.1-8b", &config).unwrap();
+        assert_eq!(p.name, "cerebras");
+        assert_eq!(p.base_url, "https://api.cerebras.ai/v1");
+    }
+
+    #[test]
+    fn resolve_together_explicit() {
+        let config = ProvidersConfig {
+            together: Some(ProviderEntry {
+                api_key: "tok-test".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
         let p = resolve_provider("together:meta-llama/Llama-3-70b", &config).unwrap();
         assert_eq!(p.name, "together");
         assert_eq!(p.base_url, "https://api.together.xyz/v1");
+    }
+
+    #[test]
+    fn resolve_nemotron_to_nvidia() {
+        let config = ProvidersConfig {
+            nvidia_nim: Some(ProviderEntry {
+                api_key: "nvapi-test".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
+        let p = resolve_provider("nemotron-4-340b-instruct", &config).unwrap();
+        assert_eq!(p.name, "nvidia_nim");
     }
 
     #[test]
@@ -425,6 +571,30 @@ mod tests {
         assert_eq!(
             provider_base_url("groq"),
             Some("https://api.groq.com/openai/v1")
+        );
+        assert_eq!(
+            provider_base_url("nvidia_nim"),
+            Some("https://integrate.api.nvidia.com/v1")
+        );
+        assert_eq!(
+            provider_base_url("cerebras"),
+            Some("https://api.cerebras.ai/v1")
+        );
+        assert_eq!(
+            provider_base_url("sambanova"),
+            Some("https://api.sambanova.ai/v1")
+        );
+        assert_eq!(
+            provider_base_url("fireworks"),
+            Some("https://api.fireworks.ai/inference/v1")
+        );
+        assert_eq!(
+            provider_base_url("together"),
+            Some("https://api.together.xyz/v1")
+        );
+        assert_eq!(
+            provider_base_url("deepinfra"),
+            Some("https://api.deepinfra.com/v1/openai")
         );
         assert_eq!(provider_base_url("unknown"), None);
     }

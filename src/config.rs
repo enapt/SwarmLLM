@@ -620,6 +620,18 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub groq: Option<ProviderEntry>,
     #[serde(default)]
+    pub nvidia_nim: Option<ProviderEntry>,
+    #[serde(default)]
+    pub cerebras: Option<ProviderEntry>,
+    #[serde(default)]
+    pub sambanova: Option<ProviderEntry>,
+    #[serde(default)]
+    pub fireworks: Option<ProviderEntry>,
+    #[serde(default)]
+    pub together: Option<ProviderEntry>,
+    #[serde(default)]
+    pub deepinfra: Option<ProviderEntry>,
+    #[serde(default)]
     pub custom: Vec<CustomProvider>,
 }
 

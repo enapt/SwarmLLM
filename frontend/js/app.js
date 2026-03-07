@@ -1470,7 +1470,7 @@ var SwarmLLM = (function() {
 
     saveProviders: async function() {
       var keys = {};
-      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq'].forEach(function(name) {
+      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra'].forEach(function(name) {
         var input = document.getElementById('provider-key-' + name);
         if (input && input.value) {
           keys[name + '_key'] = input.value;
@@ -1484,7 +1484,7 @@ var SwarmLLM = (function() {
           body: JSON.stringify(keys),
         });
         // Clear inputs after save and refresh status
-        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq'].forEach(function(name) {
+        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra'].forEach(function(name) {
           var input = document.getElementById('provider-key-' + name);
           if (input) input.value = '';
         });
@@ -1526,7 +1526,7 @@ var SwarmLLM = (function() {
             body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
           });
         } else {
-          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant' };
+          var modelMap = { openai: 'gpt-4o-mini', deepseek: 'deepseek-chat', mistral: 'mistral-small-latest', groq: 'llama-3.1-8b-instant', nvidia_nim: 'nvidia/mistral-nemo-minitron-8b-8k-instruct', cerebras: 'cerebras:llama-3.1-8b', sambanova: 'sambanova:Meta-Llama-3.3-70B-Instruct', fireworks: 'accounts/fireworks/models/llama-v3p3-70b-instruct', together: 'together:meta-llama/Llama-3.3-70B-Instruct-Turbo', deepinfra: 'deepinfra:meta-llama/Llama-3.3-70B-Instruct' };
           testResp = await authFetch('/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

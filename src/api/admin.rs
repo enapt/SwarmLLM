@@ -3394,6 +3394,30 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
             "name": "groq",
             "configured": config.groq.is_some(),
         }),
+        serde_json::json!({
+            "name": "nvidia_nim",
+            "configured": config.nvidia_nim.is_some(),
+        }),
+        serde_json::json!({
+            "name": "cerebras",
+            "configured": config.cerebras.is_some(),
+        }),
+        serde_json::json!({
+            "name": "sambanova",
+            "configured": config.sambanova.is_some(),
+        }),
+        serde_json::json!({
+            "name": "fireworks",
+            "configured": config.fireworks.is_some(),
+        }),
+        serde_json::json!({
+            "name": "together",
+            "configured": config.together.is_some(),
+        }),
+        serde_json::json!({
+            "name": "deepinfra",
+            "configured": config.deepinfra.is_some(),
+        }),
     ];
 
     Json(serde_json::json!({ "providers": providers }))
@@ -3411,6 +3435,18 @@ pub struct ProvidersUpdate {
     pub mistral_key: Option<String>,
     #[serde(default)]
     pub groq_key: Option<String>,
+    #[serde(default)]
+    pub nvidia_nim_key: Option<String>,
+    #[serde(default)]
+    pub cerebras_key: Option<String>,
+    #[serde(default)]
+    pub sambanova_key: Option<String>,
+    #[serde(default)]
+    pub fireworks_key: Option<String>,
+    #[serde(default)]
+    pub together_key: Option<String>,
+    #[serde(default)]
+    pub deepinfra_key: Option<String>,
 }
 
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
@@ -3438,6 +3474,12 @@ pub async fn update_providers(
     update_entry(&mut config.deepseek, body.deepseek_key);
     update_entry(&mut config.mistral, body.mistral_key);
     update_entry(&mut config.groq, body.groq_key);
+    update_entry(&mut config.nvidia_nim, body.nvidia_nim_key);
+    update_entry(&mut config.cerebras, body.cerebras_key);
+    update_entry(&mut config.sambanova, body.sambanova_key);
+    update_entry(&mut config.fireworks, body.fireworks_key);
+    update_entry(&mut config.together, body.together_key);
+    update_entry(&mut config.deepinfra, body.deepinfra_key);
 
     // Persist to database
     let _ = state
@@ -3457,32 +3499,51 @@ pub async fn update_providers(
         "deepseek": config.deepseek.is_some(),
         "mistral": config.mistral.is_some(),
         "groq": config.groq.is_some(),
+        "nvidia_nim": config.nvidia_nim.is_some(),
+        "cerebras": config.cerebras.is_some(),
+        "sambanova": config.sambanova.is_some(),
+        "fireworks": config.fireworks.is_some(),
+        "together": config.together.is_some(),
+        "deepinfra": config.deepinfra.is_some(),
     })))
 }
 
-/// GET /api/admin/provider-models — List well-known models for configured providers.
+/// GET /api/admin/provider-models — Fetch available models from configured providers.
 ///
-/// Returns a flat list of popular models for each provider that has an API key configured.
-/// The frontend uses this to populate the model selector with cloud models alongside local ones.
+/// Queries each configured provider's `/models` endpoint in parallel and returns
+/// a flat list. Anthropic has no /models endpoint, so uses a static list.
+/// Falls back to static lists if the provider's API is unreachable.
 pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.shared_state.providers_config.read().await;
     let mut models = Vec::new();
 
-    if config.openai.is_some() {
-        for (id, name) in [
-            ("gpt-4o", "GPT-4o"),
-            ("gpt-4o-mini", "GPT-4o Mini"),
-            ("gpt-4.1", "GPT-4.1"),
-            ("gpt-4.1-mini", "GPT-4.1 Mini"),
-            ("gpt-4.1-nano", "GPT-4.1 Nano"),
-            ("o3-mini", "o3 Mini"),
-        ] {
-            models.push(serde_json::json!({
-                "id": id, "name": name, "provider": "openai"
-            }));
+    // Collect (provider_name, base_url, api_key, needs_prefix) for all configured providers
+    let mut fetch_tasks: Vec<(&str, String, String, bool)> = Vec::new();
+
+    // Collect configured OpenAI-compatible providers for parallel /models fetch.
+    // needs_prefix: if true, model IDs are prefixed with "provider:" for routing.
+    let candidates: &[(&str, Option<&crate::config::ProviderEntry>, bool)] = &[
+        ("openai", config.openai.as_ref(), false),
+        ("deepseek", config.deepseek.as_ref(), false),
+        ("mistral", config.mistral.as_ref(), false),
+        ("groq", config.groq.as_ref(), false),
+        ("nvidia_nim", config.nvidia_nim.as_ref(), false),
+        ("cerebras", config.cerebras.as_ref(), true),
+        ("sambanova", config.sambanova.as_ref(), true),
+        ("fireworks", config.fireworks.as_ref(), false),
+        ("together", config.together.as_ref(), true),
+        ("deepinfra", config.deepinfra.as_ref(), true),
+    ];
+
+    for &(name, ref entry, needs_prefix) in candidates {
+        if let Some(e) = entry {
+            if let Some(base) = crate::api::providers::provider_base_url(name) {
+                fetch_tasks.push((name, base.to_string(), e.api_key.clone(), needs_prefix));
+            }
         }
     }
 
+    // Anthropic has no /models endpoint — use static list
     if config.anthropic.is_some() {
         for (id, name) in [
             ("claude-opus-4-6", "Claude Opus 4.6"),
@@ -3495,42 +3556,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
         }
     }
 
-    if config.deepseek.is_some() {
-        for (id, name) in [
-            ("deepseek-chat", "DeepSeek Chat"),
-            ("deepseek-reasoner", "DeepSeek Reasoner"),
-        ] {
-            models.push(serde_json::json!({
-                "id": id, "name": name, "provider": "deepseek"
-            }));
-        }
-    }
-
-    if config.mistral.is_some() {
-        for (id, name) in [
-            ("mistral-large-latest", "Mistral Large"),
-            ("mistral-small-latest", "Mistral Small"),
-            ("codestral-latest", "Codestral"),
-        ] {
-            models.push(serde_json::json!({
-                "id": id, "name": name, "provider": "mistral"
-            }));
-        }
-    }
-
-    if config.groq.is_some() {
-        for (id, name) in [
-            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
-            ("llama-3.1-8b-instant", "Llama 3.1 8B"),
-            ("gemma2-9b-it", "Gemma 2 9B"),
-        ] {
-            models.push(serde_json::json!({
-                "id": id, "name": name, "provider": "groq"
-            }));
-        }
-    }
-
-    // Include custom providers with their default model if set
+    // Collect custom provider models before dropping config
     for custom in &config.custom {
         if let Some(ref model) = custom.default_model {
             models.push(serde_json::json!({
@@ -3539,6 +3565,70 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
                 "provider": custom.name,
             }));
         }
+    }
+
+    drop(config);
+
+    // Fetch models from all OpenAI-compatible providers in parallel (5s timeout per provider)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let fetches =
+        fetch_tasks
+            .into_iter()
+            .map(|(provider_name, base_url, api_key, needs_prefix)| {
+                let client = client.clone();
+                async move {
+                    let url = format!("{}/models", base_url);
+                    let resp = client
+                        .get(&url)
+                        .header("Authorization", format!("Bearer {}", api_key))
+                        .send()
+                        .await;
+
+                    match resp {
+                        Ok(r) if r.status().is_success() => {
+                            if let Ok(body) = r.json::<serde_json::Value>().await {
+                                // OpenAI /models returns { "data": [ { "id": "...", ... }, ... ] }
+                                if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+                                    let mut result = Vec::new();
+                                    for m in data {
+                                        if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
+                                            // Use the model id as display name, cleaned up
+                                            let display = id.rsplit('/').next().unwrap_or(id);
+                                            let routed_id = if needs_prefix {
+                                                format!("{}:{}", provider_name, id)
+                                            } else {
+                                                id.to_string()
+                                            };
+                                            result.push(serde_json::json!({
+                                                "id": routed_id,
+                                                "name": display,
+                                                "provider": provider_name,
+                                            }));
+                                        }
+                                    }
+                                    return (provider_name, result);
+                                }
+                            }
+                            (provider_name, Vec::new())
+                        }
+                        _ => {
+                            tracing::debug!(
+                                provider = provider_name,
+                                "Failed to fetch /models, no fallback"
+                            );
+                            (provider_name, Vec::new())
+                        }
+                    }
+                }
+            });
+
+    let results = futures::future::join_all(fetches).await;
+    for (_provider, provider_models) in results {
+        models.extend(provider_models);
     }
 
     Json(serde_json::json!({ "models": models }))
