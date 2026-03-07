@@ -3596,18 +3596,34 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
                                     let mut result = Vec::new();
                                     for m in data {
                                         if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
-                                            // Use the model id as display name, cleaned up
                                             let display = id.rsplit('/').next().unwrap_or(id);
                                             let routed_id = if needs_prefix {
                                                 format!("{}:{}", provider_name, id)
                                             } else {
                                                 id.to_string()
                                             };
-                                            result.push(serde_json::json!({
+                                            // Pass through extra metadata from the provider.
+                                            // Skip standard fields we already handle (id, object, owned_by).
+                                            let mut meta = serde_json::Map::new();
+                                            if let Some(obj) = m.as_object() {
+                                                for (k, v) in obj {
+                                                    match k.as_str() {
+                                                        "id" | "object" => {}
+                                                        _ => {
+                                                            meta.insert(k.clone(), v.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let mut entry = serde_json::json!({
                                                 "id": routed_id,
                                                 "name": display,
                                                 "provider": provider_name,
-                                            }));
+                                            });
+                                            if !meta.is_empty() {
+                                                entry["meta"] = serde_json::Value::Object(meta);
+                                            }
+                                            result.push(entry);
                                         }
                                     }
                                     return (provider_name, result);

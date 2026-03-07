@@ -827,7 +827,9 @@ var SwarmLLM = (function() {
       if (hasCloud) {
         var providerLabels = {
           openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-          mistral: 'Mistral', groq: 'Groq'
+          mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
+          cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
+          together: 'Together AI', deepinfra: 'DeepInfra'
         };
         var divider = document.createElement('div');
         divider.className = 'cloud-models-divider';
@@ -846,7 +848,15 @@ var SwarmLLM = (function() {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
           var modelTags = pModels.map(function(cm) {
-            return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="Click to select ' + escapeHtml(cm.id) + '">' + escapeHtml(cm.name || cm.id) + '</span>';
+            var metaChip = '';
+            if (cm.meta) {
+              var parts = [];
+              if (cm.meta.owned_by) parts.push(cm.meta.owned_by);
+              if (cm.meta.context_length || cm.meta.context_window) parts.push((cm.meta.context_length || cm.meta.context_window).toLocaleString() + ' ctx');
+              if (parts.length > 0) metaChip = ' <span style="opacity:0.5;font-size:0.65rem">' + escapeHtml(parts.join(' · ')) + '</span>';
+            }
+            var tooltip = cm.meta ? escapeHtml(cm.id + '\n' + JSON.stringify(cm.meta, null, 2)) : escapeHtml(cm.id);
+            return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + tooltip + '">' + escapeHtml(cm.name || cm.id) + metaChip + '</span>';
           }).join('');
 
           var card = document.createElement('div');
@@ -1877,7 +1887,9 @@ var SwarmLLM = (function() {
       // Build grouped data
       var providerLabels = {
         openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-        mistral: 'Mistral', groq: 'Groq'
+        mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
+        cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
+        together: 'Together AI', deepinfra: 'DeepInfra'
       };
       var groups = [];
       _modelDropdownData = [];
@@ -1900,7 +1912,9 @@ var SwarmLLM = (function() {
         });
         Object.keys(byProvider).forEach(function(p) {
           var items = byProvider[p].map(function(m) {
-            return { id: m.id, name: m.name || m.id, group: p, provider: p };
+            var item = { id: m.id, name: m.name || m.id, group: p, provider: p };
+            if (m.meta) item.meta = m.meta;
+            return item;
           });
           groups.push({ key: p, label: (providerLabels[p] || p) + ' (cloud)', items: items });
           _modelDropdownData = _modelDropdownData.concat(items);
@@ -1961,8 +1975,35 @@ var SwarmLLM = (function() {
         el.className = 'model-dropdown-item';
         el.setAttribute('data-value', item.id);
         el.setAttribute('data-search', (item.name + ' ' + item.id).toLowerCase());
-        el.textContent = item.name;
-        el.title = item.id;
+        // Build display: name + optional meta chips
+        var nameSpan = document.createElement('span');
+        nameSpan.textContent = item.name;
+        el.appendChild(nameSpan);
+        if (item.meta) {
+          var metaParts = [];
+          var m = item.meta;
+          // Extract useful fields from provider metadata
+          if (m.owned_by) metaParts.push(m.owned_by);
+          if (m.context_length || m.context_window) metaParts.push((m.context_length || m.context_window).toLocaleString() + ' ctx');
+          if (m.max_tokens) metaParts.push(m.max_tokens.toLocaleString() + ' max');
+          if (m.pricing) {
+            var p = m.pricing;
+            if (p.prompt !== undefined) metaParts.push('$' + p.prompt + '/1K in');
+            if (p.completion !== undefined) metaParts.push('$' + p.completion + '/1K out');
+          }
+          if (m.status && m.status !== 'available') metaParts.push(m.status);
+          if (metaParts.length > 0) {
+            var metaSpan = document.createElement('span');
+            metaSpan.className = 'model-meta-chips';
+            metaSpan.style.cssText = 'font-size:0.7rem;opacity:0.5;margin-left:6px';
+            metaSpan.textContent = metaParts.join(' · ');
+            el.appendChild(metaSpan);
+          }
+          // Full meta as tooltip
+          el.title = item.id + '\n' + JSON.stringify(item.meta, null, 2);
+        } else {
+          el.title = item.id;
+        }
         el.addEventListener('click', function() {
           selectModelDropdown(item.id);
           closeModelDropdown();
