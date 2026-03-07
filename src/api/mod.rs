@@ -2,6 +2,7 @@ pub mod admin;
 pub mod anthropic;
 pub mod identity;
 pub mod internal;
+pub mod mcp;
 pub mod metrics;
 pub mod middleware;
 pub mod openai;

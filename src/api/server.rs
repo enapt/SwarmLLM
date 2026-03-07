@@ -7,7 +7,8 @@ use axum::Router;
 use tokio::sync::mpsc;
 
 use crate::api::{
-    admin, anthropic, identity, internal, metrics, middleware, openai, pool, providers, websocket,
+    admin, anthropic, identity, internal, mcp, metrics, middleware, openai, pool, providers,
+    websocket,
 };
 use crate::config::Config;
 use crate::daemon::SharedState;
@@ -179,6 +180,8 @@ pub fn build_router(state: AppState) -> Router {
         // Health check
         .route("/health", get(health))
         .route("/health/ready", get(metrics::health_ready))
+        // MCP (Model Context Protocol) server
+        .route("/mcp", post(mcp::handle_mcp))
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
         // Middleware (layers run bottom-to-top: CORS first, then security headers, then rate limit, then auth, then body limit, then handler)
