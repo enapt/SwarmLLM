@@ -79,9 +79,8 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     }
     // NIM uses org/model format (e.g. meta/llama-3.1-8b-instruct). If NIM is configured
     // and the model has an org/ prefix that didn't match another provider, route to NIM.
-    if config.nvidia_nim.is_some()
-        && lower.contains('/')
-        && !lower.starts_with("accounts/") // fireworks uses accounts/ prefix
+    if config.nvidia_nim.is_some() && lower.contains('/') && !lower.starts_with("accounts/")
+    // fireworks uses accounts/ prefix
     {
         return resolve_by_name("nvidia_nim", config);
     }

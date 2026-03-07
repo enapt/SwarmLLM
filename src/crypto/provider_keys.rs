@@ -74,9 +74,7 @@ fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, Swa
         .map_err(|e| SwarmError::Internal(format!("base64 decode: {e}")))?;
 
     if blob.len() < 12 {
-        return Err(SwarmError::Internal(
-            "encrypted key too short".to_string(),
-        ));
+        return Err(SwarmError::Internal("encrypted key too short".to_string()));
     }
 
     let sym_key = derive_encryption_key(signing_key_bytes);
@@ -314,7 +312,10 @@ mod tests {
         );
 
         let decrypted = decrypt_config(&encrypted, &signing_key).unwrap();
-        assert_eq!(decrypted.anthropic.as_ref().unwrap().api_key, "sk-ant-test123");
+        assert_eq!(
+            decrypted.anthropic.as_ref().unwrap().api_key,
+            "sk-ant-test123"
+        );
         assert_eq!(decrypted.openai.as_ref().unwrap().api_key, "sk-openai-test");
         assert_eq!(decrypted.custom[0].api_key, "tok-custom");
     }

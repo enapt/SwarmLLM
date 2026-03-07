@@ -485,7 +485,7 @@ mod tests {
             ..Default::default()
         };
         let mut ctx = SamplingContext::new(logits.len());
-        let (token, lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
+        let (token, _lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
         assert_eq!(token, 1); // index of 5.0 (highest)
                               // Greedy path: logprobs come from probs buffer which isn't populated by argmax.
                               // For greedy, logprobs may be None because the softmax probs aren't computed.

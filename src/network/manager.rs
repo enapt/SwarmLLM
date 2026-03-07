@@ -1459,7 +1459,7 @@ impl NetworkManager {
                                 .map(|(i, part)| {
                                     if i == 1 {
                                         // Replace the IP portion
-                                        let rest = part.splitn(2, '/').nth(1).unwrap_or("");
+                                        let rest = part.split_once('/').map(|x| x.1).unwrap_or("");
                                         format!("127.0.0.1/{rest}")
                                     } else {
                                         part.to_string()

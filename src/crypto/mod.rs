@@ -6,5 +6,5 @@ pub mod session;
 
 pub use gossip_seal::GossipSealer;
 pub use pipeline_seal::{open_prompt, seal_prompt, SealedPrompt};
-pub use provider_keys::{decrypt_config, encrypt_config, validate_api_key, scrub_api_keys};
+pub use provider_keys::{decrypt_config, encrypt_config, scrub_api_keys, validate_api_key};
 pub use session::SessionManager;

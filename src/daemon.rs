@@ -537,16 +537,14 @@ impl SharedState {
                     .ok()
                     .flatten();
                 match stored {
-                    Some(cfg) => {
-                        crate::crypto::decrypt_config(&cfg, &signing_key_bytes)
-                            .unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to decrypt stored provider keys, using config file"
-                                );
-                                config.providers.clone()
-                            })
-                    }
+                    Some(cfg) => crate::crypto::decrypt_config(&cfg, &signing_key_bytes)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to decrypt stored provider keys, using config file"
+                            );
+                            config.providers.clone()
+                        }),
                     None => config.providers.clone(),
                 }
             }),

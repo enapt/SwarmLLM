@@ -2822,12 +2822,11 @@ pub async fn join_network(
     let addr_str = crate::network::discovery::decode_network_code(&body.code).map_err(ApiError)?;
 
     // Validate the multiaddr
-    let _addr: libp2p::Multiaddr =
-        addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
-            ApiError(crate::error::SwarmError::Network(format!(
-                "Invalid address: {e}"
-            )))
-        })?;
+    let _addr: libp2p::Multiaddr = addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
+        ApiError(crate::error::SwarmError::Network(format!(
+            "Invalid address: {e}"
+        )))
+    })?;
 
     tracing::info!(addr = %addr_str, "Joining network via invite code");
 
@@ -2841,9 +2840,7 @@ pub async fn join_network(
     // Dial immediately if network manager is available
     if let Some(ref tx) = state.network_tx {
         let _ = tx
-            .send(crate::types::NetworkCommand::DialAddress(
-                addr_str.clone(),
-            ))
+            .send(crate::types::NetworkCommand::DialAddress(addr_str.clone()))
             .await;
     }
 
@@ -3709,22 +3706,51 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
 
     let candidates: &[(&str, Option<&crate::config::ProviderEntry>, &str)] = &[
         ("openai", config.openai.as_ref(), "gpt-4o-mini"),
-        ("anthropic", config.anthropic.as_ref(), "claude-haiku-4-5-20251001"),
+        (
+            "anthropic",
+            config.anthropic.as_ref(),
+            "claude-haiku-4-5-20251001",
+        ),
         ("deepseek", config.deepseek.as_ref(), "deepseek-chat"),
         ("mistral", config.mistral.as_ref(), "mistral-small-latest"),
         ("groq", config.groq.as_ref(), "llama-3.1-8b-instant"),
-        ("nvidia_nim", config.nvidia_nim.as_ref(), "meta/llama-3.1-8b-instruct"),
+        (
+            "nvidia_nim",
+            config.nvidia_nim.as_ref(),
+            "meta/llama-3.1-8b-instruct",
+        ),
         ("cerebras", config.cerebras.as_ref(), "llama-3.3-70b"),
-        ("sambanova", config.sambanova.as_ref(), "Meta-Llama-3.1-8B-Instruct"),
-        ("fireworks", config.fireworks.as_ref(), "accounts/fireworks/models/llama-v3p1-8b-instruct"),
-        ("together", config.together.as_ref(), "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"),
-        ("deepinfra", config.deepinfra.as_ref(), "meta-llama/Meta-Llama-3.1-8B-Instruct"),
+        (
+            "sambanova",
+            config.sambanova.as_ref(),
+            "Meta-Llama-3.1-8B-Instruct",
+        ),
+        (
+            "fireworks",
+            config.fireworks.as_ref(),
+            "accounts/fireworks/models/llama-v3p1-8b-instruct",
+        ),
+        (
+            "together",
+            config.together.as_ref(),
+            "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+        ),
+        (
+            "deepinfra",
+            config.deepinfra.as_ref(),
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        ),
     ];
 
     for &(name, ref entry, test_model) in candidates {
         if let Some(e) = entry {
             if let Some(base) = crate::api::providers::provider_base_url(name) {
-                probes.push((name, base.to_string(), e.api_key.clone(), test_model.to_string()));
+                probes.push((
+                    name,
+                    base.to_string(),
+                    e.api_key.clone(),
+                    test_model.to_string(),
+                ));
             }
         }
     }
@@ -3737,86 +3763,98 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let probes_futures = probes.into_iter().map(|(name, base_url, api_key, test_model)| {
-        let client = client.clone();
-        async move {
-            let url = if name == "anthropic" {
-                format!("{}/messages", base_url)
-            } else {
-                format!("{}/chat/completions", base_url)
-            };
+    let probes_futures = probes
+        .into_iter()
+        .map(|(name, base_url, api_key, test_model)| {
+            let client = client.clone();
+            async move {
+                let url = if name == "anthropic" {
+                    format!("{}/messages", base_url)
+                } else {
+                    format!("{}/chat/completions", base_url)
+                };
 
-            let body = if name == "anthropic" {
-                serde_json::json!({
-                    "model": test_model,
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}]
-                })
-            } else {
-                serde_json::json!({
-                    "model": test_model,
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "stream": false
-                })
-            };
-
-            let start = std::time::Instant::now();
-            let result = if name == "anthropic" {
-                client.post(&url)
-                    .header("x-api-key", &api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .json(&body).send().await
-            } else {
-                client.post(&url)
-                    .header("authorization", format!("Bearer {}", api_key))
-                    .header("content-type", "application/json")
-                    .json(&body).send().await
-            };
-            let latency_ms = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(resp) => {
-                    let status_code = resp.status().as_u16();
-                    let (status, detail) = if resp.status().is_success() {
-                        ("up".to_string(), String::new())
-                    } else if status_code == 401 || status_code == 403 {
-                        ("auth_error".to_string(), "Invalid API key".to_string())
-                    } else if status_code == 429 {
-                        ("rate_limited".to_string(), "Rate limited".to_string())
-                    } else if status_code == 503 || status_code == 502 {
-                        ("overloaded".to_string(), "Service overloaded".to_string())
-                    } else {
-                        let body_text = resp.text().await.unwrap_or_default();
-                        let short = if body_text.len() > 100 { body_text[..100].to_string() } else { body_text };
-                        (format!("error_{}", status_code), short)
-                    };
+                let body = if name == "anthropic" {
                     serde_json::json!({
-                        "provider": name,
-                        "status": status,
-                        "latency_ms": latency_ms,
-                        "detail": detail,
+                        "model": test_model,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}]
                     })
-                }
-                Err(e) => {
-                    let status = if e.is_timeout() {
-                        "timeout"
-                    } else if e.is_connect() {
-                        "unreachable"
-                    } else {
-                        "error"
-                    };
+                } else {
                     serde_json::json!({
-                        "provider": name,
-                        "status": status,
-                        "latency_ms": latency_ms,
-                        "detail": e.to_string(),
+                        "model": test_model,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "stream": false
                     })
+                };
+
+                let start = std::time::Instant::now();
+                let result = if name == "anthropic" {
+                    client
+                        .post(&url)
+                        .header("x-api-key", &api_key)
+                        .header("anthropic-version", "2023-06-01")
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                } else {
+                    client
+                        .post(&url)
+                        .header("authorization", format!("Bearer {}", api_key))
+                        .header("content-type", "application/json")
+                        .json(&body)
+                        .send()
+                        .await
+                };
+                let latency_ms = start.elapsed().as_millis() as u64;
+
+                match result {
+                    Ok(resp) => {
+                        let status_code = resp.status().as_u16();
+                        let (status, detail) = if resp.status().is_success() {
+                            ("up".to_string(), String::new())
+                        } else if status_code == 401 || status_code == 403 {
+                            ("auth_error".to_string(), "Invalid API key".to_string())
+                        } else if status_code == 429 {
+                            ("rate_limited".to_string(), "Rate limited".to_string())
+                        } else if status_code == 503 || status_code == 502 {
+                            ("overloaded".to_string(), "Service overloaded".to_string())
+                        } else {
+                            let body_text = resp.text().await.unwrap_or_default();
+                            let short = if body_text.len() > 100 {
+                                body_text[..100].to_string()
+                            } else {
+                                body_text
+                            };
+                            (format!("error_{}", status_code), short)
+                        };
+                        serde_json::json!({
+                            "provider": name,
+                            "status": status,
+                            "latency_ms": latency_ms,
+                            "detail": detail,
+                        })
+                    }
+                    Err(e) => {
+                        let status = if e.is_timeout() {
+                            "timeout"
+                        } else if e.is_connect() {
+                            "unreachable"
+                        } else {
+                            "error"
+                        };
+                        serde_json::json!({
+                            "provider": name,
+                            "status": status,
+                            "latency_ms": latency_ms,
+                            "detail": e.to_string(),
+                        })
+                    }
                 }
             }
-        }
-    });
+        });
 
     let results = futures::future::join_all(probes_futures).await;
     Json(serde_json::json!({ "providers": results }))
@@ -3875,10 +3913,13 @@ pub async fn provider_model_status(
                 "stream": false
             });
             let start = std::time::Instant::now();
-            let result = client.post(&url)
+            let result = client
+                .post(&url)
                 .header("authorization", format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
-                .json(&body).send().await;
+                .json(&body)
+                .send()
+                .await;
             let latency_ms = start.elapsed().as_millis() as u64;
 
             match result {

@@ -155,9 +155,12 @@ impl IntoResponse for ApiError {
                 "server_error",
             ),
             SwarmError::ProviderError { status, ref body } => {
-                let http_status = StatusCode::from_u16(*status)
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
-                (http_status, format!("Provider error: {body}"), "server_error")
+                let http_status = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+                (
+                    http_status,
+                    format!("Provider error: {body}"),
+                    "server_error",
+                )
             }
             SwarmError::Internal(ref msg) if msg.contains("Unsupported") => (
                 StatusCode::BAD_REQUEST,

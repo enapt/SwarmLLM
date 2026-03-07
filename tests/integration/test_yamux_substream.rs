@@ -540,21 +540,18 @@ async fn run_full_behaviour_exchanges(
                         }
                     }
                     event = swarm2.select_next_some() => {
-                        match event {
-                            SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
+                        if let SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
                                 request_response::Event::Message {
                                     peer,
                                     message: request_response::Message::Request { request, channel, .. },
                                     ..
                                 },
-                            )) => {
+                            )) = event {
                                 let resp = RawResponse(request.0);
                                 if let Err(e) = swarm2.behaviour_mut().request_response.send_response(channel, resp) {
                                     return Err(format!("send_response failed on round {}: {:?}", i + 1, e));
                                 }
                                 eprintln!("  [round {}] swarm2 received+echoed from {:?}", i + 1, &peer.to_string()[..8]);
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -893,20 +890,17 @@ async fn test_full_behaviour_channel_driven() {
                 }
                 // Swarm2 events
                 event = swarm2.select_next_some() => {
-                    match event {
-                        SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
+                    if let SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
                             request_response::Event::Message {
                                 message: request_response::Message::Request { request, channel, .. },
                                 ..
                             },
-                        )) => {
+                        )) = event {
                             // Simulate compute: sleep 100ms then echo
                             let resp = RawResponse(request.0);
                             if swarm2.behaviour_mut().request_response.send_response(channel, resp).is_err() {
                                 eprintln!("  [swarm2] send_response failed");
                             }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -1028,13 +1022,12 @@ async fn test_full_behaviour_cpu_blocking_responder() {
                         }
                     }
                     event = swarm2.select_next_some() => {
-                        match event {
-                            SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
+                        if let SwarmEvent::Behaviour(FullBehaviourEvent::RequestResponse(
                                 request_response::Event::Message {
                                     message: request_response::Message::Request { request, channel, .. },
                                     ..
                                 },
-                            )) => {
+                            )) = event {
                                 // SIMULATE: CPU-blocking model forward (700ms)
                                 // This blocks the Tokio worker thread, exactly like
                                 // split_model.forward() does in production.
@@ -1045,8 +1038,6 @@ async fn test_full_behaviour_cpu_blocking_responder() {
                                     return Err("send_response failed".to_string());
                                 }
                                 eprintln!("  [round {}] swarm2: response sent after blocking", i + 1);
-                            }
-                            _ => {}
                         }
                     }
                 }
