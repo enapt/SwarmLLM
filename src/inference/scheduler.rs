@@ -468,19 +468,17 @@ impl PipelineScheduler {
                     continue;
                 }
 
-                // Must be a LAN peer (low latency for AllReduce)
-                let is_lan = self
+                // Must be a LAN peer with low latency for AllReduce.
+                // Accept peers that are either mDNS-discovered (is_lan_peer) or
+                // have measured RTT ≤ 10ms (auto-detected via rr_ping).
+                let (is_lan, measured_latency) = self
                     .shared_state
                     .peer_registry
                     .get(&candidate.node_id)
-                    .map(|p| p.is_lan_peer)
-                    .unwrap_or(false);
-                if !is_lan {
-                    continue;
-                }
-
-                // Latency must be under 10ms for effective TP
-                if candidate.latency_ms > 10 {
+                    .map(|p| (p.is_lan_peer, p.latency_ms))
+                    .unwrap_or((false, None));
+                let low_latency = measured_latency.is_some_and(|ms| ms <= 10);
+                if !is_lan && !low_latency {
                     continue;
                 }
 
@@ -1011,6 +1009,63 @@ mod tests {
         // Should have segments but NO TP groups (WAN peer)
         assert_eq!(assignment.segments.len(), 1);
         assert!(assignment.tp_groups.is_empty());
+    }
+
+    #[test]
+    fn tp_group_from_low_latency_only() {
+        // TP group should form when peer has low measured latency
+        // but was NOT discovered via mDNS (is_lan_peer = false).
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_b = NodeId([22u8; 32]);
+
+        let shards = vec![ShardInfo {
+            index: 0,
+            layer_range: (0, 32),
+            size_bytes: 4_000_000_000,
+            hash: [0u8; 32],
+            tensors: vec![],
+        }];
+        let manifest = make_manifest("latency-tp-model", 32, shards);
+        state.model_registry.register_manifest(manifest);
+
+        let shard_id = ShardId {
+            model_id: ModelId("latency-tp-model".into()),
+            index: 0,
+        };
+        state
+            .model_registry
+            .record_shard_holder(shard_id.clone(), local_id.clone());
+        state
+            .model_registry
+            .record_shard_holder(shard_id, node_b.clone());
+
+        // Node B: NOT mDNS discovered, but has measured 2ms latency
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(2),
+                trust_score: 0.9,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("latency-tp-model".into()), &local_id)
+            .unwrap();
+
+        // Should form TP group based on low latency alone
+        assert_eq!(assignment.tp_groups.len(), 1);
+        assert_eq!(assignment.tp_groups[0].nodes.len(), 2);
     }
 
     #[test]

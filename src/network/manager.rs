@@ -59,6 +59,10 @@ pub struct NetworkManager {
     /// not all listen_addrs (which causes redundant connections to the same peer on
     /// different addresses, leading to request_response round-robin routing failures).
     connection_addrs: HashMap<libp2p::swarm::ConnectionId, Multiaddr>,
+    /// Tracks rr_ping send times per OutboundRequestId for RTT measurement.
+    /// When the PEX response arrives, RTT is calculated and stored as `latency_ms`
+    /// on the peer's PeerInfo, enabling tensor-parallelism group detection.
+    ping_sent_times: HashMap<OutboundRequestId, (libp2p::PeerId, std::time::Instant)>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -162,6 +166,7 @@ impl NetworkManager {
             pending_tensor_outbound: HashMap::new(),
             pending_tensor_channels: HashMap::new(),
             connection_addrs: HashMap::new(),
+            ping_sent_times: HashMap::new(),
             shutdown_rx,
         })
     }
@@ -289,6 +294,10 @@ impl NetworkManager {
                             "Skipping health ping — tensor forwards pending"
                         );
                     } else {
+                        // Clean up stale ping_sent_times (>30s old, response never arrived)
+                        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                        self.ping_sent_times.retain(|_, (_, sent_at)| *sent_at > cutoff);
+
                         let peers: Vec<libp2p::PeerId> = self.swarm.connected_peers().cloned().collect();
                         if !peers.is_empty() {
                             rr_ping_seq += 1;
@@ -296,6 +305,7 @@ impl NetworkManager {
                                 let rr_connected = self.swarm.behaviour().request_response.is_connected(peer_id);
                                 let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
                                 let outbound_id = self.swarm.behaviour_mut().request_response.send_request(peer_id, req);
+                                self.ping_sent_times.insert(outbound_id, (*peer_id, std::time::Instant::now()));
                                 tracing::info!(
                                     %peer_id,
                                     ?outbound_id,
@@ -968,10 +978,14 @@ impl NetworkManager {
                 // Layer 5: Peer Exchange — send PEX request on first connection only
                 if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
                     let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
-                    self.swarm
+                    let outbound_id = self
+                        .swarm
                         .behaviour_mut()
                         .request_response
                         .send_request(&peer_id, req);
+                    // Track send time for RTT measurement
+                    self.ping_sent_times
+                        .insert(outbound_id, (peer_id, std::time::Instant::now()));
                     tracing::debug!(%peer_id, "Sent PEX request");
                 }
             }
@@ -1240,6 +1254,36 @@ impl NetworkManager {
             SwarmResponse::Message(msg) => {
                 // Handle PEX response inline
                 if let SwarmMessage::PeerExchangeResponse(ref pex_resp) = *msg {
+                    // Measure RTT from rr_ping send time
+                    if let Some((_sent_peer, sent_at)) = self.ping_sent_times.remove(&request_id) {
+                        let rtt_ms = sent_at.elapsed().as_millis() as u32;
+                        if let Some(node_id) = self.peer_to_node.get(&peer) {
+                            if let Some(mut peer_info) =
+                                self.shared_state.peer_registry.get_mut(&*node_id)
+                            {
+                                peer_info.latency_ms = Some(rtt_ms);
+                                // Auto-detect LAN peer from low latency (< 5ms)
+                                if rtt_ms < 5 && !peer_info.is_lan_peer {
+                                    peer_info.is_lan_peer = true;
+                                    drop(peer_info);
+                                    let count = self
+                                        .shared_state
+                                        .lan_peer_count
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                        + 1;
+                                    let _ = self.shared_state.lan_discovery_tx.send(count as u32);
+                                    tracing::info!(
+                                        %peer,
+                                        rtt_ms,
+                                        lan_peers = count,
+                                        "Low-latency peer auto-detected as LAN"
+                                    );
+                                } else {
+                                    tracing::debug!(%peer, rtt_ms, "Peer RTT measured");
+                                }
+                            }
+                        }
+                    }
                     tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response");
                     self.handle_pex_response(&pex_resp.peers);
                     return;
