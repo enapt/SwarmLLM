@@ -122,11 +122,11 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 │    Loads on startup → fastest reconnect path                │
 │    File: src/network/peer_cache.rs                          │
 │                                                             │
-│  Layer 3: Network Invite Codes                               │
-│    Format: swarm://<base64url_encoded_multiaddr>            │
+│  Layer 3: Encrypted Network Invite Codes                      │
+│    Format: swarm://<base64url(key‖nonce‖encrypted_addr)>   │
+│    Encryption: ChaCha20Poly1305 (IP not visible in code)    │
 │    API: GET /api/admin/network-code                         │
 │          POST /api/admin/join-network                       │
-│    UI auto-hides once 20+ peers known                       │
 │                                                             │
 │  Layer 4: Peer Exchange (PEX) + RTT Measurement              │
 │    On each ConnectionEstablished, exchange up to 20 known   │

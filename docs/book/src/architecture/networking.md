@@ -27,7 +27,7 @@ SwarmLLM uses 5 independent discovery layers:
 
 1. **mDNS** — Discovers LAN peers in seconds. Config: `enable_mdns = true`
 2. **Persistent Peer Cache** — Saves up to 200 peers every 5 min + on shutdown. Fastest reconnect.
-3. **Invite Codes** — Format: `swarm://<base64url_encoded_multiaddr>`. UI auto-hides at 20+ peers.
+3. **Invite Codes** — Format: `swarm://<base64url(key‖nonce‖encrypted_multiaddr)>`. Encrypted with ChaCha20Poly1305.
 4. **Peer Exchange (PEX)** — On each connection, exchanges up to 20 known peers.
 5. **Kademlia DHT** — Bootstrap flag + periodic re-bootstrap every 60s.
 

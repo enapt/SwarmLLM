@@ -12,12 +12,12 @@ SwarmLLM finds peers automatically:
 
 ## Invite Codes (Easiest)
 
-1. In the Dashboard, find the **"Your Network Code"** section
-2. Share the code with a friend
+1. In the Dashboard, click **"Share Network Code"**
+2. Copy the encrypted code and share it with a friend
 3. They paste it into the **"Join Network"** field and click **Join**
-4. Both nodes connect and start discovering the wider network
+4. Both nodes connect immediately and start discovering the wider network
 
-> The invite panel auto-hides once your node knows 20+ peers.
+> Invite codes are encrypted (ChaCha20Poly1305) — your IP address is not visible in the code itself. Anyone with the full code can decode it, but the IP can't be extracted by casual inspection.
 
 ## Manual Bootstrap
 
@@ -44,6 +44,6 @@ Only nodes with the same `gossip_network_id` can communicate.
 
 ## Firewall
 
-SwarmLLM needs **UDP port 8800** open. If you're behind a router, either:
+SwarmLLM needs **TCP port 8810** (P2P) and optionally **UDP port 8800** (QUIC) open. If you're behind a router, either:
 - Set up port forwarding (UDP 8800 to your machine's local IP)
 - Rely on SwarmLLM's built-in relay (works automatically in most cases)

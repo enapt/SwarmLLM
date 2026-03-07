@@ -97,10 +97,10 @@ Cancel an in-progress download.
 ## Discovery
 
 ### GET /api/admin/network-code
-Get a shareable invite code and multiaddr.
+Get an encrypted shareable invite code and network phase. The code embeds the node's TCP listening address encrypted with ChaCha20Poly1305 — the IP is not visible in the code.
 
 ### POST /api/admin/join-network
-Join the network via invite code or multiaddr.
+Join the network via encrypted invite code (`swarm://...`) or raw multiaddr. Immediately dials the peer and saves the address to the peer cache.
 
 ## Authentication
 
