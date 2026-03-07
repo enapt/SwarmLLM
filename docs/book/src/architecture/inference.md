@@ -34,13 +34,20 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 
 ## Architecture Detection
 
-The SplitModel loader reads `general.architecture` from GGUF metadata:
+The SplitModel loader reads `general.architecture` from GGUF metadata and applies per-architecture handling:
 
-| Feature | Llama | Qwen2 |
-|---|---|---|
-| RoPE variant | Interleaved (`rope_i`) | Contiguous (`rope`) |
-| QKV biases | None | Present (broadcast_add) |
-| Context length | 4096 default | 32768 from metadata |
+| Architecture | RoPE | QKV Biases | Special Handling |
+|---|---|---|---|
+| **Llama** | Interleaved | No | Default EOS=2 |
+| **Llama 4** | iRoPE (NoPE every 4th) | No | MoE FFN |
+| **Qwen2** | Contiguous | Yes | EOS 151643+151645 |
+| **Qwen 3.5** | Contiguous | No | Hybrid SSM+attention (Gated Delta Networks) |
+| **Gemma/Gemma2** | Interleaved | No | Embedding scaling (sqrt(d)), Gemma RmsNorm (+1), EOS 107, attention + final logit softcapping, Gemma chat template fallback |
+| **Phi-3** | Su/YaRN | Yes | Fused QKV/FFN tensors |
+| **Mistral** | Interleaved | No | GQA |
+| **DeepSeek-V2/V3** | Contiguous | No | MLA attention + MoE FFN |
+| **GLM-4** | Contiguous | No | Partial RoPE, extreme GQA (16:1) |
+| **Starcoder2** | Interleaved | Yes | Code-optimized |
 
 ## KV-Cache Management
 

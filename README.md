@@ -83,9 +83,9 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ### Inference
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, ~130ms per-token pipeline latency over TCP. Candle-based direct tensor computation with E2E encryption
-- **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
+- **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
-- **Cloud Fallback (Optional)** — Optionally route to 11 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra) as a fallback. The swarm is the primary way to run models for free
+- **Cloud Fallback (Optional)** — Optionally route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi) as a fallback. The swarm is the primary way to run models for free
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
 - **MCP Server** — Native Model Context Protocol server for AI agent frameworks (Claude Code, Cursor, custom agents). Tools: `chat`, `models`. Resources: `swarmllm://status`
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
@@ -181,7 +181,7 @@ SwarmLLM supports 11 transformer architectures via native candle inference with 
 | **Qwen 3.5** | Qwen3.5-3B/14B/32B | Hybrid SSM+attention (Gated Delta Networks) |
 | **DeepSeek-V2/V3** | DeepSeek-V2-Lite, DeepSeek-V3 (671B) | MLA attention + MoE FFN |
 | **GLM-4** | GLM-4-9B, GLM-4.7 MoE | Partial RoPE, extreme GQA (16:1) |
-| **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Contiguous RoPE |
+| **Gemma/Gemma2** | Gemma 2B/7B, Gemma2 9B/27B | Gemma RmsNorm (+1), embedding scaling (sqrt(d)), attention + final logit softcapping |
 | **Phi-3** | Phi-3-mini, Phi-3-medium | Su/YaRN RoPE, biases |
 | **Mistral** | Mistral 7B, Mistral Nemo | GQA, interleaved RoPE |
 | **Starcoder2** | Starcoder2 3B/7B/15B | Code-optimized, biases |
@@ -269,7 +269,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
-| `[providers]` | `openai_api_key`, `anthropic_api_key`, `deepseek_api_key`, `mistral_api_key`, `groq_api_key`, custom providers |
+| `[providers]` | `openai_api_key`, `anthropic_api_key`, `deepseek_api_key`, `mistral_api_key`, `groq_api_key`, `moonshot_api_key`, custom providers |
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start`, `theme` |
 
@@ -312,11 +312,11 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **Parallelism** | Pipeline + tensor (LAN) | Pipeline | Tensor + pipeline | Subnet routing |
 | **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5) | 4 | 6+ | Any |
 | **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
-| **Cloud Fallback** | 11 providers (optional) | No | No | No |
+| **Cloud Fallback** | 12 providers (optional) | No | No | No |
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 628 tests | Limited | Limited | Varies |
+| **Test Suite** | 643 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 

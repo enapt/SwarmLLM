@@ -17,7 +17,7 @@ SwarmLLM is a single Rust binary that turns your computer into a node in a distr
 - **MCP Server** — Native Model Context Protocol support for AI agent frameworks (Claude Code, Cursor, etc.)
 - **Multi-SDK** — Python, JavaScript/TypeScript, LangChain, and LlamaIndex integrations.
 - **Web Dashboard** — Built-in swarm-first UI with chat interface, model browser, and network map.
-- **Cloud Fallback** — Optionally route to 11 cloud providers when no swarm peers have the model you need.
+- **Cloud Fallback** — Optionally route to 12 cloud providers (incl. Moonshot/Kimi) when no swarm peers have the model you need.
 
 ## How It Works
 
