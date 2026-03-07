@@ -506,7 +506,7 @@ impl AutoShardManager {
                 let peers = self.shared_state.peer_registry.len();
                 if holder_count == 0 && peers > 0 && !in_configured_range {
                     let node_count = (peers + 1) as u32; // include self
-                    // Use hash to assign this shard to a specific node slot
+                                                         // Use hash to assign this shard to a specific node slot
                     let mut hasher = blake3::Hasher::new();
                     hasher.update(manifest.id.0.as_bytes());
                     hasher.update(&shard.index.to_le_bytes());
@@ -621,7 +621,11 @@ impl AutoShardManager {
                 if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
                     let holder_count = mmproj_holders.len();
                     // mmproj gets a high priority bonus — every VLM node benefits from having it
-                    let rarity_bonus = if holder_count == 0 { 10.0 } else { 3.0 / (holder_count as f64 + 1.0) };
+                    let rarity_bonus = if holder_count == 0 {
+                        10.0
+                    } else {
+                        3.0 / (holder_count as f64 + 1.0)
+                    };
                     let mmproj_score = model_popularity * rarity_bonus * vram_fitness * 5.0; // 5x bonus for mmproj
 
                     candidates.push(ShardCandidate {
@@ -1351,13 +1355,12 @@ impl AutoShardManager {
                         .record_shard_holder(sid.clone(), node_id.clone());
 
                     // Broadcast shard announce so peers know we hold mmproj
-                    let announce = crate::types::SwarmMessage::ShardAnnounce(
-                        crate::types::ShardAnnounce {
+                    let announce =
+                        crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
                             node_id,
                             shards: vec![sid],
                             timestamp: chrono::Utc::now(),
-                        },
-                    );
+                        });
                     let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
 
                     // Notify dashboard
@@ -1616,11 +1619,8 @@ impl AutoShardManager {
                         let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
                         let mmproj_holder_count = mmproj_holders.len();
                         if mmproj_holder_count > mmproj_min as usize && pressure_urgent {
-                            let mmproj_size = manifest
-                                .mmproj
-                                .as_ref()
-                                .map(|m| m.size_bytes)
-                                .unwrap_or(0);
+                            let mmproj_size =
+                                manifest.mmproj.as_ref().map(|m| m.size_bytes).unwrap_or(0);
                             prune_candidates.push(PruneCandidate {
                                 model_id: manifest.id.clone(),
                                 model_name: manifest.name.clone(),
@@ -2054,7 +2054,11 @@ impl AutoShardManager {
 
 /// Estimate VRAM for a segment (layer range) by scaling the full-model estimate
 /// by the fraction of layers covered.
-fn estimate_segment_vram_mb(manifest: &crate::types::ModelManifest, layer_start: usize, layer_end: usize) -> u64 {
+fn estimate_segment_vram_mb(
+    manifest: &crate::types::ModelManifest,
+    layer_start: usize,
+    layer_end: usize,
+) -> u64 {
     let total_layers = manifest.num_layers as usize;
     if total_layers == 0 {
         return estimate_model_vram_mb(manifest.total_size_bytes);
@@ -2066,7 +2070,11 @@ fn estimate_segment_vram_mb(manifest: &crate::types::ModelManifest, layer_start:
 
 /// Compute the VRAM budget from SharedState for passing to `check_and_load_model`.
 pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
-    let gpu_total = shared.gpu_info.as_ref().map(|g| g.vram_total_mb).unwrap_or(0);
+    let gpu_total = shared
+        .gpu_info
+        .as_ref()
+        .map(|g| g.vram_total_mb)
+        .unwrap_or(0);
     shared.config.resources.inference_vram_budget_mb(gpu_total)
 }
 
@@ -2198,7 +2206,11 @@ pub async fn check_and_load_model(
         // VRAM budget pre-check: skip loading if budget is full (shards stay on disk for P2P)
         if let Some(budget) = vram_budget_mb {
             let estimated = estimate_segment_vram_mb(&manifest, layer_start, layer_end);
-            let total_loaded: u64 = shared.split_models.iter().map(|e| e.value().estimated_vram_mb).sum();
+            let total_loaded: u64 = shared
+                .split_models
+                .iter()
+                .map(|e| e.value().estimated_vram_mb)
+                .sum();
             if total_loaded + estimated > budget {
                 // Try LRU eviction first
                 crate::inference::split::evict_split_models_lru(
@@ -2207,7 +2219,11 @@ pub async fn check_and_load_model(
                     budget,
                     estimated,
                 );
-                let total_after: u64 = shared.split_models.iter().map(|e| e.value().estimated_vram_mb).sum();
+                let total_after: u64 = shared
+                    .split_models
+                    .iter()
+                    .map(|e| e.value().estimated_vram_mb)
+                    .sum();
                 if total_after + estimated > budget {
                     tracing::info!(
                         model = %model_id,
@@ -2300,9 +2316,8 @@ pub async fn check_and_load_model(
                 let eos_token = split_model.eos_token_str().to_string();
                 // VRAM-aware eviction before inserting new model
                 let max_batch = shared.config.inference.max_batch_size as usize;
-                let batch_timeout = std::time::Duration::from_millis(
-                    shared.config.inference.batch_timeout_ms,
-                );
+                let batch_timeout =
+                    std::time::Duration::from_millis(shared.config.inference.batch_timeout_ms);
                 let new_entry = if max_batch > 1 {
                     crate::inference::split::SplitModelEntry::new_with_batching(
                         split_model,
@@ -2314,8 +2329,8 @@ pub async fn check_and_load_model(
                     crate::inference::split::SplitModelEntry::new(split_model)
                 };
                 // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
-                let eviction_budget = vram_budget_mb
-                    .or(shared.config.inference.max_split_model_memory_mb);
+                let eviction_budget =
+                    vram_budget_mb.or(shared.config.inference.max_split_model_memory_mb);
                 if let Some(budget) = eviction_budget {
                     crate::inference::split::evict_split_models_lru(
                         &shared.split_models,

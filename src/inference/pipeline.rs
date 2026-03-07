@@ -197,8 +197,7 @@ impl PipelineExecutor {
                 vm
             };
 
-            let embeddings =
-                tokio::task::block_in_place(|| vision_module.encode_images(&images))?;
+            let embeddings = tokio::task::block_in_place(|| vision_module.encode_images(&images))?;
             let compressed = self.compress_vision_embeddings(&embeddings)?;
 
             tracing::info!(
@@ -271,9 +270,9 @@ impl PipelineExecutor {
                 );
                 Ok(Some(resp.embeddings))
             }
-            Ok(Err(_)) => {
-                Err(SwarmError::Inference("Vision encode channel dropped".into()))
-            }
+            Ok(Err(_)) => Err(SwarmError::Inference(
+                "Vision encode channel dropped".into(),
+            )),
             Err(_) => {
                 self.shared_state
                     .pending_vision_results
@@ -330,8 +329,12 @@ impl PipelineExecutor {
             .chunks_exact(2)
             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect();
-        candle_core::Tensor::from_vec(f32_values, &[num_tokens, hidden_dim], &candle_core::Device::Cpu)
-            .map_err(|e| SwarmError::Inference(format!("Vision tensor from vec: {e}")))
+        candle_core::Tensor::from_vec(
+            f32_values,
+            &[num_tokens, hidden_dim],
+            &candle_core::Device::Cpu,
+        )
+        .map_err(|e| SwarmError::Inference(format!("Vision tensor from vec: {e}")))
     }
 
     /// Compress an ImageData to JPEG for wire transfer.
@@ -359,7 +362,10 @@ impl PipelineExecutor {
         let model_id = &self.request.model_id;
         let shard_store =
             crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-        let header_path = shard_store.models_dir().join(&model_id.0).join("gguf_header.bin");
+        let header_path = shard_store
+            .models_dir()
+            .join(&model_id.0)
+            .join("gguf_header.bin");
         if let Some((tmpl, bos, eos)) = template_from_header(&header_path) {
             let prompt = chat_template::build_prompt_with_model(
                 &self.request.messages,
@@ -549,26 +555,23 @@ impl PipelineExecutor {
         // T14: Pre-compute vision embeddings before the token generation loop.
         // This decouples vision encoding from the text pipeline — any node with
         // mmproj can encode, and the embeddings travel with LayerForward.
-        let precomputed_vision: Option<Vec<u8>> = if !crate::inference::vision::collect_images(
-            &self.request.messages,
-        )
-        .is_empty()
-        {
-            match self.precompute_vision_embeddings().await {
-                Ok(Some(bytes)) => Some(bytes),
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::warn!(
-                        request_id = %request_id,
-                        error = %e,
-                        "Vision pre-computation failed, proceeding without images"
-                    );
-                    None
+        let precomputed_vision: Option<Vec<u8>> =
+            if !crate::inference::vision::collect_images(&self.request.messages).is_empty() {
+                match self.precompute_vision_embeddings().await {
+                    Ok(Some(bytes)) => Some(bytes),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            error = %e,
+                            "Vision pre-computation failed, proceeding without images"
+                        );
+                        None
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // Token generation loop
         let mut prompt_bytes_opt = Some(prompt_bytes);
@@ -600,7 +603,13 @@ impl PipelineExecutor {
                 None
             };
             match self
-                .forward_through_segments(request_id, seq_num, index_pos, activations, vision_for_forward)
+                .forward_through_segments(
+                    request_id,
+                    seq_num,
+                    index_pos,
+                    activations,
+                    vision_for_forward,
+                )
                 .await
             {
                 Ok(result) => {
@@ -622,7 +631,8 @@ impl PipelineExecutor {
                         // tokens per image. The vision module produces
                         // (image_size/patch_size)^2 + 1 tokens per image. Look up the
                         // actual count from the cached vision module if available.
-                        let has_images = crate::inference::vision::has_images(&self.request.messages);
+                        let has_images =
+                            crate::inference::vision::has_images(&self.request.messages);
                         let vision_expand = if has_images {
                             let model_id = &self.assignment.segments[0].shard_id.model_id;
                             self.shared_state
@@ -630,8 +640,8 @@ impl PipelineExecutor {
                                 .get(model_id)
                                 .map(|vm| {
                                     let num_patches = vm.value().num_image_tokens();
-                                    let num_images: usize = self.request.messages.iter()
-                                        .map(|m| m.images.len()).sum();
+                                    let num_images: usize =
+                                        self.request.messages.iter().map(|m| m.images.len()).sum();
                                     // Each <image> token (1) is replaced by num_patches tokens
                                     num_patches * num_images - num_images
                                 })
@@ -662,7 +672,10 @@ impl PipelineExecutor {
                             accumulated_text.push_str(&text);
 
                             // Check if accumulated text contains a stop string
-                            if let Some(stop) = stop_strings.iter().find(|s| accumulated_text.contains(s.as_str())) {
+                            if let Some(stop) = stop_strings
+                                .iter()
+                                .find(|s| accumulated_text.contains(s.as_str()))
+                            {
                                 // Trim everything from the stop string onwards
                                 if let Some(pos) = accumulated_text.find(stop.as_str()) {
                                     let trimmed = accumulated_text[pos..].to_string();
@@ -905,11 +918,7 @@ impl PipelineExecutor {
             let decoder = if let Some(vocab) = model.vocab() {
                 let (byte_decoder, is_sentencepiece, has_tokenizer) =
                     if let Some(tokenizer) = model.tokenizer() {
-                        (
-                            tokenizer.byte_decoder(),
-                            tokenizer.is_sentencepiece(),
-                            true,
-                        )
+                        (tokenizer.byte_decoder(), tokenizer.is_sentencepiece(), true)
                     } else {
                         (HashMap::new(), false, false)
                     };
@@ -1099,11 +1108,7 @@ impl PipelineExecutor {
                 .metadata
                 .get("tokenizer.ggml.scores")
                 .and_then(|v| v.to_vec().ok())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.to_f32().ok())
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                 .unwrap_or_default();
             if !scores.is_empty() {
                 Some(crate::inference::split::SplitTokenizer::from_sentencepiece(
@@ -1204,7 +1209,11 @@ impl PipelineExecutor {
                         sequence_num,
                         index_pos,
                         &activations,
-                        if idx == 0 { precomputed_vision.as_deref() } else { None },
+                        if idx == 0 {
+                            precomputed_vision.as_deref()
+                        } else {
+                            None
+                        },
                     )
                     .await?;
                 tracing::debug!(
@@ -1298,7 +1307,15 @@ impl PipelineExecutor {
                 }
 
                 let num_layers = segment.layer_range.1 - segment.layer_range.0;
-                let result = Self::wait_for_result(rx, request_id, idx, &segment.node_id, num_layers, activations.len()).await;
+                let result = Self::wait_for_result(
+                    rx,
+                    request_id,
+                    idx,
+                    &segment.node_id,
+                    num_layers,
+                    activations.len(),
+                )
+                .await;
 
                 match result {
                     Ok(result) => {
@@ -1843,13 +1860,15 @@ impl PipelineExecutor {
                 let vision_mod = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
                     Some(vm.value().clone())
                 } else {
-                    let shard_store =
-                        crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+                    let shard_store = crate::model::shard::ShardStore::new(
+                        &self.shared_state.config.node.data_dir,
+                    );
                     let model_dir = shard_store.models_dir().join(&model_id.0);
                     let mmproj_path = model_dir.join("mmproj.gguf");
                     if mmproj_path.exists() {
                         let device = split_model.device().clone();
-                        match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device) {
+                        match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device)
+                        {
                             Ok(vm) => {
                                 let vm = std::sync::Arc::new(vm);
                                 self.shared_state
@@ -1870,7 +1889,8 @@ impl PipelineExecutor {
                 if let Some(vm) = vision_mod {
                     let owned_images: Vec<crate::types::ImageData> =
                         all_images.iter().map(|img| (*img).clone()).collect();
-                    let embeddings = tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
+                    let embeddings =
+                        tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
                     tracing::info!(
                         request_id = %self.request.id,
                         image_count = owned_images.len(),
@@ -1926,9 +1946,16 @@ impl PipelineExecutor {
                 if let Ok(logits_1d) = output.flatten_all() {
                     let logits_vec: Vec<f32> = logits_1d.to_vec1().unwrap_or_default();
                     if logits_vec.len() > 10 {
-                        let mut indexed: Vec<(usize, f32)> = logits_vec.iter().copied().enumerate().collect();
-                        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                        let top5: Vec<String> = indexed.iter().take(5).map(|(i, v)| format!("{i}:{v:.2}")).collect();
+                        let mut indexed: Vec<(usize, f32)> =
+                            logits_vec.iter().copied().enumerate().collect();
+                        indexed.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let top5: Vec<String> = indexed
+                            .iter()
+                            .take(5)
+                            .map(|(i, v)| format!("{i}:{v:.2}"))
+                            .collect();
                         tracing::info!(
                             request_id = %self.request.id,
                             top5 = %top5.join(", "),
@@ -2069,9 +2096,11 @@ impl PipelineExecutor {
                     activation_bytes,
                     "DIAG: segment TIMED OUT — no result received"
                 );
-                Err(SwarmError::PipelineError(
-                    format!("Timed out waiting for segment result ({}s, {} layers)", timeout.as_secs(), num_layers),
-                ))
+                Err(SwarmError::PipelineError(format!(
+                    "Timed out waiting for segment result ({}s, {} layers)",
+                    timeout.as_secs(),
+                    num_layers
+                )))
             }
         }
     }
@@ -2167,8 +2196,15 @@ impl PipelineExecutor {
                 // Wait for standby response via the oneshot channel
                 let failed_segment = &self.assignment.segments[failed_idx];
                 let num_layers = failed_segment.layer_range.1 - failed_segment.layer_range.0;
-                let result =
-                    Self::wait_for_result(rx, request_id, failed_idx, &backup.node_id, num_layers, activations.len()).await?;
+                let result = Self::wait_for_result(
+                    rx,
+                    request_id,
+                    failed_idx,
+                    &backup.node_id,
+                    num_layers,
+                    activations.len(),
+                )
+                .await?;
 
                 // Update the assignment so subsequent tokens use the standby
                 // directly, avoiding repeated failover + 30s timeout per token.

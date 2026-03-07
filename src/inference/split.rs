@@ -759,7 +759,9 @@ impl SplitTokenizer {
         let unk_id = tokens.iter().position(|t| t == "<unk>");
 
         // Detect byte_fallback: LLaMA-style models have <0xNN> tokens
-        let byte_fallback = tokens.iter().any(|t| t.starts_with("<0x") && t.ends_with('>'));
+        let byte_fallback = tokens
+            .iter()
+            .any(|t| t.starts_with("<0x") && t.ends_with('>'));
 
         let unigram = Unigram::from(vocab, unk_id, byte_fallback)
             .expect("Failed to build Unigram tokenizer from GGUF vocab");
@@ -787,15 +789,13 @@ impl SplitTokenizer {
     pub fn encode(&self, text: &str) -> Vec<i64> {
         match self {
             Self::Bpe(bpe) => bpe.encode(text),
-            Self::HfUnigram { inner, .. } => {
-                match inner.encode(text, false) {
-                    Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "HF tokenizer encode failed, falling back to bytes");
-                        text.bytes().map(|b| b as i64).collect()
-                    }
+            Self::HfUnigram { inner, .. } => match inner.encode(text, false) {
+                Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "HF tokenizer encode failed, falling back to bytes");
+                    text.bytes().map(|b| b as i64).collect()
                 }
-            }
+            },
         }
     }
 
@@ -952,9 +952,20 @@ impl ModelArch {
     /// List of GGUF architecture strings supported by the split inference engine.
     pub fn supported_list() -> &'static [&'static str] {
         &[
-            "llama", "qwen2", "qwen3", "qwen2moe", "gemma", "gemma2",
-            "phi3", "mistral", "starcoder2", "deepseek2", "glm4", "llama4",
-            "qwen35", "qwen35moe",
+            "llama",
+            "qwen2",
+            "qwen3",
+            "qwen2moe",
+            "gemma",
+            "gemma2",
+            "phi3",
+            "mistral",
+            "starcoder2",
+            "deepseek2",
+            "glm4",
+            "llama4",
+            "qwen35",
+            "qwen35moe",
         ]
     }
 
@@ -1887,10 +1898,8 @@ impl LayerWeights {
             v = v.broadcast_add(bv)?;
         }
 
-        let mut q = q
-            .reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
-        let mut k = k
-            .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
+        let mut q = q.reshape((b_sz, seq_len, self.n_head, self.head_dim))?;
+        let mut k = k.reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?;
         let v = v
             .reshape((b_sz, seq_len, self.n_kv_head, self.head_dim))?
             .transpose(1, 2)?
@@ -2186,7 +2195,15 @@ impl Qwen35AttnWeights {
 
         // Attention
         let y = run_attention(
-            &q, &k, &v, mask, self.n_head, self.n_kv_head, self.head_dim, &self.neg_inf, None,
+            &q,
+            &k,
+            &v,
+            mask,
+            self.n_head,
+            self.n_kv_head,
+            self.head_dim,
+            &self.neg_inf,
+            None,
         )?;
 
         // Apply output gate: sigmoid(gate + attn_gate_bias) * attn_output
@@ -2265,13 +2282,14 @@ impl DeltaNetWeights {
         let alpha = softplus(&(&alpha_base + &dt)?)?;
 
         // beta = sigmoid(ssm_beta)
-        let beta_base = self.ssm_beta.broadcast_as((b_sz, seq_len, q_dim + k_dim + v_dim))?;
+        let beta_base = self
+            .ssm_beta
+            .broadcast_as((b_sz, seq_len, q_dim + k_dim + v_dim))?;
         let beta = candle_nn::ops::sigmoid(&beta_base)?;
 
         // Run the delta net recurrent scan
-        let output = self.delta_net_scan(
-            &q, &k, &v, &alpha, &beta, ssm_state, b_sz, seq_len, device,
-        )?;
+        let output =
+            self.delta_net_scan(&q, &k, &v, &alpha, &beta, ssm_state, b_sz, seq_len, device)?;
 
         // output shape: [b, n_head, seq, value_head_dim]
         let out_dim = self.n_v_head * self.value_head_dim;
@@ -2332,7 +2350,8 @@ impl DeltaNetWeights {
 
             let full_input = Tensor::cat(&[&new_state.narrow(2, 0, pad)?, &x_t], 2)?;
             let kernel = self.ssm_conv1d.reshape((channels, kernel_size))?;
-            let conv_out = (&full_input * &kernel.unsqueeze(0)?.broadcast_as(full_input.shape())?)?
+            let conv_out = (&full_input
+                * &kernel.unsqueeze(0)?.broadcast_as(full_input.shape())?)?
                 .sum(2)?
                 .unsqueeze(1)?; // [b, 1, channels]
             let conv_out = candle_nn::ops::silu(&conv_out)?;
@@ -2376,9 +2395,9 @@ impl DeltaNetWeights {
     #[allow(clippy::too_many_arguments)]
     fn delta_net_scan(
         &self,
-        q: &Tensor,   // [b, n_head, seq, key_head_dim]
-        k: &Tensor,   // [b, n_kv_head, seq, key_head_dim]
-        v: &Tensor,   // [b, n_v_head, seq, value_head_dim]
+        q: &Tensor, // [b, n_head, seq, key_head_dim]
+        k: &Tensor, // [b, n_kv_head, seq, key_head_dim]
+        v: &Tensor, // [b, n_v_head, seq, value_head_dim]
         _alpha: &Tensor,
         _beta: &Tensor,
         ssm_state: &mut Option<SsmState>,
@@ -3694,14 +3713,14 @@ impl SplitModel {
                 // Load norms (shared by both layer types)
                 let attn_norm = ct
                     .tensor(&mut file, &format!("{prefix}.attn_norm.weight"), &device)
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("{prefix}.attn_norm: {e}"))
-                    })?;
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
                 let post_attn_norm = ct
-                    .tensor(&mut file, &format!("{prefix}.attn_post_norm.weight"), &device)
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("{prefix}.attn_post_norm: {e}"))
-                    })?;
+                    .tensor(
+                        &mut file,
+                        &format!("{prefix}.attn_post_norm.weight"),
+                        &device,
+                    )
+                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_post_norm: {e}")))?;
 
                 // Load FFN (dense or MoE)
                 let ffn = if is_moe
@@ -3712,24 +3731,28 @@ impl SplitModel {
                     // MoE FFN
                     let gate_inp = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
                     let gate_exps = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_gate_exps.weight"), &device)
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_gate_exps.weight"),
+                            &device,
+                        )
                         .map_err(|e| {
                             SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
                         })?;
                     let down_exps = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_down_exps.weight"), &device)
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_down_exps.weight"),
+                            &device,
+                        )
                         .map_err(|e| {
                             SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
                         })?;
                     let up_exps = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
 
                     let _n_experts = ct
                         .metadata
@@ -3744,11 +3767,19 @@ impl SplitModel {
 
                     // Shared experts (optional for MoE)
                     let shared_gate = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_gate_shexp.weight"), &device)
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_gate_shexp.weight"),
+                            &device,
+                        )
                         .ok()
                         .map(|t| QMatMul::from_qtensor(t).unwrap());
                     let shared_down = ct
-                        .tensor(&mut file, &format!("{prefix}.ffn_down_shexp.weight"), &device)
+                        .tensor(
+                            &mut file,
+                            &format!("{prefix}.ffn_down_shexp.weight"),
+                            &device,
+                        )
                         .ok()
                         .map(|t| QMatMul::from_qtensor(t).unwrap());
                     let shared_up = ct
@@ -3778,19 +3809,13 @@ impl SplitModel {
                     // Dense FFN
                     let ffn_gate = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_gate: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
                     let ffn_down = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_down.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_down: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
                     let ffn_up = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_up: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                     FfnVariant::Dense(Mlp {
                         ffn_gate: QMatMul::from_qtensor(ffn_gate)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
@@ -3828,40 +3853,28 @@ impl SplitModel {
 
                     let ssm_alpha = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_alpha.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_alpha: {e}"))
-                        })?
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_alpha: {e}")))?
                         .dequantize(&device)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?;
                     let ssm_beta = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_beta.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_beta: {e}"))
-                        })?
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_beta: {e}")))?
                         .dequantize(&device)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?;
                     let ssm_dt = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_dt.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_dt: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_dt: {e}")))?;
                     let ssm_conv1d = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_conv1d.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_conv1d: {e}"))
-                        })?
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_conv1d: {e}")))?
                         .dequantize(&device)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?;
                     let ssm_norm_t = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_norm.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_norm: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_norm: {e}")))?;
                     let ssm_out = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_out.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ssm_out: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ssm_out: {e}")))?;
 
                     layers.push(LayerVariant::Qwen35Ssm {
                         weights: DeltaNetWeights {
@@ -3914,14 +3927,10 @@ impl SplitModel {
                     };
                     let wo = ct
                         .tensor(&mut file, &format!("{prefix}.attn_output.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.attn_output: {e}"))
-                        })?;
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
                     let attn_gate_t = ct
                         .tensor(&mut file, &format!("{prefix}.attn_gate.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.attn_gate: {e}"))
-                        })?
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_gate: {e}")))?
                         .dequantize(&device)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
@@ -3987,39 +3996,83 @@ impl SplitModel {
                                 let cpu = &candle_core::Device::Cpu;
                                 let fused = ct_ref
                                     .tensor(&mut cursor, &format!("{prefix}.attn_qkv.weight"), cpu)
-                                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_qkv: {e}")))?;
-                                let fused_f32 = fused
-                                    .dequantize(cpu)
-                                    .map_err(|e| SwarmError::Internal(format!("qkv dequant: {e}")))?;
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("{prefix}.attn_qkv: {e}"))
+                                    })?;
+                                let fused_f32 = fused.dequantize(cpu).map_err(|e| {
+                                    SwarmError::Internal(format!("qkv dequant: {e}"))
+                                })?;
                                 let q_dim = head_count * head_dim;
                                 let k_dim = head_count_kv * head_dim;
                                 let v_dim = k_dim;
-                                let wq = fused_f32.narrow(0, 0, q_dim)
+                                let wq = fused_f32
+                                    .narrow(0, 0, q_dim)
                                     .map_err(|e| SwarmError::Internal(format!("qkv split q: {e}")))?
                                     .contiguous()
-                                    .map_err(|e| SwarmError::Internal(format!("q contiguous: {e}")))?;
-                                let wk = fused_f32.narrow(0, q_dim, k_dim)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("q contiguous: {e}"))
+                                    })?;
+                                let wk = fused_f32
+                                    .narrow(0, q_dim, k_dim)
                                     .map_err(|e| SwarmError::Internal(format!("qkv split k: {e}")))?
                                     .contiguous()
-                                    .map_err(|e| SwarmError::Internal(format!("k contiguous: {e}")))?;
-                                let wv = fused_f32.narrow(0, q_dim + k_dim, v_dim)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("k contiguous: {e}"))
+                                    })?;
+                                let wv = fused_f32
+                                    .narrow(0, q_dim + k_dim, v_dim)
                                     .map_err(|e| SwarmError::Internal(format!("qkv split v: {e}")))?
                                     .contiguous()
-                                    .map_err(|e| SwarmError::Internal(format!("v contiguous: {e}")))?;
-                                (QMatMul::from_f32_tensor(wq, device_ref)?, QMatMul::from_f32_tensor(wk, device_ref)?, QMatMul::from_f32_tensor(wv, device_ref)?)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("v contiguous: {e}"))
+                                    })?;
+                                (
+                                    QMatMul::from_f32_tensor(wq, device_ref)?,
+                                    QMatMul::from_f32_tensor(wk, device_ref)?,
+                                    QMatMul::from_f32_tensor(wv, device_ref)?,
+                                )
                             } else {
                                 let wq = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.attn_q.weight"), device_ref)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}")))?;
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.attn_q.weight"),
+                                        device_ref,
+                                    )
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.attn_q: {e}"
+                                        ))
+                                    })?;
                                 let wk = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.attn_k.weight"), device_ref)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}")))?;
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.attn_k.weight"),
+                                        device_ref,
+                                    )
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.attn_k: {e}"
+                                        ))
+                                    })?;
                                 let wv = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.attn_v.weight"), device_ref)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}")))?;
-                                (QMatMul::from_qtensor(wq).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                 QMatMul::from_qtensor(wk).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                 QMatMul::from_qtensor(wv).map_err(|e| SwarmError::Internal(e.to_string()))?)
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.attn_v.weight"),
+                                        device_ref,
+                                    )
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.attn_v: {e}"
+                                        ))
+                                    })?;
+                                (
+                                    QMatMul::from_qtensor(wq)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                    QMatMul::from_qtensor(wk)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                    QMatMul::from_qtensor(wv)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                )
                             };
                             let attention_wo = ct_ref
                                 .tensor(
@@ -4076,37 +4129,76 @@ impl SplitModel {
                                 })?;
                             let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
                                 let gate = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.ffn_gate.weight"), device_ref)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}")))?;
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.ffn_gate.weight"),
+                                        device_ref,
+                                    )
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.ffn_gate: {e}"
+                                        ))
+                                    })?;
                                 let up = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.ffn_up.weight"), device_ref)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
-                                (QMatMul::from_qtensor(gate).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                 QMatMul::from_qtensor(ffn_down_qt).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                 QMatMul::from_qtensor(up).map_err(|e| SwarmError::Internal(e.to_string()))?)
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.ffn_up.weight"),
+                                        device_ref,
+                                    )
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.ffn_up: {e}"
+                                        ))
+                                    })?;
+                                (
+                                    QMatMul::from_qtensor(gate)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                    QMatMul::from_qtensor(ffn_down_qt)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                    QMatMul::from_qtensor(up)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                )
                             } else {
                                 // Fused gate+up: load to CPU, dequantize, split, convert to f16, move to device
                                 let cpu = &candle_core::Device::Cpu;
                                 let fused = ct_ref
                                     .tensor(&mut cursor, &format!("{prefix}.ffn_up.weight"), cpu)
-                                    .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
-                                let fused_f32 = fused
-                                    .dequantize(cpu)
-                                    .map_err(|e| SwarmError::Internal(format!("ffn_up dequant: {e}")))?;
-                                let total_rows = fused_f32.dim(0)
-                                    .map_err(|e| SwarmError::Internal(format!("ffn_up dim0: {e}")))?;
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!(
+                                            "Failed to load {prefix}.ffn_up: {e}"
+                                        ))
+                                    })?;
+                                let fused_f32 = fused.dequantize(cpu).map_err(|e| {
+                                    SwarmError::Internal(format!("ffn_up dequant: {e}"))
+                                })?;
+                                let total_rows = fused_f32.dim(0).map_err(|e| {
+                                    SwarmError::Internal(format!("ffn_up dim0: {e}"))
+                                })?;
                                 let half = total_rows / 2;
-                                let gate_f32 = fused_f32.narrow(0, 0, half)
-                                    .map_err(|e| SwarmError::Internal(format!("ffn gate split: {e}")))?
+                                let gate_f32 = fused_f32
+                                    .narrow(0, 0, half)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("ffn gate split: {e}"))
+                                    })?
                                     .contiguous()
-                                    .map_err(|e| SwarmError::Internal(format!("gate contiguous: {e}")))?;
-                                let up_f32 = fused_f32.narrow(0, half, half)
-                                    .map_err(|e| SwarmError::Internal(format!("ffn up split: {e}")))?
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("gate contiguous: {e}"))
+                                    })?;
+                                let up_f32 = fused_f32
+                                    .narrow(0, half, half)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("ffn up split: {e}"))
+                                    })?
                                     .contiguous()
-                                    .map_err(|e| SwarmError::Internal(format!("up contiguous: {e}")))?;
-                                (QMatMul::from_f32_tensor(gate_f32, device_ref)?,
-                                 QMatMul::from_qtensor(ffn_down_qt).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                 QMatMul::from_f32_tensor(up_f32, device_ref)?)
+                                    .map_err(|e| {
+                                        SwarmError::Internal(format!("up contiguous: {e}"))
+                                    })?;
+                                (
+                                    QMatMul::from_f32_tensor(gate_f32, device_ref)?,
+                                    QMatMul::from_qtensor(ffn_down_qt)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                    QMatMul::from_f32_tensor(up_f32, device_ref)?,
+                                )
                             };
                             let attn_norm = ct_ref
                                 .tensor(
@@ -4133,13 +4225,21 @@ impl SplitModel {
 
                             // Qwen3 QK normalization (optional)
                             let attn_q_norm = ct_ref
-                                .tensor(&mut cursor, &format!("{prefix}.attn_q_norm.weight"), device_ref)
+                                .tensor(
+                                    &mut cursor,
+                                    &format!("{prefix}.attn_q_norm.weight"),
+                                    device_ref,
+                                )
                                 .ok()
                                 .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
                                 .transpose()
                                 .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
                             let attn_k_norm = ct_ref
-                                .tensor(&mut cursor, &format!("{prefix}.attn_k_norm.weight"), device_ref)
+                                .tensor(
+                                    &mut cursor,
+                                    &format!("{prefix}.attn_k_norm.weight"),
+                                    device_ref,
+                                )
                                 .ok()
                                 .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
                                 .transpose()
@@ -4243,11 +4343,7 @@ impl SplitModel {
                     .metadata
                     .get("tokenizer.ggml.scores")
                     .and_then(|v| v.to_vec().ok())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.to_f32().ok())
-                            .collect()
-                    })
+                    .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                     .unwrap_or_default();
                 if !scores.is_empty() {
                     tracing::info!(
@@ -5136,32 +5232,50 @@ impl SplitModel {
                     let q_dim = head_count * head_dim;
                     let k_dim = head_count_kv * head_dim;
                     let v_dim = k_dim;
-                    let wq = fused_f32.narrow(0, 0, q_dim)
+                    let wq = fused_f32
+                        .narrow(0, 0, q_dim)
                         .map_err(|e| SwarmError::Internal(format!("qkv split q: {e}")))?
                         .contiguous()
                         .map_err(|e| SwarmError::Internal(format!("q contiguous: {e}")))?;
-                    let wk = fused_f32.narrow(0, q_dim, k_dim)
+                    let wk = fused_f32
+                        .narrow(0, q_dim, k_dim)
                         .map_err(|e| SwarmError::Internal(format!("qkv split k: {e}")))?
                         .contiguous()
                         .map_err(|e| SwarmError::Internal(format!("k contiguous: {e}")))?;
-                    let wv = fused_f32.narrow(0, q_dim + k_dim, v_dim)
+                    let wv = fused_f32
+                        .narrow(0, q_dim + k_dim, v_dim)
                         .map_err(|e| SwarmError::Internal(format!("qkv split v: {e}")))?
                         .contiguous()
                         .map_err(|e| SwarmError::Internal(format!("v contiguous: {e}")))?;
-                    (QMatMul::from_f32_tensor(wq, &device)?, QMatMul::from_f32_tensor(wk, &device)?, QMatMul::from_f32_tensor(wv, &device)?)
+                    (
+                        QMatMul::from_f32_tensor(wq, &device)?,
+                        QMatMul::from_f32_tensor(wk, &device)?,
+                        QMatMul::from_f32_tensor(wv, &device)?,
+                    )
                 } else {
                     let wq = ct
                         .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}")))?;
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}"))
+                        })?;
                     let wk = ct
                         .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}")))?;
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}"))
+                        })?;
                     let wv = ct
                         .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}")))?;
-                    (QMatMul::from_qtensor(wq).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                     QMatMul::from_qtensor(wk).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                     QMatMul::from_qtensor(wv).map_err(|e| SwarmError::Internal(e.to_string()))?)
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}"))
+                        })?;
+                    (
+                        QMatMul::from_qtensor(wq)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        QMatMul::from_qtensor(wk)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        QMatMul::from_qtensor(wv)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    )
                 };
                 let attention_wo = ct
                     .tensor(
@@ -5204,36 +5318,53 @@ impl SplitModel {
                 let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
                     let gate = ct
                         .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}")))?;
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}"))
+                        })?;
                     let up = ct
                         .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
-                    (QMatMul::from_qtensor(gate).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                     QMatMul::from_qtensor(ffn_down_qt).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                     QMatMul::from_qtensor(up).map_err(|e| SwarmError::Internal(e.to_string()))?)
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
+                        })?;
+                    (
+                        QMatMul::from_qtensor(gate)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        QMatMul::from_qtensor(ffn_down_qt)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        QMatMul::from_qtensor(up)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                    )
                 } else {
                     // Fused gate+up: load to CPU, dequantize, split, convert to f16, move to device
                     let cpu = &candle_core::Device::Cpu;
                     let fused = ct
                         .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), cpu)
-                        .map_err(|e| SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}")))?;
+                        .map_err(|e| {
+                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
+                        })?;
                     let fused_f32 = fused
                         .dequantize(cpu)
                         .map_err(|e| SwarmError::Internal(format!("ffn_up dequant: {e}")))?;
-                    let total_rows = fused_f32.dim(0)
+                    let total_rows = fused_f32
+                        .dim(0)
                         .map_err(|e| SwarmError::Internal(format!("ffn_up dim0: {e}")))?;
                     let half = total_rows / 2;
-                    let gate_f32 = fused_f32.narrow(0, 0, half)
+                    let gate_f32 = fused_f32
+                        .narrow(0, 0, half)
                         .map_err(|e| SwarmError::Internal(format!("ffn gate split: {e}")))?
                         .contiguous()
                         .map_err(|e| SwarmError::Internal(format!("gate contiguous: {e}")))?;
-                    let up_f32 = fused_f32.narrow(0, half, half)
+                    let up_f32 = fused_f32
+                        .narrow(0, half, half)
                         .map_err(|e| SwarmError::Internal(format!("ffn up split: {e}")))?
                         .contiguous()
                         .map_err(|e| SwarmError::Internal(format!("up contiguous: {e}")))?;
-                    (QMatMul::from_f32_tensor(gate_f32, &device)?,
-                     QMatMul::from_qtensor(ffn_down_qt).map_err(|e| SwarmError::Internal(e.to_string()))?,
-                     QMatMul::from_f32_tensor(up_f32, &device)?)
+                    (
+                        QMatMul::from_f32_tensor(gate_f32, &device)?,
+                        QMatMul::from_qtensor(ffn_down_qt)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        QMatMul::from_f32_tensor(up_f32, &device)?,
+                    )
                 };
                 let attn_norm = ct
                     .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
@@ -5248,13 +5379,21 @@ impl SplitModel {
 
                 // Qwen3 QK normalization (optional)
                 let attn_q_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_q_norm.weight"), &device)
+                    .tensor(
+                        &mut reader,
+                        &format!("{prefix}.attn_q_norm.weight"),
+                        &device,
+                    )
                     .ok()
                     .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
                     .transpose()
                     .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
                 let attn_k_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_k_norm.weight"), &device)
+                    .tensor(
+                        &mut reader,
+                        &format!("{prefix}.attn_k_norm.weight"),
+                        &device,
+                    )
                     .ok()
                     .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
                     .transpose()
@@ -5343,11 +5482,7 @@ impl SplitModel {
                     .metadata
                     .get("tokenizer.ggml.scores")
                     .and_then(|v| v.to_vec().ok())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.to_f32().ok())
-                            .collect()
-                    })
+                    .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                     .unwrap_or_default();
                 if !scores.is_empty() {
                     tracing::info!(
@@ -5573,9 +5708,15 @@ impl SplitModel {
         // then drop the DashMap guard before running the (potentially slow) forward pass.
         // Use mem::take instead of clone to avoid copying the KV cache Vec.
         #[allow(unused_mut)]
-        let (mut layer_kv_caches, mut layer_ssm_states): (Vec<Option<KvCache>>, Vec<Option<SsmState>>) = {
+        let (mut layer_kv_caches, mut layer_ssm_states): (
+            Vec<Option<KvCache>>,
+            Vec<Option<SsmState>>,
+        ) = {
             let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            (std::mem::take(&mut entry.layers), std::mem::take(&mut entry.ssm_states))
+            (
+                std::mem::take(&mut entry.layers),
+                std::mem::take(&mut entry.ssm_states),
+            )
         };
 
         // Detect pre-populated prefix cache entries (KV already present from prefix
@@ -5927,9 +6068,11 @@ impl SplitModel {
 
                 let merged = if let Some(pos) = marker_pos {
                     // Split at marker: embed before and after separately, insert vision between
-                    let num_vision = vision_emb.dim(0)
+                    let num_vision = vision_emb
+                        .dim(0)
                         .map_err(|e| SwarmError::Internal(format!("vision dim: {e}")))?;
-                    let hidden = vision_emb.dim(1)
+                    let hidden = vision_emb
+                        .dim(1)
                         .map_err(|e| SwarmError::Internal(format!("vision dim1: {e}")))?;
 
                     // All parts must be (1, seq, hidden) for cat along dim 1
@@ -5945,12 +6088,14 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("before tensor: {e}")))?
                             .reshape(&[1, pos])
                             .map_err(|e| SwarmError::Internal(format!("before reshape: {e}")))?;
-                        let before_emb = tok_emb_layer.forward(&before_ids)
+                        let before_emb = tok_emb_layer
+                            .forward(&before_ids)
                             .map_err(|e| SwarmError::Internal(format!("before embed: {e}")))?;
                         // Ensure 3D: (1, pos, hidden)
                         let before_3d = if before_emb.dims().len() == 2 {
-                            before_emb.unsqueeze(0)
-                                .map_err(|e| SwarmError::Internal(format!("before unsqueeze: {e}")))?
+                            before_emb.unsqueeze(0).map_err(|e| {
+                                SwarmError::Internal(format!("before unsqueeze: {e}"))
+                            })?
                         } else {
                             before_emb
                         };
@@ -5967,11 +6112,13 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("after tensor: {e}")))?
                             .reshape(&[1, after_len])
                             .map_err(|e| SwarmError::Internal(format!("after reshape: {e}")))?;
-                        let after_emb = tok_emb_layer.forward(&after_ids)
+                        let after_emb = tok_emb_layer
+                            .forward(&after_ids)
                             .map_err(|e| SwarmError::Internal(format!("after embed: {e}")))?;
                         let after_3d = if after_emb.dims().len() == 2 {
-                            after_emb.unsqueeze(0)
-                                .map_err(|e| SwarmError::Internal(format!("after unsqueeze: {e}")))?
+                            after_emb.unsqueeze(0).map_err(|e| {
+                                SwarmError::Internal(format!("after unsqueeze: {e}"))
+                            })?
                         } else {
                             after_emb
                         };
@@ -5991,7 +6138,8 @@ impl SplitModel {
                         .map_err(|e| SwarmError::Internal(format!("merge cat: {e}")))?
                 } else {
                     // No marker found — fallback to prepending vision before text
-                    let text_embeddings = tok_emb_layer.forward(&input_dev)
+                    let text_embeddings = tok_emb_layer
+                        .forward(&input_dev)
                         .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
                     crate::inference::vision::merge_vision_text_embeddings(
                         &text_embeddings,
@@ -7441,7 +7589,9 @@ mod tests {
         let kv_store = std::sync::Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let forwarder = std::sync::Arc::new(BatchForwarder::new(
-            model_arc, kv_store, 4, // max batch size
+            model_arc,
+            kv_store,
+            4,                         // max batch size
             std::time::Duration::ZERO, // no timeout in test
         ));
 
@@ -7587,7 +7737,10 @@ mod tests {
         assert_eq!(ModelArch::from_gguf_arch("deepseek2"), ModelArch::DeepSeek2);
         assert_eq!(ModelArch::from_gguf_arch("glm4"), ModelArch::Glm4);
         assert_eq!(ModelArch::from_gguf_arch("llama4"), ModelArch::Llama4);
-        assert_eq!(ModelArch::from_gguf_arch("starcoder2"), ModelArch::Starcoder2);
+        assert_eq!(
+            ModelArch::from_gguf_arch("starcoder2"),
+            ModelArch::Starcoder2
+        );
         assert_eq!(ModelArch::from_gguf_arch("qwen35"), ModelArch::Qwen35);
         assert_eq!(ModelArch::from_gguf_arch("qwen35moe"), ModelArch::Qwen35Moe);
         assert!(matches!(

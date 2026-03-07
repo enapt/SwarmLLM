@@ -193,8 +193,7 @@ pub struct SharedState {
     pub peer_id_map: DashMap<NodeId, Vec<u8>>,
     /// Loaded VLM vision modules (mmproj encoders) keyed by model ID.
     /// Populated when an mmproj.gguf is found alongside a model's shards.
-    pub vision_modules:
-        DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
+    pub vision_modules: DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
     /// Pending VisionEncodeResponse channels for distributed vision encoding.
     /// Keyed by request_id. Pipeline registers a oneshot sender before sending
     /// VisionEncodeRequest to a remote mmproj holder; the network dispatcher fires it
@@ -203,8 +202,7 @@ pub struct SharedState {
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::VisionEncodeResponse>>,
     /// Pending tensor-parallel AllReduce partials, keyed by (request_id, layer_idx).
     /// Coordinator collects partials from all TP ranks, sums them, and responds.
-    pub pending_tp_partials:
-        DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
+    pub pending_tp_partials: DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
     /// AllReduce response registry — pipeline executors register here to receive
     /// reduced tensors after the coordinator completes the allreduce.
     pub allreduce_registry: Arc<crate::inference::allreduce::AllReduceRegistry>,
@@ -302,7 +300,11 @@ impl TpAllReduceCollector {
     }
 
     /// Insert a partial. Returns true when all partials have arrived.
-    pub fn insert(&mut self, req: crate::types::TpAllReduceRequest, sender_peer: Option<Vec<u8>>) -> bool {
+    pub fn insert(
+        &mut self,
+        req: crate::types::TpAllReduceRequest,
+        sender_peer: Option<Vec<u8>>,
+    ) -> bool {
         let rank = req.tp_rank as usize;
         if rank < self.partials.len() {
             self.sender_peers[rank] = sender_peer;
@@ -1412,10 +1414,14 @@ impl Daemon {
                 let mut manifests = sm.model_registry.list_models();
                 // Sort by request count descending so popular models get VRAM priority on restart
                 manifests.sort_by(|a, b| {
-                    let count_a = sm.model_request_counts.get(&a.id)
+                    let count_a = sm
+                        .model_request_counts
+                        .get(&a.id)
                         .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))
                         .unwrap_or(0);
-                    let count_b = sm.model_request_counts.get(&b.id)
+                    let count_b = sm
+                        .model_request_counts
+                        .get(&b.id)
                         .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))
                         .unwrap_or(0);
                     count_b.cmp(&count_a)
@@ -2993,11 +2999,8 @@ async fn handle_layer_forward(
             } else {
                 0i64
             };
-            match candle_core::Tensor::from_vec(
-                vec![token_id],
-                &[1, 1],
-                &candle_core::Device::Cpu,
-            ) {
+            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+            {
                 Ok(t) => t,
                 Err(e) => {
                     send_error_result(
@@ -3214,38 +3217,39 @@ async fn handle_layer_forward(
     };
 
     // Decompress vision embeddings from LayerForward if present
-    let vision_tensor: Option<candle_core::Tensor> =
-        if let Some(ref compressed) = forward.vision_embeddings {
-            match zstd::decode_all(std::io::Cursor::new(compressed)) {
-                Ok(raw_bytes) => {
-                    let num_f16 = raw_bytes.len() / 2;
-                    let hidden_dim = if num_f16 % 4096 == 0 {
-                        4096
-                    } else if num_f16 % 2048 == 0 {
-                        2048
-                    } else {
-                        1024
-                    };
-                    let num_tokens = num_f16 / hidden_dim;
-                    let f32_values: Vec<f32> = raw_bytes
-                        .chunks_exact(2)
-                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-                        .collect();
-                    candle_core::Tensor::from_vec(
-                        f32_values,
-                        &[num_tokens, hidden_dim],
-                        &candle_core::Device::Cpu,
-                    )
-                    .ok()
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");
-                    None
-                }
+    let vision_tensor: Option<candle_core::Tensor> = if let Some(ref compressed) =
+        forward.vision_embeddings
+    {
+        match zstd::decode_all(std::io::Cursor::new(compressed)) {
+            Ok(raw_bytes) => {
+                let num_f16 = raw_bytes.len() / 2;
+                let hidden_dim = if num_f16 % 4096 == 0 {
+                    4096
+                } else if num_f16 % 2048 == 0 {
+                    2048
+                } else {
+                    1024
+                };
+                let num_tokens = num_f16 / hidden_dim;
+                let f32_values: Vec<f32> = raw_bytes
+                    .chunks_exact(2)
+                    .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+                    .collect();
+                candle_core::Tensor::from_vec(
+                    f32_values,
+                    &[num_tokens, hidden_dim],
+                    &candle_core::Device::Cpu,
+                )
+                .ok()
             }
-        } else {
-            None
-        };
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Run the forward pass with per-request KV-cache isolation.
     // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
@@ -3528,7 +3532,10 @@ fn map_gguf_architecture(path: &std::path::Path) -> crate::types::ModelArchitect
             crate::types::ModelArchitecture::Llama
         }
         other => {
-            tracing::warn!(arch = other, "Unknown model architecture, defaulting to Llama");
+            tracing::warn!(
+                arch = other,
+                "Unknown model architecture, defaulting to Llama"
+            );
             crate::types::ModelArchitecture::Llama
         }
     }

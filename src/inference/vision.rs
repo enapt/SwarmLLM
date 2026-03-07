@@ -590,13 +590,11 @@ pub fn load_from_mmproj_gguf(
 ) -> Result<VisionModule, SwarmError> {
     use candle_core::DType;
 
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        SwarmError::Inference(format!("Failed to open mmproj GGUF: {e}"))
-    })?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| SwarmError::Inference(format!("Failed to open mmproj GGUF: {e}")))?;
 
-    let ct = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
-        SwarmError::Inference(format!("Failed to parse mmproj GGUF: {e}"))
-    })?;
+    let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
+        .map_err(|e| SwarmError::Inference(format!("Failed to parse mmproj GGUF: {e}")))?;
 
     // Extract vision config from GGUF metadata
     let get_u32 = |key: &str| -> Result<u32, SwarmError> {
@@ -685,7 +683,13 @@ pub fn load_from_mmproj_gguf(
         let total_elements: usize = dims.iter().product();
         let ps = patch_size as usize;
         let patch_dim = 3 * ps * ps;
-        tracing::info!(?dims, total_elements, hidden_size, patch_dim, "patch_embd.weight raw shape");
+        tracing::info!(
+            ?dims,
+            total_elements,
+            hidden_size,
+            patch_dim,
+            "patch_embd.weight raw shape"
+        );
 
         // The weight is a conv2d kernel. Regardless of how many dims candle gives us,
         // we need to reshape to (hidden_size, patch_dim) for our manual patch projection.
@@ -1005,14 +1009,14 @@ mod tests {
         let num_patches = 4; // (8/4)^2 = 4
         let patch_dim = 3 * patch_size * patch_size; // 48
 
-        let proj_weight =
-            Tensor::ones(&[hidden_dim, patch_dim], DType::F32, &device).unwrap();
+        let proj_weight = Tensor::ones(&[hidden_dim, patch_dim], DType::F32, &device).unwrap();
         let proj_bias = Tensor::zeros(&[hidden_dim], DType::F32, &device).unwrap();
         let cls_token = Tensor::zeros(&[1, 1, hidden_dim], DType::F32, &device).unwrap();
         let pos_embed =
             Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
 
-        let _patch_embed = PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+        let _patch_embed =
+            PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
         // Construction succeeds — forward requires specific candle matmul broadcasting
         // which is validated with real model weights in E2E testing
     }
@@ -1033,8 +1037,9 @@ mod tests {
         let fc1 = candle_nn::linear(hidden_dim, 4 * hidden_dim, vb.pp("fc1")).unwrap();
         let fc2 = candle_nn::linear(4 * hidden_dim, hidden_dim, vb.pp("fc2")).unwrap();
 
-        let block =
-            VisionTransformerBlock::new(ln1, attn_qkv, attn_proj, ln2, fc1, fc2, num_heads, hidden_dim);
+        let block = VisionTransformerBlock::new(
+            ln1, attn_qkv, attn_proj, ln2, fc1, fc2, num_heads, hidden_dim,
+        );
 
         // (1, 5, 32) → (1, 5, 32) — shape preserved
         let x = Tensor::randn(0f32, 0.1, &[1, 5, hidden_dim], &device).unwrap();
@@ -1077,8 +1082,10 @@ mod tests {
         let proj_weight = Tensor::zeros(&[hidden_dim, patch_dim], DType::F32, &device).unwrap();
         let proj_bias = Tensor::zeros(&[hidden_dim], DType::F32, &device).unwrap();
         let cls_token = Tensor::zeros(&[1, 1, hidden_dim], DType::F32, &device).unwrap();
-        let pos_embed = Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
-        let patch_embed = PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
+        let pos_embed =
+            Tensor::zeros(&[1, num_patches + 1, hidden_dim], DType::F32, &device).unwrap();
+        let patch_embed =
+            PatchEmbedding::new(proj_weight, proj_bias, cls_token, pos_embed, patch_size);
 
         let vm = VarMap::new();
         let vb = candle_nn::VarBuilder::from_varmap(&vm, DType::F32, &device);
@@ -1088,7 +1095,8 @@ mod tests {
         let ln2 = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("ln2")).unwrap();
         let fc1 = candle_nn::linear(hidden_dim, 4 * hidden_dim, vb.pp("fc1")).unwrap();
         let fc2 = candle_nn::linear(4 * hidden_dim, hidden_dim, vb.pp("fc2")).unwrap();
-        let block = VisionTransformerBlock::new(ln1, qkv, proj, ln2, fc1, fc2, num_heads, hidden_dim);
+        let block =
+            VisionTransformerBlock::new(ln1, qkv, proj, ln2, fc1, fc2, num_heads, hidden_dim);
 
         let final_ln = candle_nn::layer_norm(hidden_dim, 1e-5, vb.pp("fln")).unwrap();
 

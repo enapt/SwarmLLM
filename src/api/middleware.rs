@@ -205,8 +205,7 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
     // Frontend routes, health checks, static assets — always exempt
     if matches!(
         path,
-        "/"
-            | "/health"
+        "/" | "/health"
             | "/health/ready"
             | "/metrics"
             | "/admin"

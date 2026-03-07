@@ -28,10 +28,7 @@ fn vlm_mmproj_load_and_encode() {
         vision_module.encoder.config().vision_num_layers,
         vision_module.encoder.config().projection_dim,
     );
-    eprintln!(
-        "Tokens per image: {}",
-        vision_module.tokens_per_image()
-    );
+    eprintln!("Tokens per image: {}", vision_module.tokens_per_image());
 
     // Create a test image (red square on white background)
     let size = vision_module.encoder.config().image_size;
@@ -77,10 +74,7 @@ fn vlm_mmproj_load_and_encode() {
     let mean = flat.iter().sum::<f32>() / flat.len() as f32;
     let max_abs = flat.iter().map(|v| v.abs()).fold(0f32, f32::max);
     eprintln!("Embedding stats: mean={mean:.6}, max_abs={max_abs:.4}");
-    assert!(
-        max_abs > 0.001,
-        "Embeddings should not be all zeros"
-    );
+    assert!(max_abs > 0.001, "Embeddings should not be all zeros");
 
     eprintln!("VLM mmproj E2E test PASSED");
 }

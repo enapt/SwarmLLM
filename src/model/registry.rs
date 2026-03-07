@@ -322,13 +322,13 @@ mod tests {
 
         // Register regular shard and mmproj sentinel
         registry.record_shard_holder(
-            ShardId { model_id: model_id.clone(), index: 0 },
+            ShardId {
+                model_id: model_id.clone(),
+                index: 0,
+            },
             node.clone(),
         );
-        registry.record_shard_holder(
-            ShardId::mmproj_for(model_id.clone()),
-            node.clone(),
-        );
+        registry.record_shard_holder(ShardId::mmproj_for(model_id.clone()), node.clone());
 
         let entries = registry.all_shard_entries();
         assert_eq!(entries.len(), 2);

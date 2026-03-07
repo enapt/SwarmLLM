@@ -47,7 +47,8 @@ pub struct NetworkManager {
     /// Maps OutboundRequestId → (inference UUID, send time, target PeerId, num_layers, activation_bytes)
     /// for tensor forwards. Used to notify the pipeline on OutboundFailure.
     /// The Instant + workload info are used for adaptive stale tensor cleanup.
-    pending_tensor_outbound: HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
+    pending_tensor_outbound:
+        HashMap<OutboundRequestId, (uuid::Uuid, std::time::Instant, libp2p::PeerId, u32, usize)>,
     /// Holds ResponseChannels for pending tensor forwards, keyed by inference UUID.
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
@@ -545,7 +546,9 @@ impl NetworkManager {
                     "DIAG: OutboundFailure"
                 );
                 // Check if this was a pending tensor forward — notify the pipeline
-                if let Some((inference_uuid, sent_at, _target, _, _)) = self.pending_tensor_outbound.remove(&request_id) {
+                if let Some((inference_uuid, sent_at, _target, _, _)) =
+                    self.pending_tensor_outbound.remove(&request_id)
+                {
                     let age_ms = sent_at.elapsed().as_millis();
                     tracing::error!(
                         %peer,
@@ -982,8 +985,11 @@ impl NetworkManager {
             } => {
                 self.connection_addrs.remove(&connection_id);
                 // Check if any in-flight tensor forwards are affected
-                let affected_tensors: Vec<_> =
-                    self.pending_tensor_outbound.values().map(|(u, _, _, _, _)| u.to_string()).collect();
+                let affected_tensors: Vec<_> = self
+                    .pending_tensor_outbound
+                    .values()
+                    .map(|(u, _, _, _, _)| u.to_string())
+                    .collect();
                 tracing::warn!(
                     %peer_id, %connection_id, ?cause, remaining = num_established,
                     pending_tensor_forwards = self.pending_tensor_outbound.len(),
@@ -1585,7 +1591,8 @@ impl NetworkManager {
                 )),
                 activations: vec![],
             };
-            if let Err(e) = self.outbound_tx
+            if let Err(e) = self
+                .outbound_tx
                 .try_send(SwarmMessage::LayerResult(error_result))
             {
                 tracing::warn!(error = %e, "Failed to send not-connected error to pipeline");
@@ -1602,8 +1609,16 @@ impl NetworkManager {
         // so we can notify pipeline on OutboundFailure and compute adaptive stale timeouts.
         let num_layers = forward.layer_range.1 - forward.layer_range.0;
         let activation_bytes = forward.activations.len();
-        self.pending_tensor_outbound
-            .insert(outbound_id, (forward.request_id, std::time::Instant::now(), peer_id, num_layers, activation_bytes));
+        self.pending_tensor_outbound.insert(
+            outbound_id,
+            (
+                forward.request_id,
+                std::time::Instant::now(),
+                peer_id,
+                num_layers,
+                activation_bytes,
+            ),
+        );
         // DIAG: check is_pending_outbound immediately — confirms the request was registered
         let is_rr_pending = self
             .swarm
@@ -2034,18 +2049,23 @@ impl NetworkManager {
             .iter()
             .flat_map(|entry| {
                 // Resolve PeerId from the reverse index so we can append /p2p/<id>
-                let peer_id = entry.peer_id_bytes.as_ref().and_then(|b| {
-                    libp2p::PeerId::from_bytes(b).ok()
-                });
-                entry.addresses.iter().map(move |addr| {
-                    if let Some(ref pid) = peer_id {
-                        // Only append if not already present
-                        if !addr.contains("/p2p/") {
-                            return format!("{addr}/p2p/{pid}");
+                let peer_id = entry
+                    .peer_id_bytes
+                    .as_ref()
+                    .and_then(|b| libp2p::PeerId::from_bytes(b).ok());
+                entry
+                    .addresses
+                    .iter()
+                    .map(move |addr| {
+                        if let Some(ref pid) = peer_id {
+                            // Only append if not already present
+                            if !addr.contains("/p2p/") {
+                                return format!("{addr}/p2p/{pid}");
+                            }
                         }
-                    }
-                    addr.clone()
-                }).collect::<Vec<_>>()
+                        addr.clone()
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
         if !addrs.is_empty() {

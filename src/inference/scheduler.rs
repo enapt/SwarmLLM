@@ -211,9 +211,7 @@ impl PipelineScheduler {
                     .shared_state
                     .active_pipelines
                     .iter()
-                    .filter(|entry| {
-                        entry.value().segments.iter().any(|s| s.node_id == node_id)
-                    })
+                    .filter(|entry| entry.value().segments.iter().any(|s| s.node_id == node_id))
                     .count() as f32;
                 health_ping_load.max(local_pipeline_load)
             };
@@ -462,9 +460,10 @@ impl PipelineScheduler {
                 }
 
                 // Must cover the same layer range
-                let covers = candidate.available_ranges.iter().any(|r| {
-                    r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1
-                });
+                let covers = candidate
+                    .available_ranges
+                    .iter()
+                    .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1);
                 if !covers {
                     continue;
                 }

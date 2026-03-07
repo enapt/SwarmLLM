@@ -143,9 +143,7 @@ pub enum ResponseFormat {
     JsonObject,
     /// Model output constrained to a JSON schema.
     #[serde(rename = "json_schema")]
-    JsonSchema {
-        json_schema: JsonSchemaSpec,
-    },
+    JsonSchema { json_schema: JsonSchemaSpec },
 }
 
 /// JSON schema specification for structured output.
@@ -255,8 +253,11 @@ impl ChatCompletionRequest {
     /// Convert API messages to internal ChatMessage format, decoding images.
     /// When tools or response_format are provided, injects system message(s).
     pub fn to_internal_messages(&self) -> Result<Vec<ChatMessage>, crate::error::SwarmError> {
-        let mut messages: Vec<ChatMessage> =
-            self.messages.iter().map(|m| m.to_chat_message()).collect::<Result<_, _>>()?;
+        let mut messages: Vec<ChatMessage> = self
+            .messages
+            .iter()
+            .map(|m| m.to_chat_message())
+            .collect::<Result<_, _>>()?;
 
         // Inject structured output instructions
         if let Some(ref fmt) = self.response_format {
@@ -1509,7 +1510,11 @@ async fn router_inference_stream(
                     model: model_name.clone(),
                     choices: vec![ChunkChoice {
                         index: 0,
-                        delta: Delta { role, content, tool_calls: None },
+                        delta: Delta {
+                            role,
+                            content,
+                            tool_calls: None,
+                        },
                         finish_reason,
                         logprobs: None,
                     }],
@@ -1915,7 +1920,11 @@ async fn split_stream_response(
                 model: model_name.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: Delta { role, content, tool_calls: None },
+                    delta: Delta {
+                        role,
+                        content,
+                        tool_calls: None,
+                    },
                     finish_reason,
                     logprobs: None,
                 }],
@@ -2029,7 +2038,11 @@ async fn stream_response(
                 model: model_name.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: Delta { role, content, tool_calls: None },
+                    delta: Delta {
+                        role,
+                        content,
+                        tool_calls: None,
+                    },
                     finish_reason,
                     logprobs: None,
                 }],
@@ -2415,7 +2428,7 @@ mod tests {
         assert!(json.contains("\"tool_calls\""));
         assert!(json.contains("\"call_123\""));
         assert!(json.contains("\"tool_calls\"")); // finish_reason
-        // content should be absent when None
+                                                  // content should be absent when None
         assert!(!json.contains("\"content\""));
     }
 
@@ -2475,7 +2488,10 @@ mod tests {
             "response_format": {"type": "json_object"}
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
-        assert!(matches!(req.response_format, Some(ResponseFormat::JsonObject)));
+        assert!(matches!(
+            req.response_format,
+            Some(ResponseFormat::JsonObject)
+        ));
     }
 
     #[test]

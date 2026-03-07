@@ -305,8 +305,9 @@ pub fn sample_token_with_logprobs(
                 });
                 ctx.indexed_logits.truncate(n);
             }
-            ctx.indexed_logits
-                .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ctx.indexed_logits.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let top: Vec<(u32, f32)> = ctx
                 .indexed_logits
@@ -486,9 +487,9 @@ mod tests {
         let mut ctx = SamplingContext::new(logits.len());
         let (token, lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
         assert_eq!(token, 1); // index of 5.0 (highest)
-        // Greedy path: logprobs come from probs buffer which isn't populated by argmax.
-        // For greedy, logprobs may be None because the softmax probs aren't computed.
-        // This is acceptable — logprobs are most useful with temperature > 0.
+                              // Greedy path: logprobs come from probs buffer which isn't populated by argmax.
+                              // For greedy, logprobs may be None because the softmax probs aren't computed.
+                              // This is acceptable — logprobs are most useful with temperature > 0.
     }
 
     #[test]

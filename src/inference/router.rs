@@ -460,9 +460,14 @@ impl InferenceRouter {
                 Ok(RouterCommand::NetworkMessage(msg)) => {
                     self.handle_network_message(msg).await;
                 }
-                Ok(RouterCommand::UpdateCacheTokens { session_id, total_tokens, prompt }) => {
+                Ok(RouterCommand::UpdateCacheTokens {
+                    session_id,
+                    total_tokens,
+                    prompt,
+                }) => {
                     if let Some(internal_id) = self.kv_cache.get_internal_id(&session_id) {
-                        self.kv_cache.update_cached_tokens(&internal_id, total_tokens);
+                        self.kv_cache
+                            .update_cached_tokens(&internal_id, total_tokens);
                         self.kv_cache.update_cached_prompt(&internal_id, prompt);
                     }
                 }
@@ -604,8 +609,7 @@ impl InferenceRouter {
             // turns can skip prefill via start_pos
             if let (Some(ref session_id), Ok(ref result)) = (&request.session_id, &output) {
                 let total_tokens = result.prompt_tokens + result.completion_tokens;
-                let prompt =
-                    crate::inference::chat_template::chatml_fallback(&request.messages);
+                let prompt = crate::inference::chat_template::chatml_fallback(&request.messages);
                 let _ = self_tx
                     .send(RouterCommand::UpdateCacheTokens {
                         session_id: session_id.clone(),
@@ -1229,7 +1233,8 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let mut router =
+            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         // Add 3 requests
         for _ in 0..3 {
@@ -1268,7 +1273,8 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let mut router =
+            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         // Add 5 requests all same model
         for _ in 0..5 {
@@ -1306,7 +1312,8 @@ mod tests {
         let (net_tx, _net_rx) = mpsc::channel(64);
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let mut router = InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
+        let mut router =
+            InferenceRouter::new(shared_state, cmd_rx, _cmd_tx.clone(), net_tx, shutdown_rx);
 
         let batch = router.collect_batch(4);
         assert!(batch.is_empty());

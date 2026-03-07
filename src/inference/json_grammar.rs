@@ -42,7 +42,10 @@ enum Position {
     /// Inside a number.
     InNumber,
     /// Inside a keyword (true/false/null).
-    InKeyword { expected: &'static str, offset: usize },
+    InKeyword {
+        expected: &'static str,
+        offset: usize,
+    },
     /// After a complete value, expecting comma/close/end.
     AfterValue,
     /// In an object, expecting a key (string).
@@ -213,10 +216,7 @@ impl JsonGrammarState {
             '"' => {
                 // String complete — context determines next state
                 if matches!(self.stack.last(), Some(JsonContext::Object))
-                    && matches!(
-                        self.pos,
-                        Position::InString
-                    )
+                    && matches!(self.pos, Position::InString)
                 {
                     // Could be a key or a value — check if we were expecting a key
                     // We need to track this better. For simplicity, after a string

@@ -449,10 +449,7 @@ mod tests {
     }
 
     /// Helper to write a minimal safetensors file with given tensor data.
-    fn write_safetensors(
-        path: &std::path::Path,
-        tensors: Vec<(String, Vec<f32>, Vec<usize>)>,
-    ) {
+    fn write_safetensors(path: &std::path::Path, tensors: Vec<(String, Vec<f32>, Vec<usize>)>) {
         let byte_data: Vec<(String, Vec<u8>, Vec<usize>)> = tensors
             .into_iter()
             .map(|(name, floats, shape)| {
@@ -495,21 +492,28 @@ mod tests {
 
         for layer in 0..2 {
             for proj in &["q_proj", "v_proj"] {
-                let a_key = format!(
-                    "base_model.model.model.layers.{layer}.self_attn.{proj}.lora_A.weight"
-                );
+                let a_key =
+                    format!("base_model.model.model.layers.{layer}.self_attn.{proj}.lora_A.weight");
                 tensors.push((a_key, vec![0.01f32; rank * dim], vec![rank, dim]));
 
-                let b_key = format!(
-                    "base_model.model.model.layers.{layer}.self_attn.{proj}.lora_B.weight"
-                );
+                let b_key =
+                    format!("base_model.model.model.layers.{layer}.self_attn.{proj}.lora_B.weight");
                 tensors.push((b_key, vec![0.01f32; dim * rank], vec![dim, rank]));
             }
         }
 
         write_safetensors(&path, tensors);
 
-        let adapter = load_adapter(&path, "test-id", "Test Adapter", "llama-test", rank, 8.0, &Device::Cpu).unwrap();
+        let adapter = load_adapter(
+            &path,
+            "test-id",
+            "Test Adapter",
+            "llama-test",
+            rank,
+            8.0,
+            &Device::Cpu,
+        )
+        .unwrap();
 
         assert_eq!(adapter.metadata.id, "test-id");
         assert_eq!(adapter.metadata.name, "Test Adapter");
@@ -533,10 +537,21 @@ mod tests {
 
         let rank = 2usize;
         let dim = 8usize;
-        write_safetensors(&path, vec![
-            ("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(), vec![0.1; rank * dim], vec![rank, dim]),
-            ("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(), vec![0.1; dim * rank], vec![dim, rank]),
-        ]);
+        write_safetensors(
+            &path,
+            vec![
+                (
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(),
+                    vec![0.1; rank * dim],
+                    vec![rank, dim],
+                ),
+                (
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(),
+                    vec![0.1; dim * rank],
+                    vec![dim, rank],
+                ),
+            ],
+        );
 
         let adapter = load_adapter(&path, "e2e", "E2E", "test", rank, 4.0, &Device::Cpu).unwrap();
         assert_eq!(adapter.weights.len(), 1);
@@ -544,11 +559,21 @@ mod tests {
         let base_output = Tensor::zeros((1, 1, dim), DType::F32, &Device::Cpu).unwrap();
         let x = Tensor::ones((1, 1, dim), DType::F32, &Device::Cpu).unwrap();
         let lora_weights = adapter.weights.get("blk.0.attn_q").unwrap();
-        let result = apply_lora(&base_output, &x, lora_weights, adapter.metadata.alpha, adapter.metadata.rank).unwrap();
+        let result = apply_lora(
+            &base_output,
+            &x,
+            lora_weights,
+            adapter.metadata.alpha,
+            adapter.metadata.rank,
+        )
+        .unwrap();
 
         let vals = result.flatten_all().unwrap().to_vec1::<f32>().unwrap();
         let sum: f32 = vals.iter().sum();
-        assert!(sum.abs() > 0.001, "LoRA output should be non-zero, got sum={sum}");
+        assert!(
+            sum.abs() > 0.001,
+            "LoRA output should be non-zero, got sum={sum}"
+        );
 
         // Uniform input + uniform weights → all output values identical
         let first = vals[0];
@@ -586,14 +611,33 @@ mod tests {
 
         let rank = 2usize;
         let dim = 4usize;
-        write_safetensors(&adapter_path, vec![
-            ("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(), vec![0.0; rank * dim], vec![rank, dim]),
-            ("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(), vec![0.0; dim * rank], vec![dim, rank]),
-        ]);
+        write_safetensors(
+            &adapter_path,
+            vec![
+                (
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight".into(),
+                    vec![0.0; rank * dim],
+                    vec![rank, dim],
+                ),
+                (
+                    "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight".into(),
+                    vec![0.0; dim * rank],
+                    vec![dim, rank],
+                ),
+            ],
+        );
 
         let registry = AdapterRegistry::new(dir.path());
         let meta = registry
-            .register("reg-1", "RegTest", "llama", rank, 4.0, &adapter_path, &Device::Cpu)
+            .register(
+                "reg-1",
+                "RegTest",
+                "llama",
+                rank,
+                4.0,
+                &adapter_path,
+                &Device::Cpu,
+            )
             .unwrap();
         assert_eq!(meta.id, "reg-1");
         assert_eq!(meta.num_layers, 1);
@@ -603,7 +647,15 @@ mod tests {
         assert_eq!(registry.list().len(), 1);
 
         // Duplicate registration fails
-        let dup = registry.register("reg-1", "Dup", "llama", rank, 4.0, &adapter_path, &Device::Cpu);
+        let dup = registry.register(
+            "reg-1",
+            "Dup",
+            "llama",
+            rank,
+            4.0,
+            &adapter_path,
+            &Device::Cpu,
+        );
         assert!(dup.is_err());
 
         // Remove

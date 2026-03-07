@@ -509,7 +509,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             };
             let mmproj_info = {
                 let mid_mmproj = crate::types::ModelId(info.name.clone());
-                let holders = state.shared_state.model_registry.mmproj_holders(&mid_mmproj);
+                let holders = state
+                    .shared_state
+                    .model_registry
+                    .mmproj_holders(&mid_mmproj);
                 let local_has = holders.contains(local_node_id);
                 serde_json::json!({
                     "available": !holders.is_empty(),
@@ -1528,18 +1531,15 @@ pub async fn hf_download_shards(
     // Probe before spawning the download task so we can return an immediate
     // HTTP error for unsupported architectures (fast: reads ~few KB header).
     let configured_shard_size = state.shared_state.config.model.shard_size_bytes();
-    let info = crate::model::huggingface::probe_gguf_file(
-        &repo_id,
-        &filename,
-        configured_shard_size,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "HuggingFace probe failed");
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "HuggingFace probe failed: {e}"
-        )))
-    })?;
+    let info =
+        crate::model::huggingface::probe_gguf_file(&repo_id, &filename, configured_shard_size)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "HuggingFace probe failed");
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "HuggingFace probe failed: {e}"
+                )))
+            })?;
 
     let arch_str = &info.tensor_meta.architecture;
     let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);

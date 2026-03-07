@@ -90,7 +90,10 @@ enum Commands {
         #[arg(long, default_value = "1")]
         concurrency: u32,
         /// Prompt text
-        #[arg(long, default_value = "Explain the theory of relativity in simple terms.")]
+        #[arg(
+            long,
+            default_value = "Explain the theory of relativity in simple terms."
+        )]
         prompt: String,
         /// Output results as JSON
         #[arg(long)]
@@ -173,7 +176,16 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|| PathBuf::from("."))
                         .join("swarmllm")
                 });
-            run_bench(port, &data_dir, max_tokens, iterations, concurrency, &prompt, json).await
+            run_bench(
+                port,
+                &data_dir,
+                max_tokens,
+                iterations,
+                concurrency,
+                &prompt,
+                json,
+            )
+            .await
         }
     }
 }
@@ -528,7 +540,10 @@ async fn run_bench(
         .trim()
         .to_string();
     if api_key.is_empty() {
-        anyhow::bail!("No API key at {} — is the daemon running?", key_path.display());
+        anyhow::bail!(
+            "No API key at {} — is the daemon running?",
+            key_path.display()
+        );
     }
 
     let base = format!("http://localhost:{port}");
@@ -598,7 +613,11 @@ async fn run_bench(
         if !json_output {
             println!(
                 "  [{}/{}] {}ms | {} tokens | {:.1} tok/s",
-                i + 1, iterations, total_ms as u64, completion_tokens, tokens_per_sec
+                i + 1,
+                iterations,
+                total_ms as u64,
+                completion_tokens,
+                tokens_per_sec
             );
         }
         results.push(r);
@@ -643,7 +662,11 @@ async fn run_bench(
                     prompt_tokens: pt,
                     completion_tokens: ct,
                     total_ms: ms,
-                    tokens_per_sec: if ms > 0.0 { ct as f64 / (ms / 1000.0) } else { 0.0 },
+                    tokens_per_sec: if ms > 0.0 {
+                        ct as f64 / (ms / 1000.0)
+                    } else {
+                        0.0
+                    },
                 })
             }));
         }
@@ -677,8 +700,14 @@ async fn run_bench(
     // --- Summary ---
     let avg_ms: f64 = results.iter().map(|r| r.total_ms).sum::<f64>() / results.len() as f64;
     let avg_tps: f64 = results.iter().map(|r| r.tokens_per_sec).sum::<f64>() / results.len() as f64;
-    let min_tps = results.iter().map(|r| r.tokens_per_sec).fold(f64::INFINITY, f64::min);
-    let max_tps = results.iter().map(|r| r.tokens_per_sec).fold(0.0_f64, f64::max);
+    let min_tps = results
+        .iter()
+        .map(|r| r.tokens_per_sec)
+        .fold(f64::INFINITY, f64::min);
+    let max_tps = results
+        .iter()
+        .map(|r| r.tokens_per_sec)
+        .fold(0.0_f64, f64::max);
 
     if json_output {
         let summary = serde_json::json!({

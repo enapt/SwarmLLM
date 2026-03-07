@@ -112,10 +112,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/hf/source/:model_id", get(admin::hf_source))
         // Model management
         .route("/api/admin/models/:id", delete(admin::delete_model))
-        .route(
-            "/api/admin/models/:id/unload",
-            post(admin::unload_model),
-        )
+        .route("/api/admin/models/:id/unload", post(admin::unload_model))
         // LoRA adapters
         .route(
             "/api/admin/adapters",

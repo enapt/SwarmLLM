@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::types::{AllReduceOp, NetworkCommand, TpAllReduceRequest, TpAllReduceResponse, TensorParallelGroup};
+use crate::types::{
+    AllReduceOp, NetworkCommand, TensorParallelGroup, TpAllReduceRequest, TpAllReduceResponse,
+};
 
 /// Timeout for AllReduce collection from all ranks.
 const ALLREDUCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -26,8 +28,7 @@ const ALLREDUCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// Pending AllReduce response channel, keyed by (request_id, layer_idx).
 /// The pipeline executor registers this before sending its partial,
 /// and the daemon dispatcher fires it when the reduced result arrives.
-type PendingAllReduceMap =
-    dashmap::DashMap<(Uuid, u32), oneshot::Sender<TpAllReduceResponse>>;
+type PendingAllReduceMap = dashmap::DashMap<(Uuid, u32), oneshot::Sender<TpAllReduceResponse>>;
 
 /// Shared registry of pending AllReduce responses.
 /// Pipeline executors register here; the daemon dispatcher delivers responses.
@@ -35,15 +36,25 @@ pub struct AllReduceRegistry {
     pending: PendingAllReduceMap,
 }
 
-impl AllReduceRegistry {
-    pub fn new() -> Self {
+impl Default for AllReduceRegistry {
+    fn default() -> Self {
         Self {
             pending: dashmap::DashMap::new(),
         }
     }
+}
+
+impl AllReduceRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Register a pending allreduce and return the receiver.
-    pub fn register(&self, request_id: Uuid, layer_idx: u32) -> oneshot::Receiver<TpAllReduceResponse> {
+    pub fn register(
+        &self,
+        request_id: Uuid,
+        layer_idx: u32,
+    ) -> oneshot::Receiver<TpAllReduceResponse> {
         let (tx, rx) = oneshot::channel();
         self.pending.insert((request_id, layer_idx), tx);
         rx
@@ -73,6 +84,7 @@ impl AllReduceRegistry {
 ///
 /// If we are NOT rank 0, we send the partial via the network and wait for the
 /// broadcast response.
+#[allow(clippy::too_many_arguments)]
 pub async fn allreduce_sum(
     shared_state: &Arc<SharedState>,
     network_tx: &mpsc::Sender<NetworkCommand>,
@@ -113,7 +125,9 @@ pub async fn allreduce_sum(
 
         if all_arrived {
             // We were the last to arrive (edge case: tp_size=1)
-            let collector = shared_state.pending_tp_partials.remove(&(request_id, layer_idx));
+            let collector = shared_state
+                .pending_tp_partials
+                .remove(&(request_id, layer_idx));
             if let Some((_, collector)) = collector {
                 let (reduced_data, shape) = collector.reduce_sum()?;
                 let resp = TpAllReduceResponse {
@@ -133,10 +147,7 @@ pub async fn allreduce_sum(
         // reduction when all partials arrive and broadcast the response.
     } else {
         // Send partial to coordinator via point-to-point
-        let peer_bytes = shared_state
-            .peer_id_map
-            .get(coordinator)
-            .map(|r| r.clone());
+        let peer_bytes = shared_state.peer_id_map.get(coordinator).map(|r| r.clone());
         if let Some(target_peer_bytes) = peer_bytes {
             network_tx
                 .send(NetworkCommand::SendAllReduceRequest {
@@ -162,7 +173,9 @@ pub async fn allreduce_sum(
         Err(_) => {
             // Cleanup stale entry
             allreduce_registry.pending.remove(&(request_id, layer_idx));
-            shared_state.pending_tp_partials.remove(&(request_id, layer_idx));
+            shared_state
+                .pending_tp_partials
+                .remove(&(request_id, layer_idx));
             Err(SwarmError::Internal(format!(
                 "AllReduce timeout after {}s for layer {}",
                 ALLREDUCE_TIMEOUT.as_secs(),
@@ -328,10 +341,7 @@ mod tests {
         // Insert rank 2, then 0, then 1
         for &rank in &[2u32, 0, 1] {
             let val = (rank + 1) as f32;
-            let raw: Vec<u8> = [val]
-                .iter()
-                .flat_map(|f| f.to_le_bytes())
-                .collect();
+            let raw: Vec<u8> = [val].iter().flat_map(|f| f.to_le_bytes()).collect();
             let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
             let req = TpAllReduceRequest {
                 request_id,

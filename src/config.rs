@@ -1288,7 +1288,10 @@ max_concurrent_requests = 42
 
     #[test]
     fn vram_budget_explicit_cap() {
-        let rc = ResourceConfig { max_gpu_vram_mb: 4000, ..Default::default() };
+        let rc = ResourceConfig {
+            max_gpu_vram_mb: 4000,
+            ..Default::default()
+        };
         assert_eq!(rc.inference_vram_budget_mb(8000), Some(4000));
     }
 
