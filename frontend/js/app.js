@@ -92,9 +92,16 @@ var SwarmLLM = (function() {
       document.body.classList.toggle('sidebar-open');
     },
 
-    openSettings: function() {
+    openSettings: function(scrollToProviders) {
       document.getElementById('settings-modal').classList.remove('hidden');
       settings.load();
+      if (scrollToProviders) {
+        var section = document.getElementById('settings-providers-section');
+        if (section) {
+          section.open = true;
+          setTimeout(function() { section.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 100);
+        }
+      }
     },
 
     closeSettings: function() {
@@ -1664,7 +1671,9 @@ var SwarmLLM = (function() {
         var resp = await fetch('/api/admin/providers');
         var data = await resp.json();
         if (data.providers) {
+          var anyConfigured = false;
           data.providers.forEach(function(p) {
+            if (p.configured) anyConfigured = true;
             var badge = document.getElementById('provider-status-' + p.name);
             if (badge) {
               if (p.configured) {
@@ -1686,6 +1695,11 @@ var SwarmLLM = (function() {
               }
             }
           });
+          // Auto-expand cloud providers section if none configured (first-run UX)
+          if (!anyConfigured) {
+            var section = document.getElementById('settings-providers-section');
+            if (section) section.open = true;
+          }
         }
       } catch (e) {
         ui.showBanner('error', 'Failed to load provider status');
@@ -1921,8 +1935,8 @@ var SwarmLLM = (function() {
         var models = await resp.json();
         if (!models || models.length === 0) {
           list.innerHTML = '<div class="empty-state" style="padding:20px 0">' +
-            '<p style="margin-bottom:8px">No models available yet.</p>' +
-            '<p class="text-muted" style="font-size:0.85rem">You can download models from HuggingFace after setup using the <strong>Browse Models</strong> button on the dashboard.</p>' +
+            '<p style="margin-bottom:8px">No models downloaded yet.</p>' +
+            '<p class="text-muted" style="font-size:0.85rem"><strong>Easiest option:</strong> Add a cloud provider API key in Settings after setup \u2014 no download needed.<br>Or browse and download models from HuggingFace using the <strong>Browse Models</strong> button on the dashboard.</p>' +
             '</div>';
         } else {
           list.innerHTML = '';
@@ -3826,9 +3840,10 @@ var SwarmLLM = (function() {
 
     // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
-      if (e.target.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
-      if (e.target.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
-      if (e.target.getAttribute('data-goto-settings')) { ui.openSettings(); }
+      var el = e.target.closest('[data-goto-chat],[data-goto-browse],[data-goto-settings]') || e.target;
+      if (el.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
+      if (el.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
+      if (el.getAttribute('data-goto-settings')) { ui.openSettings(true); }
     });
 
     // Network discovery — share popover toggle
@@ -4088,7 +4103,7 @@ var SwarmLLM = (function() {
   function updateChatAvailability(hasModels) {
     var sendBtn = document.getElementById('send-btn');
     var chatInput = document.getElementById('chat-input');
-    var emptyState = document.querySelector('#chat-messages .empty-state');
+    var emptyState = document.querySelector('#chat-messages .chat-empty');
 
     if (sendBtn) sendBtn.disabled = !hasModels;
     if (chatInput) {
@@ -4098,7 +4113,7 @@ var SwarmLLM = (function() {
       } else {
         // Check if a model is currently downloading (WI-9)
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download a model to start chatting';
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 add a cloud API key or download a model to start';
       }
     }
     if (emptyState && !hasModels) {
@@ -4225,10 +4240,10 @@ var SwarmLLM = (function() {
       if (indicator) indicator.classList.add('mode-cloud');
     } else {
       dot.className = 'mode-dot offline';
-      label.textContent = 'Not Ready';
-      modeHelp = '';
+      label.textContent = 'Setup Needed';
+      modeHelp = 'Add a cloud API key or download a model to get started';
       if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none">No models or providers configured \u2014 open Settings to add an API key</span>'];
+      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-settings="1">No models or providers configured \u2014 <u>open Settings</u> to add an API key</span>'];
     }
     if (modeHelp) label.title = modeHelp;
 

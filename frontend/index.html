@@ -97,12 +97,12 @@
         <button class="btn btn-ghost btn-sm" id="btn-close-settings" aria-label="Close settings">&times;</button>
       </div>
       <div class="form-group">
-        <label for="settings-api-key">API Key</label>
+        <label for="settings-api-key">Node Access Token</label>
         <div class="flex gap-1" style="align-items:center">
           <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
-          <button class="btn btn-sm" id="btn-copy-api-key" title="Copy API key">Copy</button>
+          <button class="btn btn-sm" id="btn-copy-api-key" title="Copy access token">Copy</button>
         </div>
-        <span class="text-muted" style="font-size:0.75rem">Bearer token for API authentication</span>
+        <span class="text-muted" style="font-size:0.75rem">Auto-generated token for programmatic API access (not a cloud API key)</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname">Nickname</label>
@@ -556,7 +556,7 @@
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty">
                 <div class="empty-icon">&#128229;</div>
-                <p>No models available. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to find models, or connect to peers.</p>
+                <p>No models available. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download models, or <a href="#" data-goto-settings="1" style="color:var(--accent)">add a cloud API key</a> for instant access.</p>
               </div>
             </div>
           </div>
