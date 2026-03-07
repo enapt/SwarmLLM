@@ -1,0 +1,43 @@
+{
+  "name": "swarmllm",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript client for SwarmLLM — zero-dependency, browser-compatible",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "swarmllm",
+    "llm",
+    "openai",
+    "inference",
+    "p2p",
+    "decentralized",
+    "ai"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/swarmllm/swarmllm",
+    "directory": "js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
