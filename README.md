@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml)
 
-Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware.
+Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware or paid API tokens.
 
-**Like Ollama, but you don't need a beefy GPU — because the network IS your GPU.**
+**The people are the power. Join the swarm.**
 
 ## How It Works
 
@@ -85,8 +85,10 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, ~130ms per-token pipeline latency over TCP. Candle-based direct tensor computation with E2E encryption
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
-- **Multi-Provider Gateway** — Route requests to cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq) when the model isn't available locally. Native Anthropic Messages API at `/v1/messages`. Model prefix routing or explicit `provider:model` syntax
+- **Cloud Fallback (Optional)** — Optionally route to 11 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra) as a fallback. The swarm is the primary way to run models for free
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
+- **MCP Server** — Native Model Context Protocol server for AI agent frameworks (Claude Code, Cursor, custom agents). Tools: `chat`, `models`. Resources: `swarmllm://status`
+- **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA, Qwen2-VL) and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
@@ -107,12 +109,12 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
 
 ### Operations
-- **Built-in Web UI** — Admin dashboard with operation mode indicator (Swarm/Cloud/Hybrid/Standalone), chat interface, model browser, shard visualization, first-run setup wizard, collapsible panels, mobile-responsive layout
+- **Built-in Web UI** — Swarm-first dashboard with chat interface, model browser, shard visualization, first-run setup wizard ("Join the Swarm"), network map, leaderboard, mobile-responsive layout
 - **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API
 - **Auto-Updater** — Checks GitHub releases for new versions, downloads and replaces binary with restart prompt
-- **Python SDK** — `pip install swarmllm-client` for programmatic access
+- **Multi-SDK Ecosystem** — Python (`pip install swarmllm-client`), JavaScript/TypeScript (zero-dep), LangChain (`ChatSwarmLLM`), LlamaIndex (`SwarmLLM`)
 
 ## Architecture
 
@@ -296,7 +298,7 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | Database | redb (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 | Monitoring | Prometheus + Grafana |
-| SDK | Python (`swarmllm-client`) |
+| SDK | Python, JS/TS, LangChain, LlamaIndex |
 
 ## How SwarmLLM Compares
 
@@ -310,7 +312,7 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **Parallelism** | Pipeline + tensor (LAN) | Pipeline | Tensor + pipeline | Subnet routing |
 | **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5) | 4 | 6+ | Any |
 | **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
-| **Multi-Provider Gateway** | Yes (OpenAI, Anthropic, etc.) | No | No | No |
+| **Cloud Fallback** | 11 providers (optional) | No | No | No |
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
 | **API Compatibility** | OpenAI + Anthropic | PyTorch | OpenAI basic | Subnet-defined |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |

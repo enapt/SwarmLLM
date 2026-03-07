@@ -758,11 +758,18 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
 
-### Multi-Provider Gateway
-When a requested model isn't available locally, requests are routed to cloud providers:
+### MCP Server
+- `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, Cursor, etc.)
+- Tools: `chat` (wraps inference router), `models` (lists all models)
+- Resources: `swarmllm://status` (node status)
+
+### Cloud Fallback (Optional)
+When a requested model isn't available locally or on the swarm, requests can optionally be routed to 11 cloud providers:
+- **Providers:** OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks AI, Together AI, DeepInfra
 - Model prefix routing: `claude-*` → Anthropic, `gpt-*` → OpenAI, `deepseek-*` → DeepSeek, `mistral-*` → Mistral
 - Explicit syntax: `provider:model` (e.g., `openai:gpt-4o`, `groq:llama-3.1-70b`)
 - Custom providers via `[providers.custom]` config section
+- Provider health probes with per-model availability checking
 - Admin API: `GET/PUT /api/admin/providers` — view/configure provider API keys
 
 ### Admin API (CORS-protected, no Bearer auth)

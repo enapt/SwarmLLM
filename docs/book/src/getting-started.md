@@ -1,6 +1,6 @@
 # Getting Started
 
-SwarmLLM lets you run AI language models on your own computer — and team up with others to run even bigger models together. It's free, open-source, and your conversations stay private.
+SwarmLLM lets you combine your hardware with others to run AI models too large for any single machine — for free, with no API tokens or cloud fees. It's open-source and your conversations are end-to-end encrypted.
 
 This guide walks you through installation, downloading your first model, and chatting.
 
