@@ -3454,6 +3454,30 @@ pub async fn update_providers(
     State(state): State<AppState>,
     Json(body): Json<ProvidersUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Validate all keys before applying any changes
+    let all_keys: &[(&str, &Option<String>)] = &[
+        ("anthropic", &body.anthropic_key),
+        ("openai", &body.openai_key),
+        ("deepseek", &body.deepseek_key),
+        ("mistral", &body.mistral_key),
+        ("groq", &body.groq_key),
+        ("nvidia_nim", &body.nvidia_nim_key),
+        ("cerebras", &body.cerebras_key),
+        ("sambanova", &body.sambanova_key),
+        ("fireworks", &body.fireworks_key),
+        ("together", &body.together_key),
+        ("deepinfra", &body.deepinfra_key),
+    ];
+    for (name, key) in all_keys {
+        if let Some(k) = key {
+            if let Err(e) = crate::crypto::validate_api_key(k) {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "Invalid API key for {name}: {e}"
+                ))));
+            }
+        }
+    }
+
     let mut config = state.shared_state.providers_config.write().await;
 
     fn update_entry(entry: &mut Option<crate::config::ProviderEntry>, key: Option<String>) {
@@ -3481,11 +3505,24 @@ pub async fn update_providers(
     update_entry(&mut config.together, body.together_key);
     update_entry(&mut config.deepinfra, body.deepinfra_key);
 
-    // Persist to database
-    let _ = state
-        .shared_state
-        .db
-        .put_json("providers", "config", &*config);
+    // Encrypt keys before persisting to database
+    let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
+    match crate::crypto::encrypt_config(&config, &signing_key_bytes) {
+        Ok(encrypted) => {
+            let _ = state
+                .shared_state
+                .db
+                .put_json("providers", "config", &encrypted);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to encrypt provider keys for storage");
+            // Fall back to storing as-is rather than losing the config
+            let _ = state
+                .shared_state
+                .db
+                .put_json("providers", "config", &*config);
+        }
+    }
 
     tracing::info!("Cloud provider configuration updated");
 

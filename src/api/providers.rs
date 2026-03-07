@@ -286,7 +286,8 @@ pub async fn proxy_openai_compatible(
     if !resp.status().is_success() {
         let status = resp.status();
         let raw_body = resp.text().await.unwrap_or_default();
-        tracing::warn!(status = %status, body = %raw_body, "Provider returned error");
+        let scrubbed_body = crate::crypto::scrub_api_keys(&raw_body);
+        tracing::warn!(status = %status, body = %scrubbed_body, "Provider returned error");
         // Try to extract a human-readable message from the provider's JSON error
         let friendly = serde_json::from_str::<serde_json::Value>(&raw_body)
             .ok()
@@ -357,9 +358,10 @@ pub async fn proxy_to_anthropic(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        tracing::warn!(status = %status, body = %body, "Anthropic returned error");
+        let scrubbed_body = crate::crypto::scrub_api_keys(&body);
+        tracing::warn!(status = %status, body = %scrubbed_body, "Anthropic returned error");
         return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Anthropic returned error status {status}: {body}"
+            "Anthropic returned error status {status}: {scrubbed_body}"
         ))));
     }
 

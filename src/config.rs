@@ -642,6 +642,12 @@ pub struct ProviderEntry {
     pub default_model: Option<String>,
 }
 
+impl Drop for ProviderEntry {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.api_key);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomProvider {
     pub name: String,
@@ -649,6 +655,12 @@ pub struct CustomProvider {
     pub api_key: String,
     #[serde(default)]
     pub default_model: Option<String>,
+}
+
+impl Drop for CustomProvider {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.api_key);
+    }
 }
 
 /// Identity configuration (voluntary self-reported metadata).

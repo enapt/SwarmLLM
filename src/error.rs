@@ -73,6 +73,10 @@ pub enum SwarmError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    // Validation
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     // Config
     #[error("Configuration error: {0}")]
     Config(String),
@@ -175,7 +179,7 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "invalid_request_error",
             ),
-            SwarmError::InvalidNickname(_) => (
+            SwarmError::InvalidNickname(_) | SwarmError::Validation(_) => (
                 StatusCode::BAD_REQUEST,
                 self.0.to_string(),
                 "invalid_request_error",

@@ -59,6 +59,7 @@ hkdf = "0.12"
 blake3 = "1"
 argon2 = { version = "0.5", features = ["std"] }
 aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
 rand = "0.8"
 
 # LLM inference
@@ -97,7 +98,7 @@ include_dir = "0.7"
 sysinfo = "0.38"
 half = "2"
 fancy-regex = "0.17"
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
@@ -144,7 +145,25 @@ path = "tests/integration/test_yamux_substream.rs"
 [patch.crates-io]
 libp2p-request-response = { path = "vendor/libp2p-request-response" }
 
+[profile.dev]
+# Faster dev builds: reduce debug info, enable incremental
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+# Optimize dependencies even in dev mode (huge perf win for candle/libp2p)
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 strip = true
+codegen-units = 1
+
+[profile.test]
+# Faster test compilation
+debug = 1
+incremental = true
+
+[profile.test.package."*"]
+opt-level = 2

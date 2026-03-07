@@ -78,6 +78,8 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
 enum BucketKind {
     Api,
     Admin,
+    /// Stricter rate limit for sensitive key-management endpoints.
+    SensitiveAdmin,
 }
 
 /// Token-bucket rate limiter keyed by client IP address.
@@ -107,7 +109,10 @@ impl RateLimiter {
     /// Try to consume one token for the given IP and path.
     /// Returns `true` if allowed, `false` if rate-limited.
     fn try_acquire(&self, ip: IpAddr, path: &str) -> bool {
-        let (kind, limit) = if path.starts_with("/api/admin/") {
+        // Sensitive key-management endpoints get a much stricter limit (5/min)
+        let (kind, limit) = if path == "/api/admin/providers" || path == "/api/admin/api-key" {
+            (BucketKind::SensitiveAdmin, 5)
+        } else if path.starts_with("/api/admin/") {
             (BucketKind::Admin, self.admin_rpm)
         } else if path.starts_with("/v1/") || path.starts_with("/api/chat") {
             (BucketKind::Api, self.rpm)

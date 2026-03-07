@@ -435,6 +435,8 @@ impl SharedState {
             }
             map
         };
+        // Grab signing key bytes before identity is moved into the struct
+        let signing_key_bytes = identity.signing_key_bytes();
         let state = Arc::new(Self {
             config: config.clone(),
             identity,
@@ -528,11 +530,25 @@ impl SharedState {
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             lan_discovery_tx: broadcast::channel(16).0,
             providers_config: RwLock::new({
-                // Hydrate from database (persisted via admin API), fall back to config
-                db.get_json::<crate::config::ProvidersConfig>("providers", "config")
+                // Hydrate from database (persisted via admin API), fall back to config.
+                // Database values may be encrypted — decrypt using the node's signing key.
+                let stored = db
+                    .get_json::<crate::config::ProvidersConfig>("providers", "config")
                     .ok()
-                    .flatten()
-                    .unwrap_or_else(|| config.providers.clone())
+                    .flatten();
+                match stored {
+                    Some(cfg) => {
+                        crate::crypto::decrypt_config(&cfg, &signing_key_bytes)
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to decrypt stored provider keys, using config file"
+                                );
+                                config.providers.clone()
+                            })
+                    }
+                    None => config.providers.clone(),
+                }
             }),
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
