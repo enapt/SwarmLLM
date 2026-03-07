@@ -79,7 +79,40 @@ sudo systemctl enable --now swarmllm
 
 ## Docker
 
-> Docker images are planned but not yet published. For now, build from source or use pre-built binaries from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases).
+Build the image locally:
+
+```bash
+# CPU-only
+docker build -t swarmllm .
+
+# With CUDA GPU support
+docker build --build-arg FEATURES="candle-cuda" -t swarmllm:cuda .
+```
+
+Run:
+
+```bash
+# CPU
+docker run -d \
+  --name swarmllm \
+  --restart unless-stopped \
+  -p 8800:8800/tcp \
+  -p 8810:8810/tcp \
+  -p 8800:8800/udp \
+  -v swarmllm-data:/data \
+  swarmllm
+
+# With NVIDIA GPU
+docker run -d \
+  --gpus all \
+  --name swarmllm \
+  --restart unless-stopped \
+  -p 8800:8800/tcp \
+  -p 8810:8810/tcp \
+  -p 8800:8800/udp \
+  -v swarmllm-data:/data \
+  swarmllm:cuda
+```
 
 ## Multi-Node Cluster
 

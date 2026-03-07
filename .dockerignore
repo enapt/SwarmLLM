@@ -5,10 +5,10 @@ target/
 .git/
 .gitignore
 
-# Documentation (keep INSTALL.md if present)
+# Documentation
 docs/
 *.md
-!INSTALL.md
+!README.md
 
 # CI/CD
 .github/
@@ -23,11 +23,14 @@ tests/
 .vscode/
 .idea/
 
+# SDKs (not needed in container)
+python/
+js/
+
+# Monitoring stack (separate deployment)
+monitoring/
+
 # OS files
 .DS_Store
 Thumbs.db
-
-# Sound/media assets (not needed in container)
-*.wav
-*.png
-*.xml
+*:Zone.Identifier

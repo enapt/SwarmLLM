@@ -214,10 +214,17 @@ Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
 
 Download from [GitHub Releases](https://github.com/enapt/SwarmLLM/releases) — available for Linux (CPU and CUDA), macOS (Intel and Apple Silicon), and Windows. Extract and run `./swarmllm run`.
 
+### Cargo Install
+
+```bash
+# Requires Rust 1.80+
+cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0-alpha.1
+swarmllm run
+```
+
 ### Building from Source
 
 ```bash
-# Requirements: Rust 1.80+
 git clone https://github.com/enapt/SwarmLLM.git
 cd SwarmLLM
 

@@ -39,7 +39,7 @@ jobs:
             archive: swarmllm-macos-aarch64.tar.gz
             features: ""
           - name: macOS x86_64
-            runner: macos-13
+            runner: macos-14
             target: x86_64-apple-darwin
             binary: swarmllm
             archive: swarmllm-macos-x86_64.tar.gz
@@ -75,7 +75,7 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: "12.4.0"
-          method: network
+          method: local
           sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
 
       - name: Build release binary

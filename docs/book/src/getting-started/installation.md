@@ -49,9 +49,16 @@ chmod +x swarmllm
 ./swarmllm run
 ```
 
-### Building from Source
+### Cargo Install
 
 Requires Rust 1.80+:
+
+```bash
+cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0-alpha.1
+swarmllm run
+```
+
+### Building from Source
 
 ```bash
 git clone https://github.com/enapt/SwarmLLM.git
