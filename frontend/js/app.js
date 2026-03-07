@@ -1421,6 +1421,20 @@ var SwarmLLM = (function() {
             fitsTag = '<span style="color:var(--yellow)" title="Smallest variant may exceed your VRAM">Check VRAM</span>';
           }
 
+          // Network replication & demand info
+          var replicas = repo.network_replicas || 0;
+          var networkTag = replicas > 0
+            ? '<span title="' + replicas + ' node(s) in the network host this model">&#127760; ' + replicas + ' node' + (replicas !== 1 ? 's' : '') + '</span>'
+            : '<span style="color:var(--blue)" title="No nodes in the network host this model yet">&#127760; New to network</span>';
+          var demandTag = '';
+          if (replicas === 0) {
+            demandTag = '<span style="color:var(--green)" title="No replicas yet — high credit earning potential">&#128176; High demand</span>';
+          } else if (replicas <= 2) {
+            demandTag = '<span style="color:var(--yellow)" title="Few replicas — good credit earning potential">&#128176; Medium demand</span>';
+          } else {
+            demandTag = '<span style="color:var(--text-muted)" title="Well replicated across the network">&#128176; Well replicated</span>';
+          }
+
           card.innerHTML = '<div class="hf-model-info">' +
             '<div class="hf-model-name">' + escapeHtml(repo.repo_id) + '</div>' +
             '<div class="hf-model-meta">' +
@@ -1428,6 +1442,7 @@ var SwarmLLM = (function() {
             (likes ? '<span>' + likes + '</span>' : '') +
             (fitsTag ? '<span>' + fitsTag + '</span>' : '') +
             '</div>' +
+            '<div class="hf-model-meta">' + networkTag + demandTag + '</div>' +
             '</div>' +
             '<div class="hf-model-actions">' +
             (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +

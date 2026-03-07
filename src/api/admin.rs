@@ -1110,6 +1110,30 @@ pub async fn hf_search(
             let smallest_size = files.iter().map(|f| f.size_bytes).min().unwrap_or(u64::MAX);
             let fits_vram = available_vram_bytes > 0 && smallest_size < available_vram_bytes;
 
+            // Network replication: count unique peers holding shards of any variant of this repo
+            let network_replicas = {
+                let mut unique_peers = std::collections::HashSet::new();
+                for f in &files {
+                    let model_id_str = f.filename
+                        .trim_end_matches(".gguf")
+                        .to_lowercase()
+                        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+                        .split('-')
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("-");
+                    let mid = crate::types::ModelId(model_id_str);
+                    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
+                        if shard_id.model_id == mid {
+                            for h in &holders {
+                                unique_peers.insert(h.clone());
+                            }
+                        }
+                    }
+                }
+                unique_peers.len()
+            };
+
             serde_json::json!({
                 "repo_id": repo_id,
                 "downloads": downloads,
@@ -1117,6 +1141,7 @@ pub async fn hf_search(
                 "variants": variants,
                 "recommended_variant": recommended_variant,
                 "fits_vram": fits_vram,
+                "network_replicas": network_replicas,
             })
         })
         .collect();
@@ -1413,10 +1438,24 @@ pub async fn hf_probe(
                 total_size_bytes: info.total_size,
                 probed_at: chrono::Utc::now(),
             };
+            // Count unique peers hosting shards of this model
+            let network_replicas = {
+                let mut unique_peers = std::collections::HashSet::new();
+                for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
+                    if shard_id.model_id == mid {
+                        for h in &holders {
+                            unique_peers.insert(h.clone());
+                        }
+                    }
+                }
+                unique_peers.len()
+            };
+
             state.shared_state.hf_probe_cache.insert(mid, probe_info);
 
             let arch_str = &info.tensor_meta.architecture;
             let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
+
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "total_size": info.total_size,
@@ -1424,6 +1463,7 @@ pub async fn hf_probe(
                 "shard_count": info.shard_count(),
                 "architecture": arch_str,
                 "architecture_supported": model_arch.is_supported(),
+                "network_replicas": network_replicas,
             })))
         }
         Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
