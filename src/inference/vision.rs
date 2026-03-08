@@ -520,6 +520,14 @@ pub fn merge_vision_text_embeddings(
         .reshape(&[1, num_vision, hidden])
         .map_err(map_err("vision_reshape"))?;
 
+    tracing::debug!(
+        text_seq,
+        num_vision,
+        hidden,
+        positions = ?image_positions,
+        "DIAG: merge_vision_text_embeddings"
+    );
+
     if image_positions.len() == 1 {
         // Replace <image> token at the given position with vision embeddings
         let pos = image_positions[0];

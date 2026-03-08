@@ -228,9 +228,10 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 
 | Level | What | Where |
 |-------|------|-------|
+| TRACE | `DIAG: layer forward complete` — `layer`, `layer_ms` (per-layer timing) | split.rs |
 | DEBUG | `DIAG: SplitModel forward pass complete` — `forward_ms`, `seq_len`, `num_layers`, `is_first`, `is_last`, `kv_offset` | split.rs |
 
-For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`.
+For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`. Use `-vvv` (trace) to see per-layer timing.
 
 ## Performance Diagnostics
 
@@ -357,6 +358,13 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `DIAG: load_model` | `path`, `backend_type`, `elapsed_ms` |
 | DEBUG | `DIAG: generate_stream starting` | `prompt_len`, `temperature`, `max_tokens` |
 
+### Sampling (sampling.rs)
+
+| Level | What | Fields |
+|-------|------|--------|
+| TRACE | `DIAG: sample_token complete` | `token`, `vocab_size`, `mode` (`greedy`/`stochastic`), `temperature`, `top_k`, `top_p` |
+| WARN  | `DIAG: sampling fallback` | `vocab_size`, `sum` (cumulative probability rounding) |
+
 ### Speculative Decoding (speculative.rs)
 
 | Level | What | Fields |
@@ -367,8 +375,10 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: encode_images` | `image_count`, `elapsed_ms` |
-| INFO  | `DIAG: precompute_vision_embeddings` | `local`/`remote`, `node`, `elapsed_ms` |
+| DEBUG | `DIAG: encode_images` | `image_count`, `patch_count`, `elapsed_ms` |
+| DEBUG | `DIAG: merge_vision_text_embeddings` | `text_seq`, `num_vision`, `hidden`, `positions` |
+| INFO  | `DIAG: precompute_vision_embeddings local` | `image_count`, `compressed_bytes` |
+| INFO  | `DIAG: precompute_vision_embeddings remote` | `remote_node` |
 | INFO  | `DIAG: handle_vision_encode_request` | `model_id`, `image_bytes`, `elapsed_ms` |
 | DEBUG | `DIAG: select_vision_node` | `local`, `first_segment`, `any_holder` |
 | WARN  | `DIAG: vision encode timeout` | `node`, `timeout_secs` |
@@ -652,9 +662,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/update.rs` | Update check start, version compare, apply start |
 | `src/main.rs` | Daemon startup |
 
-## Coverage Statistics (2026-03-06)
+## Coverage Statistics (2026-03-08)
 
-**~225 DIAG lines across 61/79 source files (100% of actionable files).**
+**~250 DIAG lines across 61/79 source files (100% of actionable files).**
 
 All 61 files containing runtime decision/timing/error logic are instrumented. The 18 uninstrumented files are:
 - `mod.rs` re-exports (11): no logic, just `pub mod` declarations

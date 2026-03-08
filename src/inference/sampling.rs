@@ -205,7 +205,14 @@ pub fn sample_token_with_ctx(
 ) -> u32 {
     // Greedy decoding when temperature is 0
     if params.temperature <= 0.0 {
-        return argmax(logits);
+        let token = argmax(logits);
+        tracing::trace!(
+            token,
+            vocab_size = logits.len(),
+            mode = "greedy",
+            "DIAG: sample_token complete"
+        );
+        return token;
     }
 
     apply_temperature(logits, params.temperature);
@@ -228,6 +235,15 @@ pub fn sample_token_with_ctx(
     for (i, &p) in ctx.probs.iter().enumerate() {
         cumulative += p;
         if cumulative >= r {
+            tracing::trace!(
+                token = i as u32,
+                vocab_size = ctx.probs.len(),
+                temperature = params.temperature,
+                top_k = params.top_k,
+                top_p = params.top_p,
+                mode = "stochastic",
+                "DIAG: sample_token complete"
+            );
             return i as u32;
         }
     }

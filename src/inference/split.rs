@@ -6152,21 +6152,10 @@ impl SplitModel {
             let abs_layer = self.layer_start + layer_idx;
             let lora_param = lora_adapter.map(|a| (a, abs_layer));
 
+            let layer_start_time = std::time::Instant::now();
             match layer {
                 LayerVariant::Dense(lw) => {
                     let x = layer_in;
-                    // DIAG: dump first few values at layer 0 to trace where computation goes wrong
-                    if abs_layer == 0 && index_pos == 0 {
-                        if let Ok(flat) = x.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                            let preview: Vec<_> = flat.iter().take(8).collect();
-                            let has_nan = flat.iter().any(|v| v.is_nan());
-                            let has_inf = flat.iter().any(|v| v.is_infinite());
-                            tracing::info!(
-                                ?preview, has_nan, has_inf,
-                                "DIAG: layer0 input (after embed+scale)"
-                            );
-                        }
-                    }
                     let residual = &x;
                     let x = lw
                         .attention_norm
@@ -6182,17 +6171,6 @@ impl SplitModel {
                             lora_param,
                         )
                         .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
-                    if abs_layer == 0 && index_pos == 0 {
-                        if let Ok(flat) = attn.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                            let preview: Vec<_> = flat.iter().take(8).collect();
-                            let has_nan = flat.iter().any(|v| v.is_nan());
-                            let has_inf = flat.iter().any(|v| v.is_infinite());
-                            tracing::info!(
-                                ?preview, has_nan, has_inf,
-                                "DIAG: layer0 after attention"
-                            );
-                        }
-                    }
                     // Gemma 2 post-attention norm: normalize before residual add
                     if let Some(ref post_norm) = lw.post_attention_norm {
                         attn = post_norm
@@ -6221,22 +6199,6 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
                     }
                     layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    // DIAG: per-layer output summary for debugging Gemma-2
-                    if index_pos == 0 {
-                        if let Ok(flat) = layer_in.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                            let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
-                            let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                            let mean = flat.iter().sum::<f32>() / flat.len() as f32;
-                            // RMS of last-token hidden state
-                            let last_start = flat.len().saturating_sub(self.hidden_dim);
-                            let last_tok: &[f32] = &flat[last_start..];
-                            let rms = (last_tok.iter().map(|v| v * v).sum::<f32>() / last_tok.len() as f32).sqrt();
-                            tracing::info!(
-                                layer = abs_layer, min, max, mean, last_tok_rms = rms,
-                                "DIAG: layer output"
-                            );
-                        }
-                    }
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -6278,6 +6240,11 @@ impl SplitModel {
                     ));
                 }
             }
+            tracing::trace!(
+                layer = abs_layer,
+                layer_ms = layer_start_time.elapsed().as_millis() as u64,
+                "DIAG: layer forward complete"
+            );
         }
 
         // Write the updated KV-caches and SSM states back to the store.
@@ -6305,37 +6272,9 @@ impl SplitModel {
             let x = x
                 .i((.., seq_len - 1, ..))
                 .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?;
-            // DIAG: dump hidden state before output projection
-            if index_pos == 0 {
-                if let Ok(flat) = x.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                    let preview: Vec<_> = flat.iter().take(8).collect();
-                    let has_nan = flat.iter().any(|v| v.is_nan());
-                    let has_inf = flat.iter().any(|v| v.is_infinite());
-                    let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    tracing::info!(
-                        ?preview, has_nan, has_inf, min, max, dim = flat.len(),
-                        "DIAG: pre-logits hidden state (after final norm, last token)"
-                    );
-                }
-            }
             let mut logits = output
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
-            // DIAG: dump logit statistics
-            if index_pos == 0 {
-                if let Ok(flat) = logits.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
-                    let has_nan = flat.iter().any(|v| v.is_nan());
-                    let has_inf = flat.iter().any(|v| v.is_infinite());
-                    let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
-                    let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    let argmax = flat.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i,v)| (i, *v));
-                    tracing::info!(
-                        has_nan, has_inf, min, max, ?argmax, dim = flat.len(),
-                        "DIAG: raw logits (before softcap)"
-                    );
-                }
-            }
             // Gemma 2 final logit soft-capping: tanh(logits / cap) * cap
             if let Some(cap) = self.final_logit_softcap {
                 logits = logits

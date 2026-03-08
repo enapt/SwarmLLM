@@ -204,7 +204,7 @@ impl PipelineExecutor {
                 request_id = %self.request.id,
                 image_count = images.len(),
                 compressed_bytes = compressed.len(),
-                "Pre-computed vision embeddings locally"
+                "DIAG: precompute_vision_embeddings local"
             );
             return Ok(Some(compressed));
         }
@@ -229,7 +229,7 @@ impl PipelineExecutor {
         tracing::info!(
             request_id = %self.request.id,
             remote_node = %remote_node,
-            "Sending VisionEncodeRequest to remote mmproj holder"
+            "DIAG: precompute_vision_embeddings remote"
         );
 
         // Compress image as JPEG for wire transfer
