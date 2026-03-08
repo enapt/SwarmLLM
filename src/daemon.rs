@@ -1138,10 +1138,10 @@ impl Daemon {
                             continue;
                         }
                         // Try local extraction from shard_000 first
-                        if model_dir.join("shard_000.bin").exists() {
-                            if crate::inference::split::ensure_gguf_header(&model_dir).is_ok() {
-                                continue;
-                            }
+                        if model_dir.join("shard_000.bin").exists()
+                            && crate::inference::split::ensure_gguf_header(&model_dir).is_ok()
+                        {
+                            continue;
                         }
                         // Download from HF if source is known
                         let model_id_str =

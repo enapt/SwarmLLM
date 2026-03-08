@@ -1663,11 +1663,8 @@ async fn split_non_stream_response(
     // First forward pass (prefill) — process entire prompt at once.
     // block_in_place: CPU-bound inference must not starve async runtime.
     let logits = tokio::task::block_in_place(|| model.forward(&input, 0, &kv_store, &request_id))?;
-    // logits shape: (1, seq_len, vocab) — take last token's logits
-    let last_logits = logits
-        .narrow(1, prompt_tokens - 1, 1)
-        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e.to_string())))?;
-    let mut next_token = sample_token(&last_logits, params.temperature, params.top_p)?;
+    // logits shape: (1, vocab) — forward() already extracts the last token
+    let mut next_token = sample_token(&logits, params.temperature, params.top_p)?;
 
     let eos = model.eos_tokens().to_vec();
     tracing::debug!(
@@ -1820,18 +1817,8 @@ async fn split_stream_response(
         let prefill_ms = prefill_start.elapsed().as_millis() as u64;
         tracing::info!(model_id = %model_id, prompt_tokens, prefill_ms, "DIAG: split stream prefill complete");
 
-        let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(
-                    prompt_tokens,
-                    "DIAG: split stream logits narrow failed: {e}"
-                );
-                let _ = tx.send(StreamEvent::Done).await;
-                return;
-            }
-        };
-        let mut next_token = match sample_token(&last_logits, params.temperature, params.top_p) {
+        // logits shape: (1, vocab) — forward() already extracts the last token
+        let mut next_token = match sample_token(&logits, params.temperature, params.top_p) {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("DIAG: split stream initial sample failed: {e}");

@@ -1114,9 +1114,19 @@ impl PipelineExecutor {
                 .and_then(|v| v.to_vec().ok())
                 .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                 .unwrap_or_default();
+            let add_space_prefix = ct
+                .metadata
+                .get("tokenizer.ggml.add_space_prefix")
+                .and_then(|v| v.to_bool().ok())
+                .unwrap_or(true);
+            let add_bos_token = ct
+                .metadata
+                .get("tokenizer.ggml.add_bos_token")
+                .and_then(|v| v.to_bool().ok())
+                .unwrap_or(false);
             if !scores.is_empty() {
                 Some(crate::inference::split::SplitTokenizer::from_sentencepiece(
-                    &vocab, &scores,
+                    &vocab, &scores, add_space_prefix, add_bos_token,
                 ))
             } else {
                 None

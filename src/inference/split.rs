@@ -723,93 +723,343 @@ impl BpeTokenizer {
     }
 }
 
-/// Unified tokenizer that wraps either our BPE tokenizer or the HuggingFace
-/// `tokenizers` crate (for sentencepiece/unigram models like LLaMA).
+/// Unified tokenizer that wraps either our BPE tokenizer or a SentencePiece
+/// merge-based tokenizer built from GGUF vocab + scores.
 pub enum SplitTokenizer {
-    Bpe(BpeTokenizer),
-    HfUnigram {
-        inner: tokenizers::Tokenizer,
-        /// Vocab for decode_token lookups
-        vocab: Vec<String>,
-    },
+    Bpe(Box<BpeTokenizer>),
+    SentencePiece(SpmTokenizer),
+}
+
+/// SentencePiece merge-based tokenizer matching llama.cpp's SPM algorithm.
+///
+/// Uses greedy best-first merge: start with character-level segmentation,
+/// iteratively merge adjacent pairs whose concatenation exists in the vocab,
+/// ordered by score (highest first). This matches llama.cpp's behavior and
+/// produces correct tokenization for GGUF SentencePiece models.
+pub struct SpmTokenizer {
+    /// Token string → (token_id, score)
+    piece_to_id: HashMap<String, (u32, f32)>,
+    /// Token ID → token string
+    #[allow(dead_code)]
+    vocab: Vec<String>,
+    /// Whether to prepend ▁ to the input
+    add_space_prefix: bool,
+    /// BOS token ID
+    bos_id: Option<u32>,
+    /// Whether to auto-prepend BOS token (from GGUF tokenizer.ggml.add_bos_token)
+    add_bos_token: bool,
+    /// UNK token ID
+    unk_id: Option<u32>,
+    /// Special tokens sorted by length (longest first) for greedy matching
+    special_tokens: Vec<(String, u32)>,
+}
+
+impl SpmTokenizer {
+    pub fn new(tokens: &[String], scores: &[f32], add_space_prefix: bool, add_bos_token: bool) -> Self {
+        let mut piece_to_id = HashMap::new();
+        for (i, (tok, &score)) in tokens.iter().zip(scores.iter()).enumerate() {
+            piece_to_id.insert(tok.clone(), (i as u32, score));
+        }
+        let unk_id = tokens.iter().position(|t| t == "<unk>").map(|i| i as u32);
+        let bos_id = tokens.iter().position(|t| t == "<bos>").map(|i| i as u32);
+
+        // Collect special tokens (control tokens like <bos>, <start_of_turn>, etc.)
+        let mut special_tokens: Vec<(String, u32)> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 30
+            })
+            .map(|(i, t)| (t.clone(), i as u32))
+            .collect();
+        // Sort by length descending for greedy matching
+        special_tokens.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        tracing::info!(
+            vocab_size = tokens.len(),
+            special_tokens = special_tokens.len(),
+            add_space_prefix,
+            add_bos_token,
+            unk_id = ?unk_id,
+            bos_id = ?bos_id,
+            "Built SPM tokenizer from GGUF vocab"
+        );
+
+        Self {
+            piece_to_id,
+            vocab: tokens.to_vec(),
+            add_space_prefix,
+            bos_id,
+            add_bos_token,
+            unk_id,
+            special_tokens,
+        }
+    }
+
+    /// Encode text to token IDs using SPM merge algorithm.
+    pub fn encode(&self, text: &str) -> Vec<i64> {
+        let mut result = Vec::new();
+
+        // Auto-prepend BOS token if configured (Gemma-2 uses this)
+        if self.add_bos_token {
+            if let Some(bos) = self.bos_id {
+                result.push(bos as i64);
+            }
+        }
+
+        // Split text around special tokens first
+        let segments = self.split_special_tokens(text);
+        for (segment, is_special) in segments {
+            if is_special {
+                if let Some(&(id, _)) = self.piece_to_id.get(&segment) {
+                    result.push(id as i64);
+                }
+            } else {
+                // Normalize: replace spaces with ▁, optionally prepend ▁
+                let normalized = if self.add_space_prefix
+                    && result.len() <= (if self.add_bos_token { 1 } else { 0 })
+                {
+                    format!("\u{2581}{}", segment.replace(' ', "\u{2581}"))
+                } else {
+                    segment.replace(' ', "\u{2581}")
+                };
+                result.extend(self.spm_encode(&normalized));
+            }
+        }
+        result
+    }
+
+    /// Split text around special tokens, returning (segment, is_special) pairs.
+    fn split_special_tokens(&self, text: &str) -> Vec<(String, bool)> {
+        let mut result = Vec::new();
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            // Find the earliest special token match
+            let mut best_match: Option<(usize, &str, u32)> = None;
+            for (tok, id) in &self.special_tokens {
+                if let Some(pos) = remaining.find(tok.as_str()) {
+                    if best_match.is_none() || pos < best_match.unwrap().0 {
+                        best_match = Some((pos, tok.as_str(), *id));
+                    }
+                }
+            }
+            match best_match {
+                Some((pos, tok, _)) => {
+                    if pos > 0 {
+                        result.push((remaining[..pos].to_string(), false));
+                    }
+                    result.push((tok.to_string(), true));
+                    remaining = &remaining[pos + tok.len()..];
+                }
+                None => {
+                    result.push((remaining.to_string(), false));
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Core SPM merge algorithm (matches llama.cpp's llm_tokenizer_spm).
+    ///
+    /// 1. Initialize each UTF-8 character as a separate symbol
+    /// 2. Build priority queue of all valid bigrams (adjacent pairs in vocab)
+    /// 3. Pop highest-score bigram, merge symbols
+    /// 4. Add new bigrams with neighbors
+    /// 5. Repeat until no more merges
+    fn spm_encode(&self, text: &str) -> Vec<i64> {
+        if text.is_empty() {
+            return vec![];
+        }
+
+        // Initialize: each character is a symbol
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+
+        // Symbols: (start_byte, len_bytes, prev, next)
+        // Use byte offsets for correct string slicing
+        struct Symbol {
+            start: usize,
+            len: usize,
+            prev: i32,
+            next: i32,
+        }
+
+        let text_bytes = text.as_bytes();
+        let mut symbols: Vec<Symbol> = Vec::with_capacity(n);
+        let mut byte_pos = 0;
+        for (i, ch) in chars.iter().enumerate() {
+            let ch_len = ch.len_utf8();
+            symbols.push(Symbol {
+                start: byte_pos,
+                len: ch_len,
+                prev: if i > 0 { i as i32 - 1 } else { -1 },
+                next: if i + 1 < n { i as i32 + 1 } else { -1 },
+            });
+            byte_pos += ch_len;
+        }
+
+        // Priority queue: (score, left_idx, right_idx, merged_token_id)
+        // Use Reverse for max-heap (BinaryHeap is max by default, we want highest score first)
+        use std::collections::BinaryHeap;
+        use std::cmp::Ordering;
+
+        #[derive(PartialEq)]
+        struct Merge {
+            score: f32,
+            left: usize,
+            right: usize,
+            token_id: u32,
+        }
+        impl Eq for Merge {}
+        impl PartialOrd for Merge {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for Merge {
+            fn cmp(&self, other: &Self) -> Ordering {
+                // Higher score first, break ties by position (lower left first)
+                self.score
+                    .partial_cmp(&other.score)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| other.left.cmp(&self.left))
+            }
+        }
+
+        let mut heap: BinaryHeap<Merge> = BinaryHeap::new();
+
+        let try_add_bigram = |heap: &mut BinaryHeap<Merge>,
+                              symbols: &[Symbol],
+                              left: usize,
+                              right: usize,
+                              text_bytes: &[u8]| {
+            let merged =
+                std::str::from_utf8(&text_bytes[symbols[left].start..symbols[right].start + symbols[right].len])
+                    .unwrap_or("");
+            if let Some(&(id, score)) = self.piece_to_id.get(merged) {
+                heap.push(Merge {
+                    score,
+                    left,
+                    right,
+                    token_id: id,
+                });
+            }
+        };
+
+        // Initialize bigrams
+        for i in 0..n.saturating_sub(1) {
+            try_add_bigram(&mut heap, &symbols, i, i + 1, text_bytes);
+        }
+
+        // Merge loop
+        while let Some(merge) = heap.pop() {
+            let left = merge.left;
+            let right = merge.right;
+
+            // Check if symbols are still valid (not already merged)
+            if symbols[left].len == 0 || symbols[right].len == 0 {
+                continue;
+            }
+
+            // Verify the merge is still valid (symbols are still adjacent)
+            if symbols[left].next != right as i32 {
+                continue;
+            }
+
+            // Merge: extend left symbol to cover right
+            symbols[left].len = (symbols[right].start + symbols[right].len) - symbols[left].start;
+            symbols[right].len = 0; // mark as deleted
+
+            // Update linked list
+            let right_next = symbols[right].next;
+            symbols[left].next = right_next;
+            if right_next >= 0 {
+                symbols[right_next as usize].prev = left as i32;
+            }
+
+            // Try new bigrams with neighbors
+            if symbols[left].prev >= 0 {
+                try_add_bigram(
+                    &mut heap,
+                    &symbols,
+                    symbols[left].prev as usize,
+                    left,
+                    text_bytes,
+                );
+            }
+            if symbols[left].next >= 0 {
+                try_add_bigram(
+                    &mut heap,
+                    &symbols,
+                    left,
+                    symbols[left].next as usize,
+                    text_bytes,
+                );
+            }
+        }
+
+        // Collect remaining symbols as token IDs
+        let mut result = Vec::new();
+        let mut idx = 0i32;
+        // Find the first symbol
+        while idx >= 0 && idx < symbols.len() as i32 {
+            if symbols[idx as usize].len == 0 {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        // Walk the linked list
+        while idx >= 0 && (idx as usize) < symbols.len() {
+            let sym = &symbols[idx as usize];
+            if sym.len == 0 {
+                idx = sym.next;
+                continue;
+            }
+            let piece = std::str::from_utf8(&text_bytes[sym.start..sym.start + sym.len])
+                .unwrap_or("");
+            if let Some(&(id, _)) = self.piece_to_id.get(piece) {
+                result.push(id as i64);
+            } else {
+                // Byte fallback: encode unknown characters as <0xNN> tokens
+                for byte in text_bytes[sym.start..sym.start + sym.len].iter() {
+                    let byte_tok = format!("<0x{:02X}>", byte);
+                    if let Some(&(id, _)) = self.piece_to_id.get(&byte_tok) {
+                        result.push(id as i64);
+                    } else if let Some(unk) = self.unk_id {
+                        result.push(unk as i64);
+                    }
+                }
+            }
+            idx = sym.next;
+        }
+
+        result
+    }
 }
 
 impl SplitTokenizer {
     /// Build from GGUF BPE merges (existing path).
     pub fn from_bpe(tokens: &[String], merges: &[String], pre_type: &str, model: &str) -> Self {
-        Self::Bpe(BpeTokenizer::from_gguf(tokens, merges, pre_type, model))
+        Self::Bpe(Box::new(BpeTokenizer::from_gguf(tokens, merges, pre_type, model)))
     }
 
-    /// Build a sentencepiece/unigram tokenizer from GGUF vocab + scores
-    /// using the HuggingFace `tokenizers` crate.
-    pub fn from_sentencepiece(tokens: &[String], scores: &[f32]) -> Self {
-        use tokenizers::models::unigram::Unigram;
-        use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
-
-        // Build (token, score) pairs for the Unigram model
-        let vocab: Vec<(String, f64)> = tokens
-            .iter()
-            .zip(scores.iter())
-            .map(|(t, &s)| (t.clone(), s as f64))
-            .collect();
-
-        // Find <unk> token ID (required by Unigram)
-        let unk_id = tokens.iter().position(|t| t == "<unk>");
-
-        // Detect byte_fallback: LLaMA-style models have <0xNN> tokens
-        let byte_fallback = tokens
-            .iter()
-            .any(|t| t.starts_with("<0x") && t.ends_with('>'));
-
-        let unigram = Unigram::from(vocab, unk_id, byte_fallback)
-            .expect("Failed to build Unigram tokenizer from GGUF vocab");
-
-        let mut tokenizer = tokenizers::Tokenizer::new(unigram);
-
-        // SentencePiece uses ▁ (U+2581) as space replacement
-        let metaspace = Metaspace::new('▁', PrependScheme::Always, true);
-        tokenizer.with_pre_tokenizer(Some(metaspace));
-
-        // Register control/special tokens (e.g. <bos>, <eos>, <start_of_turn>, <end_of_turn>)
-        // so the tokenizer handles them as single tokens instead of splitting them.
-        let special_toks: Vec<tokenizers::AddedToken> = tokens
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                t.starts_with('<') && t.ends_with('>') && !t.contains(' ') && t.len() <= 20
-            })
-            .map(|(_, t)| tokenizers::AddedToken::from(t.clone(), true))
-            .collect();
-        if !special_toks.is_empty() {
-            let count = special_toks.len();
-            tokenizer.add_special_tokens(&special_toks);
-            tracing::debug!(count, "Registered special tokens in HF Unigram tokenizer");
-        }
-
-        tracing::info!(
-            vocab_size = tokens.len(),
-            unk_id = ?unk_id,
-            byte_fallback = byte_fallback,
-            "Built HF Unigram tokenizer from GGUF sentencepiece vocab"
-        );
-
-        Self::HfUnigram {
-            inner: tokenizer,
-            vocab: tokens.to_vec(),
-        }
+    /// Build a SentencePiece tokenizer from GGUF vocab + scores.
+    pub fn from_sentencepiece(
+        tokens: &[String],
+        scores: &[f32],
+        add_space_prefix: bool,
+        add_bos_token: bool,
+    ) -> Self {
+        Self::SentencePiece(SpmTokenizer::new(tokens, scores, add_space_prefix, add_bos_token))
     }
 
     /// Encode text to token IDs.
     pub fn encode(&self, text: &str) -> Vec<i64> {
         match self {
             Self::Bpe(bpe) => bpe.encode(text),
-            Self::HfUnigram { inner, .. } => match inner.encode(text, false) {
-                Ok(encoding) => encoding.get_ids().iter().map(|&id| id as i64).collect(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "HF tokenizer encode failed, falling back to bytes");
-                    text.bytes().map(|b| b as i64).collect()
-                }
-            },
+            Self::SentencePiece(spm) => spm.encode(text),
         }
     }
 
@@ -817,7 +1067,7 @@ impl SplitTokenizer {
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
         match self {
             Self::Bpe(bpe) => bpe.decode_token(token_str),
-            Self::HfUnigram { .. } => {
+            Self::SentencePiece(_) => {
                 // Handle byte fallback tokens like <0x0A>
                 if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6
                 {
@@ -839,7 +1089,7 @@ impl SplitTokenizer {
     pub fn is_sentencepiece(&self) -> bool {
         match self {
             Self::Bpe(bpe) => bpe.is_sentencepiece(),
-            Self::HfUnigram { .. } => true,
+            Self::SentencePiece(_) => true,
         }
     }
 
@@ -847,7 +1097,7 @@ impl SplitTokenizer {
     pub fn byte_decoder(&self) -> HashMap<char, u8> {
         match self {
             Self::Bpe(bpe) => bpe.byte_decoder().clone(),
-            Self::HfUnigram { .. } => HashMap::new(),
+            Self::SentencePiece(_) => HashMap::new(),
         }
     }
 }
@@ -932,17 +1182,13 @@ impl ModelArch {
         }
     }
 
-    /// Whether this architecture uses contiguous RoPE (vs interleaved).
+    /// Whether this architecture uses contiguous RoPE (NeoX-style halves) vs
+    /// interleaved (original GPT-J/LLaMA pairs). Matches llama.cpp's
+    /// `LLM_ROPE_TYPE_NEOX` (contiguous) vs `LLM_ROPE_TYPE_NORM` (interleaved).
     pub fn use_rope_contiguous(&self) -> bool {
-        matches!(
-            self,
-            ModelArch::Qwen2
-                | ModelArch::DeepSeek2
-                | ModelArch::Glm4
-                | ModelArch::Llama4
-                | ModelArch::Qwen35
-                | ModelArch::Qwen35Moe
-        )
+        // Interleaved (NORM): Llama, Mistral
+        // Contiguous (NEOX): everything else
+        !matches!(self, ModelArch::Llama | ModelArch::Mistral | ModelArch::Unknown(_))
     }
 
     /// Default activation function for this architecture's MLP.
@@ -1618,6 +1864,10 @@ struct LayerWeights {
     attn_k_norm: Option<RmsNorm>,
     ffn: FfnVariant,
     ffn_norm: RmsNorm,
+    /// Gemma 2 post-attention RmsNorm (applied after attention, before residual add).
+    post_attention_norm: Option<RmsNorm>,
+    /// Gemma 2 post-FFN RmsNorm (applied after FFN, before residual add).
+    post_ffw_norm: Option<RmsNorm>,
     n_head: usize,
     n_kv_head: usize,
     head_dim: usize,
@@ -2840,7 +3090,7 @@ impl ShardReader {
 
     /// Find which shard (if any) contains the given virtual file position,
     /// returning (shard_vec_index, offset_within_shard_file).
-    fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
+    pub(crate) fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
         // Binary search: find the last entry where gguf_offset <= pos
         let idx = match self
             .tensor_map
@@ -3101,23 +3351,11 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
-        let use_gemma_norm = model_arch.use_gemma_norm();
-
-        // Helper: create RmsNorm, applying Gemma's +1 weight offset if needed.
-        // Gemma stores weights that expect: output = x * (1 + w) / rms(x)
-        // We add 1 at load time so the standard forward pass works correctly.
+        // Helper: create RmsNorm from GGUF weight tensor.
+        // Note: GGUF norm weights for Gemma models already include the +1 offset
+        // (added by convert_hf_to_gguf.py's modify_tensors), so we use them as-is.
         let make_norm = |qtensor: QTensor, eps: f64| -> Result<RmsNorm, SwarmError> {
-            if use_gemma_norm {
-                let w = qtensor
-                    .dequantize(&device)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                let w_plus_one = (w + 1.0).map_err(|e| SwarmError::Internal(e.to_string()))?;
-                let qt = QTensor::quantize(&w_plus_one, candle_core::quantized::GgmlDType::F32)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                RmsNorm::from_qtensor(qt, eps).map_err(|e| SwarmError::Internal(e.to_string()))
-            } else {
-                RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
-            }
+            RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
         };
 
         // Load embedding table only for first segment
@@ -3469,6 +3707,8 @@ impl SplitModel {
                             activation: Activation::SiLU,
                         }),
                         ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
+                        post_attention_norm: None,
+                        post_ffw_norm: None,
                         n_head: head_count,
                         n_kv_head: head_count_kv,
                         head_dim,
@@ -3665,6 +3905,8 @@ impl SplitModel {
                     attn_k_norm: None,
                     ffn,
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                    post_attention_norm: None,
+                    post_ffw_norm: None,
                     n_head: head_count,
                     n_kv_head: head_count_kv,
                     head_dim,
@@ -4268,6 +4510,26 @@ impl SplitModel {
                                 .transpose()
                                 .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
 
+                            // Gemma 2 post-norms (optional)
+                            let post_attention_norm = ct_ref
+                                .tensor(
+                                    &mut cursor,
+                                    &format!("{prefix}.post_attention_norm.weight"),
+                                    device_ref,
+                                )
+                                .ok()
+                                .map(|t| make_norm(t, rms_norm_eps))
+                                .transpose()?;
+                            let post_ffw_norm = ct_ref
+                                .tensor(
+                                    &mut cursor,
+                                    &format!("{prefix}.post_ffw_norm.weight"),
+                                    device_ref,
+                                )
+                                .ok()
+                                .map(|t| make_norm(t, rms_norm_eps))
+                                .transpose()?;
+
                             Ok(LayerVariant::Dense(LayerWeights {
                                 attention_wq: qkv_q,
                                 attention_wk: qkv_k,
@@ -4287,6 +4549,8 @@ impl SplitModel {
                                     activation,
                                 }),
                                 ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                                post_attention_norm,
+                                post_ffw_norm,
                                 n_head: head_count,
                                 n_kv_head: head_count_kv,
                                 head_dim,
@@ -4368,13 +4632,25 @@ impl SplitModel {
                     .and_then(|v| v.to_vec().ok())
                     .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                     .unwrap_or_default();
+                let add_space_prefix = ct
+                    .metadata
+                    .get("tokenizer.ggml.add_space_prefix")
+                    .and_then(|v| v.to_bool().ok())
+                    .unwrap_or(true);
+                let add_bos_token = ct
+                    .metadata
+                    .get("tokenizer.ggml.add_bos_token")
+                    .and_then(|v| v.to_bool().ok())
+                    .unwrap_or(false);
                 if !scores.is_empty() {
                     tracing::info!(
                         vocab_size = vocab.len(),
                         scores = scores.len(),
-                        "Building HF Unigram tokenizer from GGUF sentencepiece data"
+                        add_space_prefix,
+                        add_bos_token,
+                        "Building SPM tokenizer from GGUF sentencepiece data"
                     );
-                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores))
+                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores, add_space_prefix, add_bos_token))
                 } else {
                     None
                 }
@@ -4557,6 +4833,46 @@ impl SplitModel {
             SwarmError::Internal(format!("Failed to read GGUF via ShardReader: {e}"))
         })?;
 
+        // Verify tensor_data_offset matches between the two Content::read calls
+        if ct.tensor_data_offset != tensor_data_offset {
+            tracing::error!(
+                expected = tensor_data_offset,
+                actual = ct.tensor_data_offset,
+                "DIAG: tensor_data_offset MISMATCH between header parse and ShardReader parse!"
+            );
+        }
+
+        // Diagnostic: log first few tensor offsets from Content vs tensor_map
+        for (name, info) in ct.tensor_infos.iter().take(5) {
+            let seek_pos = ct.tensor_data_offset + info.offset;
+            let size_in_bytes = info.ggml_dtype.type_size() * info.shape.elem_count()
+                / info.ggml_dtype.block_size();
+            let found = reader.find_shard(seek_pos);
+            tracing::info!(
+                tensor = %name,
+                gguf_seek = seek_pos,
+                size = size_in_bytes,
+                shard_mapping = ?found,
+                "DIAG: tensor mapping check"
+            );
+        }
+
+        // DIAG: Read first 16 bytes of blk.0.attn_norm.weight via ShardReader
+        // to verify data integrity
+        if let Some(norm_info) = ct.tensor_infos.get("blk.0.attn_norm.weight") {
+            use std::io::{Read as IoReadTrait, Seek as SeekTrait};
+            let seek_pos = ct.tensor_data_offset + norm_info.offset;
+            reader.seek(SeekFrom::Start(seek_pos)).ok();
+            let mut probe = [0u8; 16];
+            if reader.read_exact(&mut probe).is_ok() {
+                tracing::info!(
+                    seek_pos,
+                    first_bytes = ?&probe,
+                    "DIAG: blk.0.attn_norm.weight first 16 bytes via ShardReader"
+                );
+            }
+        }
+
         // From here, the exact same logic as load_from_gguf
         let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
         if device.is_cuda() {
@@ -4644,26 +4960,17 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
-        let use_gemma_norm = model_arch.use_gemma_norm();
-
+        // Helper: create RmsNorm from GGUF weight tensor.
+        // Note: GGUF norm weights for Gemma models already include the +1 offset
+        // (added by convert_hf_to_gguf.py's modify_tensors), so we use them as-is.
         let make_norm = |qtensor: QTensor, eps: f64| -> Result<RmsNorm, SwarmError> {
-            if use_gemma_norm {
-                let w = qtensor
-                    .dequantize(&device)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                let w_plus_one = (w + 1.0).map_err(|e| SwarmError::Internal(e.to_string()))?;
-                let qt = QTensor::quantize(&w_plus_one, candle_core::quantized::GgmlDType::F32)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                RmsNorm::from_qtensor(qt, eps).map_err(|e| SwarmError::Internal(e.to_string()))
-            } else {
-                RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
-            }
+            RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
         };
 
         let tok_embeddings = if is_first {
             let tok_embd = ct
                 .tensor(&mut reader, "token_embd.weight", &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load embeddings: {e}")))?;
+                .map_err(|e| SwarmError::Internal(e.to_string()))?;
             let tok_embd = tok_embd
                 .dequantize(&device)
                 .map_err(|e| SwarmError::Internal(e.to_string()))?;
@@ -5034,6 +5341,8 @@ impl SplitModel {
                             activation: Activation::SiLU,
                         }),
                         ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
+                        post_attention_norm: None,
+                        post_ffw_norm: None,
                         n_head: head_count,
                         n_kv_head: head_count_kv,
                         head_dim,
@@ -5236,6 +5545,8 @@ impl SplitModel {
                     attn_k_norm: None,
                     ffn,
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                    post_attention_norm: None,
+                    post_ffw_norm: None,
                     n_head: head_count,
                     n_kv_head: head_count_kv,
                     head_dim,
@@ -5435,6 +5746,26 @@ impl SplitModel {
                     .transpose()
                     .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
 
+                // Gemma 2 post-norms (optional)
+                let post_attention_norm = ct
+                    .tensor(
+                        &mut reader,
+                        &format!("{prefix}.post_attention_norm.weight"),
+                        &device,
+                    )
+                    .ok()
+                    .map(|t| make_norm(t, rms_norm_eps))
+                    .transpose()?;
+                let post_ffw_norm = ct
+                    .tensor(
+                        &mut reader,
+                        &format!("{prefix}.post_ffw_norm.weight"),
+                        &device,
+                    )
+                    .ok()
+                    .map(|t| make_norm(t, rms_norm_eps))
+                    .transpose()?;
+
                 layers.push(LayerVariant::Dense(LayerWeights {
                     attention_wq: qkv_q,
                     attention_wk: qkv_k,
@@ -5454,6 +5785,8 @@ impl SplitModel {
                         activation,
                     }),
                     ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                    post_attention_norm,
+                    post_ffw_norm,
                     n_head: head_count,
                     n_kv_head: head_count_kv,
                     head_dim,
@@ -5520,13 +5853,25 @@ impl SplitModel {
                     .and_then(|v| v.to_vec().ok())
                     .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
                     .unwrap_or_default();
+                let add_space_prefix = ct
+                    .metadata
+                    .get("tokenizer.ggml.add_space_prefix")
+                    .and_then(|v| v.to_bool().ok())
+                    .unwrap_or(true);
+                let add_bos_token = ct
+                    .metadata
+                    .get("tokenizer.ggml.add_bos_token")
+                    .and_then(|v| v.to_bool().ok())
+                    .unwrap_or(false);
                 if !scores.is_empty() {
                     tracing::info!(
                         vocab_size = vocab.len(),
                         scores = scores.len(),
-                        "Building HF Unigram tokenizer from GGUF header sentencepiece data"
+                        add_space_prefix,
+                        add_bos_token,
+                        "Building SPM tokenizer from GGUF header sentencepiece data"
                     );
-                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores))
+                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores, add_space_prefix, add_bos_token))
                 } else {
                     None
                 }
@@ -5612,6 +5957,12 @@ impl SplitModel {
             rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
             activation = ?activation,
             context_length,
+            head_count,
+            head_count_kv,
+            head_dim,
+            rope_dim,
+            embedding_length,
+            has_post_norms = layers.iter().any(|l| matches!(l, LayerVariant::Dense(lw) if lw.post_attention_norm.is_some())),
             "Loaded split model from shard files"
         );
 
@@ -5804,12 +6155,24 @@ impl SplitModel {
             match layer {
                 LayerVariant::Dense(lw) => {
                     let x = layer_in;
+                    // DIAG: dump first few values at layer 0 to trace where computation goes wrong
+                    if abs_layer == 0 && index_pos == 0 {
+                        if let Ok(flat) = x.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                            let preview: Vec<_> = flat.iter().take(8).collect();
+                            let has_nan = flat.iter().any(|v| v.is_nan());
+                            let has_inf = flat.iter().any(|v| v.is_infinite());
+                            tracing::info!(
+                                ?preview, has_nan, has_inf,
+                                "DIAG: layer0 input (after embed+scale)"
+                            );
+                        }
+                    }
                     let residual = &x;
                     let x = lw
                         .attention_norm
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
-                    let attn = lw
+                    let mut attn = lw
                         .forward_attn(
                             &x,
                             mask.as_ref(),
@@ -5819,6 +6182,23 @@ impl SplitModel {
                             lora_param,
                         )
                         .map_err(|e| SwarmError::Internal(format!("attn: {e}")))?;
+                    if abs_layer == 0 && index_pos == 0 {
+                        if let Ok(flat) = attn.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                            let preview: Vec<_> = flat.iter().take(8).collect();
+                            let has_nan = flat.iter().any(|v| v.is_nan());
+                            let has_inf = flat.iter().any(|v| v.is_infinite());
+                            tracing::info!(
+                                ?preview, has_nan, has_inf,
+                                "DIAG: layer0 after attention"
+                            );
+                        }
+                    }
+                    // Gemma 2 post-attention norm: normalize before residual add
+                    if let Some(ref post_norm) = lw.post_attention_norm {
+                        attn = post_norm
+                            .forward(&attn)
+                            .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
+                    }
                     let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
 
                     let residual = &x;
@@ -5826,7 +6206,7 @@ impl SplitModel {
                         .ffn_norm
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let x = match &lw.ffn {
+                    let mut x = match &lw.ffn {
                         FfnVariant::Dense(mlp) => mlp
                             .forward(&x, lora_param)
                             .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
@@ -5834,7 +6214,29 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
                     };
+                    // Gemma 2 post-FFN norm: normalize before residual add
+                    if let Some(ref post_norm) = lw.post_ffw_norm {
+                        x = post_norm
+                            .forward(&x)
+                            .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
+                    }
                     layer_in = (x + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    // DIAG: per-layer output summary for debugging Gemma-2
+                    if index_pos == 0 {
+                        if let Ok(flat) = layer_in.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                            let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
+                            let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                            let mean = flat.iter().sum::<f32>() / flat.len() as f32;
+                            // RMS of last-token hidden state
+                            let last_start = flat.len().saturating_sub(self.hidden_dim);
+                            let last_tok: &[f32] = &flat[last_start..];
+                            let rms = (last_tok.iter().map(|v| v * v).sum::<f32>() / last_tok.len() as f32).sqrt();
+                            tracing::info!(
+                                layer = abs_layer, min, max, mean, last_tok_rms = rms,
+                                "DIAG: layer output"
+                            );
+                        }
+                    }
                 }
                 LayerVariant::DeepSeek {
                     attention,
@@ -5903,9 +6305,37 @@ impl SplitModel {
             let x = x
                 .i((.., seq_len - 1, ..))
                 .map_err(|e| SwarmError::Internal(format!("last_token_select: {e}")))?;
+            // DIAG: dump hidden state before output projection
+            if index_pos == 0 {
+                if let Ok(flat) = x.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                    let preview: Vec<_> = flat.iter().take(8).collect();
+                    let has_nan = flat.iter().any(|v| v.is_nan());
+                    let has_inf = flat.iter().any(|v| v.is_infinite());
+                    let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    tracing::info!(
+                        ?preview, has_nan, has_inf, min, max, dim = flat.len(),
+                        "DIAG: pre-logits hidden state (after final norm, last token)"
+                    );
+                }
+            }
             let mut logits = output
                 .forward(&x)
                 .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
+            // DIAG: dump logit statistics
+            if index_pos == 0 {
+                if let Ok(flat) = logits.flatten_all().and_then(|t| t.to_vec1::<f32>()) {
+                    let has_nan = flat.iter().any(|v| v.is_nan());
+                    let has_inf = flat.iter().any(|v| v.is_infinite());
+                    let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
+                    let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let argmax = flat.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i,v)| (i, *v));
+                    tracing::info!(
+                        has_nan, has_inf, min, max, ?argmax, dim = flat.len(),
+                        "DIAG: raw logits (before softcap)"
+                    );
+                }
+            }
             // Gemma 2 final logit soft-capping: tanh(logits / cap) * cap
             if let Some(cap) = self.final_logit_softcap {
                 logits = logits
@@ -6346,8 +6776,13 @@ impl SplitModel {
                     }
 
                     let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
-                    let attn_batched = Tensor::cat(&attn_refs, 0)
+                    let mut attn_batched = Tensor::cat(&attn_refs, 0)
                         .map_err(|e| SwarmError::Internal(format!("attn restack: {e}")))?;
+                    if let Some(ref post_norm) = lw.post_attention_norm {
+                        attn_batched = post_norm
+                            .forward(&attn_batched)
+                            .map_err(|e| SwarmError::Internal(format!("post_attn_norm: {e}")))?;
+                    }
                     let x = (&attn_batched + &residual)
                         .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
@@ -6356,7 +6791,7 @@ impl SplitModel {
                         .ffn_norm
                         .forward(&x)
                         .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-                    let x = match &lw.ffn {
+                    let mut x = match &lw.ffn {
                         FfnVariant::Dense(mlp) => mlp
                             .forward(&x, None)
                             .map_err(|e| SwarmError::Internal(format!("mlp: {e}")))?,
@@ -6364,6 +6799,11 @@ impl SplitModel {
                             .forward(&x)
                             .map_err(|e| SwarmError::Internal(format!("moe: {e}")))?,
                     };
+                    if let Some(ref post_norm) = lw.post_ffw_norm {
+                        x = post_norm
+                            .forward(&x)
+                            .map_err(|e| SwarmError::Internal(format!("post_ffw_norm: {e}")))?;
+                    }
                     batched = (&x + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
                 LayerVariant::DeepSeek {
@@ -6535,6 +6975,12 @@ impl SplitModel {
             prompt.bytes().map(|b| b as i64).collect()
         };
         let num_tokens = token_ids.len();
+        // DIAG: dump token IDs for debugging tokenizer issues
+        tracing::info!(
+            num_tokens,
+            tokens = ?&token_ids[..token_ids.len().min(30)],
+            "DIAG: tokenize result"
+        );
         let input = Tensor::new(&token_ids[..], &self.device)
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
             .unsqueeze(0)
@@ -6565,6 +7011,13 @@ impl SplitModel {
             // Fallback: byte-level encoding
             prompt.bytes().map(|b| b as i64).collect()
         };
+
+        // DIAG: dump token IDs for debugging tokenizer issues
+        tracing::info!(
+            num_tokens = token_ids.len(),
+            tokens = ?&token_ids[..token_ids.len().min(50)],
+            "DIAG: tokenize_and_embed token IDs"
+        );
 
         let input = Tensor::new(&token_ids[..], &self.device)
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
@@ -7499,6 +7952,8 @@ mod tests {
                     activation: Activation::SiLU,
                 }),
                 ffn_norm: make_rms_norm(&norm_w),
+                post_attention_norm: None,
+                post_ffw_norm: None,
                 n_head,
                 n_kv_head,
                 head_dim,
@@ -7816,8 +8271,10 @@ mod tests {
         assert!(ModelArch::Qwen2.use_rope_contiguous());
         assert!(ModelArch::DeepSeek2.use_rope_contiguous());
         assert!(!ModelArch::Llama.use_rope_contiguous());
-        assert!(!ModelArch::Gemma2.use_rope_contiguous());
-        assert!(!ModelArch::Phi3.use_rope_contiguous());
+        assert!(ModelArch::Gemma.use_rope_contiguous());
+        assert!(ModelArch::Gemma2.use_rope_contiguous());
+        assert!(ModelArch::Phi3.use_rope_contiguous());
+        assert!(ModelArch::Starcoder2.use_rope_contiguous());
         assert!(!ModelArch::Mistral.use_rope_contiguous());
 
         // Activation: Gemma uses Gelu, others SiLU
@@ -7902,6 +8359,8 @@ mod tests {
                     activation,
                 }),
                 ffn_norm: make_rms_norm(&norm_w),
+                post_attention_norm: None,
+                post_ffw_norm: None,
                 n_head,
                 n_kv_head,
                 head_dim,
@@ -8293,6 +8752,8 @@ mod tests {
                 activation: Activation::SiLU,
             }),
             ffn_norm: make_rms_norm(&norm_w),
+            post_attention_norm: None,
+            post_ffw_norm: None,
             n_head,
             n_kv_head,
             head_dim,
@@ -8921,6 +9382,8 @@ mod tests {
                 activation: Activation::SiLU,
             }),
             ffn_norm: make_rms_norm(hidden_dim),
+            post_attention_norm: None,
+            post_ffw_norm: None,
             n_head,
             n_kv_head: n_head,
             head_dim,
@@ -9085,6 +9548,8 @@ mod tests {
                 activation: Activation::SiLU,
             }),
             ffn_norm: make_rms_norm(&norm_w),
+            post_attention_norm: None,
+            post_ffw_norm: None,
             n_head,
             n_kv_head: n_head,
             head_dim,
@@ -9159,6 +9624,8 @@ mod tests {
                 activation: Activation::SiLU,
             }),
             ffn_norm: make_rms_norm(&norm_w),
+            post_attention_norm: None,
+            post_ffw_norm: None,
             n_head,
             n_kv_head: n_head,
             head_dim,
@@ -9328,6 +9795,8 @@ mod tests {
                 attn_k_norm: None,
                 ffn,
                 ffn_norm: make_rms_norm(hidden_dim),
+                post_attention_norm: None,
+                post_ffw_norm: None,
                 n_head,
                 n_kv_head,
                 head_dim,
@@ -9373,5 +9842,274 @@ mod tests {
             flat.iter().all(|v| v.is_finite()),
             "Llama 4 MoE output NaN/Inf"
         );
+    }
+
+    /// Test Gemma-2 with real GGUF file — compare load_from_gguf vs load_from_shards.
+    /// Requires the Gemma-2-2B-IT Q4_K_M model to be present.
+    #[test]
+    #[ignore] // Run with: cargo test gemma2_real_gguf -- --ignored --nocapture
+    fn gemma2_real_gguf_vs_shards() {
+        use candle_core::Tensor;
+        let gguf_path =
+            std::path::Path::new("/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf");
+        if !gguf_path.exists() {
+            eprintln!("Skipping: GGUF not found at {}", gguf_path.display());
+            return;
+        }
+
+        // Load from full GGUF
+        let mut model = SplitModel::load_from_gguf(gguf_path, 0, 26, true, true)
+            .expect("Failed to load from GGUF");
+
+        // Use the tokenizer to get the same tokens our API uses
+        let prompt_tokens: Vec<u32> = vec![2, 2, 106, 1645, 108, 1841, 603, 573, 6037, 576, 6081, 235336, 107, 108, 106, 2516, 108];
+        let input = Tensor::new(&prompt_tokens[..], &Device::Cpu)
+            .unwrap()
+            .unsqueeze(0) // [1, 17]
+            .unwrap()
+            .to_dtype(candle_core::DType::I64)
+            .unwrap();
+
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let logits = model
+            .forward(&input, 0, &kv_store, "gemma2-gguf-test")
+            .expect("Forward pass failed");
+
+        let flat: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
+        let (argmax_idx, argmax_val) = flat
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+
+        eprintln!("GGUF logits: argmax={} score={:.4}", argmax_idx, argmax_val);
+        eprintln!(
+            "  min={:.4} max={:.4} dim={}",
+            flat.iter().cloned().fold(f32::INFINITY, f32::min),
+            flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+            flat.len()
+        );
+
+        // Expected: token 651 ("The") should be near the top
+        let the_score = flat[651];
+        eprintln!("  token 651 ('The') score={:.4}", the_score);
+        eprintln!("  token 235274 ('1') score={:.4}", flat[235274]);
+
+        // Save logits for external comparison
+        let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
+        std::fs::write("/tmp/gemma2_our_logits.bin", &bytes).ok();
+        eprintln!("  Saved {} logits to /tmp/gemma2_our_logits.bin", flat.len());
+    }
+
+    /// Test Gemma-2 with single token (no mask) to eliminate mask issues.
+    #[test]
+    #[ignore]
+    fn gemma2_single_token() {
+        use candle_core::{Device, Tensor};
+        let gguf_path =
+            std::path::Path::new("/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf");
+        if !gguf_path.exists() {
+            eprintln!("Skipping: GGUF not found");
+            return;
+        }
+
+        // Single BOS token — no mask needed, no flash attention
+        let prompt_tokens: Vec<u32> = vec![2];
+        let input = Tensor::new(&prompt_tokens[..], &Device::Cpu)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap()
+            .to_dtype(candle_core::DType::I64)
+            .unwrap();
+
+        let mut model = SplitModel::load_from_gguf(gguf_path, 0, 26, true, true)
+            .expect("Failed to load");
+
+        let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
+        let logits = model
+            .forward(&input, 0, &kv_store, "gemma2-single-tok")
+            .expect("Forward failed");
+
+        let flat: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
+        let (argmax_idx, argmax_val) = flat
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        eprintln!("Single token (BOS): argmax={argmax_idx} score={argmax_val:.4}");
+        eprintln!("  token 2 score: {:.4}", flat[2]);
+        eprintln!("  token 108 score: {:.4}", flat[108]);
+
+        // Save for comparison
+        let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
+        std::fs::write("/tmp/gemma2_single_token_logits.bin", &bytes).ok();
+        eprintln!("  Saved logits to /tmp/gemma2_single_token_logits.bin");
+    }
+
+    /// Test embedding dequantization matches Python reference.
+    #[test]
+    #[ignore]
+    fn gemma2_embedding_verification() {
+        use candle_core::{quantized::gguf_file, Device, Tensor};
+
+        let gguf_path = "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
+        let path = std::path::Path::new(gguf_path);
+        if !path.exists() {
+            eprintln!("Skipping: GGUF not found");
+            return;
+        }
+
+        let file = std::fs::File::open(path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = gguf_file::Content::read(&mut cursor).unwrap();
+        let device = Device::Cpu;
+
+        // Load and dequantize embedding
+        let embd_qt = ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap();
+        let embd = embd_qt.dequantize(&device).unwrap();
+        eprintln!("Embedding shape: {:?}", embd.shape());
+
+        // Get row 2 (BOS token)
+        let row2 = embd.i(2).unwrap();
+        let row2_vals: Vec<f32> = row2.to_vec1().unwrap();
+        eprintln!("Row 2 (BOS) first 8: {:?}", &row2_vals[..8]);
+        eprintln!("Row 2 (BOS) last 8: {:?}", &row2_vals[row2_vals.len()-8..]);
+
+        // Compare with Python reference
+        let py_ref = std::fs::read("/tmp/gemma2_embed_row2.npy").ok();
+        if let Some(ref npy_bytes) = py_ref {
+            // Parse npy format: skip header, read f32 values
+            // Simple npy parser: header starts with \x93NUMPY, has length info
+            let header_len = 10 + npy_bytes[8] as usize + ((npy_bytes[9] as usize) << 8);
+            let data_bytes = &npy_bytes[header_len..];
+            let py_vals: Vec<f32> = data_bytes.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            eprintln!("Python ref first 8: {:?}", &py_vals[..8]);
+
+            let mut max_diff = 0f32;
+            let mut mismatches = 0;
+            for (i, (a, b)) in row2_vals.iter().zip(py_vals.iter()).enumerate() {
+                let diff = (a - b).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                if diff > 1e-4 && i < 20 {
+                    eprintln!("  MISMATCH [{i}] rust={a:.6} python={b:.6} diff={diff:.6}");
+                    mismatches += 1;
+                }
+            }
+            eprintln!("Max embedding diff: {max_diff:.6}, mismatches (>1e-4): {mismatches}");
+        } else {
+            eprintln!("No Python reference found at /tmp/gemma2_embed_row2.npy");
+        }
+
+        // Now test: embedding lookup → scale by sqrt(2304) → final norm → output projection
+        // This is the 0-layer forward pass
+        let emb = Embedding::new(embd.clone(), 2304);
+
+        // Token 2 (BOS) lookup
+        let ids = Tensor::new(&[2u32], &device).unwrap();
+        let looked_up = emb.forward(&ids).unwrap(); // (1, 2304)
+        let scaled = looked_up.affine((2304f64).sqrt(), 0.0).unwrap(); // scale by sqrt(hidden_dim)
+
+        // Apply final norm (with +1 offset)
+        let norm_qt = ct.tensor(&mut cursor, "output_norm.weight", &device).unwrap();
+        let norm_w = norm_qt.dequantize(&device).unwrap();
+        let norm_w_plus1 = (norm_w + 1.0).unwrap(); // Gemma +1
+        let normed = candle_nn::ops::rms_norm(&scaled, &norm_w_plus1, 1e-6).unwrap();
+
+        // Output projection using dequantized embedding
+        let logits = normed.matmul(&embd.t().unwrap()).unwrap();
+        let flat: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
+        let argmax = flat.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        eprintln!("0-layer logits: argmax={} score={:.4}", argmax.0, argmax.1);
+        eprintln!("  token 2 score: {:.4}", flat[2]);
+        eprintln!("  token 108 score: {:.4}", flat[108]);
+    }
+
+    /// Test QMatMul vs dequantized matmul for output projection.
+    /// Diagnoses whether the sorted-correlation issue is in the output projection.
+    #[test]
+    #[ignore]
+    fn gemma2_output_projection_qmatmul_vs_deq() {
+        use candle_core::{quantized::gguf_file, Device, Tensor};
+
+        let gguf_path = "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
+        let path = std::path::Path::new(gguf_path);
+        if !path.exists() {
+            eprintln!("Skipping: GGUF not found");
+            return;
+        }
+
+        let file = std::fs::File::open(path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+        let mut cursor = std::io::Cursor::new(mmap.as_ref());
+        let ct = gguf_file::Content::read(&mut cursor).unwrap();
+        let device = Device::Cpu;
+
+        // Load token_embd.weight as both QTensor and dequantized
+        let embd_qt = ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap();
+        eprintln!("token_embd.weight QTensor shape: {:?}", embd_qt.shape());
+
+        let embd_deq = embd_qt.dequantize(&device).unwrap();
+        eprintln!("Dequantized embedding shape: {:?}", embd_deq.shape());
+
+        // Create QMatMul from the QTensor
+        let qmm = QMatMul::from_qtensor(
+            ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap(),
+        )
+        .unwrap();
+
+        // Create a random hidden state (simulating post-norm output)
+        let hidden = Tensor::randn(0f32, 1.0, (1, 2304), &device).unwrap();
+
+        // Method 1: QMatMul (our current approach)
+        let logits_qmm = qmm.forward(&hidden).unwrap();
+        let flat_qmm: Vec<f32> = logits_qmm.flatten_all().unwrap().to_vec1().unwrap();
+
+        // Method 2: Dequantized matmul (reference approach)
+        // embd_deq shape is (256000, 2304), we need hidden @ embd_deq.T
+        let logits_deq = hidden.matmul(&embd_deq.t().unwrap()).unwrap();
+        let flat_deq: Vec<f32> = logits_deq.flatten_all().unwrap().to_vec1().unwrap();
+
+        eprintln!("QMatMul logits: argmax={}", flat_qmm.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0);
+        eprintln!("Deq logits: argmax={}", flat_deq.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0);
+
+        // Check if they agree
+        let mut max_diff = 0f32;
+        let mut sum_diff_sq = 0f64;
+        for (i, (a, b)) in flat_qmm.iter().zip(flat_deq.iter()).enumerate() {
+            let diff = (a - b).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+            sum_diff_sq += (diff as f64) * (diff as f64);
+            if i < 5 {
+                eprintln!("  [{i}] qmm={a:.6} deq={b:.6} diff={diff:.6}");
+            }
+        }
+        let rmse = (sum_diff_sq / flat_qmm.len() as f64).sqrt();
+        eprintln!("Max diff: {max_diff:.6}, RMSE: {rmse:.6}");
+
+        // Check correlation
+        let mean_q: f64 = flat_qmm.iter().map(|v| *v as f64).sum::<f64>() / flat_qmm.len() as f64;
+        let mean_d: f64 = flat_deq.iter().map(|v| *v as f64).sum::<f64>() / flat_deq.len() as f64;
+        let mut cov = 0f64;
+        let mut var_q = 0f64;
+        let mut var_d = 0f64;
+        for (q, d) in flat_qmm.iter().zip(flat_deq.iter()) {
+            let dq = *q as f64 - mean_q;
+            let dd = *d as f64 - mean_d;
+            cov += dq * dd;
+            var_q += dq * dq;
+            var_d += dd * dd;
+        }
+        let corr = cov / (var_q.sqrt() * var_d.sqrt());
+        eprintln!("Pearson correlation (QMatMul vs Deq): {corr:.6}");
+
+        // They should be highly correlated (>0.99) — just quantization error
+        assert!(corr > 0.99, "QMatMul and dequantized matmul should agree: corr={corr}");
     }
 }

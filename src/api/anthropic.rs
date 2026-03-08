@@ -853,10 +853,8 @@ async fn anthropic_split_non_stream(
     // block_in_place: CPU-bound inference must not starve async runtime.
     let logits =
         tokio::task::block_in_place(|| split_model.forward(&input, 0, &kv_store, &request_id))?;
-    let last_logits = logits
-        .narrow(1, prompt_tokens - 1, 1)
-        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e.to_string())))?;
-    let mut next_token = sample_token(&last_logits, params.temperature, params.top_p)?;
+    // logits shape: (1, vocab) — forward() already extracts the last token
+    let mut next_token = sample_token(&logits, params.temperature, params.top_p)?;
 
     let eos = split_model.eos_tokens().to_vec();
     let mut generated: Vec<u32> = Vec::new();
@@ -984,17 +982,8 @@ async fn anthropic_split_stream(
                     return;
                 }
             };
-        let last_logits = match logits.narrow(1, prompt_tokens - 1, 1) {
-            Ok(l) => l,
-            Err(_) => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                return;
-            }
-        };
-        let mut next_token = match sample_token(&last_logits, params.temperature, params.top_p) {
+        // logits shape: (1, vocab) — forward() already extracts the last token
+        let mut next_token = match sample_token(&logits, params.temperature, params.top_p) {
             Ok(t) => t,
             Err(_) => {
                 let _ = sse_tx
