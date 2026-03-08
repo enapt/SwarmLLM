@@ -22,6 +22,12 @@ All notable changes to SwarmLLM are documented here.
 - 6 new unit tests (tool_use, tool_result, thinking, tools request, response serialization, internal conversion)
 - 665 tests passing (597 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
+### Published Benchmark Data
+- **GPU (RTX 3070 8GB):** TinyLlama 1.1B 27.2 tok/s, Gemma-2 2B 20.6 tok/s, Phi-3.5 3.8B 46.4 tok/s, Qwen2.5 7B 29.0 tok/s
+- **CPU (Ryzen 7 5800H):** TinyLlama 4.2 tok/s, Gemma-2 3.5 tok/s, Phi-3.5 1.8 tok/s, Qwen2.5 2.4 tok/s
+- GPU speedups: 6.5x to 25.8x depending on architecture
+- Methodology: 100 output tokens, 3-run average, single model loaded, Q4_K_M quantization
+
 ## [0.1.0-alpha.1] — 2026-03-07
 
 First public release. Single Rust binary (~31MB) for decentralized P2P LLM inference.

@@ -895,3 +895,22 @@ SWARMLLM_NODE_DATA_DIR=/tmp/node1 ./swarmllm run -p 8800
 SWARMLLM_NODE_DATA_DIR=/tmp/node2 ./swarmllm run -p 8801 \
   --bootstrap /ip4/127.0.0.1/tcp/8810
 ```
+
+## Benchmark Data
+
+Single-node inference performance, measured with `swarmllm bench` (100 output tokens, 3-run average, Q4_K_M quantization).
+
+**Test hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8GB VRAM), WSL2
+
+| Model | Parameters | GPU (RTX 3070) | CPU (Ryzen 7 5800H) | GPU Speedup |
+|-------|-----------|----------------|---------------------|-------------|
+| TinyLlama 1.1B | 1.1B | 27.2 tok/s | 4.2 tok/s | 6.5x |
+| Gemma-2 2B IT | 2.5B | 20.6 tok/s | 3.5 tok/s | 5.9x |
+| Phi-3.5 Mini | 3.8B | 46.4 tok/s | 1.8 tok/s | 25.8x |
+| Qwen2.5-Coder 7B | 7.6B | 29.0 tok/s | 2.4 tok/s | 12.1x |
+
+**Notes:**
+- GPU inference uses candle with CUDA (`--features candle-cuda`). CPU uses candle with native BLAS.
+- Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
+- With 8GB VRAM, only one 7B model can be loaded at a time. Multiple smaller models (1-3B) can coexist.
+- On-demand model loading (C13) will eliminate the current eager-load behavior where all models load at startup.

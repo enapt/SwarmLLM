@@ -62,9 +62,21 @@ curl http://localhost:8800/v1/chat/completions \
   }'
 ```
 
-**Or use with Claude Code / Cursor (MCP):**
+**Or use as a Claude Code backend:**
 
-Add SwarmLLM as an MCP server and your AI coding agent gains access to every model in the swarm — local, distributed across peers, or cloud-fallback:
+Point Claude Code directly at your SwarmLLM node — it speaks the full Anthropic Messages API (`/v1/messages`) with tools, thinking, and streaming:
+
+```bash
+ANTHROPIC_BASE_URL="http://localhost:8800" \
+ANTHROPIC_AUTH_TOKEN="YOUR_API_KEY" \
+claude --model "qwen2.5-coder-7b"
+```
+
+Claude Code now has access to every model in the swarm — local GGUF, distributed across peers, or any of 12 cloud providers. Use `claude --model gpt-4o` to route through OpenAI, or `claude --model claude-sonnet-4-6` to proxy to Anthropic — all through your SwarmLLM node.
+
+**Or use with MCP (Claude Code / Cursor):**
+
+Add SwarmLLM as an MCP server for tool-based access. The `compare` tool sends the same prompt to multiple models simultaneously:
 
 ```json
 {
@@ -76,7 +88,7 @@ Add SwarmLLM as an MCP server and your AI coding agent gains access to every mod
 }
 ```
 
-The agent can then call `chat` (inference with any available model) and `models` (list all models in the network).
+MCP tools: `chat` (inference with any model), `models` (list all available models), `compare` (send same prompt to N models, get side-by-side results with latency and token counts).
 
 ## Connecting to the Network
 
@@ -106,7 +118,8 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Cloud Fallback (Optional)** — Optionally route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi) as a fallback. The swarm is the primary way to run models for free
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
-- **MCP Server** — Native Model Context Protocol server that exposes the entire swarm model catalog to AI agent frameworks. Point Claude Code, Cursor, or any MCP-compatible agent at your SwarmLLM node and it gains access to every model in the network — local, distributed, and cloud-fallback — through `chat` and `models` tools
+- **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, cache_control, streaming SSE. Use SwarmLLM as a drop-in Claude Code backend (`ANTHROPIC_BASE_URL=http://localhost:8800`). Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers
+- **MCP Server** — Native Model Context Protocol server with `chat` (inference), `models` (list), and `compare` (multi-model comparison) tools. The `compare` tool sends the same prompt to multiple models concurrently and returns side-by-side results with latency and token counts
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), and per-request LoRA adapter loading
@@ -207,6 +220,26 @@ SwarmLLM supports 11 transformer architectures via native candle inference with 
 | **Mixtral** | Mixtral 8x7B, 8x22B | MoE (via llama.cpp) |
 
 Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, FP16
+
+## Benchmarks
+
+Measured on a single node with `swarmllm bench`. Prompt: "Explain the theory of relativity in simple terms." 100 output tokens, average of 3 runs.
+
+**Hardware:** AMD Ryzen 7 5800H (8C/16T), NVIDIA RTX 3070 Laptop (8GB VRAM), WSL2
+
+| Model | Params | Quant | GPU (RTX 3070) | CPU Only | GPU Speedup |
+|-------|--------|-------|----------------|----------|-------------|
+| TinyLlama 1.1B | 1.1B | Q4_K_M | **27.2 tok/s** | 4.2 tok/s | 6.5x |
+| Gemma-2 2B IT | 2.5B | Q4_K_M | **20.6 tok/s** | 3.5 tok/s | 5.9x |
+| Phi-3.5 Mini | 3.8B | Q4_K_M | **46.4 tok/s** | 1.8 tok/s | 25.8x |
+| Qwen2.5-Coder 7B | 7.6B | Q4_K_M | **29.0 tok/s** | 2.4 tok/s | 12.1x |
+
+> GPU inference uses candle with CUDA (`--features candle-cuda`). CPU inference uses candle with native BLAS. All models Q4_K_M quantized, loaded from GGUF shard files. Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
+
+Run your own benchmarks:
+```bash
+swarmllm bench --max-tokens 100 --iterations 5 --concurrency 4 --json
+```
 
 ## Installation
 
@@ -334,10 +367,10 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
 | **Cloud Fallback** | 12 providers (optional) | No | No | No |
 | **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
-| **API Compatibility** | OpenAI + Anthropic + MCP | PyTorch | OpenAI basic | Subnet-defined |
+| **API Compatibility** | OpenAI + Anthropic (full Claude Code) + MCP (compare) | PyTorch | OpenAI basic | Subnet-defined |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 659 tests | Limited | Limited | Varies |
+| **Test Suite** | 665 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 

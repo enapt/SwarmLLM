@@ -16,10 +16,20 @@ SwarmLLM is a single Rust binary that turns your computer into a node in a distr
 - **Credit Incentives** — Earn credits by serving inference, hosting shards, and relaying traffic. Higher credits = higher priority.
 - **VRAM-Aware** — Automatic shard management based on available GPU memory.
 - **Zero-Config Networking** — LAN discovery via mDNS, peer exchange, persistent peer cache, invite codes.
-- **MCP Server** — Native Model Context Protocol server — point Claude Code, Cursor, or any MCP-compatible agent at your node to access every model in the swarm
 - **Multi-SDK** — Python, JavaScript/TypeScript, LangChain, and LlamaIndex integrations.
-- **Web Dashboard** — Built-in swarm-first UI with chat interface, model browser, and network map.
+- **Web Dashboard** — Built-in swarm-first UI with chat, model browser, network map, and model compare.
 - **Cloud Fallback** — Optionally route to 12 cloud providers (incl. Moonshot/Kimi) when no swarm peers have the model you need.
+
+## Performance
+
+Single-node inference on an NVIDIA RTX 3070 Laptop (8GB VRAM):
+
+| Model | GPU | CPU |
+|-------|-----|-----|
+| TinyLlama 1.1B Q4 | 27.2 tok/s | 4.2 tok/s |
+| Gemma-2 2B Q4 | 20.6 tok/s | 3.5 tok/s |
+| Phi-3.5 3.8B Q4 | 46.4 tok/s | 1.8 tok/s |
+| Qwen2.5-Coder 7B Q4 | 29.0 tok/s | 2.4 tok/s |
 
 ## How It Works
 
