@@ -335,6 +335,7 @@
       <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
       <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map">Network Map</button>
+      <button class="tab-btn" data-tab="compare">Compare</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -659,6 +660,49 @@
               <span class="text-muted" style="font-size:0.8rem" id="map-stats-text">0 nodes across 0 regions</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Compare view -->
+      <div class="view" id="view-compare" style="display:none">
+        <div class="container">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Model Compare</h2>
+              <span class="text-muted" style="font-size:0.8rem">Send the same prompt to multiple models and compare results side-by-side</span>
+            </div>
+            <div class="compare-controls">
+              <div class="form-group">
+                <label for="compare-system">System prompt (optional)</label>
+                <input type="text" id="compare-system" placeholder="You are a helpful assistant." style="font-size:0.85rem">
+              </div>
+              <div class="form-group">
+                <label for="compare-prompt">Prompt</label>
+                <textarea id="compare-prompt" rows="3" placeholder="Enter your prompt here..." style="font-size:0.85rem;resize:vertical"></textarea>
+              </div>
+              <div class="compare-params">
+                <div class="form-group" style="flex:1;min-width:0">
+                  <label>Models (select 2-10)</label>
+                  <div class="compare-model-list" id="compare-model-list">
+                    <span class="text-muted" style="font-size:0.8rem">Loading models...</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:12px;align-items:flex-end">
+                  <div class="form-group" style="width:100px">
+                    <label for="compare-temp">Temp</label>
+                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem">
+                  </div>
+                  <div class="form-group" style="width:120px">
+                    <label for="compare-max-tokens">Max tokens</label>
+                    <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64" style="font-size:0.85rem">
+                  </div>
+                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap">Run Compare</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="compare-status" style="display:none" class="mt-2"></div>
+          <div class="compare-results" id="compare-results"></div>
         </div>
       </div>
 

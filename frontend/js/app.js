@@ -66,6 +66,8 @@ var SwarmLLM = (function() {
       if (lbView) lbView.style.display = tab === 'leaderboard' ? '' : 'none';
       var mapView = document.getElementById('view-network-map');
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
+      var compareView = document.getElementById('view-compare');
+      if (compareView) compareView.style.display = tab === 'compare' ? '' : 'none';
       // Show sidebar only on chat tab
       var sidebar = document.getElementById('sidebar');
       if (sidebar) sidebar.style.display = tab === 'chat' ? '' : 'none';
@@ -78,6 +80,9 @@ var SwarmLLM = (function() {
       }
       if (tab === 'network-map') {
         networkMap.refresh();
+      }
+      if (tab === 'compare') {
+        compare.loadModels();
       }
     },
 
@@ -4104,6 +4109,9 @@ var SwarmLLM = (function() {
     on('map-model-filter', 'change', function() { networkMap.applyFilter(); });
     on('btn-refresh-map', 'click', function() { networkMap.refresh(); });
 
+    // Model Compare
+    on('btn-compare-run', 'click', function() { compare.run(); });
+
     // Leaderboard
     on('btn-refresh-leaderboard', 'click', function() { identity.loadLeaderboard(); });
 
@@ -4597,6 +4605,216 @@ var SwarmLLM = (function() {
   }
 
   // Public API
+  // ========================================================================
+  // Model Compare Module — side-by-side multi-model comparison
+  // ========================================================================
+  var compare = {
+    models: [],     // available models [{id, type}]
+    selected: [],   // selected model IDs
+    running: false,
+
+    loadModels: async function() {
+      try {
+        var container = document.getElementById('compare-model-list');
+        if (!container) return;
+
+        // Fetch local + cloud models
+        var localModels = [];
+        var cloudModels = [];
+        try {
+          var resp = await authFetch('/api/admin/models');
+          if (resp.ok) localModels = await resp.json();
+        } catch(e) {}
+        try {
+          var resp2 = await authFetch('/api/admin/provider-models');
+          if (resp2.ok) cloudModels = await resp2.json();
+        } catch(e) {}
+
+        compare.models = [];
+        (localModels || []).forEach(function(m) {
+          compare.models.push({ id: m.id || m.model_id || m.name, type: 'local' });
+        });
+        (cloudModels || []).forEach(function(m) {
+          var mid = m.id || m.model_id || m.name;
+          // Deduplicate
+          if (!compare.models.some(function(x) { return x.id === mid; })) {
+            compare.models.push({ id: mid, type: 'cloud' });
+          }
+        });
+
+        if (compare.models.length === 0) {
+          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available. Download models or configure cloud providers in Settings.</span>';
+          return;
+        }
+
+        container.innerHTML = '';
+        compare.models.forEach(function(m) {
+          var chip = document.createElement('label');
+          chip.className = 'compare-model-chip';
+          chip.innerHTML = '<input type="checkbox" value="' + escapeHtml(m.id) + '">' +
+            '<span>' + escapeHtml(m.id) + '</span>' +
+            '<span style="font-size:0.65rem;opacity:0.6">' + m.type + '</span>';
+          chip.querySelector('input').addEventListener('change', function() {
+            chip.classList.toggle('selected', this.checked);
+            compare.updateSelected();
+          });
+          container.appendChild(chip);
+        });
+      } catch(e) {
+        // non-critical
+      }
+    },
+
+    updateSelected: function() {
+      compare.selected = [];
+      var checks = document.querySelectorAll('#compare-model-list input[type="checkbox"]:checked');
+      checks.forEach(function(cb) { compare.selected.push(cb.value); });
+    },
+
+    run: async function() {
+      if (compare.running) return;
+      var prompt = (document.getElementById('compare-prompt') || {}).value;
+      if (!prompt || !prompt.trim()) {
+        showToast('Enter a prompt to compare', 'error');
+        return;
+      }
+      if (compare.selected.length < 2) {
+        showToast('Select at least 2 models to compare', 'error');
+        return;
+      }
+      if (compare.selected.length > 10) {
+        showToast('Maximum 10 models per comparison', 'error');
+        return;
+      }
+
+      var system = (document.getElementById('compare-system') || {}).value || '';
+      var temperature = parseFloat((document.getElementById('compare-temp') || {}).value) || 0.7;
+      var maxTokens = parseInt((document.getElementById('compare-max-tokens') || {}).value) || 1024;
+
+      compare.running = true;
+      var btn = document.getElementById('btn-compare-run');
+      if (btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+
+      var resultsDiv = document.getElementById('compare-results');
+      var n = compare.selected.length;
+      var colClass = n <= 2 ? 'cols-2' : n <= 3 ? 'cols-3' : n <= 4 ? 'cols-4' : 'cols-many';
+      resultsDiv.className = 'compare-results ' + colClass;
+
+      // Show spinner cards for each model
+      resultsDiv.innerHTML = '';
+      compare.selected.forEach(function(modelId) {
+        var card = document.createElement('div');
+        card.className = 'compare-card';
+        card.id = 'compare-card-' + modelId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.innerHTML =
+          '<div class="compare-card-header">' +
+            '<span class="compare-card-model">' + escapeHtml(modelId) + '</span>' +
+            '<span class="compare-card-meta"><span class="spinner" style="width:14px;height:14px"></span></span>' +
+          '</div>' +
+          '<div class="compare-card-body"><div class="compare-spinner"><div class="spinner"></div> Waiting for response...</div></div>';
+        resultsDiv.appendChild(card);
+      });
+
+      var statusDiv = document.getElementById('compare-status');
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Sending prompt to ' + n + ' models concurrently...</span>'; }
+
+      // Fire requests concurrently — use /v1/messages (Anthropic Messages API)
+      var promises = compare.selected.map(function(modelId) {
+        var body = {
+          model: modelId,
+          max_tokens: maxTokens,
+          temperature: temperature,
+          messages: [{ role: 'user', content: prompt.trim() }],
+          stream: false,
+        };
+        if (system.trim()) body.system = system.trim();
+
+        var start = performance.now();
+        return authFetch('/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(function(resp) {
+          var elapsed = Math.round(performance.now() - start);
+          return resp.json().then(function(data) {
+            return { model: modelId, data: data, ok: resp.ok, latency_ms: elapsed };
+          });
+        }).catch(function(err) {
+          return { model: modelId, error: err.message, ok: false, latency_ms: Math.round(performance.now() - start) };
+        });
+      });
+
+      // Update cards as results come in
+      var completed = 0;
+      promises.forEach(function(p) {
+        p.then(function(result) {
+          completed++;
+          compare.renderCard(result);
+          if (statusDiv) {
+            statusDiv.innerHTML = '<span class="text-muted">' + completed + ' / ' + n + ' models complete</span>';
+            if (completed === n) {
+              statusDiv.innerHTML = '<span style="color:var(--green)">All ' + n + ' models complete</span>';
+              setTimeout(function() { statusDiv.style.display = 'none'; }, 3000);
+            }
+          }
+        });
+      });
+
+      // Wait for all to finish
+      Promise.all(promises).then(function() {
+        compare.running = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Run Compare'; }
+      });
+    },
+
+    renderCard: function(result) {
+      var cardId = 'compare-card-' + result.model.replace(/[^a-zA-Z0-9_-]/g, '_');
+      var card = document.getElementById(cardId);
+      if (!card) return;
+
+      var content = '';
+      var isError = false;
+      var inputTokens = 0;
+      var outputTokens = 0;
+
+      if (result.error) {
+        content = result.error;
+        isError = true;
+      } else if (!result.ok) {
+        content = result.data.error && result.data.error.message
+          ? result.data.error.message
+          : JSON.stringify(result.data.error || result.data, null, 2);
+        isError = true;
+      } else {
+        // Anthropic Messages API response
+        var blocks = result.data.content || [];
+        blocks.forEach(function(b) {
+          if (b.type === 'text' && b.text) content += b.text;
+        });
+        if (!content) content = '(empty response)';
+        inputTokens = (result.data.usage || {}).input_tokens || 0;
+        outputTokens = (result.data.usage || {}).output_tokens || 0;
+      }
+
+      card.innerHTML =
+        '<div class="compare-card-header">' +
+          '<span class="compare-card-model">' + escapeHtml(result.model) + '</span>' +
+          '<span class="compare-card-meta">' +
+            '<span>' + result.latency_ms + 'ms</span>' +
+            (isError ? '<span style="color:var(--red,#ff6464)">error</span>' : '<span style="color:var(--green)">ok</span>') +
+          '</span>' +
+        '</div>' +
+        '<div class="compare-card-body' + (isError ? ' error' : '') + '">' + escapeHtml(content) + '</div>' +
+        (isError ? '' :
+          '<div class="compare-card-footer">' +
+            '<span>In: ' + inputTokens + ' tokens</span>' +
+            '<span>Out: ' + outputTokens + ' tokens</span>' +
+            '<span>Latency: ' + result.latency_ms + 'ms</span>' +
+          '</div>'
+        );
+    },
+  };
+
   // --- Network invite code ---
   async function loadNetworkCode() {
     try {
@@ -4677,6 +4895,7 @@ var SwarmLLM = (function() {
     setup: setup,
     identity: identity,
     networkMap: networkMap,
+    compare: compare,
     requestModel: requestModel,
     selectModel: selectModel,
     cancelDownload: cancelDownload,

@@ -2,6 +2,26 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased]
+
+### Claude Code Integration (Phase 13)
+- **Full Anthropic Messages API** (`POST /v1/messages`) — complete Claude Code compatibility
+  - `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking) request fields
+  - `tool_use`, `tool_result`, `thinking`, `redacted_thinking` content blocks
+  - `cache_control` on system blocks (Anthropic prompt caching)
+  - Full pass-through to Anthropic cloud (all fields preserved including tools and thinking)
+  - Anthropic→OpenAI translation proxy for non-Claude cloud models (GPT-4o, DeepSeek, etc.)
+  - Tool calls and thinking blocks converted to text for local GGUF inference
+  - `ResponseContentBlock` refactored from struct to enum (Text, ToolUse, Thinking variants)
+- **MCP `compare` tool** — send same prompt to multiple models concurrently (up to 10)
+  - Returns side-by-side results with `content`, `latency_ms`, `input_tokens`, `output_tokens`, `status`
+  - Supports local, network, and cloud models in same comparison
+  - Routes through `/v1/messages` for consistent routing logic
+- **Claude Code as client**: `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
+- **Model Compare dashboard page** — side-by-side multi-model comparison UI with streaming
+- 6 new unit tests (tool_use, tool_result, thinking, tools request, response serialization, internal conversion)
+- 665 tests passing (597 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+
 ## [0.1.0-alpha.1] — 2026-03-07
 
 First public release. Single Rust binary (~31MB) for decentralized P2P LLM inference.
@@ -22,8 +42,8 @@ First public release. Single Rust binary (~31MB) for decentralized P2P LLM infer
 
 ### API & Compatibility
 - **OpenAI-compatible API**: `POST /v1/chat/completions` with streaming (SSE), `tool_calls`, `tool_choice`, `logprobs`, `top_logprobs`, Tool role
-- **Anthropic-compatible**: `POST /v1/messages`, prompt cache control (`cache_control` fields)
-- **MCP server** at `/mcp` — exposes full model catalog to Claude Code, Cursor, and MCP-compatible agents
+- **Anthropic Messages API**: `POST /v1/messages` — full Claude Code compatibility (tools, tool_choice, thinking, cache_control, metadata)
+- **MCP server** at `/mcp` — `chat`, `models`, and `compare` (multi-model comparison) tools for Claude Code, Cursor, and MCP-compatible agents
 - **12 cloud provider fallback**: OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi
 - **Hidden states API**: `/v1/internal/hidden-states` for research (activation inspection, adapter insertion)
 - **Embeddings**: `POST /v1/embeddings`

@@ -753,15 +753,23 @@ allowing candle to parse the full tensor index while only loading assigned layer
 
 ### OpenAI-Compatible (Bearer auth required)
 - `POST /v1/chat/completions` — Chat completions (streaming + non-streaming, tool_calls + logprobs support)
-- `POST /v1/messages` — Anthropic Messages API (native format with SSE streaming)
+- `POST /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
 - `POST /v1/embeddings` — Text embeddings
 - `GET  /v1/models` — List available models
 - `GET  /v1/status` — SwarmLLM node status
 
+### Anthropic Messages API (`/v1/messages`)
+Full Anthropic Messages API compatibility for use as a Claude Code backend:
+- **Request fields:** `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking), `cache_control` on system blocks
+- **Content blocks:** `text`, `image`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`
+- **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy; local GGUF models → tool calls/thinking converted to text for inference
+- **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
+
 ### MCP Server
 - `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, Cursor, etc.)
-- Tools: `chat` (wraps inference router), `models` (lists all models)
+- Tools: `chat` (wraps inference router), `models` (lists all models), `compare` (multi-model comparison)
 - Resources: `swarmllm://status` (node status)
+- **`compare` tool:** sends the same prompt to up to 10 models concurrently, returns side-by-side results with `content`, `latency_ms`, `input_tokens`, `output_tokens`, `status`
 
 ### Cloud Fallback (Optional)
 When a requested model isn't available locally or on the swarm, requests can optionally be routed to 12 cloud providers:
