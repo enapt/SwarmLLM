@@ -891,6 +891,10 @@ impl Daemon {
                         }
                         let manifest_path = model_dir.join("manifest.json");
                         let header_path = model_dir.join("gguf_header.bin");
+                        // If header is missing, try to extract it from shard_000.bin
+                        if !header_path.exists() {
+                            let _ = crate::inference::split::ensure_gguf_header(&model_dir);
+                        }
                         if !manifest_path.exists() && header_path.exists() {
                             let model_id_str = model_dir
                                 .file_name()
@@ -2748,11 +2752,39 @@ fn regenerate_manifest_from_header(
         (max_end + 31) & !31
     };
 
-    let estimated_count = total_size.div_ceil(shard_size).max(1) as u32;
+    // Check if this is actually a single full GGUF file stored as shard_000.bin
+    // (not a real byte-range shard). If shard_000 exists and its size >= total_size,
+    // treat as a 1-shard model.
+    let shard0_path = model_dir.join("shard_000.bin");
+    let is_single_full_gguf = shard0_path.exists()
+        && !model_dir.join("shard_001.bin").exists()
+        && shard0_path
+            .metadata()
+            .map(|m| m.len() as u64 >= (total_size as u64).saturating_sub(4096))
+            .unwrap_or(false);
 
-    let layouts = crate::inference::split::compute_layer_shard_layouts(meta, estimated_count);
-    let shard_count = layouts.len() as u32;
-    let shards = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
+    let (shard_count, shards) = if is_single_full_gguf {
+        // Single full GGUF — 1 shard containing all layers
+        let file_size = shard0_path.metadata().map(|m| m.len()).unwrap_or(0);
+        let hash: crate::types::Blake3Hash = {
+            let data = std::fs::read(&shard0_path).unwrap_or_default();
+            blake3::hash(&data).into()
+        };
+        let shard_info = crate::types::ShardInfo {
+            index: 0,
+            layer_range: (0, meta.block_count as u32),
+            size_bytes: file_size,
+            hash,
+            tensors: Vec::new(),
+        };
+        (1u32, vec![shard_info])
+    } else {
+        let estimated_count = total_size.div_ceil(shard_size).max(1) as u32;
+        let layouts = crate::inference::split::compute_layer_shard_layouts(meta, estimated_count);
+        let sc = layouts.len() as u32;
+        let sh = crate::model::manifest::build_shard_infos_from_layouts(model_dir, &layouts);
+        (sc, sh)
+    };
 
     let model_name = meta
         .model_name
