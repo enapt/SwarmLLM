@@ -101,7 +101,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ## Features
 
 ### Inference
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, ~130ms per-token pipeline latency over TCP. Candle-based direct tensor computation with E2E encryption
+- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on real LAN (WSL2 laptop + Proxmox server) with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Cloud Fallback (Optional)** — Optionally route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi) as a fallback. The swarm is the primary way to run models for free
@@ -109,7 +109,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **MCP Server** — Native Model Context Protocol server that exposes the entire swarm model catalog to AI agent frameworks. Point Claude Code, Cursor, or any MCP-compatible agent at your SwarmLLM node and it gains access to every model in the network — local, distributed, and cloud-fallback — through `chat` and `models` tools
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
-- **Vision & Adapters** — VLM support (LLaVA, Qwen2-VL) and per-request LoRA adapter loading
+- **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation
 - **Multi-turn KV-cache** — Session-aware cache reuse, cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool)
@@ -128,7 +128,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
 
 ### Operations
-- **Built-in Web UI** — Swarm-first dashboard with chat interface, model browser, shard visualization, first-run setup wizard ("Join the Swarm"), network map, leaderboard, mobile-responsive layout
+- **Built-in Web UI** — Swarm-first dashboard with chat interface (image upload for VLM), model browser, shard visualization, first-run setup wizard ("Join the Swarm"), network map, leaderboard, mobile-responsive layout
 - **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, startup readiness probe `/health/ready`, structured startup logging, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API
@@ -337,7 +337,7 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **API Compatibility** | OpenAI + Anthropic + MCP | PyTorch | OpenAI basic | Subnet-defined |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 643 tests | Limited | Limited | Varies |
+| **Test Suite** | 659 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 

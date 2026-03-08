@@ -9,9 +9,9 @@ First public release. Single Rust binary (~31MB) for decentralized P2P LLM infer
 ### Inference Engine
 - **11 model architectures**: Llama, Llama 4, Qwen2, Qwen 3.5 (hybrid SSM+attention), Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3 (MoE+MLA), GLM-4
 - **4 architectures verified** with real models: Llama (TinyLlama-1.1B), Qwen2 (Qwen2.5-Coder-7B), Phi-3 (Phi-3.5-mini), Gemma2 (Gemma-2-2B-IT)
-- **Distributed inference** verified on 2-node pipeline (~130ms per-token over TCP)
+- **Distributed inference** verified on 2-node real LAN (WSL2 laptop + Proxmox server) with 5 models, crash recovery, auto-reconnect
 - **Tensor parallelism** via AllReduce (star topology) with RTT-based LAN peer detection
-- **VLM support**: LLaVA-v1.5-7B verified end-to-end (CLIP vision encoder + text model), distributed mmproj
+- **VLM support**: LLaVA-v1.5-7B verified end-to-end (CLIP vision encoder + correct fine-tuned text model from second-state/Llava-v1.5-7B-GGUF), distributed mmproj, chat UI image upload (camera button, paste, drag-drop)
 - **LoRA adapters**: per-request loading, verified with Qwen2.5-Coder-7B + rank-16 adapter
 - **Speculative decoding** with draft model + rejection sampling
 - **Cross-request batching** (GPU batch tensors, configurable `max_batch_size`)
@@ -81,7 +81,7 @@ First public release. Single Rust binary (~31MB) for decentralized P2P LLM infer
 ### Frontend
 - **Embedded web dashboard** (vanilla HTML/CSS/JS, no build step, < 200KB)
 - **4-step setup wizard** for first-run experience
-- **Chat interface**: multi-turn + streaming, switchable Linear/Messenger layout
+- **Chat interface**: multi-turn + streaming, switchable Linear/Messenger layout, image upload (camera button, paste, drag-drop) for VLM models
 - **Model browser**: HuggingFace search, shard grid visualization, download progress
 - **Network map**: peer visualization with region grouping
 - **Mobile-responsive** layout with dark theme
@@ -103,8 +103,14 @@ First public release. Single Rust binary (~31MB) for decentralized P2P LLM infer
 - macOS x86_64 Intel (CPU)
 - Windows x86_64 (CPU + CUDA)
 
+### Model Loading
+- **Auto-extract gguf_header.bin** from shard_000.bin when header is missing (daemon pre-pass)
+- **Single-GGUF manifest**: Full GGUF files stored as shard_000.bin generate 1-shard manifests (not split into logical shards)
+- **Single-shard mmap fallback**: Models with 1 shard and no tensor entries load via mmap instead of ShardReader
+- **Probed flag fix**: Models with gguf_header.bin correctly show as probed in admin API
+
 ### Test Suite
-- 643 tests: 575 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E
+- 659 tests: 591 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E
 - All passing, clippy clean, rustfmt clean
 - CI: GitHub Actions (fmt → clippy → test → build)
 
