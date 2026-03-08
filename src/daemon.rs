@@ -1115,6 +1115,126 @@ impl Daemon {
             }
         }
 
+        // Auto-download missing GGUF headers from HuggingFace.
+        // If a model directory has shard files but no gguf_header.bin (and no shard_000
+        // to extract it from), try to download the header using hf_source.json.
+        {
+            let models_dir = self.config.node.data_dir.join("models");
+            if models_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&models_dir) {
+                    for entry in entries.flatten() {
+                        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            continue;
+                        }
+                        let model_dir = entry.path();
+                        let header_path = model_dir.join("gguf_header.bin");
+                        if header_path.exists() {
+                            continue; // Already have header
+                        }
+                        // Check if we have any shard files
+                        let has_shards = model_dir.join("shard_000.bin").exists()
+                            || model_dir.join("shard_001.bin").exists();
+                        if !has_shards {
+                            continue;
+                        }
+                        // Try local extraction from shard_000 first
+                        if model_dir.join("shard_000.bin").exists() {
+                            if crate::inference::split::ensure_gguf_header(&model_dir).is_ok() {
+                                continue;
+                            }
+                        }
+                        // Download from HF if source is known
+                        let model_id_str =
+                            entry.file_name().to_string_lossy().to_string();
+                        let mid = crate::types::ModelId(model_id_str.clone());
+                        if let Some(hf_src) = shared_state.hf_sources.get(&mid) {
+                            tracing::info!(
+                                model = %model_id_str,
+                                repo = %hf_src.repo_id,
+                                "Downloading GGUF header from HuggingFace (no local shard_000)"
+                            );
+                            let shard_size = self.config.model.shard_size_bytes();
+                            match crate::model::huggingface::probe_gguf_file(
+                                &hf_src.repo_id,
+                                &hf_src.filename,
+                                shard_size,
+                            )
+                            .await
+                            {
+                                Ok(info) => {
+                                    if let Ok(hp) =
+                                        crate::model::huggingface::download_gguf_header(
+                                            &hf_src.repo_id,
+                                            &hf_src.filename,
+                                            &model_dir,
+                                            info.header_size,
+                                        )
+                                        .await
+                                    {
+                                        tracing::info!(
+                                            model = %model_id_str,
+                                            path = %hp.display(),
+                                            "Downloaded GGUF header from HuggingFace"
+                                        );
+                                        // Load GGUF metadata
+                                        if let Ok(meta) =
+                                            crate::inference::split::GgufTensorMeta::from_gguf_file(
+                                                &hp,
+                                            )
+                                        {
+                                            shared_state.gguf_meta.insert(mid.clone(), meta.clone());
+                                            // Regenerate manifest if missing
+                                            let manifest_path = model_dir.join("manifest.json");
+                                            if !manifest_path.exists() {
+                                                regenerate_manifest_from_header(
+                                                    &mid,
+                                                    &model_dir,
+                                                    &meta,
+                                                    &self.config,
+                                                );
+                                            }
+                                            // Extract tied output weight if needed
+                                            let tied_path =
+                                                model_dir.join("tied_output_weight.bin");
+                                            if !tied_path.exists() {
+                                                let has_output = meta
+                                                    .tensors
+                                                    .contains_key("output.weight");
+                                                let has_embd = meta
+                                                    .tensors
+                                                    .contains_key("token_embd.weight");
+                                                if !has_output && has_embd {
+                                                    if let Err(e) = crate::model::huggingface::download_tied_output_weight(
+                                                        &hf_src.repo_id,
+                                                        &hf_src.filename,
+                                                        &model_dir,
+                                                        &meta,
+                                                    ).await {
+                                                        tracing::warn!(
+                                                            model = %model_id_str,
+                                                            error = %e,
+                                                            "Failed to download tied_output_weight"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        model = %model_id_str,
+                                        error = %e,
+                                        "Failed to probe GGUF on HuggingFace for header download"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Channel Architecture ──
         //
         // network_tx      → NetworkManager (outbound commands: broadcast, send tensor)
