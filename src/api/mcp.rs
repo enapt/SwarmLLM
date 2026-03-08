@@ -504,8 +504,10 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
 
             match result {
                 Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value =
-                        resp.json().await.unwrap_or(json!({"error": "parse failed"}));
+                    let resp_body: serde_json::Value = resp
+                        .json()
+                        .await
+                        .unwrap_or(json!({"error": "parse failed"}));
                     // Extract text from Anthropic response
                     let content = resp_body["content"]
                         .as_array()
@@ -556,7 +558,9 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
     for handle in handles {
         match handle.await {
             Ok(result) => results.push(result),
-            Err(e) => results.push(json!({"error": format!("Task failed: {e}"), "status": "error"})),
+            Err(e) => {
+                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
+            }
         }
     }
 

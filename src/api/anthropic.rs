@@ -113,14 +113,10 @@ pub enum ContentBlock {
     },
     /// Thinking block (extended thinking / chain-of-thought).
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-    },
+    Thinking { thinking: String },
     /// Redacted thinking block.
     #[serde(rename = "redacted_thinking")]
-    RedactedThinking {
-        data: String,
-    },
+    RedactedThinking { data: String },
 }
 
 // ---- Response types ----
@@ -207,9 +203,7 @@ fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
                         ContentBlock::Image { .. } => {
                             // Image handling: VLM images handled via openai.rs path
                         }
-                        ContentBlock::ToolResult {
-                            content, ..
-                        } => {
+                        ContentBlock::ToolResult { content, .. } => {
                             // Include tool result text in conversation for local inference
                             if let Some(c) = content {
                                 if let Some(s) = c.as_str() {
@@ -306,9 +300,7 @@ pub async fn messages(
             id: request_id,
             response_type: "message",
             role: "assistant",
-            content: vec![ResponseContentBlock::Text {
-                text: "ok".into(),
-            }],
+            content: vec![ResponseContentBlock::Text { text: "ok".into() }],
             model,
             stop_reason: Some("end_turn".into()),
             stop_sequence: None,
@@ -463,9 +455,7 @@ pub async fn messages(
                 id: request_id,
                 response_type: "message",
                 role: "assistant",
-                content: vec![ResponseContentBlock::Text {
-                    text: content,
-                }],
+                content: vec![ResponseContentBlock::Text { text: content }],
                 model,
                 stop_reason: Some(map_finish_reason(result.finish_reason.as_str()).into()),
                 stop_sequence: None,
@@ -528,7 +518,10 @@ pub async fn messages(
                 "DIAG: anthropic→openai translation proxy to cloud provider"
             );
             return anthropic_to_openai_proxy(
-                &req, &internal_messages, &provider_url, &provider_key,
+                &req,
+                &internal_messages,
+                &provider_url,
+                &provider_key,
             )
             .await;
         }
@@ -1037,9 +1030,7 @@ async fn anthropic_split_non_stream(
         id: request_id,
         response_type: "message",
         role: "assistant",
-        content: vec![ResponseContentBlock::Text {
-            text: content,
-        }],
+        content: vec![ResponseContentBlock::Text { text: content }],
         model,
         stop_reason: Some(stop_reason.into()),
         stop_sequence: None,
@@ -1292,9 +1283,7 @@ async fn anthropic_to_openai_proxy(
         .to_string();
     let finish = choice["finish_reason"].as_str().unwrap_or("stop");
 
-    let input_tokens = openai_resp["usage"]["prompt_tokens"]
-        .as_u64()
-        .unwrap_or(0) as u32;
+    let input_tokens = openai_resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
     let output_tokens = openai_resp["usage"]["completion_tokens"]
         .as_u64()
         .unwrap_or(0) as u32;
@@ -1303,9 +1292,7 @@ async fn anthropic_to_openai_proxy(
         id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
         response_type: "message",
         role: "assistant",
-        content: vec![ResponseContentBlock::Text {
-            text: content_text,
-        }],
+        content: vec![ResponseContentBlock::Text { text: content_text }],
         model: req.model.clone(),
         stop_reason: Some(map_finish_reason(finish).into()),
         stop_sequence: None,
@@ -1601,7 +1588,10 @@ mod tests {
                         ..
                     } => {
                         assert_eq!(tool_use_id, "toolu_123");
-                        assert_eq!(content.as_ref().unwrap().as_str().unwrap(), "file contents here");
+                        assert_eq!(
+                            content.as_ref().unwrap().as_str().unwrap(),
+                            "file contents here"
+                        );
                     }
                     _ => panic!("Expected ToolResult block"),
                 }
