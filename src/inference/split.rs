@@ -755,7 +755,12 @@ pub struct SpmTokenizer {
 }
 
 impl SpmTokenizer {
-    pub fn new(tokens: &[String], scores: &[f32], add_space_prefix: bool, add_bos_token: bool) -> Self {
+    pub fn new(
+        tokens: &[String],
+        scores: &[f32],
+        add_space_prefix: bool,
+        add_bos_token: bool,
+    ) -> Self {
         let mut piece_to_id = HashMap::new();
         for (i, (tok, &score)) in tokens.iter().zip(scores.iter()).enumerate() {
             piece_to_id.insert(tok.clone(), (i as u32, score));
@@ -901,8 +906,8 @@ impl SpmTokenizer {
 
         // Priority queue: (score, left_idx, right_idx, merged_token_id)
         // Use Reverse for max-heap (BinaryHeap is max by default, we want highest score first)
-        use std::collections::BinaryHeap;
         use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
 
         #[derive(PartialEq)]
         struct Merge {
@@ -934,9 +939,10 @@ impl SpmTokenizer {
                               left: usize,
                               right: usize,
                               text_bytes: &[u8]| {
-            let merged =
-                std::str::from_utf8(&text_bytes[symbols[left].start..symbols[right].start + symbols[right].len])
-                    .unwrap_or("");
+            let merged = std::str::from_utf8(
+                &text_bytes[symbols[left].start..symbols[right].start + symbols[right].len],
+            )
+            .unwrap_or("");
             if let Some(&(id, score)) = self.piece_to_id.get(merged) {
                 heap.push(Merge {
                     score,
@@ -1017,8 +1023,8 @@ impl SpmTokenizer {
                 idx = sym.next;
                 continue;
             }
-            let piece = std::str::from_utf8(&text_bytes[sym.start..sym.start + sym.len])
-                .unwrap_or("");
+            let piece =
+                std::str::from_utf8(&text_bytes[sym.start..sym.start + sym.len]).unwrap_or("");
             if let Some(&(id, _)) = self.piece_to_id.get(piece) {
                 result.push(id as i64);
             } else {
@@ -1042,7 +1048,9 @@ impl SpmTokenizer {
 impl SplitTokenizer {
     /// Build from GGUF BPE merges (existing path).
     pub fn from_bpe(tokens: &[String], merges: &[String], pre_type: &str, model: &str) -> Self {
-        Self::Bpe(Box::new(BpeTokenizer::from_gguf(tokens, merges, pre_type, model)))
+        Self::Bpe(Box::new(BpeTokenizer::from_gguf(
+            tokens, merges, pre_type, model,
+        )))
     }
 
     /// Build a SentencePiece tokenizer from GGUF vocab + scores.
@@ -1052,7 +1060,12 @@ impl SplitTokenizer {
         add_space_prefix: bool,
         add_bos_token: bool,
     ) -> Self {
-        Self::SentencePiece(SpmTokenizer::new(tokens, scores, add_space_prefix, add_bos_token))
+        Self::SentencePiece(SpmTokenizer::new(
+            tokens,
+            scores,
+            add_space_prefix,
+            add_bos_token,
+        ))
     }
 
     /// Encode text to token IDs.
@@ -1188,7 +1201,10 @@ impl ModelArch {
     pub fn use_rope_contiguous(&self) -> bool {
         // Interleaved (NORM): Llama, Mistral
         // Contiguous (NEOX): everything else
-        !matches!(self, ModelArch::Llama | ModelArch::Mistral | ModelArch::Unknown(_))
+        !matches!(
+            self,
+            ModelArch::Llama | ModelArch::Mistral | ModelArch::Unknown(_)
+        )
     }
 
     /// Default activation function for this architecture's MLP.
@@ -4650,7 +4666,12 @@ impl SplitModel {
                         add_bos_token,
                         "Building SPM tokenizer from GGUF sentencepiece data"
                     );
-                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores, add_space_prefix, add_bos_token))
+                    Some(SplitTokenizer::from_sentencepiece(
+                        vocab,
+                        &scores,
+                        add_space_prefix,
+                        add_bos_token,
+                    ))
                 } else {
                     None
                 }
@@ -5871,7 +5892,12 @@ impl SplitModel {
                         add_bos_token,
                         "Building SPM tokenizer from GGUF header sentencepiece data"
                     );
-                    Some(SplitTokenizer::from_sentencepiece(vocab, &scores, add_space_prefix, add_bos_token))
+                    Some(SplitTokenizer::from_sentencepiece(
+                        vocab,
+                        &scores,
+                        add_space_prefix,
+                        add_bos_token,
+                    ))
                 } else {
                     None
                 }
@@ -9789,8 +9815,9 @@ mod tests {
     #[ignore] // Run with: cargo test gemma2_real_gguf -- --ignored --nocapture
     fn gemma2_real_gguf_vs_shards() {
         use candle_core::Tensor;
-        let gguf_path =
-            std::path::Path::new("/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf");
+        let gguf_path = std::path::Path::new(
+            "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf",
+        );
         if !gguf_path.exists() {
             eprintln!("Skipping: GGUF not found at {}", gguf_path.display());
             return;
@@ -9801,7 +9828,9 @@ mod tests {
             .expect("Failed to load from GGUF");
 
         // Use the tokenizer to get the same tokens our API uses
-        let prompt_tokens: Vec<u32> = vec![2, 2, 106, 1645, 108, 1841, 603, 573, 6037, 576, 6081, 235336, 107, 108, 106, 2516, 108];
+        let prompt_tokens: Vec<u32> = vec![
+            2, 2, 106, 1645, 108, 1841, 603, 573, 6037, 576, 6081, 235336, 107, 108, 106, 2516, 108,
+        ];
         let input = Tensor::new(&prompt_tokens[..], &Device::Cpu)
             .unwrap()
             .unsqueeze(0) // [1, 17]
@@ -9837,7 +9866,10 @@ mod tests {
         // Save logits for external comparison
         let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
         std::fs::write("/tmp/gemma2_our_logits.bin", &bytes).ok();
-        eprintln!("  Saved {} logits to /tmp/gemma2_our_logits.bin", flat.len());
+        eprintln!(
+            "  Saved {} logits to /tmp/gemma2_our_logits.bin",
+            flat.len()
+        );
     }
 
     /// Test Gemma-2 with single token (no mask) to eliminate mask issues.
@@ -9845,8 +9877,9 @@ mod tests {
     #[ignore]
     fn gemma2_single_token() {
         use candle_core::{Device, Tensor};
-        let gguf_path =
-            std::path::Path::new("/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf");
+        let gguf_path = std::path::Path::new(
+            "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf",
+        );
         if !gguf_path.exists() {
             eprintln!("Skipping: GGUF not found");
             return;
@@ -9861,8 +9894,8 @@ mod tests {
             .to_dtype(candle_core::DType::I64)
             .unwrap();
 
-        let mut model = SplitModel::load_from_gguf(gguf_path, 0, 26, true, true)
-            .expect("Failed to load");
+        let mut model =
+            SplitModel::load_from_gguf(gguf_path, 0, 26, true, true).expect("Failed to load");
 
         let kv_store = KvCacheStore::new(std::time::Duration::from_secs(600));
         let logits = model
@@ -9891,7 +9924,8 @@ mod tests {
     fn gemma2_embedding_verification() {
         use candle_core::{quantized::gguf_file, Device, Tensor};
 
-        let gguf_path = "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
+        let gguf_path =
+            "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
         let path = std::path::Path::new(gguf_path);
         if !path.exists() {
             eprintln!("Skipping: GGUF not found");
@@ -9905,7 +9939,9 @@ mod tests {
         let device = Device::Cpu;
 
         // Load and dequantize embedding
-        let embd_qt = ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap();
+        let embd_qt = ct
+            .tensor(&mut cursor, "token_embd.weight", &device)
+            .unwrap();
         let embd = embd_qt.dequantize(&device).unwrap();
         eprintln!("Embedding shape: {:?}", embd.shape());
 
@@ -9913,7 +9949,10 @@ mod tests {
         let row2 = embd.i(2).unwrap();
         let row2_vals: Vec<f32> = row2.to_vec1().unwrap();
         eprintln!("Row 2 (BOS) first 8: {:?}", &row2_vals[..8]);
-        eprintln!("Row 2 (BOS) last 8: {:?}", &row2_vals[row2_vals.len()-8..]);
+        eprintln!(
+            "Row 2 (BOS) last 8: {:?}",
+            &row2_vals[row2_vals.len() - 8..]
+        );
 
         // Compare with Python reference
         let py_ref = std::fs::read("/tmp/gemma2_embed_row2.npy").ok();
@@ -9922,7 +9961,8 @@ mod tests {
             // Simple npy parser: header starts with \x93NUMPY, has length info
             let header_len = 10 + npy_bytes[8] as usize + ((npy_bytes[9] as usize) << 8);
             let data_bytes = &npy_bytes[header_len..];
-            let py_vals: Vec<f32> = data_bytes.chunks_exact(4)
+            let py_vals: Vec<f32> = data_bytes
+                .chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             eprintln!("Python ref first 8: {:?}", &py_vals[..8]);
@@ -9954,7 +9994,9 @@ mod tests {
         let scaled = looked_up.affine((2304f64).sqrt(), 0.0).unwrap(); // scale by sqrt(hidden_dim)
 
         // Apply final norm (with +1 offset)
-        let norm_qt = ct.tensor(&mut cursor, "output_norm.weight", &device).unwrap();
+        let norm_qt = ct
+            .tensor(&mut cursor, "output_norm.weight", &device)
+            .unwrap();
         let norm_w = norm_qt.dequantize(&device).unwrap();
         let norm_w_plus1 = (norm_w + 1.0).unwrap(); // Gemma +1
         let normed = candle_nn::ops::rms_norm(&scaled, &norm_w_plus1, 1e-6).unwrap();
@@ -9962,7 +10004,11 @@ mod tests {
         // Output projection using dequantized embedding
         let logits = normed.matmul(&embd.t().unwrap()).unwrap();
         let flat: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
-        let argmax = flat.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        let argmax = flat
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
         eprintln!("0-layer logits: argmax={} score={:.4}", argmax.0, argmax.1);
         eprintln!("  token 2 score: {:.4}", flat[2]);
         eprintln!("  token 108 score: {:.4}", flat[108]);
@@ -9975,7 +10021,8 @@ mod tests {
     fn gemma2_output_projection_qmatmul_vs_deq() {
         use candle_core::{quantized::gguf_file, Device, Tensor};
 
-        let gguf_path = "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
+        let gguf_path =
+            "/tmp/swarm_gemma_test/models/gemma-2-2b-it-q4-k-m/gemma-2-2b-it-Q4_K_M.gguf";
         let path = std::path::Path::new(gguf_path);
         if !path.exists() {
             eprintln!("Skipping: GGUF not found");
@@ -9989,7 +10036,9 @@ mod tests {
         let device = Device::Cpu;
 
         // Load token_embd.weight as both QTensor and dequantized
-        let embd_qt = ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap();
+        let embd_qt = ct
+            .tensor(&mut cursor, "token_embd.weight", &device)
+            .unwrap();
         eprintln!("token_embd.weight QTensor shape: {:?}", embd_qt.shape());
 
         let embd_deq = embd_qt.dequantize(&device).unwrap();
@@ -9997,7 +10046,8 @@ mod tests {
 
         // Create QMatMul from the QTensor
         let qmm = QMatMul::from_qtensor(
-            ct.tensor(&mut cursor, "token_embd.weight", &device).unwrap(),
+            ct.tensor(&mut cursor, "token_embd.weight", &device)
+                .unwrap(),
         )
         .unwrap();
 
@@ -10013,8 +10063,24 @@ mod tests {
         let logits_deq = hidden.matmul(&embd_deq.t().unwrap()).unwrap();
         let flat_deq: Vec<f32> = logits_deq.flatten_all().unwrap().to_vec1().unwrap();
 
-        eprintln!("QMatMul logits: argmax={}", flat_qmm.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0);
-        eprintln!("Deq logits: argmax={}", flat_deq.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0);
+        eprintln!(
+            "QMatMul logits: argmax={}",
+            flat_qmm
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0
+        );
+        eprintln!(
+            "Deq logits: argmax={}",
+            flat_deq
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0
+        );
 
         // Check if they agree
         let mut max_diff = 0f32;
@@ -10049,6 +10115,9 @@ mod tests {
         eprintln!("Pearson correlation (QMatMul vs Deq): {corr:.6}");
 
         // They should be highly correlated (>0.99) — just quantization error
-        assert!(corr > 0.99, "QMatMul and dequantized matmul should agree: corr={corr}");
+        assert!(
+            corr > 0.99,
+            "QMatMul and dequantized matmul should agree: corr={corr}"
+        );
     }
 }

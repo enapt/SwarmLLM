@@ -1126,7 +1126,10 @@ impl PipelineExecutor {
                 .unwrap_or(false);
             if !scores.is_empty() {
                 Some(crate::inference::split::SplitTokenizer::from_sentencepiece(
-                    &vocab, &scores, add_space_prefix, add_bos_token,
+                    &vocab,
+                    &scores,
+                    add_space_prefix,
+                    add_bos_token,
                 ))
             } else {
                 None

@@ -1144,8 +1144,7 @@ impl Daemon {
                             continue;
                         }
                         // Download from HF if source is known
-                        let model_id_str =
-                            entry.file_name().to_string_lossy().to_string();
+                        let model_id_str = entry.file_name().to_string_lossy().to_string();
                         let mid = crate::types::ModelId(model_id_str.clone());
                         if let Some(hf_src) = shared_state.hf_sources.get(&mid) {
                             tracing::info!(
@@ -1162,14 +1161,13 @@ impl Daemon {
                             .await
                             {
                                 Ok(info) => {
-                                    if let Ok(hp) =
-                                        crate::model::huggingface::download_gguf_header(
-                                            &hf_src.repo_id,
-                                            &hf_src.filename,
-                                            &model_dir,
-                                            info.header_size,
-                                        )
-                                        .await
+                                    if let Ok(hp) = crate::model::huggingface::download_gguf_header(
+                                        &hf_src.repo_id,
+                                        &hf_src.filename,
+                                        &model_dir,
+                                        info.header_size,
+                                    )
+                                    .await
                                     {
                                         tracing::info!(
                                             model = %model_id_str,
@@ -1182,7 +1180,9 @@ impl Daemon {
                                                 &hp,
                                             )
                                         {
-                                            shared_state.gguf_meta.insert(mid.clone(), meta.clone());
+                                            shared_state
+                                                .gguf_meta
+                                                .insert(mid.clone(), meta.clone());
                                             // Regenerate manifest if missing
                                             let manifest_path = model_dir.join("manifest.json");
                                             if !manifest_path.exists() {
@@ -1197,12 +1197,10 @@ impl Daemon {
                                             let tied_path =
                                                 model_dir.join("tied_output_weight.bin");
                                             if !tied_path.exists() {
-                                                let has_output = meta
-                                                    .tensors
-                                                    .contains_key("output.weight");
-                                                let has_embd = meta
-                                                    .tensors
-                                                    .contains_key("token_embd.weight");
+                                                let has_output =
+                                                    meta.tensors.contains_key("output.weight");
+                                                let has_embd =
+                                                    meta.tensors.contains_key("token_embd.weight");
                                                 if !has_output && has_embd {
                                                     if let Err(e) = crate::model::huggingface::download_tied_output_weight(
                                                         &hf_src.repo_id,
@@ -2829,8 +2827,8 @@ fn extract_tied_output_weight(
     let abs_offset = meta.tensor_data_offset + embd_loc.offset;
     let size = embd_loc.size;
 
-    let shard_data = std::fs::read(shard0_path)
-        .map_err(|e| format!("Failed to read shard_000.bin: {e}"))?;
+    let shard_data =
+        std::fs::read(shard0_path).map_err(|e| format!("Failed to read shard_000.bin: {e}"))?;
 
     let end = (abs_offset + size) as usize;
     if end > shard_data.len() {
