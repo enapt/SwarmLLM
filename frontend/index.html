@@ -396,7 +396,10 @@
             </div>
           </div>
           <div class="chat-input-area">
+            <div id="image-preview-area" style="display:none;max-width:740px;margin:0 auto 6px;padding:6px;background:var(--bg-tertiary);border-radius:8px;"></div>
             <div class="chat-input-wrap">
+              <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
+              <button class="btn" id="image-upload-btn" title="Attach image (or paste/drag)" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn">Send</button>
             </div>

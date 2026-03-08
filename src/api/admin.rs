@@ -504,7 +504,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
             let probed = {
                 let mid_check = crate::types::ModelId(model_id.clone());
-                state.shared_state.hf_sources.contains_key(&mid_check)
+                has_header
+                    || state.shared_state.hf_sources.contains_key(&mid_check)
                     || state.shared_state.hf_probe_cache.contains_key(&mid_check)
             };
             let mmproj_info = {
@@ -658,7 +659,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let has_manifest = model_dir.join("manifest.json").exists();
         let has_header = model_dir.join("gguf_header.bin").exists();
 
-        let probed = state.shared_state.hf_sources.contains_key(&m.id)
+        let probed = has_header
+            || state.shared_state.hf_sources.contains_key(&m.id)
             || state.shared_state.hf_probe_cache.contains_key(&m.id);
         let mmproj_info_reg = {
             let holders = state.shared_state.model_registry.mmproj_holders(&m.id);

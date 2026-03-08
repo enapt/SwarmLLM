@@ -125,6 +125,76 @@ var SwarmLLM = (function() {
   };
 
   // ========================================================================
+  // Image Upload Module — paste, drag-drop, file picker for VLM
+  // ========================================================================
+  var pendingImages = []; // Array of { data_url: string, name: string }
+
+  function addPendingImage(file) {
+    if (!file.type.startsWith('image/')) return;
+    if (pendingImages.length >= 4) {
+      ui.showBanner('warning', 'Maximum 4 images per message');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      pendingImages.push({ data_url: e.target.result, name: file.name });
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderImagePreviews() {
+    var area = document.getElementById('image-preview-area');
+    if (!area) return;
+    if (pendingImages.length === 0) {
+      area.style.display = 'none';
+      area.innerHTML = '';
+      return;
+    }
+    area.style.display = 'flex';
+    area.style.flexWrap = 'wrap';
+    area.style.gap = '6px';
+    area.innerHTML = '';
+    pendingImages.forEach(function(img, idx) {
+      var wrap = document.createElement('div');
+      wrap.style.cssText = 'position:relative;display:inline-block;';
+      var thumb = document.createElement('img');
+      thumb.src = img.data_url;
+      thumb.style.cssText = 'height:60px;max-width:100px;border-radius:6px;object-fit:cover;border:1px solid var(--border);';
+      thumb.title = img.name;
+      var removeBtn = document.createElement('button');
+      removeBtn.textContent = '\u00D7';
+      removeBtn.style.cssText = 'position:absolute;top:-4px;right:-4px;background:var(--danger);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:12px;cursor:pointer;line-height:18px;padding:0;';
+      removeBtn.onclick = function() {
+        pendingImages.splice(idx, 1);
+        renderImagePreviews();
+      };
+      wrap.appendChild(thumb);
+      wrap.appendChild(removeBtn);
+      area.appendChild(wrap);
+    });
+  }
+
+  function clearPendingImages() {
+    pendingImages = [];
+    renderImagePreviews();
+  }
+
+  function buildMessageContent(text, images) {
+    if (!images || images.length === 0) return text;
+    // OpenAI multimodal format: content is an array of parts
+    var parts = [];
+    images.forEach(function(img) {
+      parts.push({
+        type: 'image_url',
+        image_url: { url: img.data_url }
+      });
+    });
+    parts.push({ type: 'text', text: text || 'What is in this image?' });
+    return parts;
+  }
+
+  // ========================================================================
   // Chat Module — sessions, messages, streaming
   // ========================================================================
   var chat = {
@@ -281,7 +351,16 @@ var SwarmLLM = (function() {
       }
 
       msgs.forEach(function(msg) {
-        appendMessageToDOM(msg.role, msg.content);
+        if (msg.images && msg.images.length > 0) {
+          var html = '<div style="margin-bottom:6px;">';
+          msg.images.forEach(function(url) {
+            html += '<img src="' + url + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
+          });
+          html += '</div>' + escapeHtml(msg.content);
+          appendMessageToDOM(msg.role, html, true);
+        } else {
+          appendMessageToDOM(msg.role, msg.content);
+        }
       });
       chat.scrollToBottom();
     },
@@ -304,7 +383,8 @@ var SwarmLLM = (function() {
 
       var input = document.getElementById('chat-input');
       var text = input.value.trim();
-      if (!text) return;
+      var images = pendingImages.slice(); // capture before clearing
+      if (!text && images.length === 0) return;
 
       // Ensure we have a session
       if (!currentSessionId || !sessions[currentSessionId]) {
@@ -313,18 +393,31 @@ var SwarmLLM = (function() {
 
       input.value = '';
       autoResizeInput();
+      clearPendingImages();
 
       var session = sessions[currentSessionId];
-      session.messages.push({ role: 'user', content: text });
+      // Store display text and images separately for rendering
+      var displayText = text || (images.length > 0 ? '[Image]' : '');
+      session.messages.push({ role: 'user', content: displayText, images: images.map(function(i) { return i.data_url; }) });
 
       // Auto-title from first message
       if (session.messages.length === 1) {
-        session.title = text.substring(0, 50);
+        session.title = displayText.substring(0, 50);
         chat.renderSessionList();
       }
 
       chat.saveSessions();
-      appendMessageToDOM('user', text);
+      // Show images in chat bubble
+      var userHtml = '';
+      if (images.length > 0) {
+        userHtml += '<div style="margin-bottom:6px;">';
+        images.forEach(function(img) {
+          userHtml += '<img src="' + img.data_url + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
+        });
+        userHtml += '</div>';
+      }
+      userHtml += escapeHtml(displayText);
+      appendMessageToDOM('user', userHtml, true);
 
       // Prepare assistant message for streaming
       var assistantEl = appendMessageToDOM('assistant', '');
@@ -344,6 +437,9 @@ var SwarmLLM = (function() {
       }
       // Truncate chat history to last 50 messages to prevent context overflow
       var recentMessages = session.messages.slice(-50).map(function(m) {
+        if (m.images && m.images.length > 0) {
+          return { role: m.role, content: buildMessageContent(m.content, m.images.map(function(url) { return { data_url: url }; })) };
+        }
         return { role: m.role, content: m.content };
       });
       var body = {
@@ -3439,7 +3535,7 @@ var SwarmLLM = (function() {
     });
   }
 
-  function appendMessageToDOM(role, content) {
+  function appendMessageToDOM(role, content, isHtml) {
     var container = document.getElementById('chat-messages');
     var empty = document.getElementById('chat-empty');
     if (empty) empty.style.display = 'none';
@@ -3448,7 +3544,11 @@ var SwarmLLM = (function() {
     div.className = 'chat-msg ' + role;
     var label = role === 'user' ? 'You' : 'Assistant';
     div.innerHTML = '<div class="msg-role">' + label + '</div><div class="msg-content"></div>';
-    div.querySelector('.msg-content').textContent = content;
+    if (isHtml) {
+      div.querySelector('.msg-content').innerHTML = content;
+    } else {
+      div.querySelector('.msg-content').textContent = content;
+    }
     container.appendChild(div);
     chat.scrollToBottom();
     return div;
@@ -3943,6 +4043,44 @@ var SwarmLLM = (function() {
     on('send-btn', 'click', function() { chat.send(); });
     on('chat-input', 'keydown', function(e) { chat.handleKey(e); });
     on('chat-layout-toggle', 'click', function() { toggleChatLayout(); });
+
+    // Image upload — file picker
+    on('image-upload-btn', 'click', function() {
+      document.getElementById('image-upload-input').click();
+    });
+    on('image-upload-input', 'change', function(e) {
+      Array.from(e.target.files).forEach(addPendingImage);
+      e.target.value = '';
+    });
+
+    // Image paste
+    var chatInput = document.getElementById('chat-input');
+    if (chatInput) {
+      chatInput.addEventListener('paste', function(e) {
+        var items = (e.clipboardData || {}).items || [];
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].type.indexOf('image') !== -1) {
+            e.preventDefault();
+            addPendingImage(items[i].getAsFile());
+          }
+        }
+      });
+    }
+
+    // Image drag-and-drop on chat area
+    var chatArea = document.getElementById('view-chat');
+    if (chatArea) {
+      chatArea.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+      });
+      chatArea.addEventListener('drop', function(e) {
+        e.preventDefault();
+        Array.from(e.dataTransfer.files).forEach(function(f) {
+          if (f.type.startsWith('image/')) addPendingImage(f);
+        });
+      });
+    }
 
     // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
