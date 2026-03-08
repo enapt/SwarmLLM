@@ -1284,32 +1284,60 @@ enum Activation {
 
 #[derive(Debug, Clone)]
 struct QMatMul {
-    inner: candle_core::quantized::QMatMul,
+    inner: QMatMulInner,
+}
+
+#[derive(Debug, Clone)]
+enum QMatMulInner {
+    /// Standard single-weight matmul
+    Standard(candle_core::quantized::QMatMul),
+    /// Fused weight with output slicing — keeps original quantization quality.
+    /// Computes full matmul then extracts [offset..offset+len] from the output's last dim.
+    /// Used for fused QKV/FFN (Phi-3) where re-quantization of split weights degrades quality.
+    FusedSlice {
+        fused: std::sync::Arc<candle_core::quantized::QMatMul>,
+        offset: usize,
+        len: usize,
+    },
 }
 
 impl QMatMul {
     fn from_qtensor(qtensor: QTensor) -> CandleResult<Self> {
         let inner = candle_core::quantized::QMatMul::from_qtensor(qtensor)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: QMatMulInner::Standard(inner),
+        })
     }
 
-    /// Wrap a dequantized f32 tensor as a quantized QMatMul (Q4_0).
-    /// Re-quantizes on CPU then moves to target device to save VRAM.
-    /// Used for architectures with fused QKV/FFN tensors that need splitting.
-    fn from_f32_tensor(tensor: Tensor, device: &Device) -> Result<Self, SwarmError> {
-        let qt = candle_core::quantized::QTensor::quantize_onto(
-            &tensor,
-            candle_core::quantized::GgmlDType::Q4_0,
-            device,
-        )
-        .map_err(|e| SwarmError::Internal(format!("re-quantize Q4_0: {e}")))?;
-        let inner = candle_core::quantized::QMatMul::from_qtensor(qt)
-            .map_err(|e| SwarmError::Internal(format!("QMatMul from Q4_0: {e}")))?;
-        Ok(Self { inner })
+    /// Create a shared fused QMatMul that can be used by multiple FusedSlice variants.
+    fn make_fused(
+        qtensor: QTensor,
+    ) -> CandleResult<std::sync::Arc<candle_core::quantized::QMatMul>> {
+        let fused = candle_core::quantized::QMatMul::from_qtensor(qtensor)?;
+        Ok(std::sync::Arc::new(fused))
+    }
+
+    /// Create a QMatMul that slices the output of a shared fused matmul.
+    /// Preserves the original quantization quality (no re-quantization).
+    fn from_fused_slice(
+        fused: std::sync::Arc<candle_core::quantized::QMatMul>,
+        offset: usize,
+        len: usize,
+    ) -> Self {
+        Self {
+            inner: QMatMulInner::FusedSlice { fused, offset, len },
+        }
     }
 
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
-        self.inner.forward(xs)
+        match &self.inner {
+            QMatMulInner::Standard(m) => m.forward(xs),
+            QMatMulInner::FusedSlice { fused, offset, len } => {
+                let full = fused.forward(xs)?;
+                full.narrow(candle_core::D::Minus1, *offset, *len)?
+                    .contiguous()
+            }
+        }
     }
 }
 
@@ -3256,6 +3284,77 @@ fn precompute_freqs_cis(
     Ok((idx_theta.cos()?, idx_theta.sin()?))
 }
 
+/// Precompute RoPE frequencies for Long RoPE (SuRoPE) models like Phi-3.5.
+/// Per-dimension frequency scaling factors from `rope_factors_long/short.weight` in GGUF.
+fn precompute_freqs_cis_longrope(
+    head_dim: usize,
+    freq_base: f32,
+    max_seq_len: usize,
+    rope_factors: &[f32],
+    attn_factor: f32,
+    device: &Device,
+) -> CandleResult<(Tensor, Tensor)> {
+    let half_dim = head_dim / 2;
+    assert_eq!(rope_factors.len(), half_dim);
+    let theta: Vec<_> = (0..half_dim)
+        .map(|i| 1f32 / (rope_factors[i] * freq_base.powf(2.0 * i as f32 / head_dim as f32)))
+        .collect();
+    let theta = Tensor::new(theta.as_slice(), device)?;
+    let idx_theta = Tensor::arange(0, max_seq_len as u32, device)?
+        .to_dtype(DType::F32)?
+        .reshape((max_seq_len, 1))?
+        .matmul(&theta.reshape((1, theta.elem_count()))?)?;
+    let cos = (idx_theta.cos()? * attn_factor as f64)?;
+    let sin = (idx_theta.sin()? * attn_factor as f64)?;
+    Ok((cos, sin))
+}
+
+/// Load Long RoPE (SuRoPE) frequency scaling factors from GGUF tensors.
+fn load_longrope_factors<R: std::io::Read + std::io::Seek>(
+    ct: &gguf_file::Content,
+    reader: &mut R,
+    arch: &str,
+    context_length: usize,
+) -> Option<(Vec<f32>, f32)> {
+    let has_long = ct.tensor_infos.contains_key("rope_factors_long.weight");
+    let has_short = ct.tensor_infos.contains_key("rope_factors_short.weight");
+    if !has_long || !has_short {
+        return None;
+    }
+    let original_ctx = ct
+        .metadata
+        .get(&format!("{arch}.rope.scaling.original_context_length"))
+        .and_then(|v| v.to_u32().ok())
+        .unwrap_or(4096) as usize;
+    let tensor_name = if context_length > original_ctx {
+        "rope_factors_long.weight"
+    } else {
+        "rope_factors_short.weight"
+    };
+    let cpu = &Device::Cpu;
+    let factors_qt = ct.tensor(reader, tensor_name, cpu).ok()?;
+    let factors_t = factors_qt.dequantize(cpu).ok()?;
+    let factors: Vec<f32> = factors_t.flatten_all().ok()?.to_vec1().ok()?;
+    let scale = context_length as f64 / original_ctx as f64;
+    let attn_factor = if scale <= 1.0 {
+        1.0f32
+    } else {
+        ct.metadata
+            .get(&format!("{arch}.rope.scaling.attn_factor"))
+            .and_then(|v| v.to_f32().ok())
+            .unwrap_or_else(|| (1.0 + scale.ln() / (original_ctx as f64).ln()).sqrt() as f32)
+    };
+    tracing::info!(
+        original_ctx,
+        context_length,
+        tensor = tensor_name,
+        attn_factor,
+        factors_len = factors.len(),
+        "Loaded Long RoPE factors"
+    );
+    Some((factors, attn_factor))
+}
+
 impl SplitModel {
     /// Load a partial model from a GGUF file, only loading the specified layer range.
     ///
@@ -3363,8 +3462,27 @@ impl SplitModel {
         let use_rope_contiguous = model_arch.use_rope_contiguous();
         let activation = model_arch.default_activation();
 
-        let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        // Long RoPE (SuRoPE) for Phi-3.5 and similar extended-context models
+        let longrope = load_longrope_factors(&ct, &mut file, arch, context_length);
+        let (cos, sin) = if let Some((ref factors, attn_factor)) = longrope {
+            tracing::info!(
+                factors_len = factors.len(),
+                attn_factor,
+                "Using Long RoPE (SuRoPE)"
+            );
+            precompute_freqs_cis_longrope(
+                rope_dim,
+                rope_freq_base,
+                context_length,
+                factors,
+                attn_factor,
+                &device,
+            )
+            .map_err(|e| SwarmError::Internal(e.to_string()))?
+        } else {
+            precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?
+        };
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         // Helper: create RmsNorm from GGUF weight tensor.
@@ -4273,44 +4391,24 @@ impl SplitModel {
                                 .tensor_infos
                                 .contains_key(&format!("{prefix}.attn_qkv.weight"));
                             let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
-                                // Fused QKV: load to CPU, dequantize, split, convert to f16, move to device
-                                let cpu = &candle_core::Device::Cpu;
-                                let fused = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.attn_qkv.weight"), cpu)
+                                // Fused QKV: keep original quantized tensor, split output in forward
+                                let fused_qt = ct_ref
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.attn_qkv.weight"),
+                                        device_ref,
+                                    )
                                     .map_err(|e| {
                                         SwarmError::Internal(format!("{prefix}.attn_qkv: {e}"))
                                     })?;
-                                let fused_f32 = fused.dequantize(cpu).map_err(|e| {
-                                    SwarmError::Internal(format!("qkv dequant: {e}"))
-                                })?;
                                 let q_dim = head_count * head_dim;
                                 let k_dim = head_count_kv * head_dim;
-                                let v_dim = k_dim;
-                                let wq = fused_f32
-                                    .narrow(0, 0, q_dim)
-                                    .map_err(|e| SwarmError::Internal(format!("qkv split q: {e}")))?
-                                    .contiguous()
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("q contiguous: {e}"))
-                                    })?;
-                                let wk = fused_f32
-                                    .narrow(0, q_dim, k_dim)
-                                    .map_err(|e| SwarmError::Internal(format!("qkv split k: {e}")))?
-                                    .contiguous()
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("k contiguous: {e}"))
-                                    })?;
-                                let wv = fused_f32
-                                    .narrow(0, q_dim + k_dim, v_dim)
-                                    .map_err(|e| SwarmError::Internal(format!("qkv split v: {e}")))?
-                                    .contiguous()
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("v contiguous: {e}"))
-                                    })?;
+                                let fused = QMatMul::make_fused(fused_qt)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
                                 (
-                                    QMatMul::from_f32_tensor(wq, device_ref)?,
-                                    QMatMul::from_f32_tensor(wk, device_ref)?,
-                                    QMatMul::from_f32_tensor(wv, device_ref)?,
+                                    QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
+                                    QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
+                                    QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
                                 )
                             } else {
                                 let wq = ct_ref
@@ -4440,45 +4538,27 @@ impl SplitModel {
                                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
                                 )
                             } else {
-                                // Fused gate+up: load to CPU, dequantize, split, convert to f16, move to device
-                                let cpu = &candle_core::Device::Cpu;
-                                let fused = ct_ref
-                                    .tensor(&mut cursor, &format!("{prefix}.ffn_up.weight"), cpu)
+                                // Fused gate+up: use FusedSlice to avoid re-quantization
+                                let fused_qt = ct_ref
+                                    .tensor(
+                                        &mut cursor,
+                                        &format!("{prefix}.ffn_up.weight"),
+                                        device_ref,
+                                    )
                                     .map_err(|e| {
                                         SwarmError::Internal(format!(
                                             "Failed to load {prefix}.ffn_up: {e}"
                                         ))
                                     })?;
-                                let fused_f32 = fused.dequantize(cpu).map_err(|e| {
-                                    SwarmError::Internal(format!("ffn_up dequant: {e}"))
-                                })?;
-                                let total_rows = fused_f32.dim(0).map_err(|e| {
-                                    SwarmError::Internal(format!("ffn_up dim0: {e}"))
-                                })?;
-                                let half = total_rows / 2;
-                                let gate_f32 = fused_f32
-                                    .narrow(0, 0, half)
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("ffn gate split: {e}"))
-                                    })?
-                                    .contiguous()
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("gate contiguous: {e}"))
-                                    })?;
-                                let up_f32 = fused_f32
-                                    .narrow(0, half, half)
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("ffn up split: {e}"))
-                                    })?
-                                    .contiguous()
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("up contiguous: {e}"))
-                                    })?;
+                                let fused_shape = fused_qt.shape();
+                                let half = fused_shape.dims()[0] / 2;
+                                let fused = QMatMul::make_fused(fused_qt)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
                                 (
-                                    QMatMul::from_f32_tensor(gate_f32, device_ref)?,
+                                    QMatMul::from_fused_slice(fused.clone(), 0, half),
                                     QMatMul::from_qtensor(ffn_down_qt)
                                         .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_f32_tensor(up_f32, device_ref)?,
+                                    QMatMul::from_fused_slice(fused, half, half),
                                 )
                             };
                             let attn_norm = ct_ref
@@ -4977,8 +5057,27 @@ impl SplitModel {
         let use_rope_contiguous = model_arch.use_rope_contiguous();
         let activation = model_arch.default_activation();
 
-        let (cos, sin) = precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+        // Long RoPE (SuRoPE) for Phi-3.5 and similar extended-context models
+        let longrope = load_longrope_factors(&ct, &mut reader, arch, context_length);
+        let (cos, sin) = if let Some((ref factors, attn_factor)) = longrope {
+            tracing::info!(
+                factors_len = factors.len(),
+                attn_factor,
+                "Using Long RoPE (SuRoPE)"
+            );
+            precompute_freqs_cis_longrope(
+                rope_dim,
+                rope_freq_base,
+                context_length,
+                factors,
+                attn_factor,
+                &device,
+            )
+            .map_err(|e| SwarmError::Internal(e.to_string()))?
+        } else {
+            precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?
+        };
         let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
         // Helper: create RmsNorm from GGUF weight tensor.
@@ -5589,36 +5688,19 @@ impl SplitModel {
                     .tensor_infos
                     .contains_key(&format!("{prefix}.attn_qkv.weight"));
                 let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
-                    // Fused QKV: load to CPU, dequantize, split, convert to f16, move to device
-                    let cpu = &candle_core::Device::Cpu;
-                    let fused = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_qkv.weight"), cpu)
+                    // Fused QKV: keep original quantized tensor, split output in forward pass.
+                    // Re-quantizing split weights (even Q8_0) degrades quality catastrophically.
+                    let fused_qt = ct
+                        .tensor(&mut reader, &format!("{prefix}.attn_qkv.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_qkv: {e}")))?;
-                    let fused_f32 = fused
-                        .dequantize(cpu)
-                        .map_err(|e| SwarmError::Internal(format!("qkv dequant: {e}")))?;
                     let q_dim = head_count * head_dim;
                     let k_dim = head_count_kv * head_dim;
-                    let v_dim = k_dim;
-                    let wq = fused_f32
-                        .narrow(0, 0, q_dim)
-                        .map_err(|e| SwarmError::Internal(format!("qkv split q: {e}")))?
-                        .contiguous()
-                        .map_err(|e| SwarmError::Internal(format!("q contiguous: {e}")))?;
-                    let wk = fused_f32
-                        .narrow(0, q_dim, k_dim)
-                        .map_err(|e| SwarmError::Internal(format!("qkv split k: {e}")))?
-                        .contiguous()
-                        .map_err(|e| SwarmError::Internal(format!("k contiguous: {e}")))?;
-                    let wv = fused_f32
-                        .narrow(0, q_dim + k_dim, v_dim)
-                        .map_err(|e| SwarmError::Internal(format!("qkv split v: {e}")))?
-                        .contiguous()
-                        .map_err(|e| SwarmError::Internal(format!("v contiguous: {e}")))?;
+                    let fused = QMatMul::make_fused(fused_qt)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
                     (
-                        QMatMul::from_f32_tensor(wq, &device)?,
-                        QMatMul::from_f32_tensor(wk, &device)?,
-                        QMatMul::from_f32_tensor(wv, &device)?,
+                        QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
+                        QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
+                        QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
                     )
                 } else {
                     let wq = ct
@@ -5703,35 +5785,22 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                     )
                 } else {
-                    // Fused gate+up: load to CPU, dequantize, split, convert to f16, move to device
-                    let cpu = &candle_core::Device::Cpu;
-                    let fused = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), cpu)
+                    // Fused gate+up: keep original quantized tensor, split output in forward.
+                    let fused_qt = ct
+                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
                         .map_err(|e| {
                             SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
                         })?;
-                    let fused_f32 = fused
-                        .dequantize(cpu)
-                        .map_err(|e| SwarmError::Internal(format!("ffn_up dequant: {e}")))?;
-                    let total_rows = fused_f32
-                        .dim(0)
-                        .map_err(|e| SwarmError::Internal(format!("ffn_up dim0: {e}")))?;
-                    let half = total_rows / 2;
-                    let gate_f32 = fused_f32
-                        .narrow(0, 0, half)
-                        .map_err(|e| SwarmError::Internal(format!("ffn gate split: {e}")))?
-                        .contiguous()
-                        .map_err(|e| SwarmError::Internal(format!("gate contiguous: {e}")))?;
-                    let up_f32 = fused_f32
-                        .narrow(0, half, half)
-                        .map_err(|e| SwarmError::Internal(format!("ffn up split: {e}")))?
-                        .contiguous()
-                        .map_err(|e| SwarmError::Internal(format!("up contiguous: {e}")))?;
+                    // Get ffn_hidden_dim from the fused tensor shape (total_rows / 2)
+                    let fused_shape = fused_qt.shape();
+                    let half = fused_shape.dims()[0] / 2;
+                    let fused = QMatMul::make_fused(fused_qt)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
                     (
-                        QMatMul::from_f32_tensor(gate_f32, &device)?,
+                        QMatMul::from_fused_slice(fused.clone(), 0, half),
                         QMatMul::from_qtensor(ffn_down_qt)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_f32_tensor(up_f32, &device)?,
+                        QMatMul::from_fused_slice(fused, half, half),
                     )
                 };
                 let attn_norm = ct
