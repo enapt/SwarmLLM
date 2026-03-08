@@ -26,7 +26,7 @@ jobs:
             archive: swarmllm-linux-x86_64.tar.gz
             features: ""
           - name: Linux x86_64 CUDA
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: swarmllm
             archive: swarmllm-linux-x86_64-cuda.tar.gz
