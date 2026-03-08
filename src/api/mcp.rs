@@ -172,6 +172,37 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "compare",
+                    "description": "Send the same prompt to multiple models concurrently and return all responses side-by-side for comparison. Supports local, network, and cloud models.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "The prompt to send to all models"
+                            },
+                            "system": {
+                                "type": "string",
+                                "description": "Optional system prompt"
+                            },
+                            "models": {
+                                "type": "array",
+                                "description": "Array of model IDs to compare (e.g. [\"qwen2.5-coder-7b\", \"gpt-4o\", \"claude-sonnet-4-6\"])",
+                                "items": { "type": "string" }
+                            },
+                            "temperature": {
+                                "type": "number",
+                                "description": "Sampling temperature (0.0-2.0, default 0.7)"
+                            },
+                            "max_tokens": {
+                                "type": "integer",
+                                "description": "Maximum tokens per response (default 1024)"
+                            }
+                        },
+                        "required": ["prompt", "models"]
+                    }
                 }
             ]
         }),
@@ -185,6 +216,7 @@ async fn handle_tools_call(state: &AppState, id: Option<Value>, params: Value) -
     match tool_name {
         "chat" => tool_chat(state, id, arguments).await,
         "models" => tool_models(state, id).await,
+        "compare" => tool_compare(state, id, arguments).await,
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
 }
@@ -383,6 +415,170 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
     )
 }
 
+/// Compare tool: sends the same prompt to multiple models concurrently.
+async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
+        }
+    };
+
+    let models: Vec<String> = match args.get("models").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: models");
+        }
+    };
+
+    if models.is_empty() {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "models array must not be empty");
+    }
+    if models.len() > 10 {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 10 models per comparison");
+    }
+
+    let system = args
+        .get("system")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let temperature = args
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.7) as f32;
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024) as u32;
+
+    // Build the Anthropic Messages API request body for each model
+    let mut messages = Vec::new();
+    if let Some(ref sys) = system {
+        messages.push(json!({"role": "system", "content": sys}));
+    }
+    messages.push(json!({"role": "user", "content": prompt}));
+
+    // Fire all model requests concurrently using the internal /v1/messages endpoint
+    let client = crate::api::providers::get_provider_client();
+    let port = state.config.node.listen_port;
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Get the auth token for self-requests
+    let api_key = state.shared_state.api_key.clone();
+
+    let mut handles = Vec::new();
+    for model_id in &models {
+        let url = format!("{base}/v1/messages");
+        let client = client.clone();
+        let model_id = model_id.clone();
+        let api_key = api_key.clone();
+        let system_val = system.clone();
+        let prompt_clone = prompt.clone();
+
+        let handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+
+            let mut body = json!({
+                "model": model_id,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [{"role": "user", "content": prompt_clone}],
+                "stream": false,
+            });
+            if let Some(sys) = system_val {
+                body["system"] = json!(sys);
+            }
+
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value =
+                        resp.json().await.unwrap_or(json!({"error": "parse failed"}));
+                    // Extract text from Anthropic response
+                    let content = resp_body["content"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                                .next()
+                        })
+                        .unwrap_or("")
+                        .to_string();
+                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+                    json!({
+                        "model": model_id,
+                        "content": content,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": elapsed_ms,
+                        "status": "ok",
+                    })
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    json!({
+                        "model": model_id,
+                        "error": format!("HTTP {status}: {body}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+                Err(e) => {
+                    json!({
+                        "model": model_id,
+                        "error": format!("{e}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Collect all results
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => results.push(json!({"error": format!("Task failed: {e}"), "status": "error"})),
+        }
+    }
+
+    let summary = json!({
+        "prompt": prompt,
+        "models_compared": models.len(),
+        "results": results,
+    });
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
 // ---- Resource implementations ----
 
 async fn resource_status(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
@@ -476,7 +672,7 @@ mod tests {
         let resp = handle_tools_list(Some(Value::Number(1.into())));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
 
         let chat_tool = &tools[0];
         assert_eq!(chat_tool["name"], "chat");
@@ -485,6 +681,11 @@ mod tests {
 
         let models_tool = &tools[1];
         assert_eq!(models_tool["name"], "models");
+
+        let compare_tool = &tools[2];
+        assert_eq!(compare_tool["name"], "compare");
+        assert!(compare_tool["inputSchema"]["properties"]["prompt"].is_object());
+        assert!(compare_tool["inputSchema"]["properties"]["models"].is_object());
     }
 
     #[test]

@@ -206,7 +206,7 @@ static PROVIDER_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLo
         .unwrap_or_else(|_| reqwest::Client::new())
 });
 
-fn get_provider_client() -> &'static reqwest::Client {
+pub(crate) fn get_provider_client() -> &'static reqwest::Client {
     &PROVIDER_CLIENT
 }
 

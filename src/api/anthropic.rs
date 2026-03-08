@@ -37,6 +37,18 @@ pub struct MessagesRequest {
     pub top_k: Option<u32>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
+    /// Tool definitions for function calling (Claude Code sends these).
+    #[serde(default)]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// Tool choice: "auto", "any", "none", or {"type":"tool","name":"..."}
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    /// Request metadata (e.g. user_id for abuse tracking).
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Extended thinking configuration: {"type":"enabled","budget_tokens":N}
+    #[serde(default)]
+    pub thinking: Option<serde_json::Value>,
 }
 
 fn default_temperature() -> Option<f32> {
@@ -57,6 +69,9 @@ pub struct SystemBlock {
     pub block_type: String,
     #[serde(default)]
     pub text: Option<String>,
+    /// Cache control hint (Anthropic prompt caching).
+    #[serde(default)]
+    pub cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +95,32 @@ pub enum ContentBlock {
     Text { text: String },
     #[serde(rename = "image")]
     Image { source: serde_json::Value },
+    /// Tool use request from assistant (Claude Code tool calls).
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tool result from user (response to tool call).
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: Option<serde_json::Value>,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
+    /// Thinking block (extended thinking / chain-of-thought).
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+    },
+    /// Redacted thinking block.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        data: String,
+    },
 }
 
 // ---- Response types ----
@@ -97,11 +138,20 @@ pub struct MessagesResponse {
     pub usage: AnthropicUsage,
 }
 
+/// Response content block — supports text, tool_use, and thinking.
 #[derive(Debug, Serialize)]
-pub struct ResponseContentBlock {
-    #[serde(rename = "type")]
-    pub block_type: &'static str,
-    pub text: String,
+#[serde(tag = "type")]
+pub enum ResponseContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -149,14 +199,43 @@ fn to_internal_messages(req: &MessagesRequest) -> Vec<ChatMessage> {
         };
         let text = match &msg.content {
             AnthropicContent::Text(s) => s.clone(),
-            AnthropicContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+            AnthropicContent::Blocks(blocks) => {
+                let mut texts = Vec::new();
+                for b in blocks {
+                    match b {
+                        ContentBlock::Text { text } => texts.push(text.clone()),
+                        ContentBlock::Image { .. } => {
+                            // Image handling: VLM images handled via openai.rs path
+                        }
+                        ContentBlock::ToolResult {
+                            content, ..
+                        } => {
+                            // Include tool result text in conversation for local inference
+                            if let Some(c) = content {
+                                if let Some(s) = c.as_str() {
+                                    texts.push(s.to_string());
+                                } else if let Some(arr) = c.as_array() {
+                                    for item in arr {
+                                        if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                                            texts.push(t.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            // For local inference, represent tool calls as text
+                            texts.push(format!("[Tool call: {name}({input})]"));
+                        }
+                        ContentBlock::Thinking { thinking } => {
+                            // Include thinking in context for local models
+                            texts.push(format!("<thinking>{thinking}</thinking>"));
+                        }
+                        ContentBlock::RedactedThinking { .. } => {}
+                    }
+                }
+                texts.join("\n")
+            }
         };
         messages.push(ChatMessage {
             role,
@@ -227,8 +306,7 @@ pub async fn messages(
             id: request_id,
             response_type: "message",
             role: "assistant",
-            content: vec![ResponseContentBlock {
-                block_type: "text",
+            content: vec![ResponseContentBlock::Text {
                 text: "ok".into(),
             }],
             model,
@@ -385,8 +463,7 @@ pub async fn messages(
                 id: request_id,
                 response_type: "message",
                 role: "assistant",
-                content: vec![ResponseContentBlock {
-                    block_type: "text",
+                content: vec![ResponseContentBlock::Text {
                     text: content,
                 }],
                 model,
@@ -401,8 +478,10 @@ pub async fn messages(
         }
     }
 
-    // No local model — try proxying to Anthropic cloud if the model is a Claude model
+    // No local model — try proxying to cloud providers
     let lower_model = req.model.to_lowercase();
+
+    // Claude models → Anthropic cloud API (full pass-through, preserves tools/thinking)
     if lower_model.starts_with("claude") {
         let config = state.shared_state.providers_config.read().await;
         if let Some(ref entry) = config.anthropic {
@@ -420,6 +499,10 @@ pub async fn messages(
                 top_p: req.top_p,
                 top_k: req.top_k,
                 stop_sequences: &req.stop_sequences,
+                tools: &req.tools,
+                tool_choice: &req.tool_choice,
+                metadata: &req.metadata,
+                thinking: &req.thinking,
             })
             .map_err(|e| {
                 ApiError(crate::error::SwarmError::Internal(format!(
@@ -431,11 +514,32 @@ pub async fn messages(
         }
     }
 
+    // Non-Claude models → translate Anthropic format to OpenAI and proxy through cloud providers
+    {
+        let config = state.shared_state.providers_config.read().await;
+        if let Some(provider) = providers::resolve_provider(&req.model, &config) {
+            let provider_name = provider.name.clone();
+            let provider_url = provider.base_url.clone();
+            let provider_key = provider.api_key.clone();
+            drop(config);
+            tracing::info!(
+                model = %req.model,
+                provider = %provider_name,
+                "DIAG: anthropic→openai translation proxy to cloud provider"
+            );
+            return anthropic_to_openai_proxy(
+                &req, &internal_messages, &provider_url, &provider_key,
+            )
+            .await;
+        }
+    }
+
     // No local model, no cloud provider configured
     Err(ApiError(crate::error::SwarmError::NoModelLoaded))
 }
 
 /// Serializable proxy request (borrows from the original request).
+/// Includes all Claude Code fields for full pass-through to Anthropic cloud.
 #[derive(Serialize)]
 struct ProxyMessagesRequest<'a> {
     model: &'a str,
@@ -452,6 +556,14 @@ struct ProxyMessagesRequest<'a> {
     top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: &'a Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: &'a Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: &'a Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: &'a Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: &'a Option<serde_json::Value>,
 }
 
 // We need Serialize for AnthropicMessage/Content to proxy them
@@ -490,6 +602,42 @@ impl Serialize for ContentBlock {
                 map.serialize_entry("source", source)?;
                 map.end()
             }
+            ContentBlock::ToolUse { id, name, input } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "tool_use")?;
+                map.serialize_entry("id", id)?;
+                map.serialize_entry("name", name)?;
+                map.serialize_entry("input", input)?;
+                map.end()
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                if let Some(c) = content {
+                    map.serialize_entry("content", c)?;
+                }
+                if let Some(e) = is_error {
+                    map.serialize_entry("is_error", e)?;
+                }
+                map.end()
+            }
+            ContentBlock::Thinking { thinking } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "thinking")?;
+                map.serialize_entry("thinking", thinking)?;
+                map.end()
+            }
+            ContentBlock::RedactedThinking { data } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "redacted_thinking")?;
+                map.serialize_entry("data", data)?;
+                map.end()
+            }
         }
     }
 }
@@ -506,10 +654,13 @@ impl Serialize for SystemContent {
 impl Serialize for SystemBlock {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(Some(2))?;
+        let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("type", &self.block_type)?;
         if let Some(ref text) = self.text {
             map.serialize_entry("text", text)?;
+        }
+        if let Some(ref cc) = self.cache_control {
+            map.serialize_entry("cache_control", cc)?;
         }
         map.end()
     }
@@ -561,8 +712,7 @@ async fn anthropic_non_stream(
         id: request_id,
         response_type: "message",
         role: "assistant",
-        content: vec![ResponseContentBlock {
-            block_type: "text",
+        content: vec![ResponseContentBlock::Text {
             text: output.content,
         }],
         model,
@@ -887,8 +1037,7 @@ async fn anthropic_split_non_stream(
         id: request_id,
         response_type: "message",
         role: "assistant",
-        content: vec![ResponseContentBlock {
-            block_type: "text",
+        content: vec![ResponseContentBlock::Text {
             text: content,
         }],
         model,
@@ -1059,6 +1208,116 @@ async fn anthropic_split_stream(
         .into_response())
 }
 
+/// Translate an Anthropic Messages API request to OpenAI chat completions format
+/// and proxy it to a non-Anthropic cloud provider. Translates the response back
+/// to Anthropic Messages format.
+async fn anthropic_to_openai_proxy(
+    req: &MessagesRequest,
+    messages: &[ChatMessage],
+    base_url: &str,
+    api_key: &str,
+) -> Result<axum::response::Response, ApiError> {
+    // Build OpenAI-compatible request body
+    let openai_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            };
+            serde_json::json!({
+                "role": role,
+                "content": m.content,
+            })
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": req.model,
+        "messages": openai_messages,
+        "max_tokens": req.max_tokens,
+        "stream": false,
+    });
+    if let Some(t) = req.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
+    if let Some(tp) = req.top_p {
+        body["top_p"] = serde_json::json!(tp);
+    }
+    if let Some(ref stops) = req.stop_sequences {
+        body["stop"] = serde_json::json!(stops);
+    }
+
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = providers::get_provider_client();
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "Cloud provider proxy failed: {e}"
+            )))
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let scrubbed = crate::crypto::scrub_api_keys(&body);
+        return Err(ApiError(crate::error::SwarmError::Internal(format!(
+            "Cloud provider returned {status}: {scrubbed}"
+        ))));
+    }
+
+    let openai_resp: serde_json::Value = resp.json().await.map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "Failed to parse cloud response: {e}"
+        )))
+    })?;
+
+    // Translate OpenAI response → Anthropic Messages format
+    let choice = openai_resp["choices"]
+        .as_array()
+        .and_then(|c| c.first())
+        .unwrap_or(&serde_json::Value::Null);
+    let content_text = choice["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let finish = choice["finish_reason"].as_str().unwrap_or("stop");
+
+    let input_tokens = openai_resp["usage"]["prompt_tokens"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    let output_tokens = openai_resp["usage"]["completion_tokens"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+
+    let response = MessagesResponse {
+        id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+        response_type: "message",
+        role: "assistant",
+        content: vec![ResponseContentBlock::Text {
+            text: content_text,
+        }],
+        model: req.model.clone(),
+        stop_reason: Some(map_finish_reason(finish).into()),
+        stop_sequence: None,
+        usage: AnthropicUsage {
+            input_tokens,
+            output_tokens,
+        },
+    };
+
+    Ok(Json(response).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,6 +1364,10 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 2);
@@ -1124,10 +1387,12 @@ mod tests {
                 SystemBlock {
                     block_type: "text".into(),
                     text: Some("Line 1".into()),
+                    cache_control: None,
                 },
                 SystemBlock {
                     block_type: "text".into(),
                     text: Some("Line 2".into()),
+                    cache_control: None,
                 },
             ])),
             stream: false,
@@ -1135,6 +1400,10 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 1);
@@ -1156,6 +1425,10 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         let msgs = to_internal_messages(&req);
         assert_eq!(msgs.len(), 1);
@@ -1184,6 +1457,10 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         assert!(is_connectivity_probe(&probe));
 
@@ -1200,6 +1477,10 @@ mod tests {
             top_p: None,
             top_k: None,
             stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         assert!(!is_connectivity_probe(&normal));
     }
@@ -1216,6 +1497,10 @@ mod tests {
             top_p: Some(0.95),
             top_k: Some(50),
             stop_sequences: Some(vec!["STOP".into()]),
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
         };
         let params = to_sampling_params(&req);
         assert!((params.temperature - 0.5).abs() < f32::EPSILON);
@@ -1275,5 +1560,153 @@ mod tests {
         assert_eq!(req.max_tokens, 1024);
         assert_eq!(req.messages.len(), 3);
         assert!(matches!(req.system, Some(SystemContent::Text(_))));
+    }
+
+    #[test]
+    fn deserialize_tool_use_content() {
+        let json = r#"{"role":"assistant","content":[
+            {"type":"text","text":"I'll read the file."},
+            {"type":"tool_use","id":"toolu_123","name":"Read","input":{"file_path":"/tmp/test.rs"}}
+        ]}"#;
+        let msg: AnthropicMessage = serde_json::from_str(json).unwrap();
+        match msg.content {
+            AnthropicContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[1] {
+                    ContentBlock::ToolUse { id, name, input } => {
+                        assert_eq!(id, "toolu_123");
+                        assert_eq!(name, "Read");
+                        assert_eq!(input["file_path"], "/tmp/test.rs");
+                    }
+                    _ => panic!("Expected ToolUse block"),
+                }
+            }
+            _ => panic!("Expected blocks content"),
+        }
+    }
+
+    #[test]
+    fn deserialize_tool_result_content() {
+        let json = r#"{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"toolu_123","content":"file contents here"}
+        ]}"#;
+        let msg: AnthropicMessage = serde_json::from_str(json).unwrap();
+        match msg.content {
+            AnthropicContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => {
+                        assert_eq!(tool_use_id, "toolu_123");
+                        assert_eq!(content.as_ref().unwrap().as_str().unwrap(), "file contents here");
+                    }
+                    _ => panic!("Expected ToolResult block"),
+                }
+            }
+            _ => panic!("Expected blocks content"),
+        }
+    }
+
+    #[test]
+    fn deserialize_thinking_content() {
+        let json = r#"{"role":"assistant","content":[
+            {"type":"thinking","thinking":"Let me analyze this..."},
+            {"type":"text","text":"Here's my answer."}
+        ]}"#;
+        let msg: AnthropicMessage = serde_json::from_str(json).unwrap();
+        match msg.content {
+            AnthropicContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                match &blocks[0] {
+                    ContentBlock::Thinking { thinking } => {
+                        assert_eq!(thinking, "Let me analyze this...");
+                    }
+                    _ => panic!("Expected Thinking block"),
+                }
+            }
+            _ => panic!("Expected blocks content"),
+        }
+    }
+
+    #[test]
+    fn deserialize_request_with_tools() {
+        let json = r#"{
+            "model": "claude-opus-4-6",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Read /tmp/test.rs"}],
+            "tools": [{"name": "Read", "description": "Read a file", "input_schema": {"type": "object"}}],
+            "tool_choice": {"type": "auto"},
+            "thinking": {"type": "enabled", "budget_tokens": 5000}
+        }"#;
+        let req: MessagesRequest = serde_json::from_str(json).unwrap();
+        assert!(req.tools.is_some());
+        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+        assert!(req.tool_choice.is_some());
+        assert!(req.thinking.is_some());
+        assert_eq!(req.thinking.as_ref().unwrap()["type"], "enabled");
+    }
+
+    #[test]
+    fn tool_use_to_internal_text() {
+        let req = MessagesRequest {
+            model: "test".into(),
+            max_tokens: 100,
+            messages: vec![AnthropicMessage {
+                role: "assistant".into(),
+                content: AnthropicContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "I'll read it.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"path": "/tmp/x"}),
+                    },
+                ]),
+            }],
+            system: None,
+            stream: false,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+        };
+        let msgs = to_internal_messages(&req);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("I'll read it."));
+        assert!(msgs[0].content.contains("[Tool call: Read("));
+    }
+
+    #[test]
+    fn response_content_block_serialization() {
+        let text = ResponseContentBlock::Text {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_value(&text).unwrap();
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["text"], "hello");
+
+        let tool = ResponseContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp"}),
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "tool_use");
+        assert_eq!(json["name"], "Read");
+
+        let think = ResponseContentBlock::Thinking {
+            thinking: "hmm".into(),
+        };
+        let json = serde_json::to_value(&think).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["thinking"], "hmm");
     }
 }

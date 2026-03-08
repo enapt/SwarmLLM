@@ -2760,7 +2760,7 @@ fn regenerate_manifest_from_header(
         && !model_dir.join("shard_001.bin").exists()
         && shard0_path
             .metadata()
-            .map(|m| m.len() as u64 >= (total_size as u64).saturating_sub(4096))
+            .map(|m| m.len() >= total_size.saturating_sub(4096))
             .unwrap_or(false);
 
     let (shard_count, shards) = if is_single_full_gguf {
