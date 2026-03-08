@@ -76,6 +76,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.cuda && '80' || '' }}
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
