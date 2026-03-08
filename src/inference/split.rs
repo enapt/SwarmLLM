@@ -4903,6 +4903,19 @@ impl SplitModel {
             )));
         }
 
+        // Single shard with no tensor entries = full GGUF file as shard.
+        // Load directly via mmap instead of ShardReader.
+        let has_tensor_entries = tensor_entries.iter().any(|v| !v.is_empty());
+        if shard_files.len() == 1 && !has_tensor_entries {
+            let shard_path = &shard_files[0].1;
+            tracing::info!(
+                model_dir = %model_dir.display(),
+                shard_path = %shard_path.display(),
+                "Single-shard model with no tensor entries — loading as full GGUF via mmap"
+            );
+            return Self::load_from_gguf(shard_path, layer_start, layer_end, is_first, is_last);
+        }
+
         // Read header to get tensor_data_offset
         let header_bytes = std::fs::read(&header_path).map_err(SwarmError::Io)?;
         let tensor_data_offset = {
