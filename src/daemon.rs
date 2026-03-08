@@ -1005,6 +1005,35 @@ impl Daemon {
                                 }
                             }
                         }
+
+                        // Auto-extract tied_output_weight.bin for weight-tied models.
+                        // If shard_000 is available locally, extract token_embd.weight
+                        // so nodes with the last segment can project logits even without
+                        // shard_000 (in distributed inference, another node may have it).
+                        let tied_path = model_dir.join("tied_output_weight.bin");
+                        if !tied_path.exists() {
+                            if let Some(meta) = shared_state.gguf_meta.get(model_id) {
+                                let has_output = meta.tensors.contains_key("output.weight");
+                                let has_embd = meta.tensors.contains_key("token_embd.weight");
+                                if !has_output && has_embd {
+                                    // Weight-tied model — try to extract from shard_000
+                                    let shard0_path = model_dir.join("shard_000.bin");
+                                    if shard0_path.exists() {
+                                        if let Err(e) = extract_tied_output_weight(
+                                            &shard0_path,
+                                            &model_dir,
+                                            &meta,
+                                        ) {
+                                            tracing::warn!(
+                                                model = %model_id,
+                                                error = %e,
+                                                "Failed to extract tied_output_weight.bin from shard_000"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     let shard_id = ShardId {
@@ -2612,11 +2641,24 @@ fn regenerate_manifest_from_header(
         .clone()
         .unwrap_or_else(|| model_id.0.clone());
 
+    // Map GGUF architecture string to our ModelArchitecture enum
+    let architecture = match meta.architecture.as_str() {
+        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
+        "qwen35" => crate::types::ModelArchitecture::Qwen35,
+        "qwen35moe" | "qwen3_5moe" => crate::types::ModelArchitecture::Qwen35Moe {
+            num_experts: 0,
+            experts_per_token: 0,
+        },
+        "mistral" => crate::types::ModelArchitecture::Mistral,
+        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
+        _ => crate::types::ModelArchitecture::Llama,
+    };
+
     let mut manifest = crate::types::ModelManifest {
         schema_version: 2,
         id: model_id.clone(),
         name: model_name,
-        architecture: crate::types::ModelArchitecture::Llama,
+        architecture,
         num_layers: meta.block_count as u32,
         num_params_billions: 0.0,
         quantization: crate::types::Quantization::Q4KM,
@@ -2645,6 +2687,50 @@ fn regenerate_manifest_from_header(
     }
 
     Some(manifest)
+}
+
+/// Extract `tied_output_weight.bin` from shard_000.bin for weight-tied models.
+///
+/// Weight-tied models (like Gemma-2) reuse `token_embd.weight` as the output head.
+/// In distributed inference, a node may have the last shard but not shard_000.
+/// This function extracts the raw tensor bytes from shard_000 so any node can load it.
+fn extract_tied_output_weight(
+    shard0_path: &std::path::Path,
+    model_dir: &std::path::Path,
+    meta: &crate::inference::split::GgufTensorMeta,
+) -> Result<(), String> {
+    let embd_loc = meta
+        .tensors
+        .get("token_embd.weight")
+        .ok_or("token_embd.weight not found in tensor metadata")?;
+
+    // token_embd.weight is in shard_000 — its offset in the GGUF is tensor_data_offset + embd_loc.offset.
+    // In shard_000.bin, the header is preserved so the absolute offset is the same.
+    let abs_offset = meta.tensor_data_offset + embd_loc.offset;
+    let size = embd_loc.size;
+
+    let shard_data = std::fs::read(shard0_path)
+        .map_err(|e| format!("Failed to read shard_000.bin: {e}"))?;
+
+    let end = (abs_offset + size) as usize;
+    if end > shard_data.len() {
+        return Err(format!(
+            "token_embd.weight extends beyond shard_000.bin (need {end} bytes, have {})",
+            shard_data.len()
+        ));
+    }
+
+    let tensor_bytes = &shard_data[abs_offset as usize..end];
+    let dest_path = model_dir.join("tied_output_weight.bin");
+    std::fs::write(&dest_path, tensor_bytes)
+        .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
+
+    tracing::info!(
+        size = tensor_bytes.len(),
+        path = %dest_path.display(),
+        "Extracted tied_output_weight.bin from shard_000.bin"
+    );
+    Ok(())
 }
 
 /// Handle an incoming LayerForward from a remote peer: run the local split model
