@@ -165,6 +165,14 @@ pub struct SharedState {
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Per-shard lock/pin flags — locked shards are never auto-pruned.
     pub locked_shards: DashMap<crate::types::ShardId, bool>,
+    /// Per-model trust metadata for auto-manage gating.
+    /// Models must reach `DemandVerified` or be `Pinned` before auto-manage will
+    /// download their shards. Prevents trash model propagation.
+    pub model_trust: DashMap<crate::types::ModelId, crate::types::ModelTrustInfo>,
+    /// Coordination for on-demand model loading. When an inference request arrives
+    /// for a model with shards on disk but not loaded, only one task loads it;
+    /// others wait on the Notify.
+    pub loading_models: DashMap<crate::types::ModelId, Arc<tokio::sync::Notify>>,
     /// LoRA adapter registry for per-request fine-tuned inference.
     pub adapter_registry: Arc<crate::model::lora::AdapterRegistry>,
     /// Cross-request prefix cache for sharing KV state across requests with
@@ -520,6 +528,17 @@ impl SharedState {
                 }
                 map
             },
+            model_trust: {
+                // Load persisted trust info from database
+                let map = DashMap::new();
+                if let Ok(pairs) = db.get_all_json::<crate::types::ModelTrustInfo>("model_trust") {
+                    for (key, info) in pairs {
+                        map.insert(crate::types::ModelId(key), info);
+                    }
+                }
+                map
+            },
+            loading_models: DashMap::new(),
             adapter_registry: Arc::new(crate::model::lora::AdapterRegistry::new(
                 &config.node.data_dir,
             )),

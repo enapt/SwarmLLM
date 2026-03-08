@@ -199,6 +199,7 @@ impl AutoShardManager {
                 }
                 _ = request_reset_interval.tick() => {
                     self.reset_request_counts();
+                    self.update_model_trust();
                 }
             }
         }
@@ -348,6 +349,24 @@ impl AutoShardManager {
                     tracing::debug!(
                         model = %manifest.id,
                         "Skipping model — auto-manage disabled by policy"
+                    );
+                    continue;
+                }
+            }
+
+            // ── Trust gate: skip models not yet verified for auto-propagation ──
+            {
+                let trust = self.shared_state.model_trust.get(&manifest.id);
+                let trust_level = trust
+                    .as_ref()
+                    .map(|t| &t.trust_level)
+                    .unwrap_or(&crate::types::ModelTrustLevel::Discovered);
+                let is_pinned = trust.as_ref().map(|t| t.pinned_by_user).unwrap_or(false);
+                if *trust_level < crate::types::ModelTrustLevel::DemandVerified && !is_pinned {
+                    tracing::debug!(
+                        model = %manifest.id,
+                        trust = %trust_level,
+                        "Skipping model — insufficient trust for auto-manage"
                     );
                     continue;
                 }
@@ -2000,6 +2019,58 @@ impl AutoShardManager {
     fn reset_request_counts(&self) {
         for entry in self.shared_state.model_request_counts.iter() {
             entry.value().store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Update model trust levels: promote popular models, decay inactive ones.
+    ///
+    /// - Models with >= 3 unique holder nodes → NetworkPopular
+    /// - Models without requests for 7 days → decay (DemandVerified→Discovered)
+    /// - Pinned models never decay
+    /// - Ensures new gossip-discovered models get a Discovered entry
+    fn update_model_trust(&self) {
+        let registry = &self.shared_state.model_registry;
+
+        for manifest in registry.models() {
+            // Count unique holder nodes for this model
+            let mut holder_nodes = std::collections::HashSet::new();
+            for shard in &manifest.shards {
+                let sid = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                };
+                for node in registry.shard_holders(&sid) {
+                    holder_nodes.insert(node);
+                }
+            }
+
+            let mut trust = self
+                .shared_state
+                .model_trust
+                .entry(manifest.id.clone())
+                .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
+
+            // Promote to NetworkPopular if >= 3 unique holder nodes
+            if holder_nodes.len() >= 3
+                && trust.trust_level < crate::types::ModelTrustLevel::NetworkPopular
+                && trust.trust_level >= crate::types::ModelTrustLevel::DemandVerified
+            {
+                trust.trust_level = crate::types::ModelTrustLevel::NetworkPopular;
+                tracing::info!(
+                    model = %manifest.id,
+                    holders = holder_nodes.len(),
+                    "Model promoted to NetworkPopular"
+                );
+            }
+
+            // Decay inactive models
+            trust.maybe_decay();
+
+            // Persist updated trust info
+            let _ = self
+                .shared_state
+                .db
+                .put_json("model_trust", &manifest.id.0, trust.value());
         }
     }
 

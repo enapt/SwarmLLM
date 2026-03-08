@@ -92,7 +92,7 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     if lower.starts_with("gemma") && config.groq.is_some() {
         return resolve_by_name("groq", config);
     }
-    if lower.starts_with("moonshot-") || lower.starts_with("kimi") {
+    if lower.starts_with("moonshot-") || lower.starts_with("kimi") || lower.starts_with("k2") {
         return resolve_by_name("moonshot", config);
     }
     // Fireworks uses accounts/ prefix
@@ -666,5 +666,28 @@ mod tests {
             Some("https://api.moonshot.cn/v1")
         );
         assert_eq!(provider_base_url("unknown"), None);
+    }
+
+    #[test]
+    fn resolve_kimi_k2_to_moonshot() {
+        let config = ProvidersConfig {
+            moonshot: Some(ProviderEntry {
+                api_key: "sk-kimi".into(),
+                default_model: None,
+            }),
+            ..Default::default()
+        };
+        // kimi-k2 prefix
+        let p = resolve_provider("kimi-k2-0527", &config).unwrap();
+        assert_eq!(p.name, "moonshot");
+        assert_eq!(p.base_url, "https://api.moonshot.cn/v1");
+
+        // k2 prefix
+        let p2 = resolve_provider("k2-0527", &config).unwrap();
+        assert_eq!(p2.name, "moonshot");
+
+        // moonshot prefix
+        let p3 = resolve_provider("moonshot-v1-8k", &config).unwrap();
+        assert_eq!(p3.name, "moonshot");
     }
 }

@@ -780,12 +780,25 @@ var SwarmLLM = (function() {
           statusHtml = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
         }
 
+        // Trust level badge
+        var trustBadge = '';
+        if (m.trust_level === 'network_popular') {
+          trustBadge = '<span class="badge-trust badge-trust-popular" title="Widely hosted across the network">Popular</span>';
+        } else if (m.trust_level === 'demand_verified') {
+          trustBadge = '<span class="badge-trust badge-trust-verified" title="Has received real inference requests">Verified</span>';
+        } else if (m.trust_level === 'pinned') {
+          trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
+        } else if (m.source === 'network' && hostedShards === 0) {
+          trustBadge = '<span class="badge-trust badge-trust-discovered" title="Discovered via gossip — not yet verified. Auto-manage will not download unless pinned or used.">Unverified</span>';
+        }
+
         // Meta info
         var metaParts = [];
         metaParts.push(formatBytes(m.total_size_bytes || 0));
         if (shardCount > 1) metaParts.push(shardCount + ' shards');
         if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
         if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
+        else if (hostedShards > 0) metaParts.push('<span style="color:var(--orange)">Local only</span>');
 
         // Local file indicators (manifest + header needed to run shards)
         var fileIndicators = '';
@@ -987,7 +1000,7 @@ var SwarmLLM = (function() {
 
         card.innerHTML =
           '<div class="model-header">' +
-            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + probedBadge + sourceLabel + '</span>' +
+            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + probedBadge + sourceLabel + trustBadge + '</span>' +
             '<span>' + metaBtnHtml + gearHtml + statusHtml + (unloadHtml ? ' ' + unloadHtml : '') + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
@@ -1534,8 +1547,8 @@ var SwarmLLM = (function() {
           // Network replication & demand info
           var replicas = repo.network_replicas || 0;
           var networkTag = replicas > 0
-            ? '<span title="' + replicas + ' node(s) in the network host this model">&#127760; ' + replicas + ' node' + (replicas !== 1 ? 's' : '') + '</span>'
-            : '<span style="color:var(--blue)" title="No nodes in the network host this model yet">&#127760; New to network</span>';
+            ? '<span class="badge-swarm" title="' + replicas + ' node(s) already hosting this model on the swarm">On Swarm &mdash; ' + replicas + ' node' + (replicas !== 1 ? 's' : '') + '</span>'
+            : '<span class="badge-new" title="Not yet on the swarm — you will be the first node hosting this model">New to network</span>';
           var demandTag = '';
           if (replicas === 0) {
             demandTag = '<span style="color:var(--green)" title="No replicas yet — high credit earning potential">&#128176; High demand</span>';
@@ -1556,7 +1569,7 @@ var SwarmLLM = (function() {
             '</div>' +
             '<div class="hf-model-actions">' +
             (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +
-            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Download</button>' +
+            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Add to node</button>' +
             '</div>';
           results.appendChild(card);
         });

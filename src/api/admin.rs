@@ -521,6 +521,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     "holders": holders.len(),
                 })
             };
+            let trust_level = state
+                .shared_state
+                .model_trust
+                .get(&crate::types::ModelId(model_id.clone()))
+                .map(|t| t.trust_level.to_string())
+                .unwrap_or_else(|| "pinned".to_string()); // loaded models are at least pinned
             models.push(serde_json::json!({
                 "id": model_id,
                 "name": info.name,
@@ -539,6 +545,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "has_header": has_header,
                 "probed": probed,
                 "mmproj": mmproj_info,
+                "trust_level": trust_level,
             }));
         } // else: stale loaded model, files deleted
     }
@@ -671,6 +678,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "holders": holders.len(),
             })
         };
+        let trust_level = state
+            .shared_state
+            .model_trust
+            .get(&m.id)
+            .map(|t| t.trust_level.to_string())
+            .unwrap_or_else(|| "discovered".to_string());
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
@@ -692,6 +705,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "acquisition": acq_state,
             "acquisition_progress": acq_progress,
             "mmproj": mmproj_info_reg,
+            "trust_level": trust_level,
         }));
     }
 
@@ -701,6 +715,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             continue;
         }
         seen_ids.insert(model_name.clone());
+        let trust_level = state
+            .shared_state
+            .model_trust
+            .get(&crate::types::ModelId(model_name.clone()))
+            .map(|t| t.trust_level.to_string())
+            .unwrap_or_else(|| "discovered".to_string());
         models.push(serde_json::json!({
             "id": model_name,
             "name": model_name,
@@ -714,6 +734,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "local": false,
             "peers_hosting": peers.len(),
             "shards": [],
+            "trust_level": trust_level,
         }));
     }
 
@@ -1570,6 +1591,27 @@ pub async fn hf_download_shards(
 
     let model_id_str = safe_name.clone();
     let mid = crate::types::ModelId(model_id_str.clone());
+
+    // ── Trust: pin this model as user-approved ──────────────────────────
+    // User explicitly chose to download → set Pinned trust level so auto-manage
+    // will propagate shards for this model across the network.
+    {
+        let mut trust = state
+            .shared_state
+            .model_trust
+            .entry(mid.clone())
+            .or_insert_with(crate::types::ModelTrustInfo::new_pinned);
+        if !trust.pinned_by_user {
+            trust.pinned_by_user = true;
+            if trust.trust_level < crate::types::ModelTrustLevel::Pinned {
+                trust.trust_level = crate::types::ModelTrustLevel::Pinned;
+            }
+        }
+        let _ = state
+            .shared_state
+            .db
+            .put_json("model_trust", &mid.0, trust.value());
+    }
 
     // ── Synchronous probe + architecture check ──────────────────────────
     // Probe before spawning the download task so we can return an immediate
@@ -3650,6 +3692,26 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
             models.push(serde_json::json!({
                 "id": id, "name": name, "provider": "anthropic"
             }));
+        }
+    }
+
+    // Moonshot/Kimi static fallback — common models that may not appear in /models
+    if config.moonshot.is_some() {
+        for (id, name) in [
+            ("moonshot:kimi-k2-0527", "Kimi K2 (Kimi 2.5)"),
+            ("moonshot:moonshot-v1-8k", "Moonshot v1 8K"),
+            ("moonshot:moonshot-v1-32k", "Moonshot v1 32K"),
+            ("moonshot:moonshot-v1-128k", "Moonshot v1 128K"),
+        ] {
+            // Only add if not already present from /models fetch
+            if !models
+                .iter()
+                .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))
+            {
+                models.push(serde_json::json!({
+                    "id": id, "name": name, "provider": "moonshot"
+                }));
+            }
         }
     }
 

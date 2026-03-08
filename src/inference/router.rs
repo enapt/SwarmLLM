@@ -934,6 +934,22 @@ async fn execute_request(
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
 
+    // Update model trust on inference request — promotes to DemandVerified
+    // after threshold, enabling auto-manage to propagate this model.
+    {
+        let mut trust = shared_state
+            .model_trust
+            .entry(model_id.clone())
+            .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
+        trust.record_request();
+        // Persist on promotion only (not every request)
+        if trust.total_requests == 3 {
+            let _ = shared_state
+                .db
+                .put_json("model_trust", &model_id.0, trust.value());
+        }
+    }
+
     // Check if we can handle this entirely locally.
     // Use the atomic flag to avoid locking the executor mutex just to check readiness.
     // Skip the llama.cpp path when a LoRA adapter is requested — LoRA is only
@@ -1015,6 +1031,63 @@ async fn execute_request(
             finish_reason: gen_result.finish_reason.as_str().to_string(),
             session_id: request.session_id.clone(),
         });
+    }
+
+    // ── On-demand shard loading ────────────────────────────────────────
+    // If this model has shards on disk but they aren't loaded in split_models,
+    // load them now (with LRU eviction if needed) instead of failing.
+    {
+        let already_loaded = shared_state
+            .split_models
+            .iter()
+            .any(|e| e.key().0 == *model_id);
+        if !already_loaded {
+            let model_dir = shared_state
+                .config
+                .node
+                .data_dir
+                .join("models")
+                .join(&model_id.0);
+            let has_shards_on_disk = model_dir.exists()
+                && (model_dir.join("shard_000.bin").exists()
+                    || model_dir.join("model.gguf").exists());
+
+            if has_shards_on_disk {
+                tracing::info!(
+                    request_id = %request.id,
+                    model = %model_id,
+                    "On-demand loading: model has shards on disk but not loaded"
+                );
+
+                // Coordination: only one task loads a model at a time
+                let notify = shared_state
+                    .loading_models
+                    .entry(model_id.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                    .clone();
+
+                // Check again after getting the entry (another task may have loaded it)
+                let still_not_loaded = !shared_state
+                    .split_models
+                    .iter()
+                    .any(|e| e.key().0 == *model_id);
+
+                if still_not_loaded {
+                    let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state);
+                    crate::model::auto_manage::check_and_load_model(
+                        &shared_state,
+                        model_id,
+                        vram_budget,
+                    )
+                    .await;
+                    notify.notify_waiters();
+                    shared_state.loading_models.remove(model_id);
+                } else {
+                    // Already loaded by another task
+                    shared_state.loading_models.remove(model_id);
+                }
+            }
+        }
     }
 
     // Distributed inference path: assemble pipeline across nodes

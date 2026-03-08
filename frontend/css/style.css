@@ -1245,6 +1245,17 @@ kbd {
 /* Remote badge */
 .badge-remote { background: var(--orange); color: var(--bg-primary); font-size: 0.65rem; padding: 1px 6px; border-radius: 3px; margin-left: 6px; font-weight: 600; }
 
+/* Trust level badges */
+.badge-trust { font-size: 0.6rem; padding: 1px 5px; border-radius: 3px; margin-left: 6px; font-weight: 600; letter-spacing: 0.3px; }
+.badge-trust-popular { background: var(--green); color: var(--bg-primary); }
+.badge-trust-verified { background: var(--accent); color: #fff; }
+.badge-trust-pinned { background: #f59e0b; color: var(--bg-primary); }
+.badge-trust-discovered { background: var(--text-muted); color: var(--bg-primary); }
+
+/* HF search badges */
+.badge-swarm { background: var(--green); color: var(--bg-primary); font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.badge-new { background: var(--blue); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; }
+
 /* Cloud provider badge & cards */
 .badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
 .model-card.cloud-model { border-left: 3px solid var(--accent); opacity: 0.9; }

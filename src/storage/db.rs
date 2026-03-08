@@ -245,6 +245,49 @@ impl Database {
         Ok(results)
     }
 
+    /// Iterate all key-value pairs in a named tree, returning (subkey_string, deserialized_value).
+    pub fn get_all_json<T: serde::de::DeserializeOwned>(
+        &self,
+        tree_name: &str,
+    ) -> Result<Vec<(String, T)>, SwarmError> {
+        let start = tree_range_start(tree_name);
+        let end = tree_range_end(tree_name);
+        let read_txn = self
+            .inner
+            .begin_read()
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+        let table = match read_txn.open_table(DATA_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(SwarmError::Database(e.to_string())),
+        };
+
+        let mut results = Vec::new();
+        let range = table
+            .range(start.as_slice()..end.as_slice())
+            .map_err(|e| SwarmError::Database(e.to_string()))?;
+
+        for entry in range {
+            let (key_guard, val_guard) = entry.map_err(|e| SwarmError::Database(e.to_string()))?;
+            let subkey = extract_subkey(key_guard.value())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .unwrap_or("")
+                .to_string();
+            match serde_json::from_slice(val_guard.value()) {
+                Ok(val) => results.push((subkey, val)),
+                Err(e) => {
+                    tracing::warn!(
+                        tree = tree_name,
+                        key = %subkey,
+                        error = %e,
+                        "Failed to deserialize entry in get_all_json, skipping"
+                    );
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Iterate all raw key-value pairs in a named tree.
     /// Returns (sub_key_bytes, value_bytes) pairs.
     #[allow(clippy::type_complexity)]

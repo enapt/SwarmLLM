@@ -752,6 +752,105 @@ pub struct ModelVote {
     pub signature: Vec<u8>,
 }
 
+// ---- Model Trust ----
+
+/// Trust level for a model in the auto-manage system.
+///
+/// Models progress through trust levels based on real usage. Auto-manage
+/// only downloads shards for models that are `DemandVerified` or higher
+/// (or explicitly `Pinned` by the user). This prevents trash models from
+/// propagating across the network when auto-manage is enabled.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ModelTrustLevel {
+    /// Seen via gossip but never used or approved. Auto-manage ignores.
+    Discovered = 0,
+    /// User explicitly downloaded or approved this model for their node.
+    Pinned = 1,
+    /// Has received real inference requests (>= threshold). Auto-manage propagates.
+    DemandVerified = 2,
+    /// Multiple independent nodes (>= 3) actively serving it. High priority.
+    NetworkPopular = 3,
+}
+
+impl std::fmt::Display for ModelTrustLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discovered => write!(f, "discovered"),
+            Self::Pinned => write!(f, "pinned"),
+            Self::DemandVerified => write!(f, "demand_verified"),
+            Self::NetworkPopular => write!(f, "network_popular"),
+        }
+    }
+}
+
+/// Per-model trust metadata for auto-manage gating and UI display.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelTrustInfo {
+    pub trust_level: ModelTrustLevel,
+    pub first_seen: chrono::DateTime<chrono::Utc>,
+    pub total_requests: u64,
+    /// Whether the user explicitly pinned (approved) this model.
+    pub pinned_by_user: bool,
+    pub last_request_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ModelTrustInfo {
+    pub fn new_discovered() -> Self {
+        Self {
+            trust_level: ModelTrustLevel::Discovered,
+            first_seen: chrono::Utc::now(),
+            total_requests: 0,
+            pinned_by_user: false,
+            last_request_at: None,
+        }
+    }
+
+    pub fn new_pinned() -> Self {
+        Self {
+            trust_level: ModelTrustLevel::Pinned,
+            first_seen: chrono::Utc::now(),
+            total_requests: 0,
+            pinned_by_user: true,
+            last_request_at: None,
+        }
+    }
+
+    /// Record an inference request. Promotes to DemandVerified after threshold.
+    pub fn record_request(&mut self) {
+        self.total_requests += 1;
+        self.last_request_at = Some(chrono::Utc::now());
+        // Promote after 3 real requests (prevents single accidental request from promoting)
+        if self.total_requests >= 3 && self.trust_level < ModelTrustLevel::DemandVerified {
+            self.trust_level = ModelTrustLevel::DemandVerified;
+        }
+    }
+
+    /// Check if this model should decay due to inactivity (7 days without requests).
+    /// Pinned models never decay. NetworkPopular decays to DemandVerified.
+    pub fn maybe_decay(&mut self) {
+        if self.pinned_by_user {
+            return;
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+        let inactive = self
+            .last_request_at
+            .map(|t| t < cutoff)
+            .unwrap_or(self.first_seen < cutoff);
+        if !inactive {
+            return;
+        }
+        match self.trust_level {
+            ModelTrustLevel::NetworkPopular => {
+                self.trust_level = ModelTrustLevel::DemandVerified;
+            }
+            ModelTrustLevel::DemandVerified => {
+                self.trust_level = ModelTrustLevel::Discovered;
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---- Pool Messages ----
 /// Messages related to device pool management, sent over GossipSub.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1180,5 +1279,57 @@ mod tests {
         assert_eq!(parsed.tokens_processed, 4);
         assert!(parsed.hidden_states.contains_key(&0));
         assert_eq!(parsed.hidden_states[&0].shape, vec![1, 4, 128]);
+    }
+
+    #[test]
+    fn trust_level_ordering() {
+        assert!(ModelTrustLevel::Discovered < ModelTrustLevel::Pinned);
+        assert!(ModelTrustLevel::Pinned < ModelTrustLevel::DemandVerified);
+        assert!(ModelTrustLevel::DemandVerified < ModelTrustLevel::NetworkPopular);
+    }
+
+    #[test]
+    fn trust_info_record_request_promotes() {
+        let mut info = ModelTrustInfo::new_discovered();
+        assert_eq!(info.trust_level, ModelTrustLevel::Discovered);
+        info.record_request();
+        info.record_request();
+        assert_eq!(info.trust_level, ModelTrustLevel::Discovered); // <3
+        info.record_request();
+        assert_eq!(info.trust_level, ModelTrustLevel::DemandVerified); // >=3
+    }
+
+    #[test]
+    fn trust_info_pinned_never_decays() {
+        let mut info = ModelTrustInfo::new_pinned();
+        info.trust_level = ModelTrustLevel::DemandVerified;
+        // Simulate old last_request
+        info.last_request_at = Some(chrono::Utc::now() - chrono::Duration::days(30));
+        info.maybe_decay();
+        // Pinned models never decay
+        assert_eq!(info.trust_level, ModelTrustLevel::DemandVerified);
+    }
+
+    #[test]
+    fn trust_info_unpinned_decays_after_7_days() {
+        let mut info = ModelTrustInfo::new_discovered();
+        info.trust_level = ModelTrustLevel::DemandVerified;
+        info.last_request_at = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        info.maybe_decay();
+        assert_eq!(info.trust_level, ModelTrustLevel::Discovered);
+    }
+
+    #[test]
+    fn trust_level_display() {
+        assert_eq!(ModelTrustLevel::Discovered.to_string(), "discovered");
+        assert_eq!(ModelTrustLevel::Pinned.to_string(), "pinned");
+        assert_eq!(
+            ModelTrustLevel::DemandVerified.to_string(),
+            "demand_verified"
+        );
+        assert_eq!(
+            ModelTrustLevel::NetworkPopular.to_string(),
+            "network_popular"
+        );
     }
 }
