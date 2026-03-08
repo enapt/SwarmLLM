@@ -37,3 +37,4 @@ tests/fixtures/tiny_model/*.bin
 *.dmg
 *.tar.gz
 *.zip
+node_a_*.png
