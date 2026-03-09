@@ -370,7 +370,7 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **API Compatibility** | OpenAI + Anthropic (full Claude Code) + MCP (compare) | PyTorch | OpenAI basic | Subnet-defined |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 665 tests | Limited | Limited | Varies |
+| **Test Suite** | 671 tests | Limited | Limited | Varies |
 
 See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
 

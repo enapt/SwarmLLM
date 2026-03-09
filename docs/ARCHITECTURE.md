@@ -41,6 +41,8 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ShardId, bool>         — locked shards      │  │
 │  │  DashMap<Uuid, oneshot::Sender>  — pending vision    │  │
 │  │  DashMap<ModelId, VisionModule>  — vision modules    │  │
+│  │  DashMap<ModelId, ModelTrustInfo> — model trust      │  │
+│  │  DashMap<ModelId, Notify>       — loading models    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -643,6 +645,50 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 **Per-Shard Lock** — `PUT /api/admin/models/:id/shards/:index/lock` pins individual shards, preventing auto-pruning regardless of model-level settings.
 
 **Notifications** — prune events pushed via WebSocket (`prune_event` type), toast notifications in UI, prune history accessible via `GET /api/admin/prune-history`
+
+### Model Trust System
+
+Prevents trash models from polluting the network when auto-manage is enabled.
+
+**Trust Levels** (progressive, ordered):
+```
+Discovered → Pinned → DemandVerified → NetworkPopular
+```
+
+- **Discovered**: Seen via gossip, no local data. Auto-manage ignores these.
+- **Pinned**: User explicitly downloaded/approved. Auto-manage propagates.
+- **DemandVerified**: Model has received ≥3 real inference requests. Auto-manage propagates.
+- **NetworkPopular**: ≥3 unique holder nodes across the network. Highest priority.
+
+**Auto-manage gate**: `gather_candidates()` skips models below `DemandVerified` unless `pinned_by_user = true`. This means a node will never auto-download shards for a model nobody has actually used.
+
+**Trust transitions**:
+- Gossip-discovered models start as `Discovered` (auto-created on first manifest registration)
+- User downloads via HF browser → `Pinned` (persisted immediately to redb)
+- 3rd inference request → `DemandVerified` (persisted on promotion)
+- 3+ unique holder nodes → `NetworkPopular` (checked periodically by AutoShardManager)
+- 7 days without requests → decay (`NetworkPopular` → `DemandVerified`, `DemandVerified` → `Discovered`)
+- Pinned models never decay
+
+**Persistence**: `model_trust` tree in redb, keyed by model_id, values are JSON `ModelTrustInfo`.
+
+**API**: Trust level exposed as `trust_level` field in `GET /api/admin/models` response.
+
+**Scaling**: Trust decisions are local per-node (no consensus needed). Each node independently decides what to download based on its own observed demand. This scales to thousands of nodes without coordination overhead.
+
+### On-Demand Shard Loading
+
+Models are loaded into VRAM only when needed, not eagerly at startup.
+
+**Trigger**: When `execute_request()` in the inference router encounters a model that has shards on disk but no entry in `split_models`:
+1. Check if `shard_000.bin` or `model.gguf` exists in the model directory
+2. If yes, call `check_and_load_model()` inline (runs in the spawned inference task, not the router loop)
+3. VRAM budget is checked; LRU eviction frees space from least-recently-used models
+4. Loading coordination: `DashMap<ModelId, Notify>` ensures only one task loads a model at a time; concurrent requests wait on the Notify
+
+**VRAM Budget**: Configured via `resources.max_gpu_vram_mb` or auto-detected (80% of GPU VRAM). LRU eviction protects active pipeline models from eviction.
+
+**Startup behavior**: Models are still auto-loaded at startup (in popularity order), but this is best-effort — if VRAM fills up, remaining models stay on disk and are loaded on first request.
 
 ## E2E Encryption
 

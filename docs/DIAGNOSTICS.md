@@ -450,6 +450,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `DIAG: evaluate_and_prune` | `resource_pressure`, `pressure_urgent` |
 | DEBUG | `DIAG: register_local_shard` | `model`, `shard_index` |
 | INFO  | `DIAG: check_and_load_model` | `model_id`, `available_shards`, `missing_shards`, `ready` |
+| DEBUG | `Skipping model — insufficient trust for auto-manage` | `model`, `trust` |
+| INFO  | `Model promoted to NetworkPopular` | `model`, `holders` |
+| INFO  | `On-demand loading: model has shards on disk but not loaded` | `request_id`, `model` |
 
 ## API Subsystem Diagnostics
 
