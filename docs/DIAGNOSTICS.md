@@ -1,5 +1,7 @@
 # SwarmLLM Diagnostic Instrumentation Guide
 
+> **For contributors and developers.** This guide covers the internal diagnostic logging system used for debugging distributed inference, networking, and pipeline issues.
+
 All diagnostic log lines are prefixed with `DIAG:` for easy filtering.
 
 ## Quick Start — Filtering Diagnostic Logs

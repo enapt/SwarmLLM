@@ -79,7 +79,8 @@ async fn health_endpoint_returns_ok() {
     let (base, _key) = spawn_test_server().await;
     let resp = reqwest::get(format!("{base}/health")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().await.unwrap(), "ok");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
 }
 
 #[tokio::test]

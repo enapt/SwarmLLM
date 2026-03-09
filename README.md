@@ -39,8 +39,8 @@ Available binaries:
 |----------|------|
 | Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` |
 | Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` |
-| macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` |
-| macOS Intel | `swarmllm-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | Coming soon |
+| macOS Intel | Coming soon |
 | Windows | `swarmllm-windows-x86_64.zip` |
 
 See the full [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
@@ -88,7 +88,7 @@ Add SwarmLLM as an MCP server for tool-based access. The `compare` tool sends th
 }
 ```
 
-MCP tools: `chat` (inference with any model), `models` (list all available models), `compare` (send same prompt to N models, get side-by-side results with latency and token counts).
+MCP tools: `chat` (inference), `models` (list available), `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts` (batch processing), `node_info` (node status).
 
 ## Connecting to the Network
 
@@ -113,13 +113,13 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ## Features
 
 ### Inference
-- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on real LAN (WSL2 laptop + Proxmox server) with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
+- **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on multi-node LAN deployments with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
 - **Cloud Providers** — Route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). API keys can be set via the dashboard, config.toml, environment variables (`OPENAI_API_KEY`, etc.), or a `.env` file in your data directory
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
 - **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, cache_control, streaming SSE. Use SwarmLLM as a drop-in Claude Code backend (`ANTHROPIC_BASE_URL=http://localhost:8800`). Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers
-- **MCP Server** — Native Model Context Protocol server with `chat` (inference), `models` (list), and `compare` (multi-model comparison) tools. The `compare` tool sends the same prompt to multiple models concurrently and returns side-by-side results with latency and token counts
+- **MCP Server** — Native Model Context Protocol server with 6 tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts`, and `node_info`
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement), complementing pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), and per-request LoRA adapter loading
@@ -384,9 +384,9 @@ See the [Configuration Guide](docs/book/src/configuration.md) for the full refer
 | **API Compatibility** | OpenAI + Anthropic (full Claude Code) + MCP (compare) | PyTorch | OpenAI basic | Subnet-defined |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Test Suite** | 669 tests | Limited | Limited | Varies |
+| **CI Pipeline** | fmt + clippy + unit + integration | Limited | Limited | Varies |
 
-See the full [Competitive Analysis](docs/COMPETITIVE_ANALYSIS.md) for detailed breakdowns.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 
 ## Documentation
 

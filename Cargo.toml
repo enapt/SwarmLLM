@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/enapt/SwarmLLM"
 homepage = "https://github.com/enapt/SwarmLLM"
 keywords = ["llm", "p2p", "inference", "distributed", "decentralized"]
-categories = ["network-programming", "science"]
+categories = ["network-programming", "command-line-utilities"]
 rust-version = "1.80"
 
 [[bin]]

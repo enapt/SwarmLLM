@@ -5,17 +5,16 @@ use crate::error::SwarmError;
 use crate::types::{ModelId, ShardInfo};
 
 /// Sanitize a path component to prevent path traversal attacks.
-/// Uses an allowlist approach: only `[a-zA-Z0-9_\-.]` characters are kept;
-/// everything else (including null bytes and directory separators) is replaced
-/// with `_`. Consecutive dots (`..`) are collapsed to prevent traversal.
+/// Blocks null bytes, control characters, and directory separators (`/`, `\`).
+/// Consecutive dots (`..`) are collapsed to prevent traversal.
 pub fn sanitize_path_component(s: &str) -> String {
     let replaced: String = s
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
-                c
-            } else {
+            if c == '/' || c == '\\' || c == '\0' || c.is_ascii_control() {
                 '_'
+            } else {
+                c
             }
         })
         .collect();
