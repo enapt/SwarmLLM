@@ -168,6 +168,18 @@ impl UpdateChecker {
 
     /// Download the update binary to a temp file alongside the current binary.
     pub async fn download_update(&self, info: &UpdateInfo) -> Result<PathBuf, SwarmError> {
+        // SECURITY: Only allow downloads from GitHub to prevent SSRF via poisoned API response
+        if !info.download_url.starts_with("https://github.com/")
+            && !info
+                .download_url
+                .starts_with("https://objects.githubusercontent.com/")
+        {
+            return Err(SwarmError::Internal(format!(
+                "Update rejected: download URL is not from GitHub: {}",
+                info.download_url
+            )));
+        }
+
         let tmp_path = self.binary_path.with_extension("update.tmp");
 
         let client = reqwest::Client::builder()
@@ -200,24 +212,32 @@ impl UpdateChecker {
             .await
             .map_err(|e| SwarmError::Network(format!("Failed to read response body: {e}")))?;
 
-        // Verify SHA256 checksum if available
-        if let Some(ref expected_hash) = info.checksum_sha256 {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let actual_hash = hex::encode(hasher.finalize());
-            // The .sha256 file may contain "hash  filename" format
-            let expected_trimmed = expected_hash
-                .split_whitespace()
-                .next()
-                .unwrap_or(expected_hash);
-            if actual_hash != expected_trimmed {
-                return Err(SwarmError::ShardIntegrity {
-                    expected: expected_trimmed.to_string(),
-                    actual: actual_hash,
-                });
+        // Verify SHA256 checksum — MANDATORY for security.
+        // Reject updates without a .sha256 sidecar to prevent accepting unverified binaries.
+        match info.checksum_sha256 {
+            Some(ref expected_hash) => {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let actual_hash = hex::encode(hasher.finalize());
+                // The .sha256 file may contain "hash  filename" format
+                let expected_trimmed = expected_hash
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(expected_hash);
+                if actual_hash != expected_trimmed {
+                    return Err(SwarmError::ShardIntegrity {
+                        expected: expected_trimmed.to_string(),
+                        actual: actual_hash,
+                    });
+                }
+                tracing::info!("Update checksum verified (SHA256)");
             }
-            tracing::info!("Update checksum verified (SHA256)");
+            None => {
+                return Err(SwarmError::Internal(
+                    "Update rejected: no SHA256 checksum available. Release must include a .sha256 sidecar file.".to_string(),
+                ));
+            }
         }
 
         std::fs::write(&tmp_path, &bytes).map_err(SwarmError::Io)?;

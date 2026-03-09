@@ -66,7 +66,7 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     response
@@ -214,25 +214,14 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
 
 /// Check whether a request is exempt from Bearer token authentication.
 ///
-/// Only GET requests to read-only dashboard endpoints are exempt.
-/// All state-mutating operations (POST/PUT/DELETE) require auth, with
-/// the exception of `/api/admin/join-network` (POST, but non-destructive
-/// and needed by the frontend without auth).
-///
 /// Frontend routes, health checks, and static assets are always exempt.
-/// The Bearer token protects external-facing endpoints (`/v1/...`)
-/// and all sensitive/destructive operations.
-fn is_exempt_request(path: &str, method: &Method) -> bool {
-    // Frontend routes, health checks, static assets — always exempt
+/// Dashboard data endpoints are only exempt from localhost (the local browser).
+/// Remote clients must always authenticate with the Bearer token.
+fn is_exempt_request(path: &str, method: &Method, is_loopback: bool) -> bool {
+    // Frontend routes, health checks, static assets — always exempt (any origin)
     if matches!(
         path,
-        "/" | "/health"
-            | "/health/ready"
-            | "/metrics"
-            | "/admin"
-            | "/chat"
-            | "/setup"
-            | "/favicon.ico"
+        "/" | "/health" | "/health/ready" | "/admin" | "/chat" | "/setup" | "/favicon.ico"
     ) || path.starts_with("/static/")
         || path.starts_with("/admin/")
         || path.starts_with("/chat/")
@@ -240,10 +229,15 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
         return true;
     }
 
-    // Read-only dashboard endpoints — GET only
-    // NOTE: /api/admin/providers, /api/admin/network-code, and /api/admin/credits
-    // are NOT exempt — they expose sensitive data (provider config, invite codes, balances).
-    if *method == Method::GET {
+    // /metrics is exempt but only from localhost to prevent remote recon
+    if path == "/metrics" && is_loopback {
+        return true;
+    }
+
+    // Read-only dashboard data endpoints — GET only, LOCALHOST only.
+    // Remote clients (other machines on the network) must authenticate.
+    // This prevents unauthenticated network reconnaissance.
+    if *method == Method::GET && is_loopback {
         return matches!(
             path,
             "/api/admin/stats"
@@ -262,9 +256,6 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
             || path.starts_with("/api/pool/");
     }
 
-    // POST /api/admin/join-network writes to peer cache — require auth
-    // (frontend sends the API key from localStorage after setup)
-
     false
 }
 
@@ -282,8 +273,8 @@ pub async fn auth_middleware(
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 
-    // Exempt frontend routes, health, read-only dashboard endpoints
-    if is_exempt_request(&path, &method) {
+    // Exempt frontend routes, health, read-only dashboard endpoints (loopback-gated)
+    if is_exempt_request(&path, &method, addr.ip().is_loopback()) {
         return next.run(req).await;
     }
 
@@ -385,42 +376,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exempt_get_requests() {
+    fn exempt_get_requests_loopback() {
         let get = Method::GET;
-        // Frontend routes, health, static — always exempt
-        assert!(is_exempt_request("/", &get));
-        assert!(is_exempt_request("/health", &get));
-        assert!(is_exempt_request("/health/ready", &get));
-        assert!(is_exempt_request("/metrics", &get));
-        assert!(is_exempt_request("/admin", &get));
-        assert!(is_exempt_request("/chat", &get));
-        assert!(is_exempt_request("/setup", &get));
-        assert!(is_exempt_request("/static/css/style.css", &get));
-        assert!(is_exempt_request("/static/js/app.js", &get));
-        assert!(is_exempt_request("/favicon.ico", &get));
-        // Read-only dashboard endpoints — GET exempt
-        assert!(is_exempt_request("/api/admin/stats", &get));
-        assert!(is_exempt_request("/api/admin/config", &get));
-        assert!(is_exempt_request("/api/admin/models", &get));
-        assert!(is_exempt_request("/api/admin/peers", &get));
-        assert!(is_exempt_request("/api/admin/shard-storage", &get));
-        assert!(is_exempt_request("/api/admin/hf/search", &get));
-        assert!(is_exempt_request("/api/admin/hf/probe", &get));
-        assert!(is_exempt_request("/api/admin/network-map", &get));
-        assert!(is_exempt_request("/api/admin/schedule", &get));
-        assert!(is_exempt_request("/api/admin/provider-models", &get));
-        // Sensitive endpoints require auth even for GET
-        assert!(!is_exempt_request("/api/admin/credits", &get));
-        assert!(!is_exempt_request("/api/admin/network-code", &get));
-        assert!(!is_exempt_request("/api/admin/providers", &get));
-        assert!(is_exempt_request("/api/identity/nickname", &get));
-        assert!(is_exempt_request("/api/pool/state", &get));
+        // Frontend routes, health, static — always exempt (any origin)
+        assert!(is_exempt_request("/", &get, false));
+        assert!(is_exempt_request("/health", &get, false));
+        assert!(is_exempt_request("/health/ready", &get, false));
+        assert!(is_exempt_request("/admin", &get, false));
+        assert!(is_exempt_request("/chat", &get, false));
+        assert!(is_exempt_request("/setup", &get, false));
+        assert!(is_exempt_request("/static/css/style.css", &get, false));
+        assert!(is_exempt_request("/static/js/app.js", &get, false));
+        assert!(is_exempt_request("/favicon.ico", &get, false));
+        // /metrics exempt only from loopback
+        assert!(is_exempt_request("/metrics", &get, true));
+        assert!(!is_exempt_request("/metrics", &get, false));
+        // Read-only dashboard endpoints — GET exempt from loopback only
+        assert!(is_exempt_request("/api/admin/stats", &get, true));
+        assert!(is_exempt_request("/api/admin/config", &get, true));
+        assert!(is_exempt_request("/api/admin/models", &get, true));
+        assert!(is_exempt_request("/api/admin/peers", &get, true));
+        assert!(is_exempt_request("/api/admin/shard-storage", &get, true));
+        assert!(is_exempt_request("/api/admin/hf/search", &get, true));
+        assert!(is_exempt_request("/api/admin/hf/probe", &get, true));
+        assert!(is_exempt_request("/api/admin/network-map", &get, true));
+        assert!(is_exempt_request("/api/admin/schedule", &get, true));
+        assert!(is_exempt_request("/api/admin/provider-models", &get, true));
+        assert!(is_exempt_request("/api/identity/nickname", &get, true));
+        assert!(is_exempt_request("/api/pool/state", &get, true));
+        // Same endpoints NOT exempt from remote IPs
+        assert!(!is_exempt_request("/api/admin/stats", &get, false));
+        assert!(!is_exempt_request("/api/admin/peers", &get, false));
+        assert!(!is_exempt_request("/api/admin/network-map", &get, false));
+        assert!(!is_exempt_request("/api/admin/models", &get, false));
+        // Sensitive endpoints require auth even from loopback
+        assert!(!is_exempt_request("/api/admin/credits", &get, true));
+        assert!(!is_exempt_request("/api/admin/network-code", &get, true));
+        assert!(!is_exempt_request("/api/admin/providers", &get, true));
     }
 
     #[test]
     fn non_exempt_post_join_network() {
         // POST /api/admin/join-network requires auth (writes to peer cache)
-        assert!(!is_exempt_request("/api/admin/join-network", &Method::POST));
+        assert!(!is_exempt_request(
+            "/api/admin/join-network",
+            &Method::POST,
+            true
+        ));
     }
 
     #[test]
@@ -428,45 +430,66 @@ mod tests {
         let put = Method::PUT;
         let post = Method::POST;
         let delete = Method::DELETE;
-        // PUT /api/admin/config requires auth (C4 fix)
-        assert!(!is_exempt_request("/api/admin/config", &put));
-        // POST /api/pool/* require auth (C5 fix)
-        assert!(!is_exempt_request("/api/pool/create", &post));
-        assert!(!is_exempt_request("/api/pool/invite", &post));
-        assert!(!is_exempt_request("/api/pool/leave", &post));
-        assert!(!is_exempt_request("/api/pool/remove", &post));
-        assert!(!is_exempt_request("/api/pool/accept", &post));
+        // PUT /api/admin/config requires auth even from loopback
+        assert!(!is_exempt_request("/api/admin/config", &put, true));
+        // POST /api/pool/* require auth
+        assert!(!is_exempt_request("/api/pool/create", &post, true));
+        assert!(!is_exempt_request("/api/pool/invite", &post, true));
+        assert!(!is_exempt_request("/api/pool/leave", &post, true));
+        assert!(!is_exempt_request("/api/pool/remove", &post, true));
+        assert!(!is_exempt_request("/api/pool/accept", &post, true));
         // PUT /api/identity/nickname requires auth
-        assert!(!is_exempt_request("/api/identity/nickname", &put));
-        assert!(!is_exempt_request("/api/identity/nickname", &delete));
-        // API key not in general exempt list (loopback-only exemption in auth_middleware)
-        assert!(!is_exempt_request("/api/admin/api-key", &Method::GET));
-        assert!(!is_exempt_request("/api/admin/shutdown", &post));
-        assert!(!is_exempt_request("/api/admin/hf/download", &post));
-        assert!(!is_exempt_request("/api/admin/hf/download-shards", &post));
+        assert!(!is_exempt_request("/api/identity/nickname", &put, true));
+        assert!(!is_exempt_request("/api/identity/nickname", &delete, true));
+        // API key not in general exempt list
+        assert!(!is_exempt_request("/api/admin/api-key", &Method::GET, true));
+        assert!(!is_exempt_request("/api/admin/shutdown", &post, true));
+        assert!(!is_exempt_request("/api/admin/hf/download", &post, true));
+        assert!(!is_exempt_request(
+            "/api/admin/hf/download-shards",
+            &post,
+            true
+        ));
         // OpenAI API always requires auth
-        assert!(!is_exempt_request("/v1/models", &Method::GET));
-        assert!(!is_exempt_request("/v1/chat/completions", &post));
+        assert!(!is_exempt_request("/v1/models", &Method::GET, true));
+        assert!(!is_exempt_request("/v1/chat/completions", &post, true));
         // PUT auto-manage and DELETE shard require auth
         assert!(!is_exempt_request(
             "/api/admin/models/test/auto-manage",
-            &put
+            &put,
+            true
         ));
         assert!(!is_exempt_request(
             "/api/admin/models/test/shards/0",
-            &delete
+            &delete,
+            true
         ));
     }
 
     #[test]
     fn exempt_new_read_only_endpoints() {
         let get = Method::GET;
-        // GET /api/admin/hf/source/:id is exempt (read-only)
-        assert!(is_exempt_request("/api/admin/hf/source/test-model", &get));
-        // GET /api/admin/models/:id/auto-manage is exempt (read-only)
+        // GET /api/admin/hf/source/:id is exempt from loopback
+        assert!(is_exempt_request(
+            "/api/admin/hf/source/test-model",
+            &get,
+            true
+        ));
+        assert!(!is_exempt_request(
+            "/api/admin/hf/source/test-model",
+            &get,
+            false
+        ));
+        // GET /api/admin/models/:id/auto-manage is exempt from loopback
         assert!(is_exempt_request(
             "/api/admin/models/test-model/auto-manage",
-            &get
+            &get,
+            true
+        ));
+        assert!(!is_exempt_request(
+            "/api/admin/models/test-model/auto-manage",
+            &get,
+            false
         ));
     }
 

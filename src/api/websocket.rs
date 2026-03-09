@@ -12,7 +12,36 @@ use crate::daemon::SharedState;
 use crate::model::acquisition::ShardState;
 
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
-pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Validates the Origin header to prevent cross-site WebSocket hijacking.
+/// Only connections from the same host (localhost) are accepted.
+pub async fn handler(
+    ws: WebSocketUpgrade,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Validate Origin header for non-loopback connections to prevent CSWSH attacks.
+    // Browsers always send Origin on WebSocket upgrades — a missing Origin from a
+    // non-loopback IP likely means a non-browser client, which must use the API key.
+    if !addr.ip().is_loopback() {
+        if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+            let origin_str = origin.to_str().unwrap_or("");
+            let port = state.config.node.listen_port;
+            let allowed = [
+                format!("http://localhost:{port}"),
+                format!("http://127.0.0.1:{port}"),
+            ];
+            if !allowed.iter().any(|a| a == origin_str) {
+                tracing::warn!(
+                    origin = %origin_str,
+                    remote = %addr,
+                    "WebSocket connection rejected: origin not allowed"
+                );
+                return axum::http::StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state.shared_state.clone()))
 }
 
