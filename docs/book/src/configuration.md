@@ -11,6 +11,8 @@ Settings are read from four sources, in order of priority:
 3. **Config file** — `config.toml` in your data directory
 4. **Built-in defaults** (lowest)
 
+Provider API keys have an additional source: a **`.env` file** in the data directory or current working directory. Standard env var names are used (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, etc.). The `.env` file does not override existing environment variables or keys already set via the dashboard.
+
 ## Config File Location
 
 | OS | Path |

@@ -59,3 +59,33 @@ Example:
 ```bash
 SWARMLLM_NODE_LISTEN_PORT=9000 SWARMLLM_LOGGING_LEVEL=debug ./swarmllm run
 ```
+
+## Provider API Keys via Environment
+
+Cloud provider API keys use standard environment variable names:
+
+| Provider | Environment Variable |
+|---|---|
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Groq | `GROQ_API_KEY` |
+| NVIDIA NIM | `NVIDIA_NIM_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| SambaNova | `SAMBANOVA_API_KEY` |
+| Fireworks | `FIREWORKS_API_KEY` |
+| Together | `TOGETHER_API_KEY` |
+| DeepInfra | `DEEPINFRA_API_KEY` |
+| Moonshot/Kimi | `MOONSHOT_API_KEY` |
+
+These can also be placed in a `.env` file in your data directory:
+
+```bash
+# ~/.local/share/swarmllm/.env
+OPENAI_API_KEY=sk-proj-...
+DEEPSEEK_API_KEY=sk-...
+NVIDIA_NIM_API_KEY=nvapi-...
+```
+
+The `.env` file is loaded at startup. It does not override existing environment variables or keys already configured via the dashboard/database. The dashboard settings UI shows "From .env" for keys loaded this way.

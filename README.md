@@ -116,7 +116,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Distributed Inference** — Model layers sharded across nodes with automatic pipeline assembly, verified on real LAN (WSL2 laptop + Proxmox server) with 5 models, crash recovery, auto-reconnect. Candle-based direct tensor computation with E2E encryption
 - **Architecture-Aware** — Automatic detection of model architecture (Llama, Llama 4, Qwen2, Qwen 3.5, Gemma/2, Phi-3, Mistral, Starcoder2, DeepSeek-V2/V3, GLM-4) with correct RoPE, attention biases, EOS tokens, embedding scaling, logit softcapping, and context lengths from GGUF metadata
 - **DeepSeek MoE+MLA** — Full support for DeepSeek-V2/V3 models: Multi-head Latent Attention (low-rank Q/KV compression), Mixture-of-Experts (router-based top-k expert selection with shared experts), per-layer dense/MoE detection
-- **Cloud Fallback (Optional)** — Optionally route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi) as a fallback. The swarm is the primary way to run models for free
+- **Cloud Providers** — Route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). API keys can be set via the dashboard, config.toml, environment variables (`OPENAI_API_KEY`, etc.), or a `.env` file in your data directory
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
 - **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, cache_control, streaming SSE. Use SwarmLLM as a drop-in Claude Code backend (`ANTHROPIC_BASE_URL=http://localhost:8800`). Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers
 - **MCP Server** — Native Model Context Protocol server with `chat` (inference), `models` (list), and `compare` (multi-model comparison) tools. The `compare` tool sends the same prompt to multiple models concurrently and returns side-by-side results with latency and token counts
@@ -312,6 +312,20 @@ SWARMLLM_RESOURCES_MAX_GPU_VRAM_MB=6000
 SWARMLLM_LOGGING_LEVEL=debug
 ```
 
+### .env File Support
+
+Provider API keys can be loaded from a `.env` file placed in your data directory or the current working directory:
+
+```bash
+# ~/.local/share/swarmllm/.env
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=sk-...
+NVIDIA_NIM_API_KEY=nvapi-...
+```
+
+The `.env` file is loaded at startup and does not override existing environment variables or keys already configured via the dashboard/database.
+
 ### Key Config Sections
 
 | Section | Key Settings |
@@ -322,7 +336,7 @@ SWARMLLM_LOGGING_LEVEL=debug
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
-| `[providers]` | `openai_api_key`, `anthropic_api_key`, `deepseek_api_key`, `mistral_api_key`, `groq_api_key`, `moonshot_api_key`, custom providers |
+| `[providers]` | API keys for cloud providers (also via `OPENAI_API_KEY` env var / `.env` file), custom providers |
 | `[logging]` | `level`, `format` (pretty/json) |
 | `[ui]` | `open_browser_on_start`, `theme` |
 
