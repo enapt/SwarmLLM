@@ -1454,7 +1454,7 @@ var SwarmLLM = (function() {
         }
       } catch (e) {
         var list = document.getElementById('peers-list');
-        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">Failed to load peer list</div>';
+        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet', 'No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.') + '</div>';
       }
 
     },
