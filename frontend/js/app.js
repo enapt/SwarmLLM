@@ -393,7 +393,7 @@ var SwarmLLM = (function() {
     send: async function() {
       if (isStreaming) return;
       if (!currentModel) {
-        ui.showBanner('warning', 'No model available — download a model or share your Network Code to find peers');
+        ui.showBanner('warning', 'No model selected \u2014 pick one from the dropdown above, or click + to download one');
         return;
       }
 
@@ -565,7 +565,7 @@ var SwarmLLM = (function() {
         }
 
         if (!cleared && !fullContent && !reasoningContent) {
-          contentEl.textContent = 'No response received. The model may still be loading \u2014 try again in a moment.';
+          contentEl.textContent = 'No response received. The model might still be loading \u2014 wait a moment and try again.';
           contentEl.classList.add('chat-error');
         }
       } catch (e) {
@@ -579,7 +579,7 @@ var SwarmLLM = (function() {
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
-      timerEl.textContent = elapsed + 's';
+      timerEl.textContent = 'Response time: ' + elapsed + 's';
       assistantEl.appendChild(timerEl);
 
       if (fullContent) {
@@ -639,7 +639,7 @@ var SwarmLLM = (function() {
         var data = await resp.json();
         dashboard.updateFull(data);
       } catch (e) {
-        ui.showBanner('error', 'Failed to connect to SwarmLLM daemon');
+        ui.showBanner('error', 'Can\\'t reach SwarmLLM — is it running?');
       }
 
       try {
@@ -1432,7 +1432,7 @@ var SwarmLLM = (function() {
             if (!acqInfo._slowSince) acqInfo._slowSince = Date.now();
             else if (Date.now() - acqInfo._slowSince > 30000 && !acqInfo._throttleWarned) {
               acqInfo._throttleWarned = true;
-              showToast('HuggingFace may be rate-limiting downloads. Speed: ' + formatSpeed(speed) + '. Download will continue automatically.', 'warning', 10000);
+              showToast('Download is slow (' + formatSpeed(speed) + ') \u2014 this can happen with popular models. It will keep going.', 'warning', 10000);
             }
           } else {
             acqInfo._slowSince = null;
@@ -1496,7 +1496,7 @@ var SwarmLLM = (function() {
       var speedStr = speed > 0 ? ' - ' + formatSpeed(speed) : '';
       progressEl.innerHTML =
         '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-        '<span class="text-muted">Downloading shard</span>' +
+        '<span class="text-muted">Downloading model data</span>' +
         '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
         '</div>' +
         '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>';
@@ -1590,7 +1590,7 @@ var SwarmLLM = (function() {
             '</div>' +
             '<div class="hf-model-actions">' +
             (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +
-            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Add to node</button>' +
+            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Download</button>' +
             '</div>';
           results.appendChild(card);
         });
@@ -1621,7 +1621,7 @@ var SwarmLLM = (function() {
         }
 
         // Use peer_fair_share: backend probes internally and computes fair share
-        ui.showBanner('info', 'Probing model...');
+        ui.showBanner('info', 'Checking model availability...');
         var resp = await authFetch('/api/admin/hf/download-shards', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1634,7 +1634,7 @@ var SwarmLLM = (function() {
           return;
         }
         if (data.status === 'started') {
-          showToast('Downloading seed shard — auto-manage will acquire more as peers join', 'success');
+          showToast('Download started — model data will be ready soon', 'success');
           ui.closeModelBrowser();
         } else {
           showToast(data.message || 'Download could not be started', 'warning');
@@ -2106,7 +2106,7 @@ var SwarmLLM = (function() {
             '<p style="margin-bottom:8px">No models on this node yet.</p>' +
             '<p class="text-muted" style="font-size:0.85rem"><strong>Three ways to get started:</strong><br>' +
             '1. Download models from HuggingFace using <strong>Browse Models</strong> on the dashboard<br>' +
-            '2. Share your Network Code to find peers who already have models<br>' +
+            '2. Connect with others using Network Code to share AI models<br>' +
             '3. Add a cloud provider API key for instant access</p>' +
             '<button class="btn btn-sm" id="setup-add-provider-btn" style="margin-top:10px;font-size:0.8rem">Add Cloud Provider Key (optional)</button>' +
             '</div>';
@@ -2285,7 +2285,7 @@ var SwarmLLM = (function() {
     ws.onclose = function() {
       wsHealthy = false;
       if (wsWasConnected) {
-        showWsBanner('disconnected', 'Connection lost \u2014 reconnecting...');
+        showWsBanner('disconnected', 'Lost connection to SwarmLLM \u2014 reconnecting...');
       }
       // Resume REST polling as fallback while WebSocket is disconnected
       startPolling();
@@ -2586,7 +2586,7 @@ var SwarmLLM = (function() {
           var displayName = formatModelDisplayName(m.name || m.id);
           return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: 'local' };
         });
-        groups.push({ key: 'local', label: 'Local / Network', items: items });
+        groups.push({ key: 'local', label: 'On this computer', items: items });
         _modelDropdownData = _modelDropdownData.concat(items);
       }
 
@@ -2643,7 +2643,7 @@ var SwarmLLM = (function() {
     list.innerHTML = '';
 
     if (!hasAny) {
-      list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Download a model, find peers via Network Code, or add a cloud provider</span></div>';
+      list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Click + to download a model, or add a cloud provider in Settings</span></div>';
       return;
     }
 
@@ -2823,7 +2823,7 @@ var SwarmLLM = (function() {
         activeAcquisitions[modelId] = { started: Date.now() };
         dashboard.renderAcquisitionPanel(modelId, null);
       } else {
-        ui.showBanner('warning', data.message || 'Model acquisition unavailable');
+        ui.showBanner('warning', data.message || 'Model download unavailable');
       }
     } catch (e) {
       ui.showBanner('error', 'Failed to request model: ' + e.message);
@@ -2926,7 +2926,7 @@ var SwarmLLM = (function() {
         try {
           var resp = await authFetch('/api/admin/update/apply', { method: 'POST' });
           if (resp.ok) {
-            banner.querySelector('span').textContent = 'Update applied! Restart the daemon to use v' + escapeHtml(data.latest_version);
+            banner.querySelector('span').textContent = 'Update applied! Restart SwarmLLM to use v' + escapeHtml(data.latest_version);
             applyBtn.style.display = 'none';
           } else {
             var err = await resp.json().catch(function() { return {}; });
@@ -2954,7 +2954,7 @@ var SwarmLLM = (function() {
               dlBtn.textContent = 'Applying...';
               var applyResp = await authFetch('/api/admin/update/apply', { method: 'POST' });
               if (applyResp.ok) {
-                banner.querySelector('span').textContent = 'Update applied! Restart the daemon to use v' + escapeHtml(data.latest_version);
+                banner.querySelector('span').textContent = 'Update applied! Restart SwarmLLM to use v' + escapeHtml(data.latest_version);
                 dlBtn.style.display = 'none';
               }
             }
@@ -3159,7 +3159,7 @@ var SwarmLLM = (function() {
             body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: [idx], model_id: modelId }),
           });
           if (dlResp.ok) {
-            ui.showBanner('success', 'Downloading shard ' + idx);
+            ui.showBanner('success', 'Downloading model part ' + (idx + 1));
             loadModels();
           } else {
             var errData2 = await dlResp.json().catch(function() { return {}; });
@@ -3322,7 +3322,7 @@ var SwarmLLM = (function() {
         var stateName = typeof dl.state === 'string' ? dl.state : 'unknown';
         var stateLabel = stateName, stateClass = 'waiting';
         if (stateName === 'downloading') { stateLabel = 'Downloading'; stateClass = 'active'; }
-        else if (stateName === 'awaiting_manifest') { stateLabel = 'Awaiting manifest'; stateClass = 'waiting'; }
+        else if (stateName === 'awaiting_manifest') { stateLabel = 'Preparing download...'; stateClass = 'waiting'; }
         else if (stateName === 'complete') { stateLabel = 'Complete'; stateClass = 'done'; }
         else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
           stateLabel = 'Failed'; stateClass = 'fail';
@@ -3649,7 +3649,7 @@ var SwarmLLM = (function() {
       var modelId = opts.model || (session ? session.model : '') || currentModel || '';
       var source = getModelSource(modelId);
       div.classList.add('source-' + source);
-      var sourceLabel = source === 'local' ? 'Local' : source === 'cloud' ? 'Cloud' : 'Swarm';
+      var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Network';
       sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
     }
 
@@ -3665,8 +3665,8 @@ var SwarmLLM = (function() {
     if (role === 'assistant') {
       var actions = document.createElement('div');
       actions.className = 'msg-actions';
-      actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy response">Copy</button>' +
-        '<button class="msg-action-btn" data-action="compare" title="Compare this prompt across models">Compare</button>';
+      actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy this response">Copy</button>' +
+        '<button class="msg-action-btn" data-action="compare" title="Ask other models the same question">Try other models</button>';
       div.appendChild(actions);
     }
 
@@ -3680,9 +3680,9 @@ var SwarmLLM = (function() {
     div.className = 'chat-empty';
     div.id = 'chat-empty';
     div.innerHTML = '<div class="chat-empty-icon">&#11088;</div>' +
-      '<div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">SwarmLLM Chat</div>' +
+      '<div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Chat with AI</div>' +
       '<div style="color:var(--text-muted);margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
-      '<div style="color:var(--text-muted);font-size:0.8rem;margin-top:4px">Select a model from the dropdown above \u2022 Press <kbd>Shift+Enter</kbd> for new line</div>';
+      '<div style="color:var(--text-muted);font-size:0.8rem;margin-top:4px">Pick a model from the dropdown above \u2022 <kbd>Shift+Enter</kbd> for new line</div>';
     return div;
   }
 
@@ -3702,10 +3702,11 @@ var SwarmLLM = (function() {
     var text = input.value;
     if (!text) { el.textContent = ''; el.className = 'token-counter'; return; }
     var tokens = Math.ceil(text.length / 4);
-    el.textContent = '~' + tokens + ' tokens';
-    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = 'Warning: very long input, may exceed model context window'; }
-    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = 'Getting long \u2014 some models may truncate'; }
-    else { el.className = 'token-counter'; el.title = 'Estimated token count (4 chars \u2248 1 token)'; }
+    var words = text.trim().split(/\s+/).length;
+    el.textContent = words + ' words';
+    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = 'Very long message — some models may not handle this length'; }
+    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = 'Long message — response quality may vary'; }
+    else { el.className = 'token-counter'; el.title = 'Message length'; }
   }
 
   // ========================================================================
@@ -3769,7 +3770,7 @@ var SwarmLLM = (function() {
         var entries = data.leaderboard || [];
 
         if (entries.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Leaderboard empty. No nodes have earned credits yet. Serve inference to earn credits.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">No activity yet. Credits are earned by helping others run AI models.</td></tr>';
           return;
         }
 
@@ -4476,7 +4477,7 @@ var SwarmLLM = (function() {
               var promptEl = document.getElementById('compare-prompt');
               if (promptEl) promptEl.value = userContent.textContent;
               compare.loadModels();
-              showToast('Prompt loaded in Compare \u2014 select models and run', 'info');
+              showToast('Your question is ready \u2014 pick models and hit Compare', 'info');
             }
           }
         }
@@ -4601,13 +4602,13 @@ var SwarmLLM = (function() {
       } else {
         // Check if a model is currently downloading (WI-9)
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download a model or share your Network Code to find peers';
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 click + above to download one, or add a cloud provider in Settings';
       }
     }
     if (emptyState && !hasModels) {
       emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
         '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">No Models Available</div>' +
-        '<div style="color:var(--text-muted);margin:8px 0">Download models or share your Network Code to find peers — the swarm splits models across nodes so no single machine needs everything</div>' +
+        '<div style="color:var(--text-muted);margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
           '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
           '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
@@ -4730,18 +4731,18 @@ var SwarmLLM = (function() {
       label.textContent = 'Solo Node';
       modeHelp = 'Local inference only — connect peers to unlock bigger models';
       if (indicator) indicator.classList.add('mode-offline');
-      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Local only \u2014 share your Network Code to join the swarm</span>');
+      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Running locally \u2014 connect with others to run bigger models</span>');
     } else if (cloudProviders.length > 0) {
       dot.className = 'mode-dot cloud';
       label.textContent = 'Cloud Only';
-      modeHelp = 'Using cloud providers — download models or share your Network Code for free swarm inference';
+      modeHelp = 'Using cloud AI services \u2014 download models to run AI on your own computer for free';
       if (indicator) indicator.classList.add('mode-cloud');
     } else {
       dot.className = 'mode-dot offline';
       label.textContent = 'Ready to Join';
-      modeHelp = 'Download models or share your Network Code to find peers';
+      modeHelp = 'Download a model or add a cloud provider to get started';
       if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download models</u> or share your Network Code</span>'];
+      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download one</u> or add a cloud provider</span>'];
     }
     if (modeHelp) label.title = modeHelp;
 
@@ -4895,7 +4896,7 @@ var SwarmLLM = (function() {
         });
 
         if (compare.models.length === 0) {
-          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available. Download models, find peers via Network Code, or configure cloud providers in Settings.</span>';
+          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available yet. Download a model or add a cloud provider in Settings first.</span>';
           return;
         }
 

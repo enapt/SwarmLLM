@@ -16,21 +16,21 @@
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="modal">
       <div class="modal-header">
-        <h2 id="setup-title">Join the Swarm</h2>
-        <span class="text-muted">Combine your hardware with others to run massive AI models — for free</span>
+        <h2 id="setup-title">Welcome to SwarmLLM</h2>
+        <span class="text-muted">Chat with AI using your own computer, or team up with others to run bigger models</span>
       </div>
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
-        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Hardware Detection">1</button>
+        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Your Computer">1</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Identity & Resources">2</button>
+        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Preferences">2</button>
         <div class="wizard-connector"></div>
         <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Getting Started">3</button>
         <div class="wizard-connector"></div>
         <button class="wizard-step" data-step="4" role="tab" aria-selected="false" aria-label="Step 4: Review">4</button>
       </div>
       <div class="wizard-body" id="step-1">
-        <h3>Hardware Detection</h3>
-        <p class="text-muted mb-2">We detected the following hardware on your system.</p>
+        <h3>Your Computer</h3>
+        <p class="text-muted mb-2">Here's what your system can handle.</p>
         <div id="hw-loading" class="flex gap-1" style="align-items:center">
           <div class="spinner"></div>
           <span class="text-muted">Detecting hardware...</span>
@@ -38,14 +38,14 @@
         <div id="hw-results" class="hidden">
           <div class="grid grid-2 mt-1">
             <div><label>GPU</label><div class="mono" id="hw-gpu">---</div></div>
-            <div><label>VRAM</label><div class="mono" id="hw-vram">---</div></div>
+            <div><label>GPU Memory</label><div class="mono" id="hw-vram">---</div></div>
             <div><label>System RAM</label><div class="mono" id="hw-ram">---</div></div>
             <div><label>Disk Available</label><div class="mono" id="hw-disk">---</div></div>
           </div>
         </div>
       </div>
       <div class="wizard-body hidden" id="step-2">
-        <h3>Identity & Resources</h3>
+        <h3>Preferences</h3>
         <div class="form-group mt-1">
           <label style="font-size:0.85rem;font-weight:600">Nickname <span class="text-muted" style="font-weight:normal">(optional)</span></label>
           <input type="text" id="setup-nickname" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
@@ -53,7 +53,7 @@
         </div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="font-size:0.85rem;font-weight:600">Resource Contribution</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Share your compute to help run models too large for any single machine.</p>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Let others use some of your computer's power to help run AI. You earn credits in return.</p>
           <div class="flex-between mb-1">
             <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
             <span class="mono" id="contribution-label">Minimal</span>
@@ -65,9 +65,9 @@
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="setup-auto-manage" style="width:18px;height:18px">
-            <span>Auto-manage shards</span>
+            <span>Auto-download AI models</span>
           </label>
-          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically host popular model shards so the swarm can run bigger models. Your contribution helps everyone run AI for free.</span>
+          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically download pieces of popular AI models so the network can run them. Uses some disk space but helps everyone.</span>
         </div>
       </div>
       <div class="wizard-body hidden" id="step-3">
@@ -75,8 +75,8 @@
         <p class="text-muted mb-2">Choose how you want to use SwarmLLM. You can do any or all of these.</p>
         <div id="setup-model-list"><p class="text-muted">Loading available models...</p></div>
         <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
-          <label style="font-size:0.85rem;font-weight:600">Cloud Provider Key <span class="text-muted" style="font-weight:normal">(optional — instant access)</span></label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Add a key from any cloud AI provider as a fallback. Free tiers available from most providers.</p>
+          <label style="font-size:0.85rem;font-weight:600">Cloud AI Service <span class="text-muted" style="font-weight:normal">(optional — chat instantly)</span></label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Connect an AI service like OpenAI or DeepSeek to start chatting right away. Most offer free tiers.</p>
           <select id="setup-provider-select" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-bottom:6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
             <option value="">Select a provider...</option>
             <option value="openai">OpenAI</option>
@@ -110,7 +110,7 @@
           <div class="flex-between mb-1"><span class="text-muted">GPU</span><span class="mono" id="summary-gpu">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">RAM Allocated</span><span class="mono" id="summary-ram">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Disk Allocated</span><span class="mono" id="summary-disk">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Auto-Manage</span><span class="mono" id="summary-auto-manage">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Models</span><span class="mono" id="summary-models">---</span></div>
         </div>
@@ -131,12 +131,12 @@
         <button class="btn btn-ghost btn-sm" id="btn-close-settings" aria-label="Close settings">&times;</button>
       </div>
       <div class="form-group">
-        <label for="settings-api-key">Node Access Token</label>
+        <label for="settings-api-key">Access Token</label>
         <div class="flex gap-1" style="align-items:center">
           <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
           <button class="btn btn-sm" id="btn-copy-api-key" title="Copy access token">Copy</button>
         </div>
-        <span class="text-muted" style="font-size:0.75rem">Auto-generated token for programmatic API access (not a cloud API key)</span>
+        <span class="text-muted" style="font-size:0.75rem">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname">Nickname</label>
@@ -147,8 +147,8 @@
       <div class="form-group">
         <label for="settings-visibility">Visibility</label>
         <select id="settings-visibility">
-          <option value="anonymous">Anonymous (show node ID only)</option>
-          <option value="nickname">Nickname (show name to peers)</option>
+          <option value="anonymous">Anonymous (show ID only)</option>
+          <option value="nickname">Nickname (show your name to others)</option>
         </select>
       </div>
       <div class="form-group">
@@ -164,30 +164,30 @@
         <input type="number" id="settings-max-requests" value="10" min="1" max="100">
       </div>
       <div class="form-group">
-        <label for="settings-auto-shards">Auto-Manage Shards</label>
+        <label for="settings-auto-shards">Auto-Download Models</label>
         <select id="settings-auto-shards">
           <option value="off">Off</option>
-          <option value="on">On - Auto-download popular shards</option>
+          <option value="on">On — automatically download popular model data</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem">Automatically host the rarest shards so the swarm can complete more models</span>
+        <span class="text-muted" style="font-size:0.75rem">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
       </div>
       <div id="settings-storage-info" class="hidden" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:12px;border:1px solid var(--border)">
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Shard storage used</span>
+          <span class="text-muted">Model data stored</span>
           <span class="mono" id="settings-storage-used">--</span>
         </div>
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Max auto-manage storage</span>
+          <span class="text-muted">Max auto-download storage</span>
           <span class="mono" id="settings-storage-max">--</span>
         </div>
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Network VRAM pool</span>
+          <span class="text-muted">Network GPU memory</span>
           <span class="mono" id="settings-pool-vram">--</span>
         </div>
         <div id="settings-storage-models" style="font-size:0.8rem;margin-top:8px"></div>
       </div>
       <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
-        <label>Max Auto-Manage Storage (MB, 0 = 50% of disk limit)</label>
+        <label>Max Auto-Download Storage (MB, 0 = 50% of disk limit)</label>
         <input type="number" id="settings-auto-manage-storage" value="0" min="0">
       </div>
       <details class="settings-providers" id="settings-providers-section">
@@ -348,16 +348,16 @@
         <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" aria-label="Close model browser">&times;</button>
       </div>
       <div class="model-browser-search">
-        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, mistral)...">
+        <input type="text" id="hf-search-input" placeholder="Search AI models (e.g. llama, qwen, phi, gemma)...">
         <button class="btn btn-primary" id="btn-hf-search">Search</button>
       </div>
       <div class="model-browser-filters">
         <select id="hf-filter-quant">
-          <option value="">All quantizations</option>
-          <option value="Q4_K_M">Q4_K_M</option>
-          <option value="Q5_K_M">Q5_K_M</option>
-          <option value="Q6_K">Q6_K</option>
-          <option value="Q8_0">Q8_0</option>
+          <option value="">All quality levels</option>
+          <option value="Q4_K_M">Standard (Q4 — fast, good quality)</option>
+          <option value="Q5_K_M">High (Q5 — balanced)</option>
+          <option value="Q6_K">Very High (Q6 — slower, better quality)</option>
+          <option value="Q8_0">Maximum (Q8 — slowest, best quality)</option>
         </select>
         <select id="hf-filter-size">
           <option value="">All sizes</option>
@@ -368,7 +368,7 @@
         </select>
       </div>
       <div id="hf-results">
-        <div class="empty-state"><p>Search for GGUF models on HuggingFace to get started</p></div>
+        <div class="empty-state"><p>Search for an AI model to download and run on your computer</p></div>
       </div>
       <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
         <div class="spinner"></div>
@@ -411,7 +411,7 @@
         <span class="mono" id="node-id" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
       </div>
-      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Shutdown node" aria-label="Shutdown node">&#9211;</button>
+      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Stop SwarmLLM" aria-label="Stop SwarmLLM">&#9211;</button>
     </div>
   </header>
 
@@ -423,7 +423,7 @@
     <!-- Sidebar: chat sessions -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-title">Sessions</span>
+        <span class="sidebar-title">Chats</span>
         <button class="btn btn-ghost btn-sm" id="btn-new-session" title="New chat">+</button>
       </div>
       <div class="session-list" id="session-list"></div>
@@ -445,8 +445,8 @@
           <div class="chat-messages" id="chat-messages">
             <div class="chat-empty" id="chat-empty">
               <div class="chat-empty-icon">&#11203;</div>
-              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Swarm-Powered Chat</div>
-              <div>Your message is processed across the swarm — no API tokens, no cloud fees</div>
+              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Chat with AI</div>
+              <div style="color:var(--text-muted)">Pick a model from the dropdown above and start chatting</div>
             </div>
           </div>
           <div class="chat-input-area">
@@ -487,42 +487,42 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-peers">0</div>
-                <div class="stat-label">Peers <span class="stat-help" title="Other SwarmLLM nodes connected to you">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label">Peers <span class="stat-help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Credits earned by serving inference to others">
+            <div class="stat-card" title="Credits earned by helping others run AI">
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-credits">0</div>
-                <div class="stat-label">Credits <span class="stat-help" title="Earned by serving inference to peers, spent on requests">?</span></div>
+                <div class="stat-label">Credits <span class="stat-help" title="Earned by helping others, spent when you use the network">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-requests-made">0</div>
-                <div class="stat-label">Requests <span class="stat-help" title="Chat requests you've made (local + cloud + swarm)">?</span></div>
+                <div class="stat-label">Requests <span class="stat-help" title="Messages you've sent to AI models">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Full inference requests completed by this node for others">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-served">0</div>
-                <div class="stat-label">Served <span class="stat-help" title="Inference requests you completed for other nodes">?</span></div>
+                <div class="stat-label">Served <span class="stat-help" title="Requests your computer handled for others (earns credits)">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-forwards">0</div>
-                <div class="stat-label">Forwards <span class="stat-help" title="Individual layer computations done for the network (earns credits)">?</span></div>
+                <div class="stat-label">Forwards <span class="stat-help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Currently running inference requests">
               <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-active">0</div>
-                <div class="stat-label">Active <span class="stat-help" title="Inference requests currently being processed">?</span></div>
+                <div class="stat-label">Active <span class="stat-help" title="AI requests currently being processed right now">?</span></div>
               </div>
             </div>
           </div>
@@ -621,13 +621,13 @@
           <div class="panel mt-2">
             <div class="panel-header">
               <h2>Models</h2>
-              <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
+              <button class="btn btn-sm" id="btn-browse-hf">Browse AI Models</button>
             </div>
             <div id="models-container">
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty">
                 <div class="empty-icon">&#128229;</div>
-                <p>No models yet. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download models, or share your Network Code to find peers.</p>
+                <p>No models yet. <a href="#" id="link-browse-hf">Browse AI models</a> to download one, or add a cloud provider in Settings.</p>
               </div>
             </div>
           </div>
@@ -725,31 +725,36 @@
               <span class="text-muted" style="font-size:0.8rem">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
             </div>
             <div class="compare-controls">
-              <div class="form-group">
-                <label for="compare-system">System prompt (optional)</label>
-                <input type="text" id="compare-system" placeholder="You are a helpful assistant." style="font-size:0.85rem">
-              </div>
+              <details style="margin-bottom:4px">
+                <summary style="font-size:0.78rem;color:var(--text-muted);cursor:pointer">Advanced: system prompt &amp; parameters</summary>
+                <div class="form-group mt-1">
+                  <label for="compare-system">System prompt (sets the AI's behavior)</label>
+                  <input type="text" id="compare-system" placeholder="You are a helpful assistant." style="font-size:0.85rem">
+                </div>
               <div class="form-group">
                 <label for="compare-prompt">Prompt</label>
                 <textarea id="compare-prompt" rows="3" placeholder="Enter your prompt here..." style="font-size:0.85rem;resize:vertical"></textarea>
               </div>
+                <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px">
+                  <div class="form-group" style="width:100px">
+                    <label for="compare-temp">Creativity</label>
+                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem" title="Lower = more focused, Higher = more creative">
+                  </div>
+                  <div class="form-group" style="width:140px">
+                    <label for="compare-max-tokens">Max response length</label>
+                    <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64" style="font-size:0.85rem">
+                  </div>
+                </div>
+              </details>
               <div class="compare-params">
                 <div class="form-group" style="flex:1;min-width:0">
-                  <label>Models (select 2-10)</label>
+                  <label>Pick 2 or more models to compare</label>
                   <div class="compare-model-list" id="compare-model-list">
                     <span class="text-muted" style="font-size:0.8rem">Loading models...</span>
                   </div>
                 </div>
-                <div style="display:flex;gap:12px;align-items:flex-end">
-                  <div class="form-group" style="width:100px">
-                    <label for="compare-temp">Temp</label>
-                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem">
-                  </div>
-                  <div class="form-group" style="width:120px">
-                    <label for="compare-max-tokens">Max tokens</label>
-                    <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64" style="font-size:0.85rem">
-                  </div>
-                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap">Run Compare</button>
+                <div style="display:flex;align-items:flex-end">
+                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap">Compare</button>
                 </div>
               </div>
             </div>
