@@ -194,13 +194,19 @@ pub(crate) async fn dispatch_network_messages(
                                     amount = tx.amount,
                                     "Received credit transaction"
                                 );
+                                // SEC-C3: Reject duplicate transactions (UUID replay check)
+                                if let Ok(Some(_)) = shared_state.db.get_json::<crate::types::CreditTransaction>(
+                                    crate::credit::ledger::TREE_TRANSACTIONS,
+                                    &tx.id.to_string(),
+                                ) {
+                                    tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
+                                    continue;
+                                }
                                 // Anti-gaming validation for network transactions
                                 {
                                     let mut ag = shared_state.anti_gaming.lock().await;
-                                    match ag.check_transaction(&tx.from, &tx.to, tx.amount) {
-                                        Ok(_decision) => {
-                                            ag.record_transaction(&tx.from);
-                                        }
+                                    match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
+                                        Ok(_decision) => {}
                                         Err(violation) => {
                                             tracing::warn!(
                                                 tx_id = %tx.id,

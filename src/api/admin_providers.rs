@@ -163,12 +163,10 @@ pub async fn update_providers(
                 .put_json("providers", "config", &encrypted);
         }
         Err(e) => {
-            tracing::error!(error = %e, "Failed to encrypt provider keys for storage");
-            // Fall back to storing as-is rather than losing the config
-            let _ = state
-                .shared_state
-                .db
-                .put_json("providers", "config", &*config);
+            tracing::error!(error = %e, "Failed to encrypt provider keys for storage — keys NOT saved");
+            return Err(ApiError(crate::error::SwarmError::Internal(
+                "Failed to encrypt provider configuration".into(),
+            )));
         }
     }
 

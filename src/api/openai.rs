@@ -1190,6 +1190,7 @@ async fn forward_to_peer(
     let peer_resp = client
         .post(&url)
         .header("x-swarm-forwarded", "true")
+        .header("x-swarm-internal-token", "peer-forward")
         .json(req)
         .send()
         .await

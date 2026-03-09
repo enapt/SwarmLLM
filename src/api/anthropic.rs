@@ -160,7 +160,7 @@ pub struct AnthropicUsage {
 
 /// Check if a request is a connectivity probe (Claude Code sends these to test the endpoint).
 fn is_connectivity_probe(req: &MessagesRequest) -> bool {
-    req.max_tokens <= 4 && req.messages.len() == 1
+    req.max_tokens == 1 && req.messages.len() == 1 && !req.stream
 }
 
 /// Convert Anthropic messages to internal ChatMessage format.

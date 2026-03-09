@@ -376,24 +376,7 @@ pub async fn hf_download(
 
 /// POST /api/admin/shutdown — Gracefully shut down the node.
 /// Only accepts requests from localhost (127.0.0.1 or ::1) for safety.
-pub async fn shutdown_node(
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if !addr.ip().is_loopback() {
-        return Err(ApiError(crate::error::SwarmError::Internal(
-            "Shutdown only allowed from localhost".into(),
-        )));
-    }
-    tracing::info!("Shutdown requested via API from {}", addr);
-
-    // Signal all subsystems to shut down via the watch channel.
-    // The daemon.rs supervisor loop will handle graceful draining,
-    // peer cache saving, DB flushing, and process exit.
-    state.shared_state.shutdown();
-
-    Ok(Json(serde_json::json!({ "status": "shutting_down" })))
-}
+// shutdown_node lives in admin.rs (not here) to avoid duplicate symbol from glob re-export
 
 #[derive(Debug, Deserialize)]
 pub struct HfSearchParams {

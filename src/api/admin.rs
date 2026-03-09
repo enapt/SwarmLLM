@@ -35,8 +35,11 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
             .count()
     };
 
-    // Hardware detection
-    let hardware = detect_hardware(&state.shared_state);
+    // Hardware detection — sysinfo does blocking filesystem reads (/proc/*)
+    let ss = state.shared_state.clone();
+    let hardware = tokio::task::spawn_blocking(move || detect_hardware(&ss))
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
 
     // Inference performance metrics from latency samples
     let inference_perf = {

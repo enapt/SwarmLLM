@@ -122,9 +122,11 @@ impl ModelManifest {
     /// Save the manifest to a model directory as `manifest.json`.
     pub fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError> {
         std::fs::create_dir_all(dir).map_err(SwarmError::Io)?;
-        let manifest_path = dir.join("manifest.json");
         let json = serde_json::to_string_pretty(self).map_err(SwarmError::Serialization)?;
-        std::fs::write(manifest_path, json).map_err(SwarmError::Io)?;
+        // Atomic write: write to temp file then rename to prevent corruption on kill/crash
+        let tmp_path = dir.join("manifest.json.tmp");
+        std::fs::write(&tmp_path, json).map_err(SwarmError::Io)?;
+        std::fs::rename(&tmp_path, dir.join("manifest.json")).map_err(SwarmError::Io)?;
         Ok(())
     }
 

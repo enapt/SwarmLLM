@@ -59,13 +59,14 @@ impl NicknameRecord {
     }
 
     /// Verify the Ed25519 signature on this record.
-    /// SEC-I3: Also rejects records older than 1 hour to prevent stale replay.
+    /// SEC-I3: Also rejects records older than 24 hours to prevent stale replay.
     pub fn verify(&self) -> Result<(), SwarmError> {
-        // Timestamp freshness check: reject records older than 1 hour
+        // Timestamp freshness check: reject records older than 24 hours
+        // (matches the gossip dispatcher's age filter in dispatch.rs)
         let age = chrono::Utc::now() - self.timestamp;
-        if age > chrono::Duration::hours(1) {
+        if age > chrono::Duration::hours(24) {
             return Err(SwarmError::InvalidNickname(
-                "Nickname record is stale (older than 1 hour)".into(),
+                "Nickname record is stale (older than 24 hours)".into(),
             ));
         }
         // Also reject records with timestamps in the future (clock skew tolerance: 5 min)

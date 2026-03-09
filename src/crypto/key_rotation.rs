@@ -27,6 +27,7 @@ pub async fn run_key_rotation(
     session_manager: Arc<SessionManager>,
     network_tx: mpsc::Sender<NetworkCommand>,
     local_node_id: NodeId,
+    shared_state: Arc<crate::daemon::SharedState>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut eviction_interval = tokio::time::interval(SESSION_EVICTION_INTERVAL);
@@ -77,12 +78,25 @@ pub async fn run_key_rotation(
                         ephemeral_pubkey: ephemeral_pub,
                         is_initiator: true,
                     });
-                    if let Err(e) = network_tx.try_send(NetworkCommand::Broadcast(msg)) {
-                        tracing::debug!(
-                            peer = %peer,
-                            error = %e,
-                            "Failed to send ephemeral key exchange (channel full)"
-                        );
+                    // Send directly to the target peer via request_response (not gossip).
+                    // Gossip broadcast silently dropped EphemeralKeyExchange (no topic match).
+                    // Direct send also ensures the recipient can authenticate the sender
+                    // via the request_response protocol's peer identity.
+                    let target_bytes = shared_state
+                        .peer_id_map
+                        .get(peer)
+                        .map(|r| r.value().clone());
+                    if let Some(target) = target_bytes {
+                        if let Err(e) = network_tx.try_send(NetworkCommand::SendDirectMessage {
+                            target_peer_bytes: target,
+                            message: msg,
+                        }) {
+                            tracing::debug!(
+                                peer = %peer,
+                                error = %e,
+                                "Failed to send ephemeral key exchange (channel full)"
+                            );
+                        }
                     }
                 }
             }

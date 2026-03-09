@@ -461,12 +461,17 @@ impl NetworkManager {
                             SwarmMessage::HealthPing { timestamp, .. }
                             | SwarmMessage::HealthPong { timestamp, .. } => {
                                 now_epoch.saturating_sub(*timestamp) > 300
+                                    || timestamp.saturating_sub(now_epoch) > 300
                             }
                             SwarmMessage::ShardAnnounce(ann) => {
-                                now_epoch.saturating_sub(ann.timestamp.timestamp() as u64) > 300
+                                let ts = ann.timestamp.timestamp() as u64;
+                                now_epoch.saturating_sub(ts) > 300
+                                    || ts.saturating_sub(now_epoch) > 300
                             }
                             SwarmMessage::CreditGossip(gossip) => {
-                                now_epoch.saturating_sub(gossip.timestamp.timestamp() as u64) > 300
+                                let ts = gossip.timestamp.timestamp() as u64;
+                                now_epoch.saturating_sub(ts) > 300
+                                    || ts.saturating_sub(now_epoch) > 300
                             }
                             _ => false,
                         };

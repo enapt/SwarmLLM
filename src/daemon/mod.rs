@@ -995,11 +995,13 @@ impl Daemon {
             let rotation_shutdown = shutdown_rx.clone();
             let rotation_network_tx = network_tx.clone();
             let rotation_node_id = shared_state.identity.node_id().clone();
+            let rotation_shared_state = shared_state.clone();
             tokio::spawn(async move {
                 crate::crypto::key_rotation::run_key_rotation(
                     rotation_sm,
                     rotation_network_tx,
                     rotation_node_id,
+                    rotation_shared_state,
                     rotation_shutdown,
                 )
                 .await;
