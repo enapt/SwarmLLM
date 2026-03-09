@@ -59,6 +59,22 @@ fn detect_vram_nvidia_smi() -> Option<u64> {
     text.trim().parse::<u64>().ok()
 }
 
+/// Query live GPU VRAM usage in MB via nvidia-smi.
+///
+/// Called on each auto-manage tick (~5 min) for accurate VRAM pressure.
+/// Returns None if nvidia-smi is unavailable or fails.
+fn query_gpu_vram_used() -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<u64>().ok()
+}
+
 /// Auto-manages shard downloads to improve network health.
 ///
 /// Periodically evaluates:
@@ -1835,16 +1851,18 @@ impl AutoShardManager {
             0.0
         };
 
-        // VRAM pressure
+        // VRAM pressure — prefer live nvidia-smi data over internal model tracking
         let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
             if gpu.vram_total_mb > 0 {
-                let loaded_vram: u64 = self
-                    .shared_state
-                    .split_models
-                    .iter()
-                    .map(|e| e.value().estimated_vram_mb)
-                    .sum();
-                loaded_vram as f64 / gpu.vram_total_mb as f64
+                let used_mb = query_gpu_vram_used().unwrap_or_else(|| {
+                    // Fallback: sum estimated VRAM of loaded models
+                    self.shared_state
+                        .split_models
+                        .iter()
+                        .map(|e| e.value().estimated_vram_mb)
+                        .sum()
+                });
+                used_mb as f64 / gpu.vram_total_mb as f64
             } else {
                 0.0
             }
