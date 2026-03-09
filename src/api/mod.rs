@@ -1,4 +1,7 @@
 pub mod admin;
+pub mod admin_hf;
+pub mod admin_models;
+pub mod admin_providers;
 pub mod anthropic;
 pub mod identity;
 pub mod internal;
