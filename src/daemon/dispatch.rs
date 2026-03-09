@@ -1,0 +1,1355 @@
+use std::sync::Arc;
+
+use tokio::sync::{mpsc, watch, RwLock};
+
+use crate::error::SwarmError;
+use crate::inference::router::RouterCommand;
+use crate::types::{EphemeralKeyExchange, NetworkCommand, SwarmMessage};
+
+use super::shard_loader::{try_load_from_shards, ShardLoadParams};
+use super::state::{SharedState, TpAllReduceCollector};
+
+/// Maximum number of concurrent LayerForward tasks.
+const MAX_CONCURRENT_FORWARDS: usize = 64;
+
+/// Dispatch inbound network messages to the appropriate subsystem.
+///
+/// Inference-related messages (InferenceRequest, LayerForward, LayerResult,
+/// InferenceError, PipelineAssignment) are routed to the InferenceRouter.
+/// CreditGossip messages are used to update the peer balance distribution.
+/// ModelVote messages are routed to the governance processor.
+/// Other messages (health, discovery) are handled by their respective
+/// subsystems directly via SharedState or are already handled by NetworkManager.
+pub(crate) async fn dispatch_network_messages(
+    network_out_rx: &mut mpsc::Receiver<SwarmMessage>,
+    router_tx: &mpsc::Sender<RouterCommand>,
+    credit_peer_balances: Arc<RwLock<Vec<i64>>>,
+    shared_state: &Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FORWARDS));
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            msg = network_out_rx.recv() => {
+                match msg {
+                    Some(msg) => {
+                        match msg {
+                            // LayerResult: route to pending pipeline executor via oneshot channel
+                            SwarmMessage::LayerResult(ref result) => {
+                                tracing::info!(
+                                    request_id = %result.request_id,
+                                    tokens = result.token_ids.len(),
+                                    activations_bytes = result.activations.len(),
+                                    finish = ?result.finish_reason,
+                                    pending_count = shared_state.pending_layer_results.len(),
+                                    "DIAG: dispatcher received LayerResult"
+                                );
+                                if let Some((_, tx)) = shared_state
+                                    .pending_layer_results
+                                    .remove(&result.request_id)
+                                {
+                                    if tx.send(result.clone()).is_err() {
+                                        tracing::warn!(
+                                            request_id = %result.request_id,
+                                            tokens = result.token_ids.len(),
+                                            finish = ?result.finish_reason,
+                                            "DIAG: LayerResult delivered but pipeline receiver DROPPED"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            request_id = %result.request_id,
+                                            tokens = result.token_ids.len(),
+                                            activations_bytes = result.activations.len(),
+                                            finish = ?result.finish_reason,
+                                            pending_remaining = shared_state.pending_layer_results.len(),
+                                            "DIAG: LayerResult delivered to pipeline"
+                                        );
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        request_id = %result.request_id,
+                                        tokens = result.token_ids.len(),
+                                        finish = ?result.finish_reason,
+                                        pending_count = shared_state.pending_layer_results.len(),
+                                        "DIAG: No pending channel for LayerResult — already timed out or duplicate"
+                                    );
+                                }
+                            }
+                            // LayerForward: process locally using split inference engine,
+                            // then send back a LayerResult to the requesting node.
+                            SwarmMessage::LayerForward(forward) => {
+                                tracing::info!(
+                                    request_id = %forward.request_id,
+                                    seq = forward.sequence_num,
+                                    layer_range = ?forward.layer_range,
+                                    activation_bytes = forward.activations.len(),
+                                    has_sender = forward.sender_peer_bytes.is_some(),
+                                    "DIAG: dispatcher received LayerForward, spawning handler"
+                                );
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+                                let sem = forward_semaphore.clone();
+                                tokio::spawn(async move {
+                                    let _permit = match sem.acquire().await {
+                                        Ok(p) => p,
+                                        Err(_) => return, // semaphore closed
+                                    };
+                                    handle_layer_forward(ss, ntx, forward).await;
+                                });
+                            }
+                            // StreamingToken: route to registered streaming channel
+                            SwarmMessage::StreamingToken(ref token) => {
+                                // Clone the sender to drop the DashMap Ref (read lock) before
+                                // awaiting send() or calling remove() — avoids deadlock.
+                                let maybe_tx = shared_state
+                                    .streaming_token_txs
+                                    .get(&token.request_id)
+                                    .map(|r| r.clone());
+                                if let Some(tx) = maybe_tx {
+                                    if tx.send(token.clone()).await.is_err() {
+                                        tracing::debug!(
+                                            request_id = %token.request_id,
+                                            "Streaming token channel closed"
+                                        );
+                                        shared_state.streaming_token_txs.remove(&token.request_id);
+                                    }
+                                }
+                            }
+                            // T13: VisionEncodeRequest — encode image using local mmproj
+                            SwarmMessage::VisionEncodeRequest(req) => {
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+                                tokio::spawn(async move {
+                                    handle_vision_encode_request(ss, ntx, req).await;
+                                });
+                            }
+                            // T13: VisionEncodeResponse — fire pending oneshot
+                            SwarmMessage::VisionEncodeResponse(resp) => {
+                                if let Some((_, tx)) = shared_state
+                                    .pending_vision_results
+                                    .remove(&resp.request_id)
+                                {
+                                    let _ = tx.send(resp);
+                                }
+                            }
+                            msg @ SwarmMessage::InferenceRequest(_)
+                            | msg @ SwarmMessage::PipelineAssignment(_)
+                            | msg @ SwarmMessage::InferenceError(_) => {
+                                if let Err(e) = router_tx
+                                    .send(RouterCommand::NetworkMessage(msg))
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to route inference message to router"
+                                    );
+                                }
+                            }
+                            SwarmMessage::CreditGossip(gossip) => {
+                                crate::credit::ledger::process_balance_gossip(
+                                    &credit_peer_balances,
+                                    &gossip,
+                                ).await;
+                                // Store per-peer balance for leaderboard display
+                                shared_state.peer_credit_balances.insert(
+                                    gossip.node_id.clone(),
+                                    gossip.balance_bucket,
+                                );
+                            }
+                            SwarmMessage::ModelVote(vote) => {
+                                tracing::info!(
+                                    voter = %vote.voter,
+                                    manifest_hash = hex::encode(&vote.model_manifest_hash[..8]),
+                                    vote = vote.vote,
+                                    "Received model vote"
+                                );
+                                match crate::model::governance::process_vote(
+                                    &shared_state.model_vote_tallies,
+                                    vote.clone(),
+                                ) {
+                                    Ok(Some(verdict)) => {
+                                        tracing::info!(
+                                            ?verdict,
+                                            manifest_hash = hex::encode(&vote.model_manifest_hash[..8]),
+                                            "Model vote concluded"
+                                        );
+                                    }
+                                    Ok(None) => {} // Still pending
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Failed to process model vote");
+                                    }
+                                }
+                            }
+                            SwarmMessage::CreditTransaction(tx) => {
+                                tracing::debug!(
+                                    tx_id = %tx.id,
+                                    from = %tx.from,
+                                    to = %tx.to,
+                                    amount = tx.amount,
+                                    "Received credit transaction"
+                                );
+                                // Anti-gaming validation for network transactions
+                                {
+                                    let mut ag = shared_state.anti_gaming.lock().await;
+                                    match ag.check_transaction(&tx.from, &tx.to, tx.amount) {
+                                        Ok(_decision) => {
+                                            ag.record_transaction(&tx.from);
+                                        }
+                                        Err(violation) => {
+                                            tracing::warn!(
+                                                tx_id = %tx.id,
+                                                violation = %violation,
+                                                "Anti-gaming rejected credit transaction"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // Record the transaction and apply balance change
+                                // if we are the recipient
+                                let local_id = shared_state.identity.node_id().clone();
+                                if tx.to == local_id {
+                                    if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                                        &shared_state.credit_balance,
+                                        &shared_state.db,
+                                        tx.amount,
+                                        true,
+                                    ).await {
+                                        tracing::warn!(error = %e, "Failed to apply credit transaction");
+                                    }
+                                    let bal = shared_state.credit_balance.read().await;
+                                    tracing::info!(
+                                        amount = tx.amount,
+                                        balance = bal.balance,
+                                        "Applied incoming credit transaction"
+                                    );
+                                }
+                                let key = tx.id.to_string();
+                                if let Err(e) = shared_state.db.put_json(crate::credit::ledger::TREE_TRANSACTIONS, &key, &tx) {
+                                    tracing::warn!(error = %e, "Failed to store credit transaction");
+                                }
+                            }
+                            // Process shard announcements from peers
+                            SwarmMessage::ShardAnnounce(announce) => {
+                                tracing::info!(
+                                    node_id = %announce.node_id,
+                                    shards = announce.shards.len(),
+                                    "Received shard announce from peer"
+                                );
+                                // Refresh last_seen so health monitor doesn't remove active peers
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&announce.node_id) {
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+                                for shard_id in &announce.shards {
+                                    shared_state.model_registry
+                                        .record_shard_holder(shard_id.clone(), announce.node_id.clone());
+                                }
+                                // Wake auto-manage so it re-evaluates rarity scores —
+                                // new shard holders change which shards are most needed.
+                                shared_state.auto_manage_notify.notify_one();
+                            }
+                            // Process model manifests from peers — register in model_registry
+                            SwarmMessage::ModelManifest(manifest) => {
+                                tracing::info!(
+                                    model = %manifest.id,
+                                    name = %manifest.name,
+                                    shards = manifest.shard_count,
+                                    publisher = %manifest.publisher,
+                                    "Received model manifest from network"
+                                );
+                                // Strict verification for network-received manifests:
+                                // reject zero-hash to prevent gossip poisoning.
+                                match manifest.verify_hash_strict() {
+                                    Ok(()) => {
+                                        let is_new = shared_state
+                                            .model_registry
+                                            .get_manifest(&manifest.id)
+                                            .is_none();
+                                        shared_state.model_registry.register_manifest(manifest.clone());
+                                        // Wake auto-manage when a genuinely new model appears
+                                        if is_new {
+                                            shared_state.auto_manage_notify.notify_one();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Manifest hash verification failed — rejecting"
+                                        );
+                                    }
+                                }
+                            }
+                            // Process capability updates from peers
+                            SwarmMessage::NodeCapabilityUpdate(cap) => {
+                                tracing::debug!(
+                                    node_id = %cap.node_id,
+                                    hosted_shards = cap.hosted_shards.len(),
+                                    "Received capability update from peer"
+                                );
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&cap.node_id) {
+                                    peer.capability = Some(cap.clone());
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+                            }
+                            // Nickname gossip from peers
+                            SwarmMessage::NicknameGossip(gossip) => {
+                                let record = &gossip.record;
+                                // Age check: reject messages older than 24 hours
+                                let age = chrono::Utc::now() - record.timestamp;
+                                if age > chrono::Duration::hours(24) {
+                                    tracing::debug!(
+                                        node_id = %record.node_id,
+                                        "Rejecting stale nickname gossip (>24h old)"
+                                    );
+                                } else if record.verify().is_err() {
+                                    tracing::warn!(
+                                        node_id = %record.node_id,
+                                        "Rejecting nickname gossip with invalid signature"
+                                    );
+                                } else {
+                                    // Timestamp-wins: only update if newer
+                                    let should_insert = match shared_state
+                                        .nickname_registry
+                                        .get(&record.node_id)
+                                    {
+                                        Some(existing) => record.timestamp > existing.timestamp,
+                                        None => true,
+                                    };
+                                    if should_insert {
+                                        tracing::info!(
+                                            node_id = %record.node_id,
+                                            nickname = %record.nickname,
+                                            "Accepted nickname from peer"
+                                        );
+                                        shared_state
+                                            .nickname_registry
+                                            .insert(record.node_id.clone(), record.clone());
+                                        // Persist
+                                        let store = crate::identity::nickname::NicknameStore::new(
+                                            shared_state.db.clone(),
+                                        );
+                                        if let Err(e) = store.put_record(record) {
+                                            tracing::warn!(error = %e, "Failed to persist nickname");
+                                        }
+                                    }
+                                }
+                            }
+                            // Route pool messages to the PoolManager
+                            SwarmMessage::PoolMessage(pool_msg) => {
+                                if let Some(ref tx) = *shared_state.pool_tx.read().await {
+                                    let cmd = match pool_msg {
+                                        crate::types::PoolMessage::Invitation(inv) => {
+                                            Some(crate::pool::types::PoolCommand::InboundInvitation {
+                                                invitation: inv,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::BlindedInvitation(blinded) => {
+                                            Some(crate::pool::types::PoolCommand::InboundBlindedInvitation {
+                                                blinded,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::Acceptance(acc) => {
+                                            Some(crate::pool::types::PoolCommand::InboundAcceptance {
+                                                acceptance: acc,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::StateGossip(state) => {
+                                            Some(crate::pool::types::PoolCommand::PoolStateGossip {
+                                                state,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::CreditForward(fwd) => {
+                                            Some(crate::pool::types::PoolCommand::ProcessCreditForward {
+                                                forward: fwd,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::Removal(rem) => {
+                                            Some(crate::pool::types::PoolCommand::InboundRemoval {
+                                                removal: rem,
+                                            })
+                                        }
+                                        crate::types::PoolMessage::MemberLeft { pool_id, node_id, signature } => {
+                                            Some(crate::pool::types::PoolCommand::InboundMemberLeft {
+                                                pool_id,
+                                                node_id,
+                                                signature,
+                                            })
+                                        }
+                                    };
+                                    if let Some(cmd) = cmd {
+                                        if let Err(e) = tx.send(cmd).await {
+                                            tracing::warn!(error = %e, "Failed to route pool message");
+                                        }
+                                    }
+                                }
+                            }
+                            // HuggingFace source gossip — store so auto-manage can download shards
+                            SwarmMessage::HfSourceGossip(gossip) => {
+                                let mid = gossip.model_id.clone();
+                                if !shared_state.hf_sources.contains_key(&mid) {
+                                    tracing::info!(
+                                        model = %mid,
+                                        repo = %gossip.repo_id,
+                                        filename = %gossip.filename,
+                                        publisher = %gossip.publisher,
+                                        "Received HfSourceGossip — storing HF source"
+                                    );
+                                    let source = crate::daemon::HfSource {
+                                        repo_id: gossip.repo_id.clone(),
+                                        filename: gossip.filename.clone(),
+                                        mmproj_filename: gossip.mmproj_filename.clone(),
+                                    };
+                                    shared_state.hf_sources.insert(mid.clone(), source.clone());
+                                    // Persist to sled
+                                    let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
+                                    // Wake the AutoShardManager so it evaluates promptly
+                                    shared_state.auto_manage_notify.notify_one();
+                                }
+                            }
+                            SwarmMessage::ShardDownloadProgress(progress) => {
+                                // Update peer download state in shared state
+                                let local_nid = shared_state.identity.node_id();
+                                if progress.node_id != *local_nid {
+                                    if progress.state == crate::types::DownloadState::Complete || progress.progress_pct >= 100 {
+                                        // Download finished — remove from download tracking
+                                        if let Some(mut entry) = shared_state.peer_shard_downloads.get_mut(&progress.shard_id) {
+                                            entry.retain(|(nid, _)| *nid != progress.node_id);
+                                        }
+                                        // Register the peer as a shard holder now
+                                        // (the ShardAnnounce gossip will also arrive,
+                                        //  but this gives immediate consistency)
+                                        shared_state.model_registry
+                                            .record_shard_holder(progress.shard_id.clone(), progress.node_id.clone());
+                                        // Wake auto-manage — peer completed a download, rarity changed
+                                        shared_state.auto_manage_notify.notify_one();
+                                    } else {
+                                        // Update or insert download progress
+                                        let mut entry = shared_state.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
+                                        if let Some(pos) = entry.iter().position(|(nid, _)| *nid == progress.node_id) {
+                                            entry[pos].1 = progress.progress_pct;
+                                        } else {
+                                            entry.push((progress.node_id.clone(), progress.progress_pct));
+                                        }
+                                    }
+                                    tracing::debug!(
+                                        node = %progress.node_id,
+                                        model = %progress.shard_id.model_id,
+                                        shard = progress.shard_id.index,
+                                        pct = progress.progress_pct,
+                                        state = %progress.state,
+                                        "Peer shard download progress"
+                                    );
+                                }
+                            }
+                            // Health pings: update sender's load and respond with pong
+                            SwarmMessage::HealthPing { nonce, node_id: Some(sender_id), active_request_count, .. } => {
+                                // Update the sender's active request count in peer_registry
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
+                                    peer.active_request_count = active_request_count;
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+
+                                // Respond with a pong containing our own load
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let our_load = shared_state.active_pipelines.len() as u32;
+                                let our_id = Some(shared_state.identity.node_id().clone());
+                                let pong = SwarmMessage::HealthPong {
+                                    nonce,
+                                    timestamp: ts,
+                                    node_id: our_id,
+                                    active_request_count: our_load,
+                                };
+                                let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                            }
+                            // Ignore health pings without node_id (pre-alpha format)
+                            SwarmMessage::HealthPing { node_id: None, .. } => {}
+                            // Health pongs: update the sender's load in peer_registry
+                            SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
+                                if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
+                                    peer.active_request_count = active_request_count;
+                                    peer.last_seen = chrono::Utc::now();
+                                }
+                            }
+                            // Ignore health pongs without node_id (pre-alpha format)
+                            SwarmMessage::HealthPong { node_id: None, .. } => {}
+                            // Ephemeral key exchange for forward secrecy
+                            SwarmMessage::EphemeralKeyExchange(exchange) => {
+                                let sm = shared_state.session_manager.clone();
+                                let our_id = shared_state.identity.node_id().clone();
+                                if exchange.node_id == our_id {
+                                    // Ignore our own broadcast
+                                } else if exchange.is_initiator {
+                                    // Peer wants to re-key: accept and reply
+                                    let response_pub = sm.accept_ephemeral_exchange(
+                                        &exchange.node_id,
+                                        &exchange.ephemeral_pubkey,
+                                    );
+                                    let reply = SwarmMessage::EphemeralKeyExchange(EphemeralKeyExchange {
+                                        session_id: exchange.session_id,
+                                        node_id: our_id,
+                                        ephemeral_pubkey: response_pub,
+                                        is_initiator: false,
+                                    });
+                                    let _ = network_tx.send(NetworkCommand::Broadcast(reply)).await;
+                                } else {
+                                    // Response to our initiation: complete the exchange
+                                    sm.complete_ephemeral_session(
+                                        &exchange.node_id,
+                                        &exchange.ephemeral_pubkey,
+                                    );
+                                }
+                            }
+                            // Tensor-parallel AllReduce: collect partial from a TP rank
+                            SwarmMessage::TpAllReduceRequest(req) => {
+                                let key = (req.request_id, req.layer_idx);
+                                let tp_size = req.tp_size;
+                                let ss = shared_state.clone();
+                                let ntx = network_tx.clone();
+
+                                // Extract sender peer bytes from the request context
+                                // (embedded by NetworkManager when receiving the rr request)
+                                let sender_peer = None; // TODO: plumb sender peer from rr handler
+
+                                let all_arrived = {
+                                    let mut entry = ss.pending_tp_partials
+                                        .entry(key)
+                                        .or_insert_with(|| TpAllReduceCollector::new(tp_size));
+                                    entry.insert(req, sender_peer)
+                                };
+
+                                if all_arrived {
+                                    // All partials collected — reduce and respond
+                                    tokio::spawn(async move {
+                                        let collector = ss.pending_tp_partials.remove(&key);
+                                        if let Some((_, collector)) = collector {
+                                            match collector.reduce_sum() {
+                                                Ok((reduced_data, shape)) => {
+                                                    let resp = crate::types::TpAllReduceResponse {
+                                                        request_id: key.0,
+                                                        layer_idx: key.1,
+                                                        reduced_data,
+                                                        shape,
+                                                    };
+                                                    // Deliver to local registry (coordinator is also a TP rank)
+                                                    ss.allreduce_registry.deliver(resp.clone());
+                                                    // Broadcast response to remote TP participants
+                                                    let msg = SwarmMessage::TpAllReduceResponse(resp);
+                                                    let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        error = %e,
+                                                        request_id = %key.0,
+                                                        layer_idx = key.1,
+                                                        "AllReduce sum failed"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            // Tensor-parallel AllReduce response: deliver to waiting pipeline
+                            SwarmMessage::TpAllReduceResponse(resp) => {
+                                let delivered = shared_state.allreduce_registry.deliver(resp.clone());
+                                tracing::debug!(
+                                    request_id = %resp.request_id,
+                                    layer_idx = resp.layer_idx,
+                                    reduced_bytes = resp.reduced_data.len(),
+                                    delivered,
+                                    "AllReduce response received"
+                                );
+                            }
+                            // Other messages handled by NetworkManager
+                            _ => {}
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+async fn handle_layer_forward(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    forward: crate::types::LayerForward,
+) {
+    use crate::inference::split::{self, SplitModel};
+
+    let request_id = forward.request_id;
+    let sender_peer_bytes = match forward.sender_peer_bytes {
+        Some(ref bytes) => bytes.clone(),
+        None => {
+            tracing::warn!(request_id = %request_id, "LayerForward missing sender_peer_bytes");
+            return;
+        }
+    };
+
+    let forward_start = std::time::Instant::now();
+    tracing::info!(
+        request_id = %request_id,
+        seq = forward.sequence_num,
+        activation_bytes = forward.activations.len(),
+        model_id = %forward.model_id,
+        layer_range = ?forward.layer_range,
+        "DIAG: processing LayerForward locally"
+    );
+
+    let model_id = forward.model_id.clone();
+
+    // Determine our layer range from the manifest and local shards
+    let manifest = match shared_state.model_registry.get_manifest(&model_id) {
+        Some(m) => m,
+        None => {
+            send_error_result(
+                &network_tx,
+                &sender_peer_bytes,
+                request_id,
+                "No manifest for model",
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Figure out which shard indices we hold locally
+    let local_node_id = shared_state.identity.node_id().clone();
+    let mut local_shard_indices: Vec<u32> = Vec::new();
+    for shard_info in &manifest.shards {
+        let shard_id = crate::types::ShardId {
+            model_id: model_id.clone(),
+            index: shard_info.index,
+        };
+        let holders = shared_state.model_registry.shard_holders(&shard_id);
+        if holders.contains(&local_node_id) {
+            local_shard_indices.push(shard_info.index);
+        }
+    }
+
+    if local_shard_indices.is_empty() {
+        send_error_result(
+            &network_tx,
+            &sender_peer_bytes,
+            request_id,
+            "No local shards for model",
+        )
+        .await;
+        return;
+    }
+
+    // Layer range is required in the forward message — no guessing
+    let (layer_start, layer_end, total_layers) = {
+        let (ls, le) = forward.layer_range;
+        let total = manifest.num_layers as usize;
+        (ls as usize, le as usize, total)
+    };
+
+    if layer_start >= layer_end {
+        send_error_result(
+            &network_tx,
+            &sender_peer_bytes,
+            request_id,
+            "Empty layer range",
+        )
+        .await;
+        return;
+    }
+
+    // is_first requires shard 0 (token_embd.weight is at tensor offset 0)
+    // is_last requires the final shard (output.weight spans to the end of the file)
+    let has_shard_0 = local_shard_indices.contains(&0);
+    let last_shard_idx = manifest.shard_count.saturating_sub(1);
+    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
+    let is_first = layer_start == 0 && has_shard_0;
+    let is_last = layer_end >= total_layers && has_last_shard;
+
+    // Ensure the split model is loaded
+    let split_key = (model_id.clone(), layer_start, layer_end);
+    if !shared_state.split_models.contains_key(&split_key) {
+        let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
+        let model_dir = shard_store.models_dir().join(&model_id.0);
+
+        // Try loading the split model from available sources, in priority order:
+        // 1. Reconstructed model.gguf (all shards concatenated)
+        // 2. Original GGUF via source_path
+        // 3. Shard files + gguf_header.bin (no full GGUF needed)
+        let gguf_path = model_dir.join("model.gguf");
+        let source_path_file = model_dir.join("source_path");
+
+        let load_result = if gguf_path.exists() {
+            tracing::info!(
+                model = %model_id,
+                layers = format!("[{layer_start}..{layer_end})"),
+                path = %gguf_path.display(),
+                "Loading split model from reconstructed GGUF"
+            );
+            SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
+        } else if source_path_file.exists() {
+            match std::fs::read_to_string(&source_path_file) {
+                Ok(p) => {
+                    let p = std::path::PathBuf::from(p.trim());
+                    if p.exists() {
+                        tracing::info!(
+                            model = %model_id,
+                            layers = format!("[{layer_start}..{layer_end})"),
+                            path = %p.display(),
+                            "Loading split model from source GGUF"
+                        );
+                        SplitModel::load_from_gguf(&p, layer_start, layer_end, is_first, is_last)
+                    } else {
+                        // source_path exists but file is gone — try shard-based loading
+                        try_load_from_shards(&ShardLoadParams {
+                            model_dir: &model_dir,
+                            shard_store: &shard_store,
+                            model_id: &model_id,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
+                            manifest: &manifest,
+                        })
+                    }
+                }
+                Err(e) => Err(SwarmError::Io(e)),
+            }
+        } else {
+            // No full GGUF anywhere — use shard-based loading
+            try_load_from_shards(&ShardLoadParams {
+                model_dir: &model_dir,
+                shard_store: &shard_store,
+                model_id: &model_id,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                manifest: &manifest,
+            })
+        };
+
+        match load_result {
+            Ok(model) => {
+                // VRAM-aware eviction: if a memory budget is set, evict LRU
+                // models before inserting the new one.
+                let max_batch = shared_state.config.inference.max_batch_size as usize;
+                let batch_timeout = std::time::Duration::from_millis(
+                    shared_state.config.inference.batch_timeout_ms,
+                );
+                let new_entry = if max_batch > 1 {
+                    crate::inference::split::SplitModelEntry::new_with_batching(
+                        model,
+                        shared_state.kv_cache_store.clone(),
+                        max_batch,
+                        batch_timeout,
+                    )
+                } else {
+                    crate::inference::split::SplitModelEntry::new(model)
+                };
+                let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state)
+                    .or(shared_state.config.inference.max_split_model_memory_mb);
+                if let Some(budget_mb) = vram_budget {
+                    let evicted = crate::inference::split::evict_split_models_lru(
+                        &shared_state.split_models,
+                        &shared_state.active_pipelines,
+                        budget_mb,
+                        new_entry.estimated_vram_mb,
+                    );
+                    if evicted > 0 {
+                        tracing::info!(
+                            evicted,
+                            budget_mb,
+                            "Evicted LRU split models for VRAM budget"
+                        );
+                    }
+                }
+                shared_state
+                    .split_models
+                    .insert(split_key.clone(), new_entry);
+            }
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Load failed: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    let (split_model_ref, batch_forwarder, cached_eos_tokens) =
+        match shared_state.split_models.get(&split_key) {
+            Some(r) => {
+                r.value().touch();
+                (
+                    r.value().model.clone(),
+                    r.value().batch_forwarder.clone(),
+                    r.value().eos_tokens.clone(),
+                )
+            }
+            None => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    "Split model vanished",
+                )
+                .await;
+                return;
+            }
+        };
+
+    // Clear per-request KV-cache at the start of a new request (prefill)
+    let req_id_str = request_id.to_string();
+    if forward.sequence_num == 0 {
+        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
+        shared_state
+            .kv_cache_store
+            .clear_request(&model_key, &req_id_str);
+    }
+
+    // Try batch path for decode steps (seq > 0) when batching is enabled.
+    // Prefill (seq 0 on is_first) requires tokenization under the model lock,
+    // so it always falls through to the sequential path.
+    let use_batch = batch_forwarder.is_some() && forward.sequence_num > 0;
+
+    if use_batch {
+        let forwarder = batch_forwarder.unwrap();
+
+        // Build input tensor without holding the model lock
+        let input_tensor = if is_first {
+            // Decode step on first segment: single token ID as i64 LE
+            let token_id = if forward.activations.len() >= 8 {
+                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            "Invalid activation data",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                i64::from_le_bytes(bytes)
+            } else {
+                0i64
+            };
+            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            match split::bytes_to_tensor(&forward.activations) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Decode: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        // Submit to batch forwarder — will be batched with other concurrent requests
+        let output = match forwarder
+            .submit(input_tensor, forward.index_pos as usize, req_id_str)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Batch forward: {e}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        // Post-process using cached eos_tokens (no model lock needed)
+        let result = if is_last {
+            match split::sample_token(&output, 0.7, 0.9) {
+                Ok(token_id) => {
+                    let finish = if cached_eos_tokens.contains(&token_id) {
+                        Some(crate::types::NetworkFinishReason::Stop)
+                    } else {
+                        None
+                    };
+                    crate::types::LayerResult {
+                        request_id,
+                        token_ids: vec![token_id],
+                        finish_reason: finish,
+                        activations: vec![],
+                    }
+                }
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Sample: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            match split::tensor_to_bytes(&output) {
+                Ok(activation_bytes) => crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: activation_bytes,
+                },
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Encode: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+
+        let forward_elapsed = forward_start.elapsed();
+        tracing::info!(
+            request_id = %request_id,
+            tokens = result.token_ids.len(),
+            activations_bytes = result.activations.len(),
+            is_last,
+            elapsed_ms = forward_elapsed.as_millis() as u64,
+            model_id = %model_id,
+            layers = format!("[{layer_start}..{layer_end})"),
+            batched = true,
+            "DIAG: LayerForward processed via batch forwarder"
+        );
+
+        // Track participation
+        {
+            if let Ok(mut stats) = shared_state.node_stats.try_write() {
+                stats.forwards_served += 1;
+            }
+            let layers_processed = (layer_end - layer_start) as i64;
+            let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+            if let Ok(mut bal) = shared_state.credit_balance.try_write() {
+                bal.balance += earned;
+                bal.lifetime_earned += earned as u64;
+                bal.last_updated = chrono::Utc::now();
+            }
+        }
+
+        if let Err(e) = network_tx
+            .send(NetworkCommand::SendTensorResult {
+                target_peer_bytes: sender_peer_bytes,
+                result,
+            })
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
+        }
+        return;
+    }
+
+    // Sequential path: prefill or batching disabled
+    let mut split_model = split_model_ref.lock().await;
+
+    // Convert activation bytes to a candle Tensor
+    let input_tensor = if is_first {
+        if forward.index_pos == 0 {
+            // Prefill: activations are the prompt text → tokenize with BPE if available
+            let prompt = String::from_utf8_lossy(&forward.activations);
+            let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
+                tokenizer.encode(&prompt)
+            } else {
+                prompt.bytes().map(|b| b as i64).collect()
+            };
+            match candle_core::Tensor::from_vec(
+                token_ids.clone(),
+                &[1, token_ids.len()],
+                &candle_core::Device::Cpu,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            // Decode step: activations are a single i64 token ID (8 bytes LE)
+            let token_id = if forward.activations.len() >= 8 {
+                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
+                    Ok(b) => b,
+                    Err(_) => {
+                        tracing::warn!("LayerForward activations too short for token ID");
+                        send_error_result(
+                            &network_tx,
+                            &sender_peer_bytes,
+                            request_id,
+                            "Invalid activation data",
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                i64::from_le_bytes(bytes)
+            } else {
+                0i64
+            };
+            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Tensor: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    } else {
+        match split::bytes_to_tensor(&forward.activations) {
+            Ok(t) => t,
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Decode: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    };
+
+    // Decompress vision embeddings from LayerForward if present
+    let vision_tensor: Option<candle_core::Tensor> = if let Some(ref compressed) =
+        forward.vision_embeddings
+    {
+        match zstd::decode_all(std::io::Cursor::new(compressed)) {
+            Ok(raw_bytes) => {
+                let num_f16 = raw_bytes.len() / 2;
+                let hidden_dim = if num_f16 % 4096 == 0 {
+                    4096
+                } else if num_f16 % 2048 == 0 {
+                    2048
+                } else {
+                    1024
+                };
+                let num_tokens = num_f16 / hidden_dim;
+                let f32_values: Vec<f32> = raw_bytes
+                    .chunks_exact(2)
+                    .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+                    .collect();
+                candle_core::Tensor::from_vec(
+                    f32_values,
+                    &[num_tokens, hidden_dim],
+                    &candle_core::Device::Cpu,
+                )
+                .ok()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Run the forward pass with per-request KV-cache isolation.
+    // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
+    // split_model.forward() is CPU-bound (hundreds of ms for LLM inference) and
+    // would otherwise starve the network event loop — preventing yamux window
+    // updates and causing substream stalling on the next request_response exchange.
+    let compute_result =
+        tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
+            let output = if let Some(ref vis_emb) = vision_tensor {
+                split_model
+                    .forward_multimodal(
+                        &input_tensor,
+                        forward.index_pos as usize,
+                        &shared_state.kv_cache_store,
+                        &req_id_str,
+                        Some(vis_emb),
+                    )
+                    .map_err(|e| format!("Forward multimodal: {e}"))?
+            } else {
+                split_model
+                    .forward(
+                        &input_tensor,
+                        forward.index_pos as usize,
+                        &shared_state.kv_cache_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward: {e}"))?
+            };
+
+            if is_last {
+                let token_id =
+                    split::sample_token(&output, 0.7, 0.9).map_err(|e| format!("Sample: {e}"))?;
+                let eos_tokens = split_model.eos_tokens();
+                let finish = if eos_tokens.contains(&token_id) {
+                    Some(crate::types::NetworkFinishReason::Stop)
+                } else {
+                    None
+                };
+                Ok(crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![token_id],
+                    finish_reason: finish,
+                    activations: vec![],
+                })
+            } else {
+                let activation_bytes =
+                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?;
+                Ok(crate::types::LayerResult {
+                    request_id,
+                    token_ids: vec![],
+                    finish_reason: None,
+                    activations: activation_bytes,
+                })
+            }
+        });
+
+    let result = match compute_result {
+        Ok(r) => r,
+        Err(e) => {
+            send_error_result(&network_tx, &sender_peer_bytes, request_id, &e).await;
+            return;
+        }
+    };
+
+    let forward_elapsed = forward_start.elapsed();
+    tracing::info!(
+        request_id = %request_id,
+        tokens = result.token_ids.len(),
+        activations_bytes = result.activations.len(),
+        is_last,
+        elapsed_ms = forward_elapsed.as_millis() as u64,
+        model_id = %model_id,
+        layers = format!("[{layer_start}..{layer_end})"),
+        "DIAG: LayerForward processed, sending result back"
+    );
+
+    // Track participation: increment forwards_served and earn credits (non-blocking)
+    {
+        if let Ok(mut stats) = shared_state.node_stats.try_write() {
+            stats.forwards_served += 1;
+        }
+        let layers_processed = (layer_end - layer_start) as i64;
+        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+        if let Ok(mut bal) = shared_state.credit_balance.try_write() {
+            bal.balance += earned;
+            bal.lifetime_earned += earned as u64;
+            bal.last_updated = chrono::Utc::now();
+        }
+    }
+
+    // Send back as a separate request to the originating peer
+    if let Err(e) = network_tx
+        .send(NetworkCommand::SendTensorResult {
+            target_peer_bytes: sender_peer_bytes,
+            result,
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
+    }
+}
+
+/// Handle a VisionEncodeRequest: encode the image using local mmproj and respond.
+async fn handle_vision_encode_request(
+    shared_state: Arc<SharedState>,
+    network_tx: mpsc::Sender<NetworkCommand>,
+    req: crate::types::VisionEncodeRequest,
+) {
+    let model_id = &req.model_id;
+    tracing::info!(
+        request_id = %req.request_id,
+        model = %model_id,
+        image_bytes = req.image_data.len(),
+        "Handling VisionEncodeRequest"
+    );
+
+    // Load or get the vision module
+    let vision_module = if let Some(entry) = shared_state.vision_modules.get(model_id) {
+        entry.value().clone()
+    } else {
+        // Try to load mmproj on-demand
+        let model_dir = shared_state
+            .config
+            .node
+            .data_dir
+            .join("models")
+            .join(&model_id.0);
+        let mmproj_path = model_dir.join("mmproj.gguf");
+        if !mmproj_path.exists() {
+            tracing::warn!(
+                request_id = %req.request_id,
+                model = %model_id,
+                "VisionEncodeRequest received but no mmproj.gguf found"
+            );
+            return;
+        }
+        match crate::inference::vision::load_from_mmproj_gguf(
+            &mmproj_path,
+            &candle_core::Device::Cpu,
+        ) {
+            Ok(module) => {
+                let module = Arc::new(module);
+                shared_state
+                    .vision_modules
+                    .insert(model_id.clone(), module.clone());
+                module
+            }
+            Err(e) => {
+                tracing::warn!(
+                    request_id = %req.request_id,
+                    error = %e,
+                    "Failed to load mmproj for VisionEncodeRequest"
+                );
+                return;
+            }
+        }
+    };
+
+    // Decode JPEG image into ImageData
+    let img = match image::load_from_memory(&req.image_data) {
+        Ok(dyn_img) => {
+            let rgb = dyn_img.to_rgb8();
+            let (w, h) = rgb.dimensions();
+            crate::types::ImageData {
+                rgb_bytes: rgb.into_raw(),
+                width: w,
+                height: h,
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Failed to decode image in VisionEncodeRequest"
+            );
+            return;
+        }
+    };
+
+    // Encode image to vision embeddings (CPU-bound)
+    let encode_result = tokio::task::block_in_place(|| vision_module.encode_images(&[img]));
+    match encode_result {
+        Ok(embeddings) => {
+            // Compress embeddings with zstd for wire transfer
+            let (num_tokens, hidden_dim) = embeddings.dims2().unwrap_or((0, 0));
+            let raw_bytes: Vec<u8> = embeddings
+                .to_dtype(candle_core::DType::F16)
+                .and_then(|t| t.to_vec2::<half::f16>())
+                .map(|v: Vec<Vec<half::f16>>| {
+                    let mut bytes = Vec::with_capacity(num_tokens * hidden_dim * 2);
+                    for row in v {
+                        for f in row {
+                            bytes.extend_from_slice(&f.to_le_bytes());
+                        }
+                    }
+                    bytes
+                })
+                .unwrap_or_default();
+            let compressed =
+                zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3).unwrap_or(raw_bytes);
+
+            let response = crate::types::VisionEncodeResponse {
+                request_id: req.request_id,
+                embeddings: compressed,
+                num_tokens: num_tokens as u32,
+                hidden_dim: hidden_dim as u32,
+            };
+
+            tracing::info!(
+                request_id = %req.request_id,
+                num_tokens,
+                hidden_dim,
+                compressed_bytes = response.embeddings.len(),
+                "VisionEncodeRequest completed, sending response"
+            );
+
+            // Send response back via gossip (directed messages use the same path)
+            let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response));
+            if let Err(e) = network_tx.send(msg).await {
+                tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                request_id = %req.request_id,
+                error = %e,
+                "Vision encoding failed"
+            );
+        }
+    }
+}
+
+/// Send an error LayerResult back to the requesting peer.
+async fn send_error_result(
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    target_peer_bytes: &[u8],
+    request_id: uuid::Uuid,
+    error: &str,
+) {
+    tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
+    let result = crate::types::LayerResult {
+        request_id,
+        token_ids: vec![],
+        finish_reason: Some(crate::types::NetworkFinishReason::Error(error.to_string())),
+        activations: vec![],
+    };
+    let _ = network_tx
+        .send(NetworkCommand::SendTensorResult {
+            target_peer_bytes: target_peer_bytes.to_vec(),
+            result,
+        })
+        .await;
+}
