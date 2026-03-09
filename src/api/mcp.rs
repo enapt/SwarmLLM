@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::api::server::AppState;
 
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-05";
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -134,6 +134,13 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                 {
                     "name": "chat",
                     "description": "Send a chat completion request to the SwarmLLM inference engine",
+                    "annotations": {
+                        "title": "Chat Completion",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": true
+                    },
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -168,6 +175,13 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                 {
                     "name": "models",
                     "description": "List available models on this SwarmLLM node and network",
+                    "annotations": {
+                        "title": "List Models",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    },
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
@@ -176,6 +190,13 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                 {
                     "name": "compare",
                     "description": "Send the same prompt to multiple models concurrently and return all responses side-by-side for comparison. Supports local, network, and cloud models.",
+                    "annotations": {
+                        "title": "Compare Models",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": true
+                    },
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -203,6 +224,110 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                         },
                         "required": ["prompt", "models"]
                     }
+                },
+                {
+                    "name": "research",
+                    "description": "Fan out a research question to multiple models in parallel and collect all responses. Designed for knowledge gathering — send a question to cheap/fast models to get diverse perspectives without using expensive model tokens. Each model's response is returned separately with latency and token usage.",
+                    "annotations": {
+                        "title": "Research (Multi-Model)",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": true
+                    },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": "The research question to send to all models"
+                            },
+                            "system": {
+                                "type": "string",
+                                "description": "Optional system prompt to guide research focus"
+                            },
+                            "models": {
+                                "type": "array",
+                                "description": "Array of model IDs to query. If omitted, uses all available models (local + cloud).",
+                                "items": { "type": "string" }
+                            },
+                            "max_models": {
+                                "type": "integer",
+                                "description": "Maximum number of models to query when models is omitted (default 5)"
+                            },
+                            "max_tokens": {
+                                "type": "integer",
+                                "description": "Maximum tokens per response (default 2048)"
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                },
+                {
+                    "name": "batch_prompts",
+                    "description": "Execute multiple independent prompts in parallel, each targeting a specific model. Returns all results once complete. Ideal for offloading parallel subtasks — e.g., ask one model to summarize, another to translate, another to review code, all at once.",
+                    "annotations": {
+                        "title": "Batch Prompts (Parallel)",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": true
+                    },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "tasks": {
+                                "type": "array",
+                                "description": "Array of independent prompt tasks to execute in parallel",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "Caller-defined ID for this task (returned in results for matching)"
+                                        },
+                                        "model": {
+                                            "type": "string",
+                                            "description": "Model ID to use for this task"
+                                        },
+                                        "prompt": {
+                                            "type": "string",
+                                            "description": "The prompt to send"
+                                        },
+                                        "system": {
+                                            "type": "string",
+                                            "description": "Optional system prompt"
+                                        },
+                                        "max_tokens": {
+                                            "type": "integer",
+                                            "description": "Max tokens for this task (default 1024)"
+                                        },
+                                        "temperature": {
+                                            "type": "number",
+                                            "description": "Temperature for this task (default 0.7)"
+                                        }
+                                    },
+                                    "required": ["id", "model", "prompt"]
+                                }
+                            }
+                        },
+                        "required": ["tasks"]
+                    }
+                },
+                {
+                    "name": "node_info",
+                    "description": "Get detailed information about this SwarmLLM node: loaded models, connected peers, VRAM/disk usage, credit balance, available cloud providers, and network status.",
+                    "annotations": {
+                        "title": "Node Information",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": true,
+                        "openWorldHint": false
+                    },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
                 }
             ]
         }),
@@ -217,6 +342,9 @@ async fn handle_tools_call(state: &AppState, id: Option<Value>, params: Value) -
         "chat" => tool_chat(state, id, arguments).await,
         "models" => tool_models(state, id).await,
         "compare" => tool_compare(state, id, arguments).await,
+        "research" => tool_research(state, id, arguments).await,
+        "batch_prompts" => tool_batch_prompts(state, id, arguments).await,
+        "node_info" => tool_node_info(state, id).await,
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
 }
@@ -583,6 +711,458 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
     )
 }
 
+/// Research tool: fan-out a question to multiple models, collect all responses.
+/// If no models specified, auto-selects available models (local first, then cloud).
+async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let question = match args.get("question").and_then(|v| v.as_str()) {
+        Some(q) => q.to_string(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: question");
+        }
+    };
+
+    let max_models = args.get("max_models").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2048) as u32;
+    let system = args
+        .get("system")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // Determine which models to query
+    let models: Vec<String> = if let Some(arr) = args.get("models").and_then(|v| v.as_array()) {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    } else {
+        // Auto-select: local models first, then cloud providers
+        let mut auto_models = Vec::new();
+        if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+            let slug = info
+                .name
+                .to_lowercase()
+                .replace(' ', "-")
+                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            auto_models.push(slug);
+        }
+        for entry in state.shared_state.provider_model_map.iter() {
+            if auto_models.len() >= max_models {
+                break;
+            }
+            auto_models.push(entry.key().clone());
+        }
+        auto_models
+    };
+
+    if models.is_empty() {
+        return JsonRpcResponse::error(id, INTERNAL_ERROR, "No models available for research");
+    }
+    if models.len() > 20 {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 20 models per research query");
+    }
+
+    // Reuse the compare infrastructure but with research-focused framing
+    let client = crate::api::providers::get_provider_client();
+    let port = state.config.node.listen_port;
+    let base = format!("http://127.0.0.1:{port}");
+    let api_key = state.shared_state.api_key.clone();
+
+    let mut handles = Vec::new();
+    for model_id in &models {
+        let url = format!("{base}/v1/messages");
+        let client = client.clone();
+        let model_id = model_id.clone();
+        let api_key = api_key.clone();
+        let system_val = system.clone();
+        let question_clone = question.clone();
+
+        let handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+
+            let mut body = json!({
+                "model": model_id,
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "messages": [{"role": "user", "content": question_clone}],
+                "stream": false,
+            });
+            if let Some(sys) = system_val {
+                body["system"] = json!(sys);
+            }
+
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value = resp
+                        .json()
+                        .await
+                        .unwrap_or(json!({"error": "parse failed"}));
+                    let content = resp_body["content"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                                .next()
+                        })
+                        .unwrap_or("")
+                        .to_string();
+                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+                    json!({
+                        "model": model_id,
+                        "response": content,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": elapsed_ms,
+                        "status": "ok",
+                    })
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    json!({
+                        "model": model_id,
+                        "error": format!("HTTP {status}: {body}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+                Err(e) => {
+                    json!({
+                        "model": model_id,
+                        "error": format!("{e}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
+            }
+        }
+    }
+
+    let total_tokens: u64 = results
+        .iter()
+        .map(|r| r["input_tokens"].as_u64().unwrap_or(0) + r["output_tokens"].as_u64().unwrap_or(0))
+        .sum();
+    let successful = results.iter().filter(|r| r["status"] == "ok").count();
+
+    let summary = json!({
+        "question": question,
+        "models_queried": models.len(),
+        "successful_responses": successful,
+        "total_tokens_used": total_tokens,
+        "results": results,
+    });
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
+/// Batch prompts tool: execute multiple independent prompts in parallel.
+async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let tasks = match args.get("tasks").and_then(|v| v.as_array()) {
+        Some(arr) => arr.clone(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: tasks");
+        }
+    };
+
+    if tasks.is_empty() {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "tasks array must not be empty");
+    }
+    if tasks.len() > 20 {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 20 tasks per batch");
+    }
+
+    let client = crate::api::providers::get_provider_client();
+    let port = state.config.node.listen_port;
+    let base = format!("http://127.0.0.1:{port}");
+    let api_key = state.shared_state.api_key.clone();
+
+    let mut handles = Vec::new();
+    for task in &tasks {
+        let task_id = task
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let model_id = match task.get("model").and_then(|v| v.as_str()) {
+            Some(m) => m.to_string(),
+            None => {
+                handles.push(tokio::spawn(async move {
+                    json!({
+                        "task_id": task_id,
+                        "error": "Missing required field: model",
+                        "status": "error",
+                    })
+                }));
+                continue;
+            }
+        };
+        let prompt = match task.get("prompt").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => {
+                handles.push(tokio::spawn(async move {
+                    json!({
+                        "task_id": task_id,
+                        "error": "Missing required field: prompt",
+                        "status": "error",
+                    })
+                }));
+                continue;
+            }
+        };
+        let system = task
+            .get("system")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let max_tokens = task
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1024) as u32;
+        let temperature = task
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.7) as f32;
+
+        let url = format!("{base}/v1/messages");
+        let client = client.clone();
+        let api_key = api_key.clone();
+
+        let handle = tokio::spawn(async move {
+            let start = std::time::Instant::now();
+
+            let mut body = json!({
+                "model": model_id,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": false,
+            });
+            if let Some(sys) = system {
+                body["system"] = json!(sys);
+            }
+
+            let result = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {api_key}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(resp) if resp.status().is_success() => {
+                    let resp_body: serde_json::Value = resp
+                        .json()
+                        .await
+                        .unwrap_or(json!({"error": "parse failed"}));
+                    let content = resp_body["content"]
+                        .as_array()
+                        .and_then(|arr| {
+                            arr.iter()
+                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                                .next()
+                        })
+                        .unwrap_or("")
+                        .to_string();
+                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+                    json!({
+                        "task_id": task_id,
+                        "model": model_id,
+                        "content": content,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": elapsed_ms,
+                        "status": "ok",
+                    })
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    json!({
+                        "task_id": task_id,
+                        "model": model_id,
+                        "error": format!("HTTP {status}: {body}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+                Err(e) => {
+                    json!({
+                        "task_id": task_id,
+                        "model": model_id,
+                        "error": format!("{e}"),
+                        "latency_ms": elapsed_ms,
+                        "status": "error",
+                    })
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
+            }
+        }
+    }
+
+    let successful = results.iter().filter(|r| r["status"] == "ok").count();
+
+    let summary = json!({
+        "tasks_submitted": tasks.len(),
+        "tasks_completed": successful,
+        "results": results,
+    });
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&summary).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
+/// Node info tool: detailed node status, models, peers, resources.
+async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    // Loaded model
+    let info = state.shared_state.loaded_model_info.read().await;
+    let loaded_model = info.as_ref().map(|i| {
+        json!({
+            "name": i.name,
+            "size_bytes": i.size_bytes,
+        })
+    });
+    drop(info);
+
+    // Peers
+    let peer_count = state.shared_state.peer_registry.len();
+    let mut peers_summary = Vec::new();
+    for entry in state.shared_state.peer_registry.iter() {
+        let peer = entry.value();
+        peers_summary.push(json!({
+            "node_id_short": entry.key().to_string(),
+            "latency_ms": peer.latency_ms,
+            "is_lan": peer.is_lan_peer,
+            "trust_score": peer.trust_score,
+            "active_requests": peer.active_request_count,
+        }));
+    }
+
+    // Registry models
+    let mut registry_models = Vec::new();
+    for manifest in state.shared_state.model_registry.models() {
+        let shard_count = manifest.shards.len();
+        registry_models.push(json!({
+            "id": manifest.id.0,
+            "name": manifest.name,
+            "shards": shard_count,
+            "architecture": format!("{:?}", manifest.architecture),
+        }));
+    }
+
+    // Cloud providers
+    let mut cloud_models: Vec<String> = state
+        .shared_state
+        .provider_model_map
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    cloud_models.sort();
+
+    // Node stats
+    let stats = state.shared_state.node_stats.read().await;
+    let node_stats = json!({
+        "requests_served": stats.requests_served,
+        "requests_made": stats.requests_made,
+        "forwards_served": stats.forwards_served,
+        "bytes_uploaded": stats.bytes_uploaded,
+        "bytes_downloaded": stats.bytes_downloaded,
+        "uptime_seconds": chrono::Utc::now().signed_duration_since(stats.uptime_start).num_seconds(),
+    });
+    drop(stats);
+
+    // Credit balance
+    let credit_balance = state.shared_state.credit_balance.read().await;
+    let credits = json!({
+        "balance": credit_balance.balance,
+        "lifetime_earned": credit_balance.lifetime_earned,
+        "lifetime_spent": credit_balance.lifetime_spent,
+    });
+    drop(credit_balance);
+
+    let node_info = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "loaded_model": loaded_model,
+        "registry_models": registry_models,
+        "cloud_models_available": cloud_models.len(),
+        "cloud_models": cloud_models,
+        "peers": {
+            "count": peer_count,
+            "details": peers_summary,
+        },
+        "stats": node_stats,
+        "credits": credits,
+    });
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&node_info).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
 // ---- Resource implementations ----
 
 async fn resource_status(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
@@ -676,12 +1256,13 @@ mod tests {
         let resp = handle_tools_list(Some(Value::Number(1.into())));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 6);
 
         let chat_tool = &tools[0];
         assert_eq!(chat_tool["name"], "chat");
         assert!(chat_tool["inputSchema"]["properties"]["model"].is_object());
         assert!(chat_tool["inputSchema"]["properties"]["messages"].is_object());
+        assert_eq!(chat_tool["annotations"]["readOnlyHint"], true);
 
         let models_tool = &tools[1];
         assert_eq!(models_tool["name"], "models");
@@ -690,6 +1271,17 @@ mod tests {
         assert_eq!(compare_tool["name"], "compare");
         assert!(compare_tool["inputSchema"]["properties"]["prompt"].is_object());
         assert!(compare_tool["inputSchema"]["properties"]["models"].is_object());
+
+        let research_tool = &tools[3];
+        assert_eq!(research_tool["name"], "research");
+        assert!(research_tool["inputSchema"]["properties"]["question"].is_object());
+
+        let batch_tool = &tools[4];
+        assert_eq!(batch_tool["name"], "batch_prompts");
+        assert!(batch_tool["inputSchema"]["properties"]["tasks"].is_object());
+
+        let node_info_tool = &tools[5];
+        assert_eq!(node_info_tool["name"], "node_info");
     }
 
     #[test]

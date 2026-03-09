@@ -811,11 +811,15 @@ Full Anthropic Messages API compatibility for use as a Claude Code backend:
 - **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy; local GGUF models → tool calls/thinking converted to text for inference
 - **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
 
-### MCP Server
-- `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, Cursor, etc.)
-- Tools: `chat` (wraps inference router), `models` (lists all models), `compare` (multi-model comparison)
+### MCP Server (Protocol v2025-11-05)
+- `POST /mcp` — JSON-RPC 2.0 MCP endpoint for AI agent frameworks (Claude Code, VS Code Copilot, Cursor, etc.)
+- Tools: `chat`, `models`, `compare`, `research`, `batch_prompts`, `node_info`
 - Resources: `swarmllm://status` (node status)
-- **`compare` tool:** sends the same prompt to up to 10 models concurrently, returns side-by-side results with `content`, `latency_ms`, `input_tokens`, `output_tokens`, `status`
+- All tools include [tool annotations](https://modelcontextprotocol.io/specification/2025-11-25) (`readOnlyHint`, `destructiveHint`, etc.)
+- **`compare`:** sends the same prompt to up to 10 models concurrently, returns side-by-side results
+- **`research`:** fan-out a question to multiple models (auto-selects if models omitted), returns all responses with token usage
+- **`batch_prompts`:** execute up to 20 independent {id, model, prompt} tasks in parallel
+- **`node_info`:** detailed node status (loaded model, peers, credits, registry models, cloud providers)
 
 ### Cloud Fallback (Optional)
 When a requested model isn't available locally or on the swarm, requests can optionally be routed to 12 cloud providers:
