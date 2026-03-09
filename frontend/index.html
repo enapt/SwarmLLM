@@ -784,16 +784,15 @@
               <span class="text-muted" style="font-size:0.8rem" data-i18n="compare.subtitle">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
             </div>
             <div class="compare-controls">
+              <div class="form-group" style="margin-bottom:8px">
+                <textarea id="compare-prompt" rows="3" placeholder="Enter your prompt here..." data-i18n-placeholder="compare.prompt_placeholder" style="font-size:0.9rem;resize:vertical"></textarea>
+              </div>
               <details style="margin-bottom:4px">
-                <summary style="font-size:0.78rem;color:var(--text-muted);cursor:pointer">Advanced: system prompt &amp; parameters</summary>
+                <summary style="font-size:0.78rem;color:var(--text-muted);cursor:pointer" data-i18n="compare.advanced">Advanced: system prompt &amp; parameters</summary>
                 <div class="form-group mt-1">
                   <label for="compare-system">System prompt (sets the AI's behavior)</label>
                   <input type="text" id="compare-system" placeholder="You are a helpful assistant." style="font-size:0.85rem">
                 </div>
-              <div class="form-group">
-                <label for="compare-prompt">Prompt</label>
-                <textarea id="compare-prompt" rows="3" placeholder="Enter your prompt here..." style="font-size:0.85rem;resize:vertical"></textarea>
-              </div>
                 <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px">
                   <div class="form-group" style="width:100px">
                     <label for="compare-temp" data-i18n="compare.creativity">Creativity</label>
