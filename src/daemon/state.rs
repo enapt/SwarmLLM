@@ -545,7 +545,7 @@ impl SharedState {
                     .get_json::<crate::config::ProvidersConfig>("providers", "config")
                     .ok()
                     .flatten();
-                match stored {
+                let mut pc = match stored {
                     Some(cfg) => crate::crypto::decrypt_config(&cfg, &signing_key_bytes)
                         .unwrap_or_else(|e| {
                             tracing::warn!(
@@ -555,7 +555,10 @@ impl SharedState {
                             config.providers.clone()
                         }),
                     None => config.providers.clone(),
-                }
+                };
+                // Fill any unconfigured providers from environment variables (.env or shell)
+                pc.fill_from_env();
+                pc
             }),
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,

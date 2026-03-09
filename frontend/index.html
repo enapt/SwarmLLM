@@ -191,9 +191,9 @@
         <input type="number" id="settings-auto-manage-storage" value="0" min="0">
       </div>
       <details class="settings-providers" id="settings-providers-section">
-        <summary>Cloud Providers (Optional Fallback)</summary>
+        <summary>Cloud Providers</summary>
         <div class="mt-2" style="font-size:0.8rem">
-          <span class="text-muted">Optional: add cloud API keys as a fallback when no swarm peers have the model you need. The swarm is the primary way to run models for free.</span>
+          <span class="text-muted">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">.env</code> file in your data directory (e.g. <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">OPENAI_API_KEY=sk-...</code>).</span>
         </div>
         <div class="mt-2" style="margin-bottom:8px">
           <input type="text" id="provider-filter" placeholder="Filter providers..." style="width:100%;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">

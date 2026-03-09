@@ -11,56 +11,38 @@ use crate::error::ApiError;
 pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.shared_state.providers_config.read().await;
 
-    let providers = vec![
-        serde_json::json!({
-            "name": "anthropic",
-            "configured": config.anthropic.is_some(),
-        }),
-        serde_json::json!({
-            "name": "openai",
-            "configured": config.openai.is_some(),
-        }),
-        serde_json::json!({
-            "name": "deepseek",
-            "configured": config.deepseek.is_some(),
-        }),
-        serde_json::json!({
-            "name": "mistral",
-            "configured": config.mistral.is_some(),
-        }),
-        serde_json::json!({
-            "name": "groq",
-            "configured": config.groq.is_some(),
-        }),
-        serde_json::json!({
-            "name": "nvidia_nim",
-            "configured": config.nvidia_nim.is_some(),
-        }),
-        serde_json::json!({
-            "name": "cerebras",
-            "configured": config.cerebras.is_some(),
-        }),
-        serde_json::json!({
-            "name": "sambanova",
-            "configured": config.sambanova.is_some(),
-        }),
-        serde_json::json!({
-            "name": "fireworks",
-            "configured": config.fireworks.is_some(),
-        }),
-        serde_json::json!({
-            "name": "together",
-            "configured": config.together.is_some(),
-        }),
-        serde_json::json!({
-            "name": "deepinfra",
-            "configured": config.deepinfra.is_some(),
-        }),
-        serde_json::json!({
-            "name": "moonshot",
-            "configured": config.moonshot.is_some(),
-        }),
+    let entries: &[(&str, &Option<crate::config::ProviderEntry>)] = &[
+        ("anthropic", &config.anthropic),
+        ("openai", &config.openai),
+        ("deepseek", &config.deepseek),
+        ("mistral", &config.mistral),
+        ("groq", &config.groq),
+        ("nvidia_nim", &config.nvidia_nim),
+        ("cerebras", &config.cerebras),
+        ("sambanova", &config.sambanova),
+        ("fireworks", &config.fireworks),
+        ("together", &config.together),
+        ("deepinfra", &config.deepinfra),
+        ("moonshot", &config.moonshot),
     ];
+
+    let providers: Vec<_> = entries
+        .iter()
+        .map(|(name, entry)| {
+            let source = if entry.is_some() && config.env_sourced.contains(*name) {
+                "env"
+            } else if entry.is_some() {
+                "config"
+            } else {
+                "none"
+            };
+            serde_json::json!({
+                "name": name,
+                "configured": entry.is_some(),
+                "source": source,
+            })
+        })
+        .collect();
 
     Json(serde_json::json!({ "providers": providers }))
 }

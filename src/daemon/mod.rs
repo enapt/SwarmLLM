@@ -78,6 +78,9 @@ impl Daemon {
 
     /// Run the daemon — spawns all subsystems and waits for shutdown.
     pub async fn run(self) -> anyhow::Result<()> {
+        // Load .env file from data dir (or cwd) into process environment
+        crate::config::load_dotenv(&self.config.node.data_dir);
+
         // Log resolved configuration at startup
         let auto_interval = self
             .config

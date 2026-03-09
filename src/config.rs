@@ -635,6 +635,11 @@ pub struct ProvidersConfig {
     pub moonshot: Option<ProviderEntry>,
     #[serde(default)]
     pub custom: Vec<CustomProvider>,
+
+    /// Tracks which providers were loaded from environment variables / .env file.
+    /// Not persisted — runtime only. Used by the UI to show source attribution.
+    #[serde(skip)]
+    pub env_sourced: std::collections::HashSet<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -662,6 +667,105 @@ pub struct CustomProvider {
 impl Drop for CustomProvider {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.api_key);
+    }
+}
+
+impl ProvidersConfig {
+    /// Fill empty provider entries from environment variables.
+    /// Standard env var names: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
+    /// Only fills providers that don't already have a key configured.
+    pub fn fill_from_env(&mut self) {
+        let mappings: &[(&str, &str)] = &[
+            ("OPENAI_API_KEY", "openai"),
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("DEEPSEEK_API_KEY", "deepseek"),
+            ("MISTRAL_API_KEY", "mistral"),
+            ("GROQ_API_KEY", "groq"),
+            ("NVIDIA_NIM_API_KEY", "nvidia_nim"),
+            ("CEREBRAS_API_KEY", "cerebras"),
+            ("SAMBANOVA_API_KEY", "sambanova"),
+            ("FIREWORKS_API_KEY", "fireworks"),
+            ("TOGETHER_API_KEY", "together"),
+            ("DEEPINFRA_API_KEY", "deepinfra"),
+            ("MOONSHOT_API_KEY", "moonshot"),
+        ];
+
+        for (env_var, name) in mappings {
+            if let Ok(key) = std::env::var(env_var) {
+                let key = key.trim().to_string();
+                if key.is_empty() {
+                    continue;
+                }
+                let field = self.field_mut(name);
+                if field.is_none() {
+                    tracing::info!(env_var, "Loaded provider key from environment");
+                    *field = Some(ProviderEntry {
+                        api_key: key,
+                        default_model: None,
+                    });
+                    self.env_sourced.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    fn field_mut(&mut self, name: &str) -> &mut Option<ProviderEntry> {
+        match name {
+            "openai" => &mut self.openai,
+            "anthropic" => &mut self.anthropic,
+            "deepseek" => &mut self.deepseek,
+            "mistral" => &mut self.mistral,
+            "groq" => &mut self.groq,
+            "nvidia_nim" => &mut self.nvidia_nim,
+            "cerebras" => &mut self.cerebras,
+            "sambanova" => &mut self.sambanova,
+            "fireworks" => &mut self.fireworks,
+            "together" => &mut self.together,
+            "deepinfra" => &mut self.deepinfra,
+            "moonshot" => &mut self.moonshot,
+            _ => unreachable!("unknown provider: {name}"),
+        }
+    }
+}
+
+/// Load a `.env` file into the process environment.
+/// Searches in order: `<data_dir>/.env`, `./.env`.
+/// Lines are `KEY=VALUE` or `KEY="VALUE"` format. Blank lines and `#` comments are skipped.
+/// Does NOT override existing environment variables.
+pub fn load_dotenv(data_dir: &std::path::Path) {
+    let candidates = [data_dir.join(".env"), std::path::PathBuf::from(".env")];
+    for path in &candidates {
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                let mut count = 0;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, val)) = line.split_once('=') {
+                        let key = key.trim();
+                        let val = val.trim();
+                        // Strip surrounding quotes
+                        let val = val
+                            .strip_prefix('"')
+                            .and_then(|v| v.strip_suffix('"'))
+                            .or_else(|| val.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                            .unwrap_or(val);
+                        if !key.is_empty() && std::env::var(key).is_err() {
+                            std::env::set_var(key, val);
+                            count += 1;
+                        }
+                    }
+                }
+                tracing::info!(
+                    path = %path.display(),
+                    vars_loaded = count,
+                    "Loaded .env file"
+                );
+                return; // Use first .env found
+            }
+        }
     }
 }
 

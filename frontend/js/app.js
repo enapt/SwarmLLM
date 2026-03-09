@@ -1834,7 +1834,11 @@ var SwarmLLM = (function() {
             if (p.configured) anyConfigured = true;
             var badge = document.getElementById('provider-status-' + p.name);
             if (badge) {
-              if (p.configured) {
+              if (p.configured && p.source === 'env') {
+                badge.textContent = '\u2713 From .env';
+                badge.className = 'badge provider-badge-active';
+                badge.title = 'Loaded from environment variable or .env file';
+              } else if (p.configured) {
                 badge.textContent = '\u2713 Active';
                 badge.className = 'badge provider-badge-active';
               } else {
