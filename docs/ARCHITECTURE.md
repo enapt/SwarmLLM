@@ -965,4 +965,4 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - GPU inference uses candle with CUDA (`--features candle-cuda`). CPU uses candle with native BLAS.
 - Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
 - With 8GB VRAM, only one 7B model can be loaded at a time. Multiple smaller models (1-3B) can coexist.
-- On-demand model loading (C13) will eliminate the current eager-load behavior where all models load at startup.
+- On-demand model loading with LRU eviction loads models into VRAM only when requested.

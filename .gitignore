@@ -17,13 +17,32 @@ Thumbs.db
 # SwarmLLM runtime data
 /.swarmllm/
 
-# Environment
+# Environment / secrets
 .env
 .env.*
 
-# Claude Code local config (personal settings, not shared)
-.claude/settings.local.json
-.claude/logs/
+# Claude Code (entire directory — dev tooling, not part of the project)
+.claude/
+CLAUDE.md
+
+# Peon notification sounds (dev environment)
+.peon-*
+peon-ping-sound.wav
+
+# Internal docs (not for public repo)
+SwarmLLM_Technical_Specification.docx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.pytest_cache/
+
+# Node.js
+node_modules/
+js/dist/
 
 # Test artifacts
 tests/fixtures/tiny_model/*.bin
@@ -37,4 +56,6 @@ tests/fixtures/tiny_model/*.bin
 *.dmg
 *.tar.gz
 *.zip
+
+# Screenshots
 node_a_*.png
