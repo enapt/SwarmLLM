@@ -51,7 +51,7 @@ Single Rust binary, three simultaneous functions:
 
 ```
                            ┌──────────────┐
-                           │   daemon.rs  │
+                           │   daemon/    │
                            │  (bootstrap) │
                            └──────┬───────┘
                                   │ spawns tokio tasks
@@ -83,7 +83,7 @@ Single Rust binary, three simultaneous functions:
 | PoolManager | NetworkManager | `network_tx` | PoolInvitation, PoolState gossip |
 | AutoShardManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (auto downloads) |
 
-The **MessageDispatcher** is a dedicated task in `daemon.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by the model governance module, and pool messages go to PoolManager.
+The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by the model governance module, and pool messages go to PoolManager.
 
 ## Startup Sequence
 
@@ -435,7 +435,7 @@ Long prompts are split into chunks for overlapped prefill and decode:
 - Attention runs per-request (different KV-caches and positions)
 - Output split back via `Tensor::narrow` per request
 - Prefill and single-item batches use sequential path
-- **Both local and remote requests** route through `BatchForwarder` — remote `LayerForward` requests (from `handle_layer_forward` in `daemon.rs`) submit to the same batch queue as local pipeline segments, filling pipeline bubbles where a node would otherwise sit idle waiting for upstream/downstream nodes
+- **Both local and remote requests** route through `BatchForwarder` — remote `LayerForward` requests (from `handle_layer_forward` in `daemon/dispatch.rs`) submit to the same batch queue as local pipeline segments, filling pipeline bubbles where a node would otherwise sit idle waiting for upstream/downstream nodes
 - Timeout-based batch collection: when a request arrives and fewer than `max_batch_size` items are queued, the processor waits up to `batch_timeout_ms` for more requests before dispatching
 - `SplitModelEntry` caches `eos_tokens: Vec<u32>` at construction, enabling lock-free sampling after batched forward passes (no model mutex needed for EOS detection)
 - Config: `max_batch_size` (default 1 = no batching), `batch_timeout_ms` (default 50ms)

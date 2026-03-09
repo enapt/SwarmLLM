@@ -42,16 +42,16 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 7. **Encryption (if enabled)** → `DIAG: encrypting tensor forward` with `aad_len`, `has_session` (manager.rs)
 8. **Remote receive** → `DIAG: codec read_request header` with `tag`, `len` (protocol.rs)
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager.rs)
-10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon.rs)
-11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon.rs)
+10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch.rs)
+11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch.rs)
 12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split.rs)
-13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon.rs)
+13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager.rs)
 16. **Response read** → `DIAG: codec read_response header` with `tag`, `len` (protocol.rs)
 17. **Response received** → `DIAG: received response` with `kind`, `was_tensor_forward`, `pending_tensor_out` (manager.rs)
 18. **Response dispatch** → `DIAG: received TensorPayload response` (manager.rs)
-19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon.rs)
+19. **Result delivery** → `DIAG: dispatcher received LayerResult` → `DIAG: LayerResult delivered to pipeline` (daemon/dispatch.rs)
 20. **Forward complete** → `DIAG: forward_through_segments returned OK` with `fwd_ms`, `tokens`, `activations_bytes` (pipeline.rs)
 21. **Local segment** → `DIAG: local segment complete` with `segment_ms`, `activation_bytes` (pipeline.rs)
 22. **Remote segment** → `DIAG: remote segment complete` with `segment_ms`, `activation_bytes` (pipeline.rs)
@@ -78,8 +78,8 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 - **Decryption fail** → `DIAG: decrypt FAILED — possible AAD mismatch` (manager.rs)
 - **No standby** → `DIAG: NO standby available for failed segment` (pipeline.rs)
 - **Client disconnect** → `DIAG: result_tx receiver dropped` (router.rs)
-- **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon.rs)
-- **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon.rs)
+- **Channel drop** → `DIAG: LayerResult delivered but pipeline receiver DROPPED` (daemon/dispatch.rs)
+- **No pending channel** → `DIAG: No pending channel for LayerResult — already timed out or duplicate` (daemon/dispatch.rs)
 - **Streaming done event** → `DIAG: streaming done_event send failed` (router.rs)
 
 ## SSE Streaming Diagnostics
@@ -371,7 +371,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 |-------|------|--------|
 | DEBUG | `DIAG: speculative record_batch` | `drafted`, `accepted`, `acceptance_rate` |
 
-### Vision (vision.rs + pipeline.rs + daemon.rs)
+### Vision (vision.rs + pipeline.rs + daemon/dispatch.rs)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -654,7 +654,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/credit/trust.rs` | Trust score updates |
 | `src/storage/db.rs` | Database open with path |
 | `src/identity/keypair.rs` | Identity key load |
-| `src/daemon.rs` | LayerForward timing, LayerResult delivery, pending channel state |
+| `src/daemon/dispatch.rs` | LayerForward timing, LayerResult delivery, pending channel state |
 | `src/health/monitor.rs` | Broadcast failures, stale peer counts, channel cleanup details |
 | `src/api/anthropic.rs` | Messages API request entry, connectivity probe fast-path, inference path resolution, cloud proxy |
 | `src/api/identity.rs` | Nickname set/gossip, leaderboard query with peer filtering |
@@ -687,7 +687,7 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 | Model (shard, manifest, huggingface, acquisition, auto_manage, registry, distribution, governance, lora) | 9 | ~25 | Shard verification, HF search/download, model loading, pruning |
 | Credit (ledger, transaction, priority, anti_gaming, trust, escrow) | 6 | ~15 | Transaction verification, tier calculation, trust updates, escrow |
 | Crypto (session, key_rotation, gossip_seal, pipeline_seal) | 4 | ~10 | Key exchange, session management, encryption seal/open |
-| Daemon + Main (daemon.rs, main.rs) | 2 | ~11 | Daemon startup, LayerForward processing, result delivery |
+| Daemon + Main (daemon/, main.rs) | 5 | ~11 | Daemon startup, LayerForward processing, result delivery |
 | Config (config.rs) | 1 | ~2 | Config load source, WSL2 detection, validation |
 | Update (update.rs) | 1 | ~3 | Update check, version compare, apply |
 | Pool (manager, crypto, forward) | 3 | ~5 | Pool commands, invitations, credit forwarding |
@@ -767,7 +767,7 @@ SWARMLLM_NODE_DATA_DIR=/tmp/swarm_n2 cargo run --release -- run -p 8801 --bootst
 
 2. **WSL2 multi-address connection race**: With autonat enabled, mDNS discovered the peer on multiple addresses (127.0.0.1, 172.27.198.18, 10.255.255.254). Both nodes simultaneously established connections via the WSL2 NAT adapter. With `max_established_per_peer=1`, both sides denied each other's connections — sending mutual yamux GoAway frames that killed ALL connections.
 
-3. **Tokio runtime blocking** (`daemon.rs`): `split_model.forward()` ran synchronously on a Tokio worker thread for 708ms+, blocking the runtime. **Fix:** `tokio::task::block_in_place()` wrapper.
+3. **Tokio runtime blocking** (`daemon/dispatch.rs`): `split_model.forward()` ran synchronously on a Tokio worker thread for 708ms+, blocking the runtime. **Fix:** `tokio::task::block_in_place()` wrapper.
 
 **Status:** All three issues fixed. Distributed inference verified working (streaming + non-streaming) with ~130ms per-token pipeline latency. E2E encryption re-enabled.
 

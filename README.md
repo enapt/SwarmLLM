@@ -162,7 +162,7 @@ Internally, the daemon runs 10 async Tokio tasks communicating via channels:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                           daemon.rs                                   │
+│                           daemon/                                     │
 │                                                                      │
 │  NetworkManager ──── InferenceRouter ──── CreditLedger               │
 │       │                    │                   │                      │
