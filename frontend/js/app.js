@@ -90,7 +90,11 @@ var SwarmLLM = (function() {
   }
 
   // Authenticated fetch — adds Bearer token to all requests that need auth
-  function authFetch(url, opts) {
+  async function authFetch(url, opts) {
+    // Ensure API key is loaded before making authenticated requests
+    if (!settings._apiKeyFull && settings._apiKeyPromise) {
+      await settings._apiKeyPromise;
+    }
     opts = opts || {};
     opts.headers = opts.headers || {};
     if (settings._apiKeyFull && !opts.headers['Authorization']) {
@@ -140,7 +144,7 @@ var SwarmLLM = (function() {
       if (tab === 'network-map') {
         networkMap.refresh();
       }
-      if (tab === 'compare') {
+      if (tab === 'compare' && typeof compare !== 'undefined' && compare) {
         compare.loadModels();
         compare.renderHistory();
       }
@@ -1770,11 +1774,12 @@ var SwarmLLM = (function() {
         ui.showBanner('error', 'Failed to load settings: ' + (e.message || 'network error'));
       }
       // Load API key and provider status
-      settings.loadApiKey();
+      settings._apiKeyPromise = settings.loadApiKey();
       settings.loadProviders();
     },
 
     _apiKeyFull: '',
+    _apiKeyPromise: null,
 
     loadApiKey: async function() {
       var keyEl = document.getElementById('settings-api-key');
@@ -4946,6 +4951,11 @@ var SwarmLLM = (function() {
       inputEl.addEventListener('input', updateTokenCounter);
     }
 
+    // Load API key BEFORE switching tabs (compare tab needs auth)
+    setup.init();
+    settings.init();
+    settings._apiKeyPromise = settings.loadApiKey();
+
     // Apply initial tab from URL (handles direct navigation / bookmarks)
     ui.switchTab(activeTab, true);
 
@@ -4981,9 +4991,6 @@ var SwarmLLM = (function() {
       }
     }
 
-    setup.init();
-    settings.init();
-    settings.loadApiKey();
     dashboard.loadInitial();
     loadModels().then(function() { syncMobileModelSelect(); });
     loadPruneHistory();
@@ -5006,7 +5013,6 @@ var SwarmLLM = (function() {
     init();
   }
 
-  // Public API
   // ========================================================================
   // Model Compare Module — side-by-side multi-model comparison
   // ========================================================================
@@ -5025,11 +5031,17 @@ var SwarmLLM = (function() {
         var cloudModels = [];
         try {
           var resp = await authFetch('/api/admin/models');
-          if (resp.ok) localModels = await resp.json();
+          if (resp.ok) {
+            var d = await resp.json();
+            localModels = Array.isArray(d) ? d : (d.models || d.data || []);
+          }
         } catch(e) {}
         try {
           var resp2 = await authFetch('/api/admin/provider-models');
-          if (resp2.ok) cloudModels = await resp2.json();
+          if (resp2.ok) {
+            var d2 = await resp2.json();
+            cloudModels = Array.isArray(d2) ? d2 : (d2.models || d2.data || []);
+          }
         } catch(e) {}
 
         compare.models = [];
@@ -5263,6 +5275,16 @@ var SwarmLLM = (function() {
         );
     },
   };
+
+  // Post-init: load compare models if that tab is active on page load.
+  // compare is defined after init(), so switchTab('compare') during init()
+  // can't reach compare.loadModels(). Defer to ensure init() has completed.
+  setTimeout(function() {
+    if (activeTab === 'compare' && compare) {
+      compare.loadModels();
+      compare.renderHistory();
+    }
+  }, 0);
 
   // --- Network invite code ---
   async function loadNetworkCode() {
