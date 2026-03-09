@@ -427,6 +427,19 @@ pub struct TensorParallelMeta {
 }
 
 // ---- Network Messages ----
+
+/// A SwarmMessage wrapped with transport-authenticated sender identity.
+/// The `sender` field is set by NetworkManager from the Noise-authenticated PeerId
+/// (for request_response) or from the Ed25519-verified gossip signature.
+/// This allows the dispatch handler to verify that message-internal sender claims
+/// (e.g., ShardAnnounce.node_id) match the actual authenticated sender.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedMessage {
+    /// Transport-authenticated sender NodeId. None only for locally-generated messages.
+    pub sender: Option<NodeId>,
+    pub message: SwarmMessage,
+}
+
 /// Top-level enum for all protocol messages sent over libp2p.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SwarmMessage {

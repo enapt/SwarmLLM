@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::error::SwarmError;
 use crate::inference::router::RouterCommand;
-use crate::types::{EphemeralKeyExchange, NetworkCommand, SwarmMessage};
+use crate::types::{AuthenticatedMessage, EphemeralKeyExchange, NetworkCommand, SwarmMessage};
 
 use super::shard_loader::{try_load_from_shards, ShardLoadParams};
 use super::state::{SharedState, TpAllReduceCollector};
@@ -37,7 +37,7 @@ fn track_forward_participation(shared_state: &SharedState, layer_start: usize, l
 /// Other messages (health, discovery) are handled by their respective
 /// subsystems directly via SharedState or are already handled by NetworkManager.
 pub(crate) async fn dispatch_network_messages(
-    network_out_rx: &mut mpsc::Receiver<SwarmMessage>,
+    network_out_rx: &mut mpsc::Receiver<AuthenticatedMessage>,
     router_tx: &mpsc::Sender<RouterCommand>,
     credit_peer_balances: Arc<RwLock<Vec<i64>>>,
     shared_state: &Arc<SharedState>,
@@ -52,9 +52,9 @@ pub(crate) async fn dispatch_network_messages(
                     break;
                 }
             }
-            msg = network_out_rx.recv() => {
-                match msg {
-                    Some(msg) => {
+            authed_msg = network_out_rx.recv() => {
+                match authed_msg {
+                    Some(AuthenticatedMessage { sender: authenticated_sender, message: msg }) => {
                         match msg {
                             // LayerResult: route to pending pipeline executor via oneshot channel
                             SwarmMessage::LayerResult(ref result) => {
@@ -170,6 +170,17 @@ pub(crate) async fn dispatch_network_messages(
                                 }
                             }
                             SwarmMessage::CreditGossip(gossip) => {
+                                // SEC: Verify sender matches the gossip's node_id
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &gossip.node_id {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            claimed = %gossip.node_id,
+                                            "Credit gossip rejected: sender mismatch"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 crate::credit::ledger::process_balance_gossip(
                                     &credit_peer_balances,
                                     &gossip,
@@ -212,6 +223,20 @@ pub(crate) async fn dispatch_network_messages(
                                     amount = tx.amount,
                                     "Received credit transaction"
                                 );
+                                // SEC: Verify the transport-authenticated sender is a party to this tx.
+                                // Prevents relaying forged transactions under someone else's identity.
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &tx.from && sender != &tx.to {
+                                        tracing::warn!(
+                                            tx_id = %tx.id,
+                                            sender = %sender,
+                                            from = %tx.from,
+                                            to = %tx.to,
+                                            "Credit tx rejected: sender is not a party to this transaction"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 // SEC-C3: Reject duplicate transactions (UUID replay check)
                                 if let Ok(Some(_)) = shared_state.db.get_json::<crate::types::CreditTransaction>(
                                     crate::credit::ledger::TREE_TRANSACTIONS,
@@ -289,6 +314,19 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Process shard announcements from peers
                             SwarmMessage::ShardAnnounce(announce) => {
+                                // SEC: Verify the authenticated sender matches the announce's node_id.
+                                // Prevents peers from announcing shards under another node's identity.
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &announce.node_id {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            claimed = %announce.node_id,
+                                            shards = announce.shards.len(),
+                                            "Shard announce rejected: sender mismatch"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 tracing::info!(
                                     node_id = %announce.node_id,
                                     shards = announce.shards.len(),
@@ -352,6 +390,18 @@ pub(crate) async fn dispatch_network_messages(
                             // Nickname gossip from peers
                             SwarmMessage::NicknameGossip(gossip) => {
                                 let record = &gossip.record;
+                                // SEC: Verify gossip sender matches the record's node_id.
+                                // Prevents peers from injecting nicknames for other nodes.
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &record.node_id {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            claimed = %record.node_id,
+                                            "Nickname gossip rejected: sender mismatch"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 // Age check: reject messages older than 24 hours
                                 let age = chrono::Utc::now() - record.timestamp;
                                 if age > chrono::Duration::hours(24) {
@@ -365,6 +415,19 @@ pub(crate) async fn dispatch_network_messages(
                                         "Rejecting nickname gossip with invalid signature"
                                     );
                                 } else {
+                                    // SEC: Only accept nicknames from peers we've seen to prevent
+                                    // Sybil memory exhaustion via pre-generated Ed25519 keypairs.
+                                    // Hard cap as secondary defense.
+                                    if !shared_state.peer_registry.contains_key(&record.node_id)
+                                        && !shared_state.nickname_registry.contains_key(&record.node_id)
+                                        && shared_state.nickname_registry.len() >= 10_000
+                                    {
+                                        tracing::debug!(
+                                            node_id = %record.node_id,
+                                            "Rejecting nickname from unknown peer (registry cap)"
+                                        );
+                                        continue;
+                                    }
                                     // Timestamp-wins: only update if newer
                                     let should_insert = match shared_state
                                         .nickname_registry
@@ -501,6 +564,17 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Health pings: update sender's load and respond with pong
                             SwarmMessage::HealthPing { nonce, node_id: Some(sender_id), active_request_count, .. } => {
+                                // SEC: Verify sender matches the health ping's node_id
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &sender_id {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            claimed = %sender_id,
+                                            "Health ping rejected: sender mismatch"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 // Update the sender's active request count in peer_registry
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
                                     peer.active_request_count = active_request_count;
@@ -526,6 +600,12 @@ pub(crate) async fn dispatch_network_messages(
                             SwarmMessage::HealthPing { node_id: None, .. } => {}
                             // Health pongs: update the sender's load in peer_registry
                             SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
+                                // SEC: Verify sender matches the health pong's node_id
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &sender_id {
+                                        continue;
+                                    }
+                                }
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
                                     peer.active_request_count = active_request_count;
                                     peer.last_seen = chrono::Utc::now();

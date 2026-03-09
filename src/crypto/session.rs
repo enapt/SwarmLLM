@@ -11,6 +11,12 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use crate::error::SwarmError;
 use crate::types::NodeId;
 
+/// Pending ephemeral key exchange entry with creation timestamp for TTL purge.
+struct PendingEphemeral {
+    secret: EphemeralSecret,
+    created_at: Instant,
+}
+
 /// A cached pairwise session derived from X25519 ECDH.
 pub struct CachedSession {
     cipher_key: [u8; 32],
@@ -54,7 +60,8 @@ pub struct SessionManager {
     sessions: DashMap<NodeId, CachedSession>,
     /// Pending ephemeral secrets for in-progress key exchanges (initiator side).
     /// Removed and consumed when the peer responds with their ephemeral key.
-    pending_ephemeral: DashMap<NodeId, EphemeralSecret>,
+    /// Entries have a TTL and are purged by `evict_stale()`.
+    pending_ephemeral: DashMap<NodeId, PendingEphemeral>,
     /// Our ephemeral public keys for pending exchanges (used in key derivation).
     pending_ephemeral_pub: DashMap<NodeId, [u8; 32]>,
 }
@@ -107,8 +114,13 @@ impl SessionManager {
 
         // Store the ephemeral secret and public key temporarily, keyed by peer
         self.pending_ephemeral_pub.insert(peer.clone(), pub_bytes);
-        self.pending_ephemeral
-            .insert(peer.clone(), ephemeral_secret);
+        self.pending_ephemeral.insert(
+            peer.clone(),
+            PendingEphemeral {
+                secret: ephemeral_secret,
+                created_at: Instant::now(),
+            },
+        );
 
         tracing::debug!(peer = %peer, "Initiated ephemeral ECDH exchange");
         pub_bytes
@@ -125,7 +137,7 @@ impl SessionManager {
         peer_ephemeral_pub_bytes: &[u8; 32],
     ) -> bool {
         let ephemeral_secret = match self.pending_ephemeral.remove(peer) {
-            Some((_, secret)) => secret,
+            Some((_, pending)) => pending.secret,
             None => {
                 tracing::warn!(peer = %peer, "No pending ephemeral exchange to complete");
                 return false;
@@ -324,7 +336,7 @@ impl SessionManager {
         Ok(plaintext)
     }
 
-    /// Evict sessions older than `max_age`.
+    /// Evict sessions older than `max_age` and pending ephemeral exchanges older than 60s.
     pub fn evict_stale(&self, max_age: std::time::Duration) {
         let now = Instant::now();
         self.sessions.retain(|peer, session| {
@@ -334,6 +346,23 @@ impl SessionManager {
             }
             keep
         });
+        // SEC: Purge pending ephemeral exchanges that were never completed.
+        // Prevents memory exhaustion from unanswered re-key requests.
+        let ephemeral_ttl = std::time::Duration::from_secs(60);
+        let before = self.pending_ephemeral.len();
+        self.pending_ephemeral.retain(|peer, pending| {
+            let keep = now.duration_since(pending.created_at) < ephemeral_ttl;
+            if !keep {
+                tracing::debug!(peer = %peer, "Evicted stale pending ephemeral exchange");
+            }
+            keep
+        });
+        let evicted = before.saturating_sub(self.pending_ephemeral.len());
+        if evicted > 0 {
+            // Also clean up the matching public key entries
+            self.pending_ephemeral_pub
+                .retain(|peer, _| self.pending_ephemeral.contains_key(peer));
+        }
     }
 
     /// Number of active sessions.

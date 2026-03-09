@@ -13,7 +13,7 @@ use crate::model::acquisition::{AcquisitionCommand, AcquisitionManager};
 use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
-use crate::types::{NetworkCommand, RebalanceEvent, ShardId, SwarmMessage};
+use crate::types::{AuthenticatedMessage, NetworkCommand, RebalanceEvent, ShardId, SwarmMessage};
 use tokio::sync::RwLock;
 
 mod dispatch;
@@ -686,7 +686,7 @@ impl Daemon {
         // acquisition_tx  → AcquisitionManager (model download commands from API)
         //
         let (network_tx, network_rx) = mpsc::channel::<NetworkCommand>(1024);
-        let (network_out_tx, mut network_out_rx) = mpsc::channel::<SwarmMessage>(1024);
+        let (network_out_tx, mut network_out_rx) = mpsc::channel::<AuthenticatedMessage>(1024);
         let (router_cmd_tx, router_cmd_rx) = mpsc::channel::<RouterCommand>(256);
         let (rebalance_tx, rebalance_rx) = mpsc::channel::<RebalanceEvent>(64);
         let (acquisition_tx, acquisition_rx) = mpsc::channel::<AcquisitionCommand>(64);

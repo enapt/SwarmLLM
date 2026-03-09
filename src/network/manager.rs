@@ -29,7 +29,8 @@ pub struct NetworkManager {
     /// Receives commands from daemon tasks (broadcast, send tensor, etc.)
     inbound_rx: mpsc::Receiver<NetworkCommand>,
     /// Sends decoded network messages to the dispatcher for routing.
-    outbound_tx: mpsc::Sender<SwarmMessage>,
+    /// Each message carries the transport-authenticated sender identity.
+    outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
     /// Sends shard data to the AcquisitionManager when received from peers.
     acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     /// Shard store for serving shard data to peers.
@@ -73,7 +74,7 @@ impl NetworkManager {
         identity: &Identity,
         config: &Config,
         inbound_rx: mpsc::Receiver<NetworkCommand>,
-        outbound_tx: mpsc::Sender<SwarmMessage>,
+        outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
         shutdown_rx: watch::Receiver<bool>,
         acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     ) -> Result<Self, SwarmError> {
@@ -169,6 +170,26 @@ impl NetworkManager {
             ping_sent_times: HashMap::new(),
             shutdown_rx,
         })
+    }
+
+    /// Resolve a PeerId to a NodeId using the peer_to_node mapping.
+    fn peer_to_node_id(&self, peer: &libp2p::PeerId) -> Option<crate::types::NodeId> {
+        self.peer_to_node.get(peer).map(|r| r.value().clone())
+    }
+
+    /// Send a SwarmMessage to the dispatcher with transport-authenticated sender.
+    #[allow(clippy::result_large_err)]
+    fn dispatch_authenticated(
+        &self,
+        sender_peer: Option<&libp2p::PeerId>,
+        msg: SwarmMessage,
+    ) -> Result<(), mpsc::error::TrySendError<crate::types::AuthenticatedMessage>> {
+        let sender = sender_peer.and_then(|p| self.peer_to_node_id(p));
+        self.outbound_tx
+            .try_send(crate::types::AuthenticatedMessage {
+                sender,
+                message: msg,
+            })
     }
 
     /// Start the network manager event loop.
@@ -373,9 +394,10 @@ impl NetworkManager {
                                 )),
                                 activations: vec![],
                             };
-                            if let Err(e) = self.outbound_tx
-                                .try_send(SwarmMessage::LayerResult(error_result))
-                            {
+                            if let Err(e) = self.dispatch_authenticated(
+                                Some(&target_peer),
+                                SwarmMessage::LayerResult(error_result),
+                            ) {
                                 tracing::warn!(error = %e, "Failed to send stale tensor error to pipeline");
                             }
                             // Also clean up the inbound response channel for this request
@@ -435,26 +457,26 @@ impl NetworkManager {
                 message,
                 ..
             })) => {
-                // All gossip messages MUST be sealed with the epoch-based group key (PSK).
-                // No plaintext fallback — reject anything that fails to unseal.
+                // SEC: All gossip MUST be signed + sealed. No unsigned fallback.
                 let decoded = self
                     .shared_state
                     .gossip_sealer
-                    .open(&message.data)
+                    .open_signed(&message.data)
                     .map_err(|e| {
-                        tracing::debug!(
+                        tracing::warn!(
                             source = ?message.source,
                             error = %e,
-                            "Rejecting unsealed gossip message"
+                            "Rejecting unsigned/invalid gossip message"
                         );
                         e
                     })
-                    .and_then(|plaintext| {
-                        protocol::decode_message(&plaintext).map_err(|e| e.into())
+                    .and_then(|(sender_pub, plaintext)| {
+                        let msg = protocol::decode_message(&plaintext)?;
+                        Ok((crate::types::NodeId(sender_pub), msg))
                     });
 
                 match decoded {
-                    Ok(msg) => {
+                    Ok((sender_node_id, msg)) => {
                         // NET-M10: Reject gossip messages with timestamps older than 5 minutes
                         let now_epoch = chrono::Utc::now().timestamp() as u64;
                         let too_old = match &msg {
@@ -483,9 +505,14 @@ impl NetworkManager {
                         } else {
                             tracing::debug!(
                                 source = %propagation_source,
-                                "Received GossipSub message"
+                                sender = %sender_node_id,
+                                "Received signed GossipSub message"
                             );
-                            if let Err(e) = self.outbound_tx.try_send(msg) {
+                            let authed = crate::types::AuthenticatedMessage {
+                                sender: Some(sender_node_id),
+                                message: msg,
+                            };
+                            if let Err(e) = self.outbound_tx.try_send(authed) {
                                 self.shared_state
                                     .channel_metrics
                                     .network_out
@@ -497,7 +524,7 @@ impl NetworkManager {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!(error = %e, "Failed to decode gossipsub message");
+                        tracing::debug!(error = %e, "Failed to decode/verify gossipsub message");
                     }
                 }
             }
@@ -581,10 +608,10 @@ impl NetworkManager {
                         ))),
                         activations: vec![],
                     };
-                    if let Err(e) = self
-                        .outbound_tx
-                        .try_send(SwarmMessage::LayerResult(error_result))
-                    {
+                    if let Err(e) = self.dispatch_authenticated(
+                        Some(&peer),
+                        SwarmMessage::LayerResult(error_result),
+                    ) {
                         tracing::warn!(error = %e, "Failed to send OutboundFailure to pipeline");
                     }
                 }
@@ -1182,9 +1209,9 @@ impl NetworkManager {
                             }
                             _ => {}
                         }
-                        // Forward all other messages to dispatcher
+                        // Forward all other messages to dispatcher with authenticated sender
                         tracing::debug!(%peer, "Handling protocol message request");
-                        if let Err(e) = self.outbound_tx.try_send(*msg) {
+                        if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
                             self.shared_state
                                 .channel_metrics
                                 .network_out
@@ -1317,7 +1344,7 @@ impl NetworkManager {
                     self.handle_pex_response(&pex_resp.peers);
                     return;
                 }
-                if let Err(e) = self.outbound_tx.try_send(*msg) {
+                if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
                     self.shared_state
                         .channel_metrics
                         .network_out
@@ -1540,9 +1567,14 @@ impl NetworkManager {
 
         match protocol::encode_message(&msg) {
             Ok(data) => {
-                // Always seal gossip with epoch-based group key (PSK).
-                // This prevents passive sniffing even before per-peer sessions exist.
-                let publish_data = match self.shared_state.gossip_sealer.seal(&data) {
+                // SEC: Sign and seal gossip with Ed25519 identity + epoch PSK.
+                // Unsigned gossip allows any peer to forge messages (shard announcements,
+                // model manifests, health pings, credit gossip) under arbitrary NodeIds.
+                let publish_data = match self
+                    .shared_state
+                    .gossip_sealer
+                    .seal_signed(&data, &self.shared_state.identity)
+                {
                     Ok(sealed) => sealed,
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to seal gossip message, dropping");
@@ -1708,9 +1740,8 @@ impl NetworkManager {
                 )),
                 activations: vec![],
             };
-            if let Err(e) = self
-                .outbound_tx
-                .try_send(SwarmMessage::LayerResult(error_result))
+            if let Err(e) =
+                self.dispatch_authenticated(Some(&peer_id), SwarmMessage::LayerResult(error_result))
             {
                 tracing::warn!(error = %e, "Failed to send not-connected error to pipeline");
             }
@@ -1903,7 +1934,7 @@ impl NetworkManager {
                         let request_id = forward.request_id;
                         forward.sender_peer_bytes = Some(peer.to_bytes());
                         let msg = SwarmMessage::LayerForward(forward);
-                        if let Err(e) = self.outbound_tx.try_send(msg) {
+                        if let Err(e) = self.dispatch_authenticated(Some(&peer), msg) {
                             self.shared_state
                                 .channel_metrics
                                 .network_out
@@ -1932,7 +1963,8 @@ impl NetworkManager {
                             activations_bytes = result.activations.len(),
                             "Decoded tensor LayerResult, dispatching"
                         );
-                        if let Err(e) = self.outbound_tx.try_send(SwarmMessage::LayerResult(result))
+                        if let Err(e) = self
+                            .dispatch_authenticated(Some(&peer), SwarmMessage::LayerResult(result))
                         {
                             self.shared_state
                                 .channel_metrics
@@ -1977,10 +2009,10 @@ impl NetworkManager {
                                     let request_id = forward.request_id;
                                     forward.activations = plaintext;
                                     forward.sender_peer_bytes = Some(peer.to_bytes());
-                                    if let Err(e) = self
-                                        .outbound_tx
-                                        .try_send(SwarmMessage::LayerForward(forward))
-                                    {
+                                    if let Err(e) = self.dispatch_authenticated(
+                                        Some(&peer),
+                                        SwarmMessage::LayerForward(forward),
+                                    ) {
                                         self.shared_state
                                             .channel_metrics
                                             .network_out
