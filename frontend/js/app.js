@@ -487,14 +487,15 @@ var SwarmLLM = (function() {
         if (!resp.ok) {
           var errText = await resp.text();
           var friendlyMsg = errText;
+          var hintHtml = '';
           try {
             var errJson = JSON.parse(errText);
             if (errJson.error) {
               friendlyMsg = errJson.error.message || errJson.error.detail || errText;
-              if (errJson.error.hint) friendlyMsg += '\n\nHint: ' + errJson.error.hint;
+              if (errJson.error.hint) hintHtml = '<div class="chat-error-hint">' + escapeHtml(errJson.error.hint) + '</div>';
             }
           } catch (e) {}
-          contentEl.innerHTML = escapeHtml(friendlyMsg) + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">Retry</button></div>';
+          contentEl.innerHTML = escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">Retry</button></div>';
           contentEl.classList.add('chat-error');
           isStreaming = false;
           document.getElementById('send-btn').disabled = false;
@@ -2093,8 +2094,19 @@ var SwarmLLM = (function() {
         if (!models || models.length === 0) {
           list.innerHTML = '<div class="empty-state" style="padding:20px 0">' +
             '<p style="margin-bottom:8px">No models on this node yet.</p>' +
-            '<p class="text-muted" style="font-size:0.85rem"><strong>Three ways to get started:</strong><br>1. Download models from HuggingFace using <strong>Browse Models</strong> on the dashboard<br>2. Share your Network Code to find peers who already have models<br>3. Add a cloud provider API key in Settings for instant access</p>' +
+            '<p class="text-muted" style="font-size:0.85rem"><strong>Three ways to get started:</strong><br>' +
+            '1. Download models from HuggingFace using <strong>Browse Models</strong> on the dashboard<br>' +
+            '2. Share your Network Code to find peers who already have models<br>' +
+            '3. Add a cloud provider API key for instant access</p>' +
+            '<button class="btn btn-sm" id="setup-add-provider-btn" style="margin-top:10px;font-size:0.8rem">Add Cloud Provider Key (optional)</button>' +
             '</div>';
+          var provBtn = document.getElementById('setup-add-provider-btn');
+          if (provBtn) provBtn.onclick = function() {
+            document.getElementById('setup-wizard').style.display = 'none';
+            ui.openSettings();
+            var section = document.getElementById('settings-providers-section');
+            if (section) { section.open = true; section.scrollIntoView({behavior:'smooth'}); }
+          };
         } else {
           list.innerHTML = '';
           models.forEach(function(m) {
@@ -2115,6 +2127,8 @@ var SwarmLLM = (function() {
     },
 
     populateSummary: function() {
+      var nick = (document.getElementById('setup-nickname').value || '').trim();
+      document.getElementById('summary-nickname').textContent = nick || 'Anonymous';
       var levels = ['minimal', 'moderate', 'maximum'];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
       document.getElementById('summary-contribution').textContent = capitalize(levels[val]);
@@ -2123,6 +2137,8 @@ var SwarmLLM = (function() {
       document.getElementById('summary-disk').textContent = formatMB(setup.hwData ? setup.hwData.available_disk_mb || 0 : 0);
       var autoManage = document.getElementById('setup-auto-manage').checked;
       document.getElementById('summary-auto-manage').textContent = autoManage ? 'Enabled' : 'Disabled';
+      var provNames = {openai:'OpenAI',deepseek:'DeepSeek',groq:'Groq',nvidia_nim:'NVIDIA NIM',cerebras:'Cerebras',sambanova:'SambaNova',anthropic:'Anthropic',mistral:'Mistral',fireworks:'Fireworks',together:'Together',deepinfra:'DeepInfra'};
+      document.getElementById('summary-provider').textContent = setup._savedProvider ? provNames[setup._savedProvider] || setup._savedProvider : 'None (can add later)';
       document.getElementById('summary-models').textContent = 'Default configuration';
     },
 
@@ -2147,6 +2163,17 @@ var SwarmLLM = (function() {
         ui.showBanner('error', 'Setup failed: ' + (e.message || 'network error'));
         return;
       }
+      // Save nickname if set
+      var nick = (document.getElementById('setup-nickname').value || '').trim();
+      if (nick) {
+        try {
+          await authFetch('/api/identity/nickname', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nickname: nick, visibility: 'nickname' }),
+          });
+        } catch (e) { /* non-critical */ }
+      }
       localStorage.setItem(SETUP_DONE_KEY, 'true');
       // Also persist to server so other clients / restarts see setup as done
       try {
@@ -2158,6 +2185,12 @@ var SwarmLLM = (function() {
       } catch (e) { /* non-critical */ }
       document.getElementById('setup-modal').classList.add('hidden');
       ui.showBanner('success', 'Setup complete! Welcome to SwarmLLM.');
+    },
+
+    finish: function() {
+      localStorage.setItem(SETUP_DONE_KEY, 'true');
+      document.getElementById('setup-modal').classList.add('hidden');
+      ui.showBanner('info', 'Setup skipped — you can configure everything in Settings.');
     }
   };
 
@@ -4017,6 +4050,55 @@ var SwarmLLM = (function() {
     // Setup wizard
     on('btn-prev', 'click', function() { setup.prevStep(); });
     on('btn-next', 'click', function() { setup.nextStep(); });
+    on('btn-skip-setup', 'click', function(e) {
+      e.preventDefault();
+      setup.finish();
+    });
+    // Setup provider select
+    on('setup-provider-select', 'change', function() {
+      var sel = document.getElementById('setup-provider-select');
+      var inputDiv = document.getElementById('setup-provider-input');
+      var signupLink = document.getElementById('setup-provider-signup');
+      var providerUrls = {
+        openai: 'https://platform.openai.com/api-keys',
+        deepseek: 'https://platform.deepseek.com/api_keys',
+        groq: 'https://console.groq.com/keys',
+        nvidia_nim: 'https://build.nvidia.com/',
+        cerebras: 'https://cloud.cerebras.ai/',
+        sambanova: 'https://cloud.sambanova.ai/',
+        anthropic: 'https://console.anthropic.com/settings/keys',
+        mistral: 'https://console.mistral.ai/api-keys',
+        fireworks: 'https://fireworks.ai/account/api-keys',
+        together: 'https://api.together.xyz/settings/api-keys',
+        deepinfra: 'https://deepinfra.com/dash/api_keys'
+      };
+      if (sel.value) {
+        inputDiv.classList.remove('hidden');
+        signupLink.href = providerUrls[sel.value] || '#';
+      } else {
+        inputDiv.classList.add('hidden');
+      }
+      document.getElementById('setup-provider-status').textContent = '';
+    });
+    on('setup-provider-save', 'click', async function() {
+      var provider = document.getElementById('setup-provider-select').value;
+      var key = document.getElementById('setup-provider-key').value.trim();
+      var status = document.getElementById('setup-provider-status');
+      if (!provider || !key) { status.textContent = 'Select a provider and enter a key'; status.style.color = 'var(--red)'; return; }
+      status.textContent = 'Saving...'; status.style.color = 'var(--text-muted)';
+      try {
+        var body = {}; body[provider + '_key'] = key;
+        var resp = await authFetch('/api/admin/providers', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+        var data = await resp.json();
+        if (data[provider]) {
+          status.innerHTML = '<span style="color:var(--green)">✓ Connected!</span>';
+          setup._savedProvider = provider;
+        } else {
+          status.innerHTML = '<span style="color:var(--red)">Key saved but provider not responding</span>';
+          setup._savedProvider = provider;
+        }
+      } catch (e) { status.innerHTML = '<span style="color:var(--red)">Error: ' + e.message + '</span>'; }
+    });
     // Wizard step indicators — clickable to jump to completed steps
     document.querySelectorAll('.wizard-step[data-step]').forEach(function(stepBtn) {
       stepBtn.addEventListener('click', function() {
@@ -4488,8 +4570,14 @@ var SwarmLLM = (function() {
     var chips = [];
     if (hasLocalModel) chips.push('<span class="mode-chip chip-local">' + hostedShards + ' shard' + (hostedShards !== 1 ? 's' : '') + ' local</span>');
     if (peers > 0) chips.push('<span class="mode-chip chip-peer">' + peers + ' peer' + (peers !== 1 ? 's' : '') + '</span>');
+    var _providerNames = {
+      openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
+      mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
+      cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks',
+      together: 'Together', deepinfra: 'DeepInfra', moonshot: 'Kimi'
+    };
     cloudProviders.forEach(function(p) {
-      chips.push('<span class="mode-chip chip-cloud">' + capitalize(p) + '</span>');
+      chips.push('<span class="mode-chip chip-cloud">' + escapeHtml(_providerNames[p] || capitalize(p)) + '</span>');
     });
 
     // Remove old mode classes

@@ -22,9 +22,9 @@
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
         <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Hardware Detection">1</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Resource Contribution">2</button>
+        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Identity & Resources">2</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Model Selection">3</button>
+        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Getting Started">3</button>
         <div class="wizard-connector"></div>
         <button class="wizard-step" data-step="4" role="tab" aria-selected="false" aria-label="Step 4: Review">4</button>
       </div>
@@ -45,9 +45,15 @@
         </div>
       </div>
       <div class="wizard-body hidden" id="step-2">
-        <h3>Resource Contribution</h3>
-        <p class="text-muted mb-2">Share your compute to help run models too large for any single machine. The more you give, the more the swarm can do.</p>
-        <div class="form-group mt-2">
+        <h3>Identity & Resources</h3>
+        <div class="form-group mt-1">
+          <label style="font-size:0.85rem;font-weight:600">Nickname <span class="text-muted" style="font-weight:normal">(optional)</span></label>
+          <input type="text" id="setup-nickname" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+          <span class="text-muted" style="font-size:0.72rem">Visible to peers if you choose. Letters, numbers, dash, underscore.</span>
+        </div>
+        <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
+          <label style="font-size:0.85rem;font-weight:600">Resource Contribution</label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Share your compute to help run models too large for any single machine.</p>
           <div class="flex-between mb-1">
             <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
             <span class="mono" id="contribution-label">Minimal</span>
@@ -55,7 +61,7 @@
           </div>
           <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" aria-label="Resource contribution level">
         </div>
-        <div class="mt-2 text-muted" id="contribution-desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
+        <div class="text-muted" style="font-size:0.78rem" id="contribution-desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="setup-auto-manage" style="width:18px;height:18px">
@@ -65,25 +71,53 @@
         </div>
       </div>
       <div class="wizard-body hidden" id="step-3">
-        <h3>Model Selection</h3>
-        <p class="text-muted mb-2">Choose which models to download and host.</p>
+        <h3>Getting Started</h3>
+        <p class="text-muted mb-2">Choose how you want to use SwarmLLM. You can do any or all of these.</p>
         <div id="setup-model-list"><p class="text-muted">Loading available models...</p></div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+          <label style="font-size:0.85rem;font-weight:600">Cloud Provider Key <span class="text-muted" style="font-weight:normal">(optional — instant access)</span></label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Add a key from any cloud AI provider as a fallback. Free tiers available from most providers.</p>
+          <select id="setup-provider-select" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-bottom:6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+            <option value="">Select a provider...</option>
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek (free tier available)</option>
+            <option value="groq">Groq (free tier)</option>
+            <option value="nvidia_nim">NVIDIA NIM (free tier)</option>
+            <option value="cerebras">Cerebras (free tier)</option>
+            <option value="sambanova">SambaNova (free tier)</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="mistral">Mistral</option>
+            <option value="fireworks">Fireworks AI</option>
+            <option value="together">Together AI</option>
+            <option value="deepinfra">DeepInfra</option>
+          </select>
+          <div id="setup-provider-input" class="hidden" style="margin-top:6px">
+            <input type="password" id="setup-provider-key" placeholder="Paste your API key here..." style="width:100%;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);margin-bottom:4px">
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-sm" id="setup-provider-save">Save Key</button>
+              <a id="setup-provider-signup" href="#" target="_blank" rel="noopener" class="provider-signup-link">Get a free key &rarr;</a>
+              <span id="setup-provider-status" style="font-size:0.78rem"></span>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="wizard-body hidden" id="step-4">
         <h3>Ready to Start</h3>
         <p class="text-muted mb-2">Review your configuration:</p>
         <div class="mt-1">
+          <div class="flex-between mb-1"><span class="text-muted">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">GPU</span><span class="mono" id="summary-gpu">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">RAM Allocated</span><span class="mono" id="summary-ram">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Disk Allocated</span><span class="mono" id="summary-disk">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Auto-Manage</span><span class="mono" id="summary-auto-manage">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Models</span><span class="mono" id="summary-models">---</span></div>
         </div>
       </div>
       <div class="wizard-footer">
         <button class="btn hidden" id="btn-prev">Back</button>
-        <div></div>
+        <a href="#" id="btn-skip-setup" style="font-size:0.78rem;color:var(--text-muted);text-decoration:none;align-self:center" title="Skip setup and go straight to the dashboard">Skip setup</a>
         <button class="btn btn-primary btn-lg" id="btn-next">Continue</button>
       </div>
     </div>
@@ -172,6 +206,7 @@
             </div>
             <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="anthropic">Test</button>
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -180,6 +215,7 @@
             </div>
             <input type="password" id="provider-key-openai" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="openai">Test</button>
+            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -188,6 +224,7 @@
             </div>
             <input type="password" id="provider-key-deepseek" placeholder="sk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="deepseek">Test</button>
+            <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -196,6 +233,7 @@
             </div>
             <input type="password" id="provider-key-mistral" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="mistral">Test</button>
+            <a href="https://console.mistral.ai/api-keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -204,6 +242,7 @@
             </div>
             <input type="password" id="provider-key-groq" placeholder="gsk_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="groq">Test</button>
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -212,6 +251,7 @@
             </div>
             <input type="password" id="provider-key-nvidia_nim" placeholder="nvapi-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="nvidia_nim">Test</button>
+            <a href="https://build.nvidia.com/" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -220,6 +260,7 @@
             </div>
             <input type="password" id="provider-key-cerebras" placeholder="csk-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="cerebras">Test</button>
+            <a href="https://cloud.cerebras.ai/" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -228,6 +269,7 @@
             </div>
             <input type="password" id="provider-key-sambanova" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="sambanova">Test</button>
+            <a href="https://cloud.sambanova.ai/" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -236,6 +278,7 @@
             </div>
             <input type="password" id="provider-key-fireworks" placeholder="fw_..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="fireworks">Test</button>
+            <a href="https://fireworks.ai/account/api-keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -244,6 +287,7 @@
             </div>
             <input type="password" id="provider-key-together" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="together">Test</button>
+            <a href="https://api.together.xyz/settings/api-keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -252,6 +296,7 @@
             </div>
             <input type="password" id="provider-key-deepinfra" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="deepinfra">Test</button>
+            <a href="https://deepinfra.com/dash/api_keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -260,6 +305,7 @@
             </div>
             <input type="password" id="provider-key-moonshot" placeholder="..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
             <button class="btn btn-sm" data-test-provider="moonshot">Test</button>
+            <a href="https://platform.moonshot.cn/console/api-keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
           </div>
         </div>
       </details>

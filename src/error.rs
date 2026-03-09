@@ -276,6 +276,36 @@ pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
         SwarmError::Config(_) => Some(
             "Check your config.toml for syntax errors. See config/default.toml for valid options.",
         ),
+        SwarmError::ProviderError { status, ref body } => {
+            let lower = body.to_lowercase();
+            let is_quota = *status == 402
+                || *status == 429
+                || lower.contains("quota")
+                || lower.contains("billing")
+                || lower.contains("insufficient")
+                || lower.contains("balance")
+                || lower.contains("exceeded")
+                || lower.contains("limit")
+                || lower.contains("credits")
+                || lower.contains("payment");
+            if is_quota {
+                Some(
+                    "Your cloud provider credits may be exhausted or rate-limited. \
+                     Top up your account on the provider's website, switch to a free-tier provider \
+                     (DeepSeek, Groq, NVIDIA NIM), or use a local swarm model instead.",
+                )
+            } else if *status == 401 || *status == 403 {
+                Some(
+                    "Your API key appears to be invalid or revoked. \
+                     Update it in Settings → Cloud Providers.",
+                )
+            } else {
+                Some(
+                    "The cloud provider returned an error. Try again, \
+                     switch to a different model, or use a local swarm model.",
+                )
+            }
+        }
         _ => None,
     }
 }

@@ -1258,6 +1258,10 @@ kbd {
 .badge-swarm { background: var(--green); color: var(--bg-primary); font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
 .badge-new { background: var(--blue); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; }
 
+/* Provider signup link */
+.provider-signup-link { font-size: 0.75rem; color: var(--accent); text-decoration: none; margin-left: 8px; opacity: 0.8; }
+.provider-signup-link:hover { opacity: 1; text-decoration: underline; }
+
 /* Cloud provider badge & cards */
 .badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
 .model-card.cloud-model { border-left: 3px solid var(--accent); opacity: 0.9; }
@@ -1858,6 +1862,7 @@ kbd {
 }
 
 /* #23: Chat error with retry */
+.chat-error-hint { margin-top: 8px; padding: 6px 10px; font-size: 0.78rem; color: var(--text-muted); background: rgba(255,255,255,0.04); border-left: 2px solid var(--accent); border-radius: 2px; }
 .chat-error-actions { margin-top: 8px; }
 .chat-error-actions .btn { font-size: 0.75rem; padding: 3px 10px; }
 
