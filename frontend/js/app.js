@@ -5286,7 +5286,7 @@ var SwarmLLM = (function() {
             '<span>In: ' + inputTokens + '</span>' +
             '<span>Out: ' + outputTokens + '</span>' +
             '<span>' + result.latency_ms + 'ms</span>' +
-            (outputTokens > 0 ? '<span>' + Math.round(outputTokens / (result.latency_ms / 1000)) + ' tok/s</span>' : '') +
+            (outputTokens > 0 ? '<span>' + (function() { var t = outputTokens / (result.latency_ms / 1000); return t >= 1 ? Math.round(t) : t.toFixed(1); })() + ' tok/s</span>' : '') +
           '</div>'
         );
     },
