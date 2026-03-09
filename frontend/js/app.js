@@ -2690,6 +2690,9 @@ var SwarmLLM = (function() {
 
       syncMobileModelSelect();
       updateChatAvailability(hasAny);
+      // Re-render chat header now that model data is available
+      // (fixes "unavailable" badge on sessions loaded before model fetch completes)
+      if (typeof chat !== 'undefined' && chat.updateChatHeader) chat.updateChatHeader();
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
