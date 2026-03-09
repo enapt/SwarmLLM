@@ -14,6 +14,20 @@ use crate::types::{CreditBalance, NodeId, NodeStats, PeerInfo, PipelineAssignmen
 
 use super::resolve_api_key;
 
+/// System notification for WebSocket push to the dashboard.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SystemNotification {
+    /// Notification level: "info", "warn", "error"
+    pub level: String,
+    /// Short title for the toast
+    pub title: String,
+    /// Detailed message
+    pub message: String,
+    /// Optional model ID for context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
 /// Thread-safe shared state accessible by all daemon tasks.
 /// Cached info about a locally loaded model (lock-free reads).
 #[derive(Clone, Debug)]
@@ -184,6 +198,9 @@ pub struct SharedState {
     /// Broadcast channel fired when models change (shard download, load, prune).
     /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
     pub models_changed_tx: broadcast::Sender<()>,
+    /// Broadcast channel for system notifications (CPU fallback, errors, etc.).
+    /// WebSocket subscribers push these as toast-worthy events to the dashboard.
+    pub system_notify_tx: broadcast::Sender<SystemNotification>,
     /// Cached mapping of cloud provider model IDs to provider names.
     /// Populated by `list_provider_models` so that `try_proxy_openai` can route
     /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
@@ -583,6 +600,7 @@ impl SharedState {
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
+            system_notify_tx: broadcast::channel(32).0,
             provider_model_map: DashMap::new(),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),

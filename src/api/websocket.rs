@@ -30,6 +30,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let mut lan_rx = shared_state.lan_discovery_tx.subscribe();
     let mut update_rx = shared_state.update_tx.subscribe();
     let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
+    let mut system_rx = shared_state.system_notify_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
@@ -104,6 +105,18 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
                     if sender.send(Message::Text(msg_str)).await.is_err() {
                         break;
+                    }
+                }
+                notification = system_rx.recv() => {
+                    if let Ok(notif) = notification {
+                        let msg = serde_json::json!({
+                            "type": "system_notification",
+                            "data": notif,
+                        });
+                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 update_info = update_rx.recv() => {

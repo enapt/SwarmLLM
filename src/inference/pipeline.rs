@@ -1536,43 +1536,67 @@ impl PipelineExecutor {
             let gguf_path = model_dir.join("model.gguf");
             let source_path_file = model_dir.join("source_path");
 
-            let load_result = if gguf_path.exists() {
-                tracing::info!(
-                    model = %model_id,
-                    layers = format!("[{layer_start}..{layer_end})"),
-                    "Loading split model from GGUF"
-                );
-                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
-            } else if source_path_file.exists() {
-                let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
-                let path = std::path::PathBuf::from(p.trim());
-                tracing::info!(
-                    model = %model_id,
-                    layers = format!("[{layer_start}..{layer_end})"),
-                    "Loading split model from source_path"
-                );
-                SplitModel::load_from_gguf(&path, layer_start, layer_end, is_first, is_last)
-            } else {
-                // Shard-only loading path
-                let params = crate::daemon::ShardLoadParams {
-                    model_dir: &model_dir,
-                    shard_store: &shard_store,
-                    model_id,
-                    layer_start,
-                    layer_end,
-                    is_first,
-                    is_last,
-                    manifest: &manifest,
-                };
-                tracing::info!(
-                    model = %model_id,
-                    layers = format!("[{layer_start}..{layer_end})"),
-                    "Loading split model from shard files"
-                );
-                crate::daemon::try_load_from_shards(&params)
-            };
+            // CRITICAL: Model loading is CPU/IO-heavy (mmap + tensor copies).
+            // Must use block_in_place to avoid starving the Tokio runtime.
+            let load_result = tokio::task::block_in_place(|| {
+                if gguf_path.exists() {
+                    tracing::info!(
+                        model = %model_id,
+                        layers = format!("[{layer_start}..{layer_end})"),
+                        "Loading split model from GGUF"
+                    );
+                    SplitModel::load_from_gguf(
+                        &gguf_path,
+                        layer_start,
+                        layer_end,
+                        is_first,
+                        is_last,
+                    )
+                } else if source_path_file.exists() {
+                    let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
+                    let path = std::path::PathBuf::from(p.trim());
+                    tracing::info!(
+                        model = %model_id,
+                        layers = format!("[{layer_start}..{layer_end})"),
+                        "Loading split model from source_path"
+                    );
+                    SplitModel::load_from_gguf(&path, layer_start, layer_end, is_first, is_last)
+                } else {
+                    let params = crate::daemon::ShardLoadParams {
+                        model_dir: &model_dir,
+                        shard_store: &shard_store,
+                        model_id,
+                        layer_start,
+                        layer_end,
+                        is_first,
+                        is_last,
+                        manifest: &manifest,
+                    };
+                    tracing::info!(
+                        model = %model_id,
+                        layers = format!("[{layer_start}..{layer_end})"),
+                        "Loading split model from shard files"
+                    );
+                    crate::daemon::try_load_from_shards(&params)
+                }
+            });
 
             let split_model = load_result?;
+            // Notify dashboard if model fell back to CPU
+            if split_model.device().is_cpu() {
+                let _ = self.shared_state.system_notify_tx.send(
+                    crate::daemon::state::SystemNotification {
+                        level: "warn".into(),
+                        title: "Model loaded on CPU".into(),
+                        message: format!(
+                            "{} loaded on CPU (GPU VRAM insufficient). Inference will be slower. \
+                             You can free VRAM by unloading other models from the Models page.",
+                            model_id
+                        ),
+                        model_id: Some(model_id.0.clone()),
+                    },
+                );
+            }
             // VRAM-aware eviction before inserting new model
             let max_batch = self.shared_state.config.inference.max_batch_size as usize;
             let batch_timeout = std::time::Duration::from_millis(

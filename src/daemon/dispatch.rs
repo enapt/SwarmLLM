@@ -112,10 +112,12 @@ pub(crate) async fn dispatch_network_messages(
                                     .get(&token.request_id)
                                     .map(|r| r.clone());
                                 if let Some(tx) = maybe_tx {
-                                    if tx.send(token.clone()).await.is_err() {
+                                    // Use try_send to avoid blocking the dispatch loop
+                                    // if the client isn't consuming fast enough.
+                                    if tx.try_send(token.clone()).is_err() {
                                         tracing::debug!(
                                             request_id = %token.request_id,
-                                            "Streaming token channel closed"
+                                            "Streaming token channel closed or full"
                                         );
                                         shared_state.streaming_token_txs.remove(&token.request_id);
                                     }
@@ -709,58 +711,81 @@ async fn handle_layer_forward(
         let gguf_path = model_dir.join("model.gguf");
         let source_path_file = model_dir.join("source_path");
 
-        let load_result = if gguf_path.exists() {
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{layer_start}..{layer_end})"),
-                path = %gguf_path.display(),
-                "Loading split model from reconstructed GGUF"
-            );
-            SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
-        } else if source_path_file.exists() {
-            match std::fs::read_to_string(&source_path_file) {
-                Ok(p) => {
-                    let p = std::path::PathBuf::from(p.trim());
-                    if p.exists() {
-                        tracing::info!(
-                            model = %model_id,
-                            layers = format!("[{layer_start}..{layer_end})"),
-                            path = %p.display(),
-                            "Loading split model from source GGUF"
-                        );
-                        SplitModel::load_from_gguf(&p, layer_start, layer_end, is_first, is_last)
-                    } else {
-                        // source_path exists but file is gone — try shard-based loading
-                        try_load_from_shards(&ShardLoadParams {
-                            model_dir: &model_dir,
-                            shard_store: &shard_store,
-                            model_id: &model_id,
-                            layer_start,
-                            layer_end,
-                            is_first,
-                            is_last,
-                            manifest: &manifest,
-                        })
+        // CRITICAL: Model loading is CPU/IO-heavy (mmap + tensor copies).
+        // Must use block_in_place to avoid starving the Tokio runtime.
+        let load_result = tokio::task::block_in_place(|| {
+            if gguf_path.exists() {
+                tracing::info!(
+                    model = %model_id,
+                    layers = format!("[{layer_start}..{layer_end})"),
+                    path = %gguf_path.display(),
+                    "Loading split model from reconstructed GGUF"
+                );
+                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
+            } else if source_path_file.exists() {
+                match std::fs::read_to_string(&source_path_file) {
+                    Ok(p) => {
+                        let p = std::path::PathBuf::from(p.trim());
+                        if p.exists() {
+                            tracing::info!(
+                                model = %model_id,
+                                layers = format!("[{layer_start}..{layer_end})"),
+                                path = %p.display(),
+                                "Loading split model from source GGUF"
+                            );
+                            SplitModel::load_from_gguf(
+                                &p,
+                                layer_start,
+                                layer_end,
+                                is_first,
+                                is_last,
+                            )
+                        } else {
+                            try_load_from_shards(&ShardLoadParams {
+                                model_dir: &model_dir,
+                                shard_store: &shard_store,
+                                model_id: &model_id,
+                                layer_start,
+                                layer_end,
+                                is_first,
+                                is_last,
+                                manifest: &manifest,
+                            })
+                        }
                     }
+                    Err(e) => Err(SwarmError::Io(e)),
                 }
-                Err(e) => Err(SwarmError::Io(e)),
+            } else {
+                try_load_from_shards(&ShardLoadParams {
+                    model_dir: &model_dir,
+                    shard_store: &shard_store,
+                    model_id: &model_id,
+                    layer_start,
+                    layer_end,
+                    is_first,
+                    is_last,
+                    manifest: &manifest,
+                })
             }
-        } else {
-            // No full GGUF anywhere — use shard-based loading
-            try_load_from_shards(&ShardLoadParams {
-                model_dir: &model_dir,
-                shard_store: &shard_store,
-                model_id: &model_id,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-                manifest: &manifest,
-            })
-        };
+        });
 
         match load_result {
             Ok(model) => {
+                // Notify dashboard if model fell back to CPU
+                if model.device().is_cpu() {
+                    let _ = shared_state.system_notify_tx.send(
+                        crate::daemon::state::SystemNotification {
+                            level: "warn".into(),
+                            title: "Model loaded on CPU".into(),
+                            message: format!(
+                            "{} loaded on CPU (GPU VRAM insufficient). Inference will be slower. \
+                                 You can free VRAM by unloading other models from the Models page.",
+                            model_id
+                        ),
+                            model_id: Some(model_id.0.clone()),
+                        },
+                    );
+                }
                 // VRAM-aware eviction: if a memory budget is set, evict LRU
                 // models before inserting the new one.
                 let max_batch = shared_state.config.inference.max_batch_size as usize;

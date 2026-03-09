@@ -2324,6 +2324,10 @@ var SwarmLLM = (function() {
             ' \u2014 ' + d.holder_count_before + '\u2192' + d.holder_count_after + ' holders (freed ' + freed + ')';
           showPruneToast(text);
           // models_changed event from prune will trigger refresh below
+        } else if (msg.type === 'system_notification') {
+          var n = msg.data;
+          var level = n.level === 'error' ? 'error' : (n.level === 'warn' ? 'warning' : 'info');
+          showToast(n.title + ': ' + n.message, level, 10000);
         } else if (msg.type === 'models_changed') {
           // Debounce: coalesce rapid model change events
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);

@@ -187,8 +187,8 @@ pub async fn hf_download(
         )));
     }
 
-    // Sanitize repo_id to prevent path traversal — reject ".." components
-    let sanitized_repo = repo_id.replace('/', "_");
+    // Sanitize repo_id to prevent path traversal — reject ".." and backslash
+    let sanitized_repo = repo_id.replace(['/', '\\'], "_");
     if sanitized_repo.contains("..") || sanitized_repo.starts_with('.') {
         return Err(ApiError(crate::error::SwarmError::Config(
             "Invalid repo_id: path traversal detected".into(),
