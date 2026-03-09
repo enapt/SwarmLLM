@@ -167,7 +167,7 @@ a:hover { color: var(--accent-hover); }
   background: var(--bg-secondary); border: 1px solid var(--border-light); border-radius: var(--radius);
   box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000;
   min-width: 260px; max-width: 320px; max-height: 400px;
-  display: none; flex-direction: column;
+  flex-direction: column;
 }
 .model-dropdown.open .model-dropdown-panel { display: flex; }
 .model-dropdown-search {
@@ -1295,7 +1295,7 @@ kbd {
 
 /* HF search badges */
 .badge-swarm { background: var(--green); color: var(--bg-primary); font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
-.badge-new { background: var(--blue); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; }
+.badge-new { background: var(--accent); color: #fff; font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; }
 
 /* Provider signup link */
 .provider-signup-link { font-size: 0.75rem; color: var(--accent); text-decoration: none; margin-left: 8px; opacity: 0.8; }

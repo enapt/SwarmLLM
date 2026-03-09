@@ -40,9 +40,6 @@ var SwarmLLM = (function() {
   var modelStatus = {};
   var _modelStatusPending = {}; // track in-flight probes
 
-  // Clear stale chat sessions on each page load (dev mode)
-  try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
-
   // --- BASIC / ADVANCED MODE ---
   function isBasicMode() { return (localStorage.getItem(MODE_KEY) || 'basic') === 'basic'; }
 
@@ -233,7 +230,7 @@ var SwarmLLM = (function() {
       thumb.title = img.name;
       var removeBtn = document.createElement('button');
       removeBtn.textContent = '\u00D7';
-      removeBtn.style.cssText = 'position:absolute;top:-4px;right:-4px;background:var(--danger);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:12px;cursor:pointer;line-height:18px;padding:0;';
+      removeBtn.style.cssText = 'position:absolute;top:-4px;right:-4px;background:var(--red);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:12px;cursor:pointer;line-height:18px;padding:0;';
       removeBtn.onclick = function() {
         pendingImages.splice(idx, 1);
         renderImagePreviews();
@@ -423,7 +420,7 @@ var SwarmLLM = (function() {
         if (msg.images && msg.images.length > 0) {
           var html = '<div style="margin-bottom:6px;">';
           msg.images.forEach(function(url) {
-            html += '<img src="' + url + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
+            html += '<img src="' + escapeHtml(url) + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
           });
           html += '</div>' + escapeHtml(msg.content);
           appendMessageToDOM(msg.role, html, true);
@@ -970,10 +967,7 @@ var SwarmLLM = (function() {
           var speed = ap.speed_bytes_per_sec || 0;
           var etaStr = '';
           if (speed > 0 && totalBytes > dlBytes) {
-            var secsLeft = Math.round((totalBytes - dlBytes) / speed);
-            if (secsLeft >= 3600) etaStr = Math.floor(secsLeft / 3600) + 'h ' + Math.floor((secsLeft % 3600) / 60) + 'm';
-            else if (secsLeft >= 60) etaStr = Math.floor(secsLeft / 60) + 'm ' + (secsLeft % 60) + 's';
-            else etaStr = secsLeft + 's';
+            etaStr = formatEta((totalBytes - dlBytes) / speed);
           }
           // Build segmented bar — one segment per downloading shard
           var dlShards = shards.filter(function(s) { return s.download || s.local; });
@@ -1320,10 +1314,7 @@ var SwarmLLM = (function() {
               var shardLabel = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || shardDetails.length)) : 'Downloading';
               var etaStr = '';
               if (speed > 0 && acq.total_bytes > dlBytes) {
-                var secsLeft = Math.round((acq.total_bytes - dlBytes) / speed);
-                if (secsLeft >= 3600) etaStr = Math.floor(secsLeft / 3600) + 'h ' + Math.floor((secsLeft % 3600) / 60) + 'm';
-                else if (secsLeft >= 60) etaStr = Math.floor(secsLeft / 60) + 'm ' + (secsLeft % 60) + 's';
-                else etaStr = secsLeft + 's';
+                etaStr = formatEta((acq.total_bytes - dlBytes) / speed);
               }
               var textEl = progressEl.querySelector('.dl-progress-text');
               if (textEl) {
@@ -2980,13 +2971,13 @@ var SwarmLLM = (function() {
     if (document.getElementById('update-banner')) return;
     var banner = document.createElement('div');
     banner.id = 'update-banner';
-    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:#f9e2af;color:#1e1e2e;padding:0.6rem 1rem;display:flex;align-items:center;justify-content:center;gap:1rem;font-size:0.85rem;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--yellow, #eab308);color:var(--bg-primary, #0a0e14);padding:0.6rem 1rem;display:flex;align-items:center;justify-content:center;gap:1rem;font-size:0.85rem;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
     var text = 'Update available: v' + escapeHtml(data.current_version) + ' \u2192 v' + escapeHtml(data.latest_version);
     banner.innerHTML = '<span>' + text + '</span>';
     if (data.downloaded) {
       var applyBtn = document.createElement('button');
       applyBtn.textContent = 'Apply & Restart';
-      applyBtn.style.cssText = 'background:#1e1e2e;color:#f9e2af;border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      applyBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       applyBtn.onclick = async function() {
         applyBtn.disabled = true;
         applyBtn.textContent = 'Applying...';
@@ -3009,7 +3000,7 @@ var SwarmLLM = (function() {
     } else {
       var dlBtn = document.createElement('button');
       dlBtn.textContent = 'Download & Apply';
-      dlBtn.style.cssText = 'background:#1e1e2e;color:#f9e2af;border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
+      dlBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       dlBtn.onclick = async function() {
         dlBtn.disabled = true;
         dlBtn.textContent = 'Checking...';
@@ -3402,10 +3393,7 @@ var SwarmLLM = (function() {
         var speed = dl.speed_bytes_per_sec || 0;
         var etaStr = '';
         if (dl.eta_secs) {
-          var s = dl.eta_secs;
-          if (s >= 3600) etaStr = Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
-          else if (s >= 60) etaStr = Math.floor(s / 60) + 'm ' + (s % 60) + 's';
-          else etaStr = s + 's';
+          etaStr = formatEta(dl.eta_secs);
         }
 
         var statsRight = formatBytes(dl.downloaded_bytes || 0) + ' / ' + formatBytes(dl.total_bytes || 0);
@@ -3475,12 +3463,7 @@ var SwarmLLM = (function() {
           var right = formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes);
           if (speed > 0) right += ' \u00b7 ' + formatSpeed(speed);
           if (speed > 0 && totalBytes > dlBytes) {
-            var etaSecs = Math.round((totalBytes - dlBytes) / speed);
-            var etaStr;
-            if (etaSecs >= 3600) etaStr = Math.floor(etaSecs / 3600) + 'h ' + Math.floor((etaSecs % 3600) / 60) + 'm';
-            else if (etaSecs >= 60) etaStr = Math.floor(etaSecs / 60) + 'm ' + (etaSecs % 60) + 's';
-            else etaStr = etaSecs + 's';
-            right += ' \u00b7 ETA ' + etaStr;
+            right += ' \u00b7 ETA ' + formatEta((totalBytes - dlBytes) / speed);
           }
           statsEl.innerHTML = '<span>' + shardInfo + ' \u00b7 ' + pct + '%</span><span>' + right + '</span>';
         }
@@ -3670,6 +3653,13 @@ var SwarmLLM = (function() {
     if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
     if (bytesPerSec >= 1024) return Math.round(bytesPerSec / 1024) + ' KB/s';
     return bytesPerSec + ' B/s';
+  }
+
+  function formatEta(seconds) {
+    var s = Math.round(seconds);
+    if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    if (s >= 60) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return s + 's';
   }
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -4612,7 +4602,7 @@ var SwarmLLM = (function() {
             var userContent = prev.querySelector('.msg-content');
             if (userContent) {
               // Switch to compare tab and populate prompt
-              switchTab('compare');
+              ui.switchTab('compare');
               var promptEl = document.getElementById('compare-prompt');
               if (promptEl) promptEl.value = userContent.textContent;
               compare.loadModels();
