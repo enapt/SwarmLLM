@@ -4,6 +4,21 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### UX & Internationalization
+- **i18n** — 20 languages (Arabic, Chinese, Czech, Dutch, English, French, German, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian, Vietnamese)
+- **Theme toggle** — Light / Dark / System theme with persistent preference
+- **Basic/Advanced mode** — Toggle for simplified vs power-user UI
+- **Plain-English UX pass** — Removed jargon, clearer labels and error messages for beginners
+- **Compare UX** — Prompt textarea moved out of collapsed section, All/Local/Cloud filter buttons, chat source indicators, tok/s display fix for slow models (shows 0.5 instead of 0)
+- **Provider UX** — `.env` file support for API keys, key source selector (auto/env/dashboard), error badges with click-to-settings
+- **GPU OOM → CPU fallback** — Models that exceed GPU VRAM automatically retry on CPU (split fast-path preserved, not slow pipeline path)
+- **Anthropic API model routing fix** — Requests now route to the correct model instead of always using the first loaded model
+
+### Codebase Quality
+- **Refactored**: `daemon.rs` (4015 lines → module directory), `admin.rs` (4225 lines → 4 modules), `split.rs` (10K lines → 6 modules)
+- **Extracted**: `swarmllm-frontend` crate with dev mode for instant UI changes without full rebuild
+- 669 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+
 ### Model Trust & On-Demand Loading (Phase 14)
 - **Model Trust System** — demand-driven trust prevents trash models from auto-propagating
   - `ModelTrustLevel` enum: Discovered → Pinned → DemandVerified → NetworkPopular
@@ -26,8 +41,6 @@ All notable changes to SwarmLLM are documented here.
   - Download button renamed to "Add to node" (clarifies seed shard semantics)
   - "Local only" indicator when no peers host the model
 - **Storage**: `get_all_json()` method on Database for key-value iteration with subkeys
-- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
-
 ### Claude Code Integration (Phase 13)
 - **Full Anthropic Messages API** (`POST /v1/messages`) — complete Claude Code compatibility
   - `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking) request fields
