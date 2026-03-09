@@ -5,7 +5,10 @@ use libp2p::kad::RecordKey;
 use libp2p::swarm::Swarm;
 use libp2p::Multiaddr;
 
+use ed25519_dalek::Verifier;
+
 use crate::error::SwarmError;
+use crate::identity::Identity;
 use crate::network::behaviour::SwarmBehaviour;
 use crate::types::{NodeCapability, NodeId, ShardId};
 
@@ -108,14 +111,50 @@ pub fn subscribe_topics(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmEr
     Ok(())
 }
 
+/// Sign a DHT record value with Ed25519 identity.
+/// Output format: `[32B pubkey][64B signature][payload]`
+fn sign_dht_value(identity: &Identity, payload: &[u8]) -> Vec<u8> {
+    let pubkey = identity.node_id().0;
+    let signature = identity.sign(payload);
+    let mut out = Vec::with_capacity(32 + 64 + payload.len());
+    out.extend_from_slice(&pubkey);
+    out.extend_from_slice(&signature);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Verify a signed DHT record value. Returns (node_id_bytes, payload) on success.
+pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> {
+    if signed.len() < 32 + 64 {
+        return Err(SwarmError::InvalidSignature);
+    }
+    let pubkey_bytes: [u8; 32] = signed[..32]
+        .try_into()
+        .map_err(|_| SwarmError::InvalidSignature)?;
+    let sig_bytes: [u8; 64] = signed[32..96]
+        .try_into()
+        .map_err(|_| SwarmError::InvalidSignature)?;
+    let payload = &signed[96..];
+
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|_| SwarmError::InvalidSignature)?;
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    vk.verify(payload, &sig)
+        .map_err(|_| SwarmError::InvalidSignature)?;
+
+    Ok((pubkey_bytes, payload))
+}
+
 /// Announce local node capability to the DHT.
 pub fn announce_capability(
     swarm: &mut Swarm<SwarmBehaviour>,
     node_id: &NodeId,
     capability: &NodeCapability,
+    identity: &Identity,
 ) -> Result<(), SwarmError> {
     let key = RecordKey::new(&format!("/swarm/node/{node_id}"));
-    let value = serde_json::to_vec(capability).map_err(|e| SwarmError::Network(e.to_string()))?;
+    let payload = serde_json::to_vec(capability).map_err(|e| SwarmError::Network(e.to_string()))?;
+    let value = sign_dht_value(identity, &payload);
 
     // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
     let record = kad::Record {
@@ -131,7 +170,7 @@ pub fn announce_capability(
         .put_record(record, kad::Quorum::One)
         .map_err(|e| SwarmError::Network(format!("Failed to put capability record: {e}")))?;
 
-    tracing::debug!(node_id = %node_id, "Announced capability to DHT");
+    tracing::debug!(node_id = %node_id, "Announced signed capability to DHT");
     Ok(())
 }
 
@@ -143,6 +182,7 @@ pub fn announce_shards(
     swarm: &mut Swarm<SwarmBehaviour>,
     node_id: &NodeId,
     shards: &[ShardId],
+    identity: &Identity,
 ) -> Result<(), SwarmError> {
     // Group shards by model_id for batched announcement
     let mut by_model: std::collections::HashMap<&crate::types::ModelId, Vec<u32>> =
@@ -155,10 +195,11 @@ pub fn announce_shards(
     }
 
     for (model_id, indices) in &by_model {
-        // Single record per model: key = /swarm/shards/<model_id>, value = (node_id, [indices])
+        // Single record per model: key = /swarm/shards/<model_id>, value = signed(node_id, [indices])
         let key = RecordKey::new(&format!("/swarm/shards/{model_id}"));
-        let value = serde_json::to_vec(&(node_id, indices))
+        let payload = serde_json::to_vec(&(node_id, indices))
             .map_err(|e| SwarmError::Network(e.to_string()))?;
+        let value = sign_dht_value(identity, &payload);
 
         // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
         let record = kad::Record {

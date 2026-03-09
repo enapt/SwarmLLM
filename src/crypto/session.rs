@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -17,14 +17,115 @@ struct PendingEphemeral {
     created_at: Instant,
 }
 
+/// RFC 6479 sliding window anti-replay bitmap.
+/// Tracks the highest seen nonce and a bitmap of recent nonces within the window.
+/// Allows reordered packets within WINDOW_SIZE positions of the highest seen nonce.
+struct ReplayWindow {
+    /// Highest nonce successfully decrypted.
+    top: u64,
+    /// Bitmap: bit i is set if nonce (top - i) has been seen.
+    /// Index 0 = top itself, index 1 = top-1, etc.
+    bitmap: [u64; REPLAY_BITMAP_WORDS],
+}
+
+/// Window size in bits (128 = 2 × u64).
+const REPLAY_WINDOW_SIZE: u64 = 128;
+const REPLAY_BITMAP_WORDS: usize = (REPLAY_WINDOW_SIZE / 64) as usize;
+
+impl ReplayWindow {
+    fn new() -> Self {
+        Self {
+            top: 0,
+            bitmap: [0u64; REPLAY_BITMAP_WORDS],
+        }
+    }
+
+    /// Check whether a nonce is acceptable (not replayed, within window).
+    /// Returns true if the nonce should be accepted.
+    fn check(&self, nonce: u64) -> bool {
+        if self.top == 0 && self.bitmap == [0; REPLAY_BITMAP_WORDS] {
+            // First message: any nonce is acceptable
+            return true;
+        }
+        if nonce > self.top {
+            return true; // New high — always accept
+        }
+        let diff = self.top - nonce;
+        if diff >= REPLAY_WINDOW_SIZE {
+            return false; // Too old — outside window
+        }
+        // Check bitmap
+        let word = (diff / 64) as usize;
+        let bit = diff % 64;
+        (self.bitmap[word] >> bit) & 1 == 0 // Accept if bit not set
+    }
+
+    /// Record a nonce as seen. Call only after successful decryption.
+    fn record(&mut self, nonce: u64) {
+        if self.top == 0 && self.bitmap == [0; REPLAY_BITMAP_WORDS] {
+            // First nonce
+            self.top = nonce;
+            self.bitmap[0] = 1; // Mark position 0 (= top itself)
+            return;
+        }
+        if nonce > self.top {
+            let shift = nonce - self.top;
+            self.shift_bitmap(shift);
+            self.top = nonce;
+            self.bitmap[0] |= 1; // Mark position 0 (= new top)
+        } else {
+            let diff = self.top - nonce;
+            if diff < REPLAY_WINDOW_SIZE {
+                let word = (diff / 64) as usize;
+                let bit = diff % 64;
+                self.bitmap[word] |= 1 << bit;
+            }
+        }
+    }
+
+    /// Shift the bitmap by `shift` positions to make room for a new top.
+    fn shift_bitmap(&mut self, shift: u64) {
+        if shift >= REPLAY_WINDOW_SIZE {
+            // Entire window is invalidated
+            self.bitmap = [0; REPLAY_BITMAP_WORDS];
+            return;
+        }
+        let word_shift = (shift / 64) as usize;
+        let bit_shift = (shift % 64) as u32;
+
+        if bit_shift == 0 {
+            // Whole-word shift only
+            for i in (word_shift..REPLAY_BITMAP_WORDS).rev() {
+                self.bitmap[i] = self.bitmap[i - word_shift];
+            }
+            for i in 0..word_shift {
+                self.bitmap[i] = 0;
+            }
+        } else {
+            for i in (0..REPLAY_BITMAP_WORDS).rev() {
+                let lo = if i >= word_shift {
+                    self.bitmap[i - word_shift] << bit_shift
+                } else {
+                    0
+                };
+                let hi = if i > word_shift {
+                    self.bitmap[i - word_shift - 1] >> (64 - bit_shift)
+                } else {
+                    0
+                };
+                self.bitmap[i] = lo | hi;
+            }
+        }
+    }
+}
+
 /// A cached pairwise session derived from X25519 ECDH.
 pub struct CachedSession {
     cipher_key: [u8; 32],
     send_nonce: AtomicU64,
-    /// SEC-I5: Tracks the highest received nonce to prevent replay attacks.
-    last_seen_recv_nonce: AtomicU64,
-    /// Whether nonce=0 has been seen (prevents replay of the first message).
-    nonce_zero_seen: AtomicBool,
+    /// RFC 6479 sliding window for anti-replay. Protected by a Mutex since
+    /// it requires mutable access for both check and record operations.
+    replay_window: std::sync::Mutex<ReplayWindow>,
     created_at: Instant,
 }
 
@@ -33,8 +134,7 @@ impl CachedSession {
         Self {
             cipher_key,
             send_nonce: AtomicU64::new(0),
-            last_seen_recv_nonce: AtomicU64::new(0),
-            nonce_zero_seen: AtomicBool::new(false),
+            replay_window: std::sync::Mutex::new(ReplayWindow::new()),
             created_at: Instant::now(),
         }
     }
@@ -260,7 +360,8 @@ impl SessionManager {
     }
 
     /// Open (decrypt) data from a specific peer.
-    /// SEC-I5: Rejects replayed messages by enforcing monotonic nonce ordering.
+    /// SEC-I5: RFC 6479 sliding window anti-replay. Allows reordered packets
+    /// within a 128-nonce window while rejecting duplicates and ancient nonces.
     /// Nonce state is only updated AFTER successful decryption to prevent DoS
     /// via forged packets with high nonce values.
     pub fn open(&self, peer: &NodeId, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, SwarmError> {
@@ -277,16 +378,19 @@ impl SessionManager {
         nonce_counter_bytes.copy_from_slice(&sealed[4..12]);
         let recv_nonce = u64::from_le_bytes(nonce_counter_bytes);
 
-        // Pre-check: reject obviously replayed nonces without modifying state.
-        if recv_nonce == 0 {
-            if session.nonce_zero_seen.load(Ordering::SeqCst) {
-                tracing::warn!(peer = %peer, "Rejecting replayed nonce=0");
-                return Err(SwarmError::DecryptionFailed);
-            }
-        } else {
-            let current = session.last_seen_recv_nonce.load(Ordering::SeqCst);
-            if current >= recv_nonce {
-                tracing::warn!(peer = %peer, recv_nonce, current, "Rejecting replayed nonce");
+        // Pre-check: reject replayed or out-of-window nonces without modifying state.
+        {
+            let window = session
+                .replay_window
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !window.check(recv_nonce) {
+                tracing::warn!(
+                    peer = %peer,
+                    recv_nonce,
+                    window_top = window.top,
+                    "Rejecting replayed/out-of-window nonce"
+                );
                 return Err(SwarmError::DecryptionFailed);
             }
         }
@@ -310,7 +414,6 @@ impl SessionManager {
                 aad_len = aad.len(),
                 sealed_len = sealed.len(),
                 ciphertext_len = ciphertext.len(),
-                last_seen_nonce = session.last_seen_recv_nonce.load(Ordering::SeqCst),
                 "DIAG: open() decryption FAILED — likely AAD mismatch or key mismatch"
             );
             SwarmError::DecryptionFailed
@@ -324,13 +427,13 @@ impl SessionManager {
             "DIAG: open() decryption success"
         );
 
-        // Decryption succeeded — now commit the nonce to prevent replay.
-        if recv_nonce == 0 {
-            session.nonce_zero_seen.store(true, Ordering::SeqCst);
-        } else {
-            session
-                .last_seen_recv_nonce
-                .fetch_max(recv_nonce, Ordering::SeqCst);
+        // Decryption succeeded — commit the nonce to the sliding window.
+        {
+            let mut window = session
+                .replay_window
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            window.record(recv_nonce);
         }
 
         Ok(plaintext)
@@ -711,5 +814,79 @@ mod tests {
         // The ephemeral public keys should not equal the static public keys
         assert_ne!(&a_eph, sm_a.local_public_key().as_bytes());
         assert_ne!(&b_eph, sm_b.local_public_key().as_bytes());
+    }
+
+    // ---- Sliding window anti-replay tests ----
+
+    #[test]
+    fn replay_window_rejects_duplicate() {
+        let mut w = ReplayWindow::new();
+        assert!(w.check(0));
+        w.record(0);
+        assert!(!w.check(0)); // Duplicate rejected
+    }
+
+    #[test]
+    fn replay_window_allows_reorder() {
+        let mut w = ReplayWindow::new();
+        // Receive nonces out of order: 5, 3, 4, 1, 2
+        for &n in &[5u64, 3, 4, 1, 2] {
+            assert!(w.check(n), "nonce {n} should be accepted");
+            w.record(n);
+        }
+        // All should now be rejected as duplicates
+        for &n in &[1u64, 2, 3, 4, 5] {
+            assert!(!w.check(n), "nonce {n} should be rejected as duplicate");
+        }
+        // 6 should still be accepted
+        assert!(w.check(6));
+    }
+
+    #[test]
+    fn replay_window_rejects_outside_window() {
+        let mut w = ReplayWindow::new();
+        w.record(200);
+        // 200 - 128 = 72, so nonce 72 is just outside the window
+        assert!(!w.check(72));
+        // 73 is at the edge
+        assert!(w.check(73));
+    }
+
+    #[test]
+    fn replay_window_large_jump() {
+        let mut w = ReplayWindow::new();
+        w.record(0);
+        w.record(1);
+        // Jump far ahead — entire window resets
+        assert!(w.check(1000));
+        w.record(1000);
+        // Old nonces are way out of window
+        assert!(!w.check(0));
+        assert!(!w.check(1));
+        // Recent within new window should work
+        assert!(w.check(999));
+        w.record(999);
+        assert!(!w.check(999)); // But not twice
+    }
+
+    #[test]
+    fn replay_window_in_session_open() {
+        // Integration test: verify that the sliding window works end-to-end
+        let (sm_a, sm_b, node_a, node_b) = make_session_pair();
+        let aad = b"test";
+
+        let sealed1 = sm_a.seal(&node_b, b"msg1", aad).unwrap();
+        let sealed2 = sm_a.seal(&node_b, b"msg2", aad).unwrap();
+        let sealed3 = sm_a.seal(&node_b, b"msg3", aad).unwrap();
+
+        // Open out of order: 3, 1, 2
+        assert!(sm_b.open(&node_a, &sealed3, aad).is_ok());
+        assert!(sm_b.open(&node_a, &sealed1, aad).is_ok());
+        assert!(sm_b.open(&node_a, &sealed2, aad).is_ok());
+
+        // Replaying any of them should fail
+        assert!(sm_b.open(&node_a, &sealed1, aad).is_err());
+        assert!(sm_b.open(&node_a, &sealed2, aad).is_err());
+        assert!(sm_b.open(&node_a, &sealed3, aad).is_err());
     }
 }

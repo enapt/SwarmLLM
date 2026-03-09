@@ -615,6 +615,19 @@ pub(crate) async fn dispatch_network_messages(
                             SwarmMessage::HealthPong { node_id: None, .. } => {}
                             // Ephemeral key exchange for forward secrecy
                             SwarmMessage::EphemeralKeyExchange(exchange) => {
+                                // SEC: Verify transport-authenticated sender matches exchange.node_id.
+                                // The Noise protocol authenticates the transport, so we trust the PeerId→NodeId
+                                // mapping. This prevents a peer from injecting ephemeral keys for another node.
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &exchange.node_id {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            claimed = %exchange.node_id,
+                                            "Ephemeral key exchange rejected: sender mismatch"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 let sm = shared_state.session_manager.clone();
                                 let our_id = shared_state.identity.node_id().clone();
                                 if exchange.node_id == our_id {
