@@ -5,6 +5,8 @@ use std::time::SystemTime;
 /// Size of the GGUF header probe download (16 MB).
 /// Most GGUF headers are <10MB; 16MB gives margin for large vocab models.
 const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
+/// Gap tolerance for coalescing byte-range requests (4MB).
+const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
 
 /// Read HuggingFace API token from `HF_TOKEN` env var (or `HUGGING_FACE_HUB_TOKEN` fallback).
 fn hf_token() -> Option<String> {
@@ -694,7 +696,7 @@ pub async fn download_shard_v2(
         .collect();
 
     // Coalesce nearby ranges (4MB gap tolerance) to reduce HTTP requests
-    let coalesced = coalesce_byte_ranges(&tensor_ranges, 4 * 1024 * 1024);
+    let coalesced = coalesce_byte_ranges(&tensor_ranges, BYTE_RANGE_COALESCE_GAP);
     let total_download_bytes: u64 = coalesced.iter().map(|(s, e)| e - s).sum();
     let expected_tensor_bytes: u64 = layout.tensors.iter().map(|(_, _, sz)| sz).sum();
 

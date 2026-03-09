@@ -772,7 +772,7 @@ impl ProvidersConfig {
             "together" => &mut self.together,
             "deepinfra" => &mut self.deepinfra,
             "moonshot" => &mut self.moonshot,
-            _ => unreachable!("unknown provider: {name}"),
+            other => unreachable!("unknown provider: {other} — update field_mut() match arms"),
         }
     }
 }

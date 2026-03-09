@@ -875,7 +875,7 @@ async fn handle_layer_forward(
     let use_batch = batch_forwarder.is_some() && forward.sequence_num > 0;
 
     if use_batch {
-        let forwarder = batch_forwarder.unwrap();
+        let forwarder = batch_forwarder.expect("batch_forwarder must exist when use_batch=true");
 
         // Build input tensor without holding the model lock
         let input_tensor = if is_first {
@@ -1122,13 +1122,13 @@ async fn handle_layer_forward(
         match zstd::decode_all(std::io::Cursor::new(compressed)) {
             Ok(raw_bytes) => {
                 let num_f16 = raw_bytes.len() / 2;
-                let hidden_dim = if num_f16 % 4096 == 0 {
-                    4096
-                } else if num_f16 % 2048 == 0 {
-                    2048
-                } else {
-                    1024
-                };
+                // Infer hidden dimension from common VLM sizes.
+                const COMMON_HIDDEN_DIMS: &[usize] = &[4096, 2048, 1024];
+                let hidden_dim = COMMON_HIDDEN_DIMS
+                    .iter()
+                    .copied()
+                    .find(|&d| num_f16 % d == 0)
+                    .unwrap_or(1024);
                 let num_tokens = num_f16 / hidden_dim;
                 let f32_values: Vec<f32> = raw_bytes
                     .chunks_exact(2)
