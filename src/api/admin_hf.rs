@@ -5,6 +5,33 @@ use serde::Deserialize;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 
+/// SEC: Validate HuggingFace repo_id format (owner/repo).
+/// Only allows alphanumeric, hyphens, dots, underscores in each segment.
+fn is_valid_hf_repo_id(repo_id: &str) -> bool {
+    let parts: Vec<&str> = repo_id.split('/').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.len() <= 96
+            && p.chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+    })
+}
+
+/// SEC: Validate HuggingFace filename format.
+/// Only allows alphanumeric, hyphens, dots, underscores. Must end with .gguf.
+fn is_valid_hf_filename(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename.len() <= 256
+        && filename.ends_with(".gguf")
+        && filename
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && !filename.contains("..")
+}
+
 /// Extract EOS token IDs from a GGUF file, with architecture-specific fallbacks.
 /// Mirrors the logic in inference/split.rs for consistency.
 fn extract_eos_token_ids(path: &std::path::Path) -> Vec<u32> {
@@ -441,6 +468,21 @@ pub async fn hf_probe(
         )));
     }
 
+    // SEC: Validate repo_id format (owner/repo) to prevent URL injection/SSRF.
+    if !is_valid_hf_repo_id(&repo_id) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid repo_id format. Expected: owner/repo (alphanumeric, hyphens, dots, underscores)"
+                .into(),
+        )));
+    }
+    // SEC: Validate filename to prevent URL metacharacter injection.
+    if !is_valid_hf_filename(&filename) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid filename. Must be alphanumeric with hyphens, dots, underscores, ending in .gguf"
+                .into(),
+        )));
+    }
+
     let shard_size = state.config.model.shard_size_bytes();
     match crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size).await {
         Ok(info) => {
@@ -516,6 +558,18 @@ pub async fn hf_download_shards(
     if repo_id.is_empty() || filename.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Config(
             "repo_id and filename are required".into(),
+        )));
+    }
+
+    // SEC: Validate repo_id and filename to prevent URL injection.
+    if !is_valid_hf_repo_id(&repo_id) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid repo_id format. Expected: owner/repo".into(),
+        )));
+    }
+    if !is_valid_hf_filename(&filename) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid filename format. Must end in .gguf, no special characters".into(),
         )));
     }
 

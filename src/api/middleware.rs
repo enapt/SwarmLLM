@@ -250,7 +250,6 @@ fn is_exempt_request(path: &str, method: &Method, is_loopback: bool) -> bool {
                 | "/api/admin/hf/search"
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
-                | "/api/admin/provider-models"
                 | "/api/admin/schedule"
         ) || path.starts_with("/api/admin/hf/source/")
             || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
@@ -403,7 +402,8 @@ mod tests {
         assert!(is_exempt_request("/api/admin/hf/probe", &get, true));
         assert!(is_exempt_request("/api/admin/network-map", &get, true));
         assert!(is_exempt_request("/api/admin/schedule", &get, true));
-        assert!(is_exempt_request("/api/admin/provider-models", &get, true));
+        // provider-models requires auth (makes live API calls with stored keys)
+        assert!(!is_exempt_request("/api/admin/provider-models", &get, true));
         assert!(is_exempt_request("/api/identity/nickname", &get, true));
         assert!(is_exempt_request("/api/pool/state", &get, true));
         // Same endpoints NOT exempt from remote IPs
