@@ -1177,9 +1177,14 @@ impl AutoShardManager {
 
                         // Compute BLAKE3 hash of the downloaded shard and update the manifest
                         // so startup verification passes on restart.
+                        // block_in_place: reads up to 1GB shard + CPU-intensive hash
                         let shard_path = dest.join(format!("shard_{:03}.bin", shard_idx));
-                        if let Ok(data) = std::fs::read(&shard_path) {
-                            let hash: [u8; 32] = *blake3::hash(&data).as_bytes();
+                        let hash_result: Option<[u8; 32]> = tokio::task::block_in_place(|| {
+                            std::fs::read(&shard_path)
+                                .ok()
+                                .map(|data| *blake3::hash(&data).as_bytes())
+                        });
+                        if let Some(hash) = hash_result {
                             if let Some(mut manifest) =
                                 shared.model_registry.get_manifest(&model_id)
                             {

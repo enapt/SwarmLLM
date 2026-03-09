@@ -139,28 +139,31 @@ impl HealthMonitor {
                 .max(0) as u64
         };
 
-        // Populate real system metrics
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let ram_total_mb = sys.total_memory() / (1024 * 1024);
-        let ram_available_mb = sys.available_memory() / (1024 * 1024);
+        // Populate real system metrics.
+        // sysinfo does blocking filesystem reads (/proc/*) — use block_in_place.
+        let data_dir = self.shared_state.config.node.data_dir.clone();
+        let (ram_total_mb, ram_available_mb, disk_available_mb) =
+            tokio::task::block_in_place(|| {
+                let mut sys = sysinfo::System::new();
+                sys.refresh_memory();
+                let ram_total = sys.total_memory() / (1024 * 1024);
+                let ram_avail = sys.available_memory() / (1024 * 1024);
 
-        // Get disk space for the data_dir partition, not all disks combined.
-        let disks = sysinfo::Disks::new_with_refreshed_list();
-        let data_dir = &self.shared_state.config.node.data_dir;
-        let disk_available_mb: u64 = disks
-            .list()
-            .iter()
-            .filter(|d| data_dir.starts_with(d.mount_point()))
-            .max_by_key(|d| d.mount_point().as_os_str().len())
-            .map(|d| d.available_space() / (1024 * 1024))
-            .unwrap_or_else(|| {
-                // Fallback: sum of all disks if data_dir mount not found
-                disks
+                let disks = sysinfo::Disks::new_with_refreshed_list();
+                let disk_avail: u64 = disks
                     .list()
                     .iter()
+                    .filter(|d| data_dir.starts_with(d.mount_point()))
+                    .max_by_key(|d| d.mount_point().as_os_str().len())
                     .map(|d| d.available_space() / (1024 * 1024))
-                    .sum()
+                    .unwrap_or_else(|| {
+                        disks
+                            .list()
+                            .iter()
+                            .map(|d| d.available_space() / (1024 * 1024))
+                            .sum()
+                    });
+                (ram_total, ram_avail, disk_avail)
             });
 
         let cap = crate::types::NodeCapability {
