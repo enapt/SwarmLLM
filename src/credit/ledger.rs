@@ -11,9 +11,6 @@ use crate::types::{
 };
 
 /// Earning/spending rates (credits per unit).
-/// These are initial values — tunable via config in the future.
-///
-/// Earning/spending rates (credits per unit).
 /// SEC-M16 FIX: Rates are balanced (serve == consume) to prevent net credit inflation.
 /// All rates are configurable via `[pool.credit_rates]` in config.toml.
 pub const RATE_INFERENCE_SERVE: i64 = 10; // per layer per token
@@ -31,7 +28,7 @@ pub const TREE_TRANSACTIONS: &str = "credit_txns";
 
 /// CreditLedger tracks the local node's credit balance and transaction history.
 ///
-/// It persists balance and transactions to sled, and gossips balance buckets
+/// It persists balance and transactions to redb, and gossips balance buckets
 /// for network-wide percentile estimation.
 pub struct CreditLedger {
     node_id: NodeId,
@@ -57,7 +54,7 @@ impl CreditLedger {
         peer_balances: Arc<RwLock<Vec<i64>>>,
     ) -> Self {
         // Restore persisted balance synchronously to avoid race condition.
-        // sled reads are fast (in-memory B-tree), so this is safe in constructor.
+        // redb reads are fast, so this is safe in constructor.
         let restored = match db.get_json::<CreditBalance>(TREE_CREDITS, KEY_BALANCE) {
             Ok(v) => v,
             Err(e) => {
@@ -107,7 +104,6 @@ impl CreditLedger {
         self.identity = Some(identity);
     }
 
-    /// Get the current credit balance.
     pub async fn get_balance(&self) -> CreditBalance {
         self.balance.read().await.clone()
     }
@@ -308,7 +304,6 @@ impl CreditLedger {
         bucket_balance(bal.balance)
     }
 
-    /// Get a reference to the peer balances for external use.
     pub fn peer_balances(&self) -> &Arc<RwLock<Vec<i64>>> {
         &self.peer_balances
     }

@@ -77,11 +77,6 @@ impl ModelRegistry {
         self.manifests.iter().map(|v| v.value().clone()).collect()
     }
 
-    /// List all known model manifests (alias for models()).
-    pub fn list_models(&self) -> Vec<ModelManifest> {
-        self.models()
-    }
-
     /// Get the number of registered models.
     pub fn model_count(&self) -> usize {
         self.manifests.len()

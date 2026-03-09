@@ -14,6 +14,20 @@ const MAX_CONCURRENT_FORWARDS: usize = 64;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
+/// Track inference participation: increment forwards_served and earn credits (non-blocking).
+fn track_forward_participation(shared_state: &SharedState, layer_start: usize, layer_end: usize) {
+    if let Ok(mut stats) = shared_state.node_stats.try_write() {
+        stats.forwards_served += 1;
+    }
+    let layers_processed = (layer_end.saturating_sub(layer_start)) as i64;
+    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
+    if let Ok(mut bal) = shared_state.credit_balance.try_write() {
+        bal.balance += earned;
+        bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned as u64);
+        bal.last_updated = chrono::Utc::now();
+    }
+}
+
 /// Dispatch inbound network messages to the appropriate subsystem.
 ///
 /// Inference-related messages (InferenceRequest, LayerForward, LayerResult,
@@ -416,7 +430,7 @@ pub(crate) async fn dispatch_network_messages(
                                         mmproj_filename: gossip.mmproj_filename.clone(),
                                     };
                                     shared_state.hf_sources.insert(mid.clone(), source.clone());
-                                    // Persist to sled
+                                    // Persist to DB
                                     let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
                                     // Wake the AutoShardManager so it evaluates promptly
                                     shared_state.auto_manage_notify.notify_one();
@@ -1007,19 +1021,7 @@ async fn handle_layer_forward(
             "DIAG: LayerForward processed via batch forwarder"
         );
 
-        // Track participation
-        {
-            if let Ok(mut stats) = shared_state.node_stats.try_write() {
-                stats.forwards_served += 1;
-            }
-            let layers_processed = (layer_end - layer_start) as i64;
-            let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-            if let Ok(mut bal) = shared_state.credit_balance.try_write() {
-                bal.balance += earned;
-                bal.lifetime_earned += earned as u64;
-                bal.last_updated = chrono::Utc::now();
-            }
-        }
+        track_forward_participation(&shared_state, layer_start, layer_end);
 
         if let Err(e) = network_tx
             .send(NetworkCommand::SendTensorResult {
@@ -1225,19 +1227,7 @@ async fn handle_layer_forward(
         "DIAG: LayerForward processed, sending result back"
     );
 
-    // Track participation: increment forwards_served and earn credits (non-blocking)
-    {
-        if let Ok(mut stats) = shared_state.node_stats.try_write() {
-            stats.forwards_served += 1;
-        }
-        let layers_processed = (layer_end - layer_start) as i64;
-        let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-        if let Ok(mut bal) = shared_state.credit_balance.try_write() {
-            bal.balance += earned;
-            bal.lifetime_earned += earned as u64;
-            bal.last_updated = chrono::Utc::now();
-        }
-    }
+    track_forward_participation(&shared_state, layer_start, layer_end);
 
     // Send back as a separate request to the originating peer
     if let Err(e) = network_tx

@@ -1023,7 +1023,7 @@ impl Daemon {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                     _ = autoload_shutdown.changed() => { return; }
                 }
-                let mut manifests = sm.model_registry.list_models();
+                let mut manifests = sm.model_registry.models();
                 // Sort by request count descending so popular models get VRAM priority on restart
                 manifests.sort_by(|a, b| {
                     let count_a = sm
@@ -1316,7 +1316,7 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
         tracing::warn!(error = %e, "Failed to persist API key to database");
     }
 
-    // Write to file so CLI `status` can read it without opening sled
+    // Write to file so CLI `status` can read it without opening the database
     write_api_key_file(&config.node.data_dir, &key);
 
     // Print API key to stderr only (not to tracing logs which may be persisted/shipped)
@@ -1439,12 +1439,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn subsystem_criticality_classification() {
-        // Verify our criticality assignments match the task spec
-        assert_eq!(
-            SubsystemCriticality::Critical,
-            SubsystemCriticality::Critical
-        );
+    fn subsystem_criticality_variants_are_distinct() {
         assert_ne!(
             SubsystemCriticality::Critical,
             SubsystemCriticality::NonCritical

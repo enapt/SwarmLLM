@@ -113,7 +113,7 @@ impl EscrowManager {
             status: EscrowStatus::Pending,
         };
 
-        // Persist to sled
+        // Persist to DB
         if let Err(e) = self.db.put_json(TREE_ESCROW, &entry.id.to_string(), &entry) {
             tracing::warn!(error = %e, "Failed to persist escrow entry");
         }

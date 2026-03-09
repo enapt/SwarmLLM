@@ -2133,7 +2133,7 @@ impl AutoShardManager {
                             self.shared_state
                                 .hf_sources
                                 .insert(mid.clone(), source.clone());
-                            // Persist to sled
+                            // Persist to DB
                             let _ =
                                 self.shared_state
                                     .db

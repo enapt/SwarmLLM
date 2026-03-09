@@ -58,8 +58,8 @@ pub fn tier_weight(tier: PriorityTier) -> u32 {
 
 /// Check whether a node with the given tier can submit requests.
 ///
-/// All tiers can submit requests (spec says "never block on credit errors"),
-/// but Bronze tier gets lowest priority and may be rate-limited.
+/// Always returns `true` — all tiers can submit (spec says "never block on credit errors").
+/// Bronze tier gets lowest priority via `tier_weight` and `max_concurrent_for_tier`.
 pub fn can_submit_request(_tier: PriorityTier) -> bool {
     // Per spec: credit errors degrade priority tier, never block
     true

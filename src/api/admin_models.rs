@@ -276,7 +276,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
     // 2. Models from the P2P manifest registry
     let registry = &state.shared_state.model_registry;
-    let manifests = registry.list_models();
+    let manifests = registry.models();
 
     for m in &manifests {
         if seen_ids.contains(&m.id.0) {
@@ -739,7 +739,7 @@ pub async fn delete_model(
         let _ = std::fs::remove_dir(&model_dir);
     }
 
-    // Remove manifest from sled DB
+    // Remove manifest from DB
     let _ = shared.db.remove("model_meta", &model_id);
 
     // Remove HF source from DB

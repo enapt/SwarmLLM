@@ -661,7 +661,7 @@ pub struct ScheduleUpdate {
     pub prune_aggressiveness: Option<String>,
 }
 
-/// PUT /api/admin/schedule — Update resource schedule at runtime (persisted to sled).
+/// PUT /api/admin/schedule — Update resource schedule at runtime (persisted to redb).
 pub async fn update_schedule(
     State(state): State<AppState>,
     Json(body): Json<ScheduleUpdate>,
@@ -704,7 +704,7 @@ pub async fn update_schedule(
         }
     }
 
-    // Persist to sled
+    // Persist to DB
     let _ = state
         .shared_state
         .db

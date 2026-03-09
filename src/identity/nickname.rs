@@ -99,7 +99,7 @@ pub enum VisibilityMode {
     Nickname,
 }
 
-/// Local identity preferences stored in sled.
+/// Local identity preferences stored in redb.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityPrefs {
     pub nickname: Option<String>,

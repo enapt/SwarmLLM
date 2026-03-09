@@ -139,7 +139,7 @@ pub struct SharedState {
     /// Watch channel for hot-reloaded operational config parameters.
     /// Subsystems can subscribe to changes via `config_watch_rx()`.
     pub config_watch_tx: watch::Sender<crate::config::OperationalParams>,
-    /// Trust score manager — tracks per-peer reputation, persisted to sled.
+    /// Trust score manager — tracks per-peer reputation, persisted to redb.
     pub trust_manager: crate::credit::trust::TrustManager,
     /// Auto-detected country code from IP geolocation (e.g. "US", "DE").
     /// Falls back to config.identity.region if geolocation fails.
@@ -154,7 +154,7 @@ pub struct SharedState {
     /// Paged KV store: per-request block table tracking.
     #[cfg(feature = "paged-attn")]
     pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
-    /// Per-model auto-manage policies (runtime-mutable, persisted to sled).
+    /// Per-model auto-manage policies (runtime-mutable, persisted to redb).
     pub model_auto_manage_policies:
         DashMap<crate::types::ModelId, crate::config::ModelAutoManagePolicy>,
     /// Global default cap on auto-managed shards per model (from config).
@@ -404,7 +404,7 @@ impl SharedState {
 
         let model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
 
-        // Hydrate nickname registry from sled
+        // Hydrate nickname registry from DB
         let nickname_registry = DashMap::new();
         let nick_store = crate::identity::nickname::NicknameStore::new(db.clone());
         if let Ok(records) = nick_store.load_all() {

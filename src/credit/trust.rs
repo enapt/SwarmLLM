@@ -58,7 +58,7 @@ impl TrustEvent {
     }
 }
 
-/// TrustManager tracks per-peer trust scores, persists them to sled,
+/// TrustManager tracks per-peer trust scores, persists them to redb,
 /// and provides update/query methods used by the scheduler and ledger.
 pub struct TrustManager {
     db: Database,
@@ -70,7 +70,7 @@ impl TrustManager {
     }
 
     /// Update the trust score for a peer after a trust-affecting event.
-    /// The updated score is clamped to [0.0, 1.0] and persisted to sled.
+    /// The updated score is clamped to [0.0, 1.0] and persisted to redb.
     /// Also updates the live PeerInfo in the peer_registry.
     pub fn update_trust(
         &self,
@@ -88,7 +88,7 @@ impl TrustManager {
             (current + delta).clamp(0.0, 1.0)
         };
 
-        // Persist to sled
+        // Persist to DB
         let key = hex::encode(node_id.0);
         if let Err(e) = self.db.put_json(TREE_TRUST_SCORES, &key, &new_score) {
             tracing::warn!(error = %e, node = %node_id, "Failed to persist trust score");

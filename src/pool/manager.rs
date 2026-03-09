@@ -18,7 +18,7 @@ const TREE_POOL_FORWARDS: &str = "pool_forwards";
 const KEY_MY_POOL: &str = "my_pool";
 
 /// The PoolManager is the 9th subsystem task.
-/// It owns all pool state, persists to sled, and handles pool commands.
+/// It owns all pool state, persists to redb, and handles pool commands.
 pub struct PoolManager {
     shared_state: Arc<SharedState>,
     cmd_rx: mpsc::Receiver<PoolCommand>,
@@ -47,7 +47,7 @@ impl PoolManager {
         }
     }
 
-    /// Restore pool state from sled on startup.
+    /// Restore pool state from database on startup.
     async fn restore_state(&mut self) {
         let db = &self.shared_state.db;
 

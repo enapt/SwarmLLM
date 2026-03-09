@@ -79,8 +79,7 @@ impl KvCacheStore {
         }
     }
 
-    /// Get or create the KV-cache entry for a request. Returns a mutable ref guard.
-    /// Build the composite key for the KV-cache DashMap.
+    /// Build a composite lookup key from model key and request ID for the KV-cache DashMap.
     #[inline]
     pub(crate) fn cache_key(model_key: &str, request_id: &str) -> String {
         format!("{model_key}\0{request_id}")
