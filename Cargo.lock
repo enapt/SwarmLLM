@@ -649,6 +649,7 @@ version = "0.0.2"
 dependencies = [
  "anyhow",
  "candle-core",
+ "candle-nn",
  "half",
  "num_cpus",
  "rayon",
@@ -5128,7 +5129,6 @@ dependencies = [
  "hex",
  "hkdf",
  "image",
- "include_dir",
  "libp2p",
  "llama-cpp-2",
  "memmap2",
@@ -5140,6 +5140,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sled",
+ "swarmllm-frontend",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
@@ -5155,6 +5156,16 @@ dependencies = [
  "x25519-dalek",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "swarmllm-frontend"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "include_dir",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

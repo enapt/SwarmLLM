@@ -19,7 +19,7 @@ use crate::inference::router::RouterCommand;
 use crate::model::acquisition::AcquisitionCommand;
 use crate::storage::db::Database;
 use crate::types::NetworkCommand;
-use crate::ui::assets;
+use swarmllm_frontend as assets;
 
 /// Shared application state passed to all Axum handlers.
 #[derive(Clone)]

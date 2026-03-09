@@ -1,3 +1,8 @@
+[workspace]
+resolver = "2"
+members = [".", "crates/swarmllm-frontend"]
+exclude = ["vendor/candle-paged-attention", "vendor/libp2p-request-response"]
+
 [package]
 name = "swarmllm"
 version = "0.1.0"
@@ -94,13 +99,16 @@ hex = "0.4"
 base64 = "0.22"
 dirs = "6"
 bytes = "1"
-include_dir = "0.7"
+# include_dir moved to swarmllm-frontend crate
 sysinfo = "0.38"
 half = "2"
 fancy-regex = "0.17"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Frontend assets
+swarmllm-frontend = { path = "crates/swarmllm-frontend" }
 
 # Memory-mapped I/O for fast model loading
 memmap2 = "0.9"
@@ -113,6 +121,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 
 [features]
 default = []
+dev = ["swarmllm-frontend/dev"]
 migrate-sled = ["sled"]
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]

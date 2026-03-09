@@ -1,0 +1,18 @@
+[package]
+name = "swarmllm-frontend"
+version = "0.1.0"
+edition = "2021"
+description = "Embedded frontend assets for SwarmLLM"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[dependencies]
+axum = { version = "0.7" }
+include_dir = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["fs"], optional = true }
+tracing = { version = "0.1", optional = true }
+
+[features]
+default = ["embedded"]
+embedded = ["dep:include_dir"]
+dev = ["dep:tokio", "dep:tracing"]
