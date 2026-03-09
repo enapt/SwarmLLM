@@ -292,6 +292,20 @@ impl InferenceRouter {
             .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Reject when queue is full to prevent memory exhaustion from request flooding.
+        // max_concurrent gates execution slots; this caps the waiting queue depth.
+        const MAX_QUEUE_DEPTH: usize = 512;
+        if self.queue.len() >= MAX_QUEUE_DEPTH {
+            tracing::warn!(
+                queue_len = self.queue.len(),
+                "Inference queue full — rejecting request"
+            );
+            let _ = result_tx.send(Err(crate::error::SwarmError::ServiceUnavailable(
+                "Inference queue is full. Please try again later.".to_string(),
+            )));
+            return;
+        }
+
         tracing::info!(
             request_id = %adjusted_request.id,
             model = %adjusted_request.model_id,

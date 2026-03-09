@@ -91,6 +91,18 @@ pub fn verify_transaction(
     Ok(())
 }
 
+/// Verify both signatures on a credit transaction without the DB replay check.
+/// Used by the gossip dispatch handler which does its own replay check separately.
+pub fn verify_single_signatures(
+    tx: &CreditTransaction,
+    from_key: &VerifyingKey,
+    to_key: &VerifyingKey,
+) -> Result<(), SwarmError> {
+    verify_single_signature(tx, from_key, true)?;
+    verify_single_signature(tx, to_key, false)?;
+    Ok(())
+}
+
 /// Verify a single signature on the transaction.
 fn verify_single_signature(
     tx: &CreditTransaction,

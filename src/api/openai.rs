@@ -581,11 +581,36 @@ pub async fn chat_completions(
         }
     }
 
+    // Validate model field length to prevent DashMap memory exhaustion from unique keys
+    if req.model.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "model name too long (max 256 chars)".into(),
+        )));
+    }
+
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
             "Too many messages (max 4096)".into(),
         )));
+    }
+
+    // Limit tools array to prevent system prompt explosion in format_tool_system_prompt
+    if let Some(ref tools) = req.tools {
+        if tools.len() > 128 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Too many tools (max 128)".into(),
+            )));
+        }
+    }
+
+    // Limit stop sequences to prevent excessive tokenization overhead
+    if let Some(crate::api::openai::StopSequence::Multiple(ref v)) = req.stop {
+        if v.len() > 16 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Too many stop sequences (max 16)".into(),
+            )));
+        }
     }
 
     // Convert API messages to internal format (decode base64 images if present)

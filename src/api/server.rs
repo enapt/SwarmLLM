@@ -224,8 +224,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/mcp", post(mcp::handle_mcp))
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
-        // Middleware (layers run bottom-to-top: CORS first, then security headers, then rate limit, then auth, then body limit, then handler)
+        // Middleware (layers run bottom-to-top: timeout, CORS, security headers, rate limit, auth, body limit, handler)
         .layer(DefaultBodyLimit::max(32 * 1024 * 1024)) // 32MB request body limit (VLM images can be 20MB+)
+        // Request timeout: kill idle/stalled connections after 5 minutes.
+        // Streaming responses (SSE) are not affected — the timeout applies to the
+        // initial request processing, not the response stream. Long inference
+        // requests complete within this window; the 30s inference timeout fires first.
+        .layer(tower_http::timeout::TimeoutLayer::new(
+            std::time::Duration::from_secs(300),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,
@@ -307,6 +314,17 @@ pub async fn run_server_with_state(
         network_tx: Some(network_tx),
         shared_state,
     };
+
+    // Periodically clean up stale rate-limiter entries to prevent memory exhaustion
+    // from unique IPs accumulating over time (DashMap never shrinks otherwise).
+    let cleanup_limiter = state.rate_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            cleanup_limiter.cleanup(std::time::Duration::from_secs(600));
+        }
+    });
 
     let app = build_router(state);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

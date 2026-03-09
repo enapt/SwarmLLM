@@ -85,6 +85,10 @@ pub enum SwarmError {
     #[error("Provider error ({status}): {body}")]
     ProviderError { status: u16, body: String },
 
+    // Overload
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     // Generic
     #[error("Internal error: {0}")]
     Internal(String),
@@ -124,7 +128,7 @@ impl IntoResponse for ApiError {
                 self.0.to_string(),
                 "rate_limit_error",
             ),
-            SwarmError::InsufficientCapacity(_) => (
+            SwarmError::InsufficientCapacity(_) | SwarmError::ServiceUnavailable(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
                 "server_error",

@@ -281,11 +281,27 @@ pub async fn messages(
     State(state): State<AppState>,
     crate::api::server::JsonBody(req): crate::api::server::JsonBody<MessagesRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Validate model field length to prevent DashMap memory exhaustion
+    if req.model.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "model name too long (max 256 chars)".into(),
+        )));
+    }
+
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
             "Too many messages (max 4096)".into(),
         )));
+    }
+
+    // Limit tools array
+    if let Some(ref tools) = req.tools {
+        if tools.len() > 128 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Too many tools (max 128)".into(),
+            )));
+        }
     }
 
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());

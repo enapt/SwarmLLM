@@ -220,6 +220,34 @@ pub(crate) async fn dispatch_network_messages(
                                     tracing::warn!(tx_id = %tx.id, "Rejecting replayed credit transaction");
                                     continue;
                                 }
+                                // SEC: Verify dual Ed25519 signatures before accepting.
+                                // Without this check, any peer can forge arbitrary credit transactions.
+                                {
+                                    use ed25519_dalek::VerifyingKey;
+                                    let from_key = match VerifyingKey::from_bytes(&tx.from.0) {
+                                        Ok(k) => k,
+                                        Err(_) => {
+                                            tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid from key");
+                                            continue;
+                                        }
+                                    };
+                                    let to_key = match VerifyingKey::from_bytes(&tx.to.0) {
+                                        Ok(k) => k,
+                                        Err(_) => {
+                                            tracing::warn!(tx_id = %tx.id, "Credit tx rejected: invalid to key");
+                                            continue;
+                                        }
+                                    };
+                                    // verify_transaction also checks replay, but we already checked above
+                                    if let Err(e) = crate::credit::transaction::verify_single_signatures(&tx, &from_key, &to_key) {
+                                        tracing::warn!(
+                                            tx_id = %tx.id,
+                                            error = %e,
+                                            "Credit tx rejected: signature verification failed"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 // Anti-gaming validation for network transactions
                                 {
                                     let mut ag = shared_state.anti_gaming.lock().await;

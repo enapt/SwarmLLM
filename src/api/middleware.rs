@@ -13,12 +13,14 @@ use tower_http::cors::CorsLayer;
 use crate::api::server::AppState;
 
 /// Constant-time byte comparison to prevent timing side-channel attacks on API key validation.
-/// Iterates over min(len) bytes even when lengths differ to avoid leaking length via timing.
+/// Iterates over max(len) bytes to avoid leaking the expected token length via timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = (a.len() != b.len()) as u8;
-    let min_len = a.len().min(b.len());
-    for i in 0..min_len {
-        diff |= a[i] ^ b[i];
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let ab = a.get(i).copied().unwrap_or(0);
+        let bb = b.get(i).copied().unwrap_or(0);
+        diff |= ab ^ bb;
     }
     diff == 0
 }
@@ -66,7 +68,7 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         axum::http::header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
         ),
     );
     response

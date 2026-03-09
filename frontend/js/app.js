@@ -478,7 +478,7 @@ var SwarmLLM = (function() {
       if (images.length > 0) {
         userHtml += '<div style="margin-bottom:6px;">';
         images.forEach(function(img) {
-          userHtml += '<img src="' + img.data_url + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
+          userHtml += '<img src="' + escapeHtml(img.data_url) + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
         });
         userHtml += '</div>';
       }
@@ -2318,8 +2318,8 @@ var SwarmLLM = (function() {
         } else if (msg.type === 'prune_event') {
           var d = msg.data;
           var freed = formatBytes(d.freed_bytes || 0);
-          var text = 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) +
-            ' \u2014 ' + d.holder_count_before + '\u2192' + d.holder_count_after + ' holders (freed ' + freed + ')';
+          var text = 'Pruned shard ' + escapeHtml(String(d.shard_index)) + ' of ' + escapeHtml(d.model_name || d.model_id) +
+            ' \u2014 ' + escapeHtml(String(d.holder_count_before)) + '\u2192' + escapeHtml(String(d.holder_count_after)) + ' holders (freed ' + escapeHtml(freed) + ')';
           showPruneToast(text);
           // models_changed event from prune will trigger refresh below
         } else if (msg.type === 'system_notification') {
