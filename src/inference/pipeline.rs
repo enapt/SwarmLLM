@@ -242,13 +242,30 @@ impl PipelineExecutor {
             .pending_vision_results
             .insert(self.request.id, tx);
 
-        // Send VisionEncodeRequest
+        // Send VisionEncodeRequest directly to the selected remote node (not broadcast)
         let req = crate::types::VisionEncodeRequest {
             request_id: self.request.id,
             model_id: model_id.clone(),
             image_data: jpeg_bytes,
         };
-        let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeRequest(req));
+        let target_peer_bytes = self
+            .shared_state
+            .peer_id_map
+            .get(&remote_node)
+            .map(|r| r.value().clone())
+            .or_else(|| {
+                self.shared_state
+                    .peer_registry
+                    .get(&remote_node)
+                    .and_then(|p| p.peer_id_bytes.clone())
+            })
+            .ok_or_else(|| {
+                SwarmError::Network(format!("No peer_id_bytes for vision node {}", remote_node))
+            })?;
+        let msg = NetworkCommand::SendDirectMessage {
+            target_peer_bytes,
+            message: SwarmMessage::VisionEncodeRequest(req),
+        };
         self.network_tx
             .send(msg)
             .await
@@ -544,10 +561,22 @@ impl PipelineExecutor {
             None
         };
         // Text-based stop sequences from the chat template (e.g. "<|user|>")
+        // Use the specific model's GGUF header first, fall back to loaded_model_info singleton.
         let stop_strings = {
-            let info = self.shared_state.loaded_model_info.read().await;
-            let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
-            chat_template::extract_stop_strings(tmpl)
+            let model_id = &self.request.model_id;
+            let shard_store =
+                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let header_path = shard_store
+                .models_dir()
+                .join(&model_id.0)
+                .join("gguf_header.bin");
+            if let Some((tmpl, _, _)) = template_from_header(&header_path) {
+                chat_template::extract_stop_strings(tmpl.as_deref())
+            } else {
+                let info = self.shared_state.loaded_model_info.read().await;
+                let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
+                chat_template::extract_stop_strings(tmpl)
+            }
         };
         // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
         let mut accumulated_text = String::new();
@@ -678,15 +707,14 @@ impl PipelineExecutor {
                             {
                                 // Trim everything from the stop string onwards
                                 if let Some(pos) = accumulated_text.find(stop.as_str()) {
-                                    let trimmed = accumulated_text[pos..].to_string();
                                     accumulated_text.truncate(pos);
                                     if let Some(ref mut st) = streamed_text {
                                         // Remove the stop string from streamed text too
                                         if let Some(spos) = st.rfind(stop.as_str()) {
                                             st.truncate(spos);
-                                        } else if st.len() >= trimmed.len() {
-                                            st.truncate(st.len() - trimmed.len());
                                         }
+                                        // If rfind misses, the stop string hasn't appeared
+                                        // in streamed text yet — no truncation needed.
                                     }
                                 }
                                 hit_stop_string = true;
@@ -1191,7 +1219,7 @@ impl PipelineExecutor {
 
             if let Some(ref group) = tp_group {
                 // Tensor-parallel execution: layer-by-layer with AllReduce
-                activations = self
+                let tp_result = self
                     .execute_tp_segment(
                         request_id,
                         sequence_num,
@@ -1202,16 +1230,44 @@ impl PipelineExecutor {
                         is_last,
                     )
                     .await?;
-                if is_last {
-                    // For the last segment, activations contains the serialized LayerResult
-                    // We already handled sampling in execute_tp_segment
-                    // Return a synthetic result
+
+                // Parse the tagged result: 0x01 prefix = sampled token, 0x00 = raw activations
+                if !tp_result.is_empty() && tp_result[0] == 0x01 {
+                    // Last segment returned a sampled token ID
+                    let token_id = if tp_result.len() >= 9 {
+                        i64::from_le_bytes(tp_result[1..9].try_into().unwrap()) as u32
+                    } else {
+                        0u32
+                    };
+                    // Check EOS
+                    let eos_tokens = self
+                        .shared_state
+                        .split_models
+                        .get(&(
+                            segment.shard_id.model_id.clone(),
+                            segment.layer_range.0 as usize,
+                            segment.layer_range.1 as usize,
+                        ))
+                        .map(|e| e.value().eos_tokens.clone())
+                        .unwrap_or_default();
+                    let finish = if eos_tokens.contains(&token_id) {
+                        Some(NetworkFinishReason::Stop)
+                    } else {
+                        None
+                    };
                     return Ok(LayerResult {
                         request_id,
-                        token_ids: vec![], // filled by execute_tp_segment
-                        finish_reason: None,
-                        activations,
+                        token_ids: vec![token_id],
+                        finish_reason: finish,
+                        activations: vec![],
                     });
+                } else {
+                    // Intermediate segment: strip the 0x00 tag and continue
+                    activations = if !tp_result.is_empty() {
+                        tp_result[1..].to_vec()
+                    } else {
+                        tp_result
+                    };
                 }
                 continue;
             }
@@ -2443,11 +2499,26 @@ impl PipelineExecutor {
             }
         }
 
-        // Serialize the output
-        let result_bytes = split::tensor_to_bytes(&current_activations)
-            .map_err(|e| SwarmError::Internal(format!("Serialize TP output: {e}")))?;
-
-        Ok(result_bytes)
+        if _is_last {
+            // Last segment: sample a token from the output activations
+            let token_id = split::sample_token_with_params(
+                &current_activations,
+                &self.request.sampling_params,
+            )?;
+            // Return the token ID as i64 LE bytes (same format as decode-step activations)
+            // with a 1-byte prefix tag (0x01) to signal "this is a sampled token, not raw activations"
+            let mut result = vec![0x01];
+            result.extend_from_slice(&(token_id as i64).to_le_bytes());
+            Ok(result)
+        } else {
+            // Intermediate segment: serialize raw activations
+            let result_bytes = split::tensor_to_bytes(&current_activations)
+                .map_err(|e| SwarmError::Internal(format!("Serialize TP output: {e}")))?;
+            // Prefix with 0x00 tag to signal raw activations
+            let mut result = vec![0x00];
+            result.extend(result_bytes);
+            Ok(result)
+        }
     }
 }
 

@@ -1316,7 +1316,9 @@ async fn handle_vision_encode_request(
                 "VisionEncodeRequest completed, sending response"
             );
 
-            // Send response back via gossip (directed messages use the same path)
+            // TODO: Send response directly to the requesting node instead of broadcast.
+            // Currently the dispatcher doesn't pass the sender's identity, so we fall back
+            // to broadcast. Only the originator consumes the response (via pending_vision_results).
             let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response));
             if let Err(e) = network_tx.send(msg).await {
                 tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");

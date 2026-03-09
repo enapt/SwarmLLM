@@ -909,6 +909,11 @@ pub enum NetworkCommand {
         target_peer_bytes: Vec<u8>,
         response: TpAllReduceResponse,
     },
+    /// Send a SwarmMessage directly to a specific peer via request_response.
+    SendDirectMessage {
+        target_peer_bytes: Vec<u8>,
+        message: SwarmMessage,
+    },
     /// Dial a multiaddr to connect to a new peer.
     DialAddress(String),
 }

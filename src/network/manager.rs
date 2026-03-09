@@ -1393,6 +1393,7 @@ impl NetworkManager {
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
             NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
             NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
+            NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
             NetworkCommand::DialAddress(_) => "DialAddress",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
@@ -1443,6 +1444,12 @@ impl NetworkManager {
                     SwarmMessage::TpAllReduceResponse(response),
                     "AllReduceResponse",
                 );
+            }
+            NetworkCommand::SendDirectMessage {
+                target_peer_bytes,
+                message,
+            } => {
+                self.handle_send_rr_message(target_peer_bytes, message, "DirectMessage");
             }
             NetworkCommand::DialAddress(addr_str) => {
                 match addr_str.parse::<libp2p::Multiaddr>() {
