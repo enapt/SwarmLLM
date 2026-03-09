@@ -1309,6 +1309,10 @@ kbd {
 .provider-badge .pb-dot.dot-ok { background: var(--orange); box-shadow: 0 0 4px rgba(245,158,11,0.4); }
 .provider-badge .pb-dot.dot-slow { background: var(--red); }
 .provider-badge .pb-dot.dot-down { background: var(--text-muted); }
+.provider-badge .pb-dot.dot-error { background: var(--red); box-shadow: 0 0 4px rgba(239,68,68,0.5); }
+.provider-badge.badge-error { border-color: rgba(239,68,68,0.3); opacity: 0.75; }
+.provider-badge.badge-error .pb-name { text-decoration: line-through; text-decoration-color: rgba(239,68,68,0.4); }
+.provider-badge.badge-error .pb-latency { color: var(--red); }
 .provider-badge .pb-latency { font-size: 0.68rem; color: var(--text-secondary); font-family: var(--font-mono); }
 
 .model-status-badge { display: inline-block; font-size: 0.6rem; font-weight: 600; padding: 0 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; }

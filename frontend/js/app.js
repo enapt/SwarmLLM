@@ -1040,7 +1040,7 @@ var SwarmLLM = (function() {
         };
         var divider = document.createElement('div');
         divider.className = 'cloud-models-divider';
-        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Fallback</span><span class="cloud-divider-line"></span>';
+        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Providers</span><span class="cloud-divider-line"></span>';
         list.appendChild(divider);
 
         // Group by provider
@@ -2357,7 +2357,8 @@ var SwarmLLM = (function() {
     configured.sort().forEach(function(p) {
       var h = providerHealth[p];
       var badge = document.createElement('div');
-      badge.className = 'provider-badge' + (h.status === 'up' ? ' badge-active' : '');
+      var isError = (h.status === 'auth_error' || h.status === 'down' || h.status === 'error');
+      badge.className = 'provider-badge' + (h.status === 'up' ? ' badge-active' : '') + (isError ? ' badge-error' : '');
       var dotClass = 'dot-down';
       var latencyText = '';
       if (h.status === 'up') {
@@ -2370,11 +2371,13 @@ var SwarmLLM = (function() {
         dotClass = 'dot-slow';
         latencyText = 'Timeout';
       } else if (h.status === 'auth_error') {
-        latencyText = 'Auth err';
+        dotClass = 'dot-error';
+        latencyText = 'Key Invalid';
       } else if (h.status === 'overloaded') {
         dotClass = 'dot-ok';
         latencyText = 'Busy';
       } else {
+        dotClass = 'dot-error';
         latencyText = 'Down';
       }
       var iconHtml = providerIcons[p] || '';
@@ -2384,6 +2387,10 @@ var SwarmLLM = (function() {
         '<span class="pb-dot ' + dotClass + '"></span>' +
         (latencyText ? '<span class="pb-latency">' + escapeHtml(latencyText) + '</span>' : '');
       badge.title = name + ': ' + h.status + (h.detail ? ' — ' + h.detail : '') + (h.latency_ms ? ' (' + h.latency_ms + 'ms)' : '');
+      if (isError) {
+        badge.style.cursor = 'pointer';
+        badge.addEventListener('click', function() { ui.openSettings(true); });
+      }
       strip.appendChild(badge);
     });
   }
@@ -4562,7 +4569,11 @@ var SwarmLLM = (function() {
     var cloudProviders = [];
     if (providerData && providerData.providers) {
       providerData.providers.forEach(function(p) {
-        if (p.configured) cloudProviders.push(p.name);
+        if (!p.configured) return;
+        // Only count providers that are healthy (not auth errors or down)
+        var h = providerHealth[p.name];
+        var isHealthy = !h || h.status === 'up' || h.status === 'rate_limited' || h.status === 'overloaded';
+        if (isHealthy) cloudProviders.push(p.name);
       });
     }
 
