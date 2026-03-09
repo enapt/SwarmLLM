@@ -2008,3 +2008,171 @@ kbd {
   }
   .compare-params { flex-direction: column; }
 }
+
+/* ---- Chat source indicators ---- */
+.msg-source-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.6rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; padding: 1px 7px; border-radius: 10px;
+  margin-left: 8px; vertical-align: middle;
+}
+.msg-source-badge.source-local {
+  background: var(--green-dim); color: var(--green);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.msg-source-badge.source-cloud {
+  background: var(--purple-dim); color: var(--purple);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+}
+.msg-source-badge.source-swarm {
+  background: var(--accent-glow); color: var(--accent);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+/* Source-colored left border for assistant messages */
+.chat-msg.assistant.source-local { border-left-color: var(--green); }
+.chat-msg.assistant.source-cloud { border-left-color: var(--purple); }
+.chat-msg.assistant.source-swarm { border-left-color: var(--accent); }
+
+/* Messenger layout source colors */
+.chat-messages.chat-messenger .chat-msg.assistant.source-local {
+  border-left: none; border-bottom: 2px solid var(--green);
+}
+.chat-messages.chat-messenger .chat-msg.assistant.source-cloud {
+  border-left: none; border-bottom: 2px solid var(--purple);
+}
+.chat-messages.chat-messenger .chat-msg.assistant.source-swarm {
+  border-left: none; border-bottom: 2px solid var(--accent);
+}
+
+/* ---- Compare from chat button ---- */
+.msg-actions {
+  display: flex; gap: 6px; margin-top: 6px; opacity: 0;
+  transition: opacity 0.15s;
+}
+.chat-msg:hover .msg-actions { opacity: 1; }
+.msg-action-btn {
+  background: var(--bg-tertiary); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-muted);
+  font-size: 0.65rem; padding: 2px 8px; cursor: pointer;
+  transition: all var(--transition);
+}
+.msg-action-btn:hover {
+  color: var(--accent); border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
+/* ---- Compare tab improvements ---- */
+.compare-controls {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 4px 0;
+}
+.compare-model-list {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 10px;
+  min-height: 44px; background: var(--bg-primary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  max-height: 140px; overflow-y: auto;
+}
+.compare-model-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 12px; background: var(--bg-tertiary);
+  border: 1px solid var(--border); border-radius: 16px;
+  font-size: 0.78rem; cursor: pointer; user-select: none;
+  transition: all 0.15s;
+}
+.compare-model-chip .chip-type {
+  font-size: 0.6rem; opacity: 0.5; text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.compare-model-chip.type-local .chip-type { color: var(--green); opacity: 0.8; }
+.compare-model-chip.type-cloud .chip-type { color: var(--purple); opacity: 0.8; }
+.compare-card {
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); display: flex; flex-direction: column;
+  overflow: hidden; transition: border-color var(--transition);
+}
+.compare-card:hover { border-color: var(--border-light); }
+.compare-card-header {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--bg-tertiary);
+}
+.compare-card-model { font-weight: 600; font-size: 0.85rem; color: var(--text-primary); }
+.compare-card-actions {
+  display: flex; gap: 4px; margin-left: 8px;
+}
+.compare-card-actions button {
+  background: transparent; border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text-muted);
+  font-size: 0.65rem; padding: 2px 6px; cursor: pointer;
+  transition: all var(--transition);
+}
+.compare-card-actions button:hover {
+  color: var(--accent); border-color: var(--accent);
+}
+.compare-card-body {
+  padding: 16px; flex: 1; font-size: 0.85rem; line-height: 1.6;
+  white-space: pre-wrap; word-wrap: break-word; overflow-y: auto;
+  max-height: 500px; color: var(--text-secondary);
+}
+.compare-card-footer {
+  padding: 8px 16px; border-top: 1px solid var(--border); font-size: 0.72rem;
+  color: var(--text-muted); display: flex; gap: 16px; background: var(--bg-tertiary);
+}
+.compare-history {
+  margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px;
+}
+.compare-history-item {
+  padding: 10px 14px; background: var(--bg-tertiary);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 8px; cursor: pointer; transition: all var(--transition);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.compare-history-item:hover { border-color: var(--accent); }
+.compare-history-prompt {
+  font-size: 0.8rem; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
+}
+.compare-history-meta {
+  font-size: 0.7rem; color: var(--text-muted); white-space: nowrap; margin-left: 12px;
+}
+
+/* ---- Bolder visual hierarchy ---- */
+.panel {
+  border: 1px solid var(--border-light);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,255,255,0.02);
+}
+.panel h2 {
+  font-size: 0.88rem; color: var(--text-primary);
+  letter-spacing: 0.04em;
+}
+.panel-header {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.stat-value, .stat-label {
+  letter-spacing: 0.01em;
+}
+.data-table th {
+  background: var(--bg-tertiary) !important;
+  border-bottom: 2px solid var(--border-light) !important;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary) !important;
+  padding: 10px 12px !important;
+}
+.data-table td {
+  padding: 10px 12px !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.data-table tr:hover td {
+  background: var(--bg-hover) !important;
+}
+/* Section dividers between view sections */
+.view .panel + .panel { margin-top: 20px; }
+/* Nav tabs — stronger active state */
+.nav-tabs .nav-link.active,
+.tab-bar .tab.active {
+  border-bottom-width: 3px;
+}

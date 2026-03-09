@@ -102,6 +102,7 @@ var SwarmLLM = (function() {
       }
       if (tab === 'compare') {
         compare.loadModels();
+        compare.renderHistory();
       }
     },
 
@@ -3624,20 +3625,51 @@ var SwarmLLM = (function() {
     });
   }
 
-  function appendMessageToDOM(role, content, isHtml) {
+  function getModelSource(modelId) {
+    if (!modelId) return 'local';
+    var match = _modelDropdownData.find(function(m) { return m.id === modelId; });
+    if (!match) return 'local';
+    if (match.group === 'local') return 'local';
+    return 'cloud';
+  }
+
+  function appendMessageToDOM(role, content, isHtml, opts) {
+    opts = opts || {};
     var container = document.getElementById('chat-messages');
     var empty = document.getElementById('chat-empty');
     if (empty) empty.style.display = 'none';
 
     var div = document.createElement('div');
     div.className = 'chat-msg ' + role;
+
+    // Add source indicator for assistant messages
+    var sourceHtml = '';
+    if (role === 'assistant') {
+      var session = currentSessionId && sessions[currentSessionId] ? sessions[currentSessionId] : null;
+      var modelId = opts.model || (session ? session.model : '') || currentModel || '';
+      var source = getModelSource(modelId);
+      div.classList.add('source-' + source);
+      var sourceLabel = source === 'local' ? 'Local' : source === 'cloud' ? 'Cloud' : 'Swarm';
+      sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
+    }
+
     var label = role === 'user' ? 'You' : 'Assistant';
-    div.innerHTML = '<div class="msg-role">' + label + '</div><div class="msg-content"></div>';
+    div.innerHTML = '<div class="msg-role">' + label + sourceHtml + '</div><div class="msg-content"></div>';
     if (isHtml) {
       div.querySelector('.msg-content').innerHTML = content;
     } else {
       div.querySelector('.msg-content').textContent = content;
     }
+
+    // Add action buttons for assistant messages
+    if (role === 'assistant') {
+      var actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy response">Copy</button>' +
+        '<button class="msg-action-btn" data-action="compare" title="Compare this prompt across models">Compare</button>';
+      div.appendChild(actions);
+    }
+
     container.appendChild(div);
     chat.scrollToBottom();
     return div;
@@ -4397,6 +4429,60 @@ var SwarmLLM = (function() {
       var amSave = target.getAttribute('data-am-save');
       if (amSave) { saveAutoManagePolicy(amSave); return; }
 
+      // Compare card copy button
+      var copyCompare = target.getAttribute('data-copy-compare');
+      if (copyCompare) {
+        var el = document.getElementById(copyCompare);
+        if (el) {
+          navigator.clipboard.writeText(el.textContent).then(function() {
+            target.textContent = 'Copied!';
+            setTimeout(function() { target.textContent = 'Copy'; }, 1500);
+          });
+        }
+        return;
+      }
+
+      // Compare history re-run
+      var historyPrompt = target.getAttribute('data-compare-prompt') || (target.closest('[data-compare-prompt]') || {}).getAttribute && (target.closest('[data-compare-prompt]') || {}).getAttribute('data-compare-prompt');
+      if (historyPrompt) {
+        var promptEl = document.getElementById('compare-prompt');
+        if (promptEl) { promptEl.value = historyPrompt; promptEl.focus(); }
+        return;
+      }
+
+      // Chat action buttons (copy, compare)
+      if (target.getAttribute('data-action') === 'copy') {
+        var msgEl = target.closest('.chat-msg');
+        var contentEl = msgEl ? msgEl.querySelector('.msg-content') : null;
+        if (contentEl) {
+          navigator.clipboard.writeText(contentEl.textContent).then(function() {
+            target.textContent = 'Copied!';
+            setTimeout(function() { target.textContent = 'Copy'; }, 1500);
+          });
+        }
+        return;
+      }
+      if (target.getAttribute('data-action') === 'compare') {
+        // Find the user message that preceded this assistant message
+        var msgEl = target.closest('.chat-msg');
+        if (msgEl) {
+          var prev = msgEl.previousElementSibling;
+          while (prev && !prev.classList.contains('user')) prev = prev.previousElementSibling;
+          if (prev) {
+            var userContent = prev.querySelector('.msg-content');
+            if (userContent) {
+              // Switch to compare tab and populate prompt
+              switchTab('compare');
+              var promptEl = document.getElementById('compare-prompt');
+              if (promptEl) promptEl.value = userContent.textContent;
+              compare.loadModels();
+              showToast('Prompt loaded in Compare \u2014 select models and run', 'info');
+            }
+          }
+        }
+        return;
+      }
+
       // Chat retry button
       if (target.getAttribute('data-retry-chat')) {
         // Remove the error message and re-send the last user message
@@ -4803,7 +4889,8 @@ var SwarmLLM = (function() {
           var mid = m.id || m.model_id || m.name;
           // Deduplicate
           if (!compare.models.some(function(x) { return x.id === mid; })) {
-            compare.models.push({ id: mid, type: 'cloud' });
+            var ctx = m.context_length || m.context_window || m.max_model_len || 0;
+            compare.models.push({ id: mid, type: 'cloud', context: ctx });
           }
         });
 
@@ -4815,10 +4902,13 @@ var SwarmLLM = (function() {
         container.innerHTML = '';
         compare.models.forEach(function(m) {
           var chip = document.createElement('label');
-          chip.className = 'compare-model-chip';
+          chip.className = 'compare-model-chip type-' + m.type;
+          var displayName = m.id.length > 35 ? m.id.substring(0, 35) + '...' : m.id;
+          var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + Math.round(m.context / 1000) + 'k ctx' : '';
           chip.innerHTML = '<input type="checkbox" value="' + escapeHtml(m.id) + '">' +
-            '<span>' + escapeHtml(m.id) + '</span>' +
-            '<span style="font-size:0.65rem;opacity:0.6">' + m.type + '</span>';
+            '<span>' + escapeHtml(displayName) + '</span>' +
+            '<span class="chip-type">' + m.type + ctxLabel + '</span>';
+          chip.title = m.id + (ctxLabel ? ' (' + m.context + ' tokens)' : '');
           chip.querySelector('input').addEventListener('change', function() {
             chip.classList.toggle('selected', this.checked);
             compare.updateSelected();
@@ -4925,11 +5015,50 @@ var SwarmLLM = (function() {
         });
       });
 
-      // Wait for all to finish
-      Promise.all(promises).then(function() {
+      // Wait for all to finish, save to history
+      Promise.all(promises).then(function(results) {
         compare.running = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Run Compare'; }
+        // Save to compare history (keep last 20)
+        try {
+          var history = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+          history.unshift({
+            prompt: prompt.trim().substring(0, 200),
+            models: compare.selected.slice(),
+            timestamp: Date.now(),
+          });
+          if (history.length > 20) history = history.slice(0, 20);
+          localStorage.setItem('swarmllm_compare_history', JSON.stringify(history));
+          compare.renderHistory();
+        } catch (e) {}
       });
+    },
+
+    renderHistory: function() {
+      var container = document.getElementById('compare-history');
+      if (!container) return;
+      try {
+        var history = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+        if (history.length === 0) { container.style.display = 'none'; return; }
+        container.style.display = '';
+        var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Recent Comparisons</div>';
+        history.slice(0, 10).forEach(function(item) {
+          var ago = compare.timeAgo(item.timestamp);
+          html += '<div class="compare-history-item" data-compare-prompt="' + escapeHtml(item.prompt) + '">' +
+            '<span class="compare-history-prompt">' + escapeHtml(item.prompt) + '</span>' +
+            '<span class="compare-history-meta">' + item.models.length + ' models &middot; ' + ago + '</span>' +
+          '</div>';
+        });
+        container.innerHTML = html;
+      } catch (e) { container.style.display = 'none'; }
+    },
+
+    timeAgo: function(ts) {
+      var s = Math.floor((Date.now() - ts) / 1000);
+      if (s < 60) return 'just now';
+      if (s < 3600) return Math.floor(s / 60) + 'm ago';
+      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+      return Math.floor(s / 86400) + 'd ago';
     },
 
     renderCard: function(result) {
@@ -4961,20 +5090,24 @@ var SwarmLLM = (function() {
         outputTokens = (result.data.usage || {}).output_tokens || 0;
       }
 
+      var cardContentId = 'compare-content-' + result.model.replace(/[^a-zA-Z0-9_-]/g, '_');
       card.innerHTML =
         '<div class="compare-card-header">' +
-          '<span class="compare-card-model">' + escapeHtml(result.model) + '</span>' +
-          '<span class="compare-card-meta">' +
-            '<span>' + result.latency_ms + 'ms</span>' +
-            (isError ? '<span style="color:var(--red,#ff6464)">error</span>' : '<span style="color:var(--green)">ok</span>') +
-          '</span>' +
+          '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">' +
+            '<span class="compare-card-model" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(result.model) + '">' + escapeHtml(result.model) + '</span>' +
+            (isError ? '<span style="color:var(--red);font-size:0.7rem">error</span>' : '<span style="color:var(--green);font-size:0.7rem">' + result.latency_ms + 'ms</span>') +
+          '</div>' +
+          '<div class="compare-card-actions">' +
+            '<button data-copy-compare="' + cardContentId + '" title="Copy response">Copy</button>' +
+          '</div>' +
         '</div>' +
-        '<div class="compare-card-body' + (isError ? ' error' : '') + '">' + escapeHtml(content) + '</div>' +
+        '<div class="compare-card-body' + (isError ? ' error' : '') + '" id="' + cardContentId + '">' + escapeHtml(content) + '</div>' +
         (isError ? '' :
           '<div class="compare-card-footer">' +
-            '<span>In: ' + inputTokens + ' tokens</span>' +
-            '<span>Out: ' + outputTokens + ' tokens</span>' +
-            '<span>Latency: ' + result.latency_ms + 'ms</span>' +
+            '<span>In: ' + inputTokens + '</span>' +
+            '<span>Out: ' + outputTokens + '</span>' +
+            '<span>' + result.latency_ms + 'ms</span>' +
+            (outputTokens > 0 ? '<span>' + Math.round(outputTokens / (result.latency_ms / 1000)) + ' tok/s</span>' : '') +
           '</div>'
         );
     },
