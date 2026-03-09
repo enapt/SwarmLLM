@@ -61,6 +61,27 @@ var SwarmLLM = (function() {
     if (dashboard && dashboard.loadInitial) dashboard.loadInitial();
   }
 
+  // --- THEME (light / dark / system) ---
+  var THEME_KEY = 'swarmllm_theme';
+
+  function applyTheme(theme) {
+    var resolved = theme;
+    if (theme === 'system') {
+      resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    }
+    document.documentElement.setAttribute('data-theme', resolved);
+    var btn = document.getElementById('btn-theme-toggle');
+    var icons = { dark: '\u263E', light: '\u2600', system: '\uD83D\uDCBB' };
+    if (btn) btn.textContent = icons[theme] || '\u263E';
+  }
+
+  // Listen for system theme changes when in 'system' mode
+  try {
+    window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function() {
+      if ((localStorage.getItem(THEME_KEY) || 'dark') === 'system') applyTheme('system');
+    });
+  } catch(e) {}
+
   // --- HELPERS ---
   function escapeHtml(str) {
     var div = document.createElement('div');
@@ -1718,6 +1739,15 @@ var SwarmLLM = (function() {
         });
         wrap.appendChild(toggle);
       });
+
+      // Language picker — sync with I18n
+      var langSelect = document.getElementById('settings-language');
+      if (langSelect && typeof I18n !== 'undefined') {
+        langSelect.value = I18n.getLang() || 'en';
+        langSelect.addEventListener('change', function() {
+          I18n.setLang(this.value);
+        });
+      }
     },
 
     load: async function() {
@@ -4186,6 +4216,77 @@ var SwarmLLM = (function() {
     on('btn-save-settings', 'click', function() { settings.save(); });
     on('btn-open-settings', 'click', function() { ui.openSettings(); });
     on('btn-mode-toggle', 'click', function() { toggleMode(); });
+
+    // Theme toggle (light / dark / system)
+    on('btn-theme-toggle', 'click', function() {
+      var THEME_KEY = 'swarmllm_theme';
+      var themes = ['dark', 'light', 'system'];
+      var icons = { dark: '\u263E', light: '\u2600', system: '\uD83D\uDCBB' };
+      var cur = localStorage.getItem(THEME_KEY) || 'dark';
+      var next = themes[(themes.indexOf(cur) + 1) % themes.length];
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+      var btn = document.getElementById('btn-theme-toggle');
+      if (btn) btn.textContent = icons[next] || '\u263E';
+    });
+
+    // Language picker dropdown
+    (function() {
+      var LANGS = [
+        ['en','English'],['es','Español'],['fr','Français'],['de','Deutsch'],
+        ['pt','Português'],['it','Italiano'],['nl','Nederlands'],['ru','Русский'],
+        ['zh','中文'],['ja','日本語'],['ko','한국어'],['ar','العربية'],
+        ['tr','Türkçe'],['pl','Polski'],['sv','Svenska'],['th','ไทย'],
+        ['hi','हिन्दी'],['vi','Tiếng Việt'],['id','Bahasa Indonesia'],
+        ['uk','Українська'],['cs','Čeština']
+      ];
+      var dropdown = document.getElementById('lang-dropdown');
+      var btn = document.getElementById('btn-lang-picker');
+      if (!dropdown || !btn) return;
+      LANGS.forEach(function(pair) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = pair[1];
+        b.dataset.lang = pair[0];
+        b.addEventListener('click', function() {
+          if (typeof I18n !== 'undefined') I18n.setLang(pair[0]);
+          var settingsLang = document.getElementById('settings-language');
+          if (settingsLang) settingsLang.value = pair[0];
+          var setupLang = document.getElementById('setup-language');
+          if (setupLang) setupLang.value = pair[0];
+          dropdown.style.display = 'none';
+          updateLangDropdownActive();
+        });
+        dropdown.appendChild(b);
+      });
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var open = dropdown.style.display !== 'none';
+        dropdown.style.display = open ? 'none' : '';
+        if (!open) updateLangDropdownActive();
+      });
+      document.addEventListener('click', function() { dropdown.style.display = 'none'; });
+      dropdown.addEventListener('click', function(e) { e.stopPropagation(); });
+
+      function updateLangDropdownActive() {
+        var cur = (typeof I18n !== 'undefined') ? I18n.getLang() : 'en';
+        dropdown.querySelectorAll('button').forEach(function(b) {
+          b.classList.toggle('active', b.dataset.lang === cur);
+        });
+      }
+    })();
+
+    // Setup wizard language picker
+    on('setup-language', 'change', function() {
+      var lang = document.getElementById('setup-language').value;
+      if (typeof I18n !== 'undefined') I18n.setLang(lang);
+      var settingsLang = document.getElementById('settings-language');
+      if (settingsLang) settingsLang.value = lang;
+      // Toggle "Continue in English" visibility
+      var engBtn = document.getElementById('setup-lang-english');
+      if (engBtn) engBtn.style.display = (lang !== 'en') ? '' : 'none';
+    });
+
     on('btn-rerun-setup', 'click', function() {
       localStorage.removeItem(SETUP_DONE_KEY);
       ui.closeSettings();
@@ -4828,6 +4929,11 @@ var SwarmLLM = (function() {
   }
 
   function init() {
+    // Initialize i18n — translates static [data-i18n] elements
+    if (typeof I18n !== 'undefined') {
+      I18n.init(['en','es','fr','de','pt','it','nl','ru','zh','ja','ko','ar','tr','pl','sv','th','hi','vi','id','uk','cs']);
+    }
+
     bindEvents();
     initCollapsiblePanels();
     initModelDropdown();
@@ -4854,6 +4960,27 @@ var SwarmLLM = (function() {
     chat.renderMessages();
 
     applyMode(localStorage.getItem(MODE_KEY) || 'basic');
+    applyTheme(localStorage.getItem(THEME_KEY) || 'dark');
+
+    // Sync setup language dropdown with detected language
+    if (typeof I18n !== 'undefined') {
+      var detectedLang = I18n.getLang() || 'en';
+      var setupLang = document.getElementById('setup-language');
+      if (setupLang) setupLang.value = detectedLang;
+      // Show "Continue in English" button if non-English was auto-detected
+      var engBtn = document.getElementById('setup-lang-english');
+      if (engBtn && detectedLang !== 'en') {
+        engBtn.style.display = '';
+        engBtn.addEventListener('click', function() {
+          I18n.setLang('en');
+          if (setupLang) setupLang.value = 'en';
+          var settingsLang = document.getElementById('settings-language');
+          if (settingsLang) settingsLang.value = 'en';
+          engBtn.style.display = 'none';
+        });
+      }
+    }
+
     setup.init();
     settings.init();
     settings.loadApiKey();

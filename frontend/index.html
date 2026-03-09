@@ -16,8 +16,34 @@
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="modal">
       <div class="modal-header">
-        <h2 id="setup-title">Welcome to SwarmLLM</h2>
-        <span class="text-muted">Chat with AI using your own computer, or team up with others to run bigger models</span>
+        <div id="setup-lang-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:4px">
+          <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none">Continue in English</button>
+          <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" title="Language">
+            <option value="en">English</option>
+            <option value="es">Español</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="pt">Português</option>
+            <option value="it">Italiano</option>
+            <option value="nl">Nederlands</option>
+            <option value="ru">Русский</option>
+            <option value="zh">中文</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="ar">العربية</option>
+            <option value="tr">Türkçe</option>
+            <option value="pl">Polski</option>
+            <option value="sv">Svenska</option>
+            <option value="th">ไทย</option>
+            <option value="hi">हिन्दी</option>
+            <option value="vi">Tiếng Việt</option>
+            <option value="id">Bahasa Indonesia</option>
+            <option value="uk">Українська</option>
+            <option value="cs">Čeština</option>
+          </select>
+        </div>
+        <h2 id="setup-title" data-i18n="setup.welcome">Welcome to SwarmLLM</h2>
+        <span class="text-muted" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</span>
       </div>
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
         <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Your Computer">1</button>
@@ -29,7 +55,7 @@
         <button class="wizard-step" data-step="4" role="tab" aria-selected="false" aria-label="Step 4: Review">4</button>
       </div>
       <div class="wizard-body" id="step-1">
-        <h3>Your Computer</h3>
+        <h3 data-i18n="setup.step1">Your Computer</h3>
         <p class="text-muted mb-2">Here's what your system can handle.</p>
         <div id="hw-loading" class="flex gap-1" style="align-items:center">
           <div class="spinner"></div>
@@ -38,9 +64,9 @@
         <div id="hw-results" class="hidden">
           <div class="grid grid-2 mt-1">
             <div><label>GPU</label><div class="mono" id="hw-gpu">---</div></div>
-            <div><label>GPU Memory</label><div class="mono" id="hw-vram">---</div></div>
-            <div><label>System RAM</label><div class="mono" id="hw-ram">---</div></div>
-            <div><label>Disk Available</label><div class="mono" id="hw-disk">---</div></div>
+            <div><label data-i18n="setup.gpu_memory">GPU Memory</label><div class="mono" id="hw-vram">---</div></div>
+            <div><label data-i18n="setup.system_ram">System RAM</label><div class="mono" id="hw-ram">---</div></div>
+            <div><label data-i18n="setup.disk_available">Disk Available</label><div class="mono" id="hw-disk">---</div></div>
           </div>
         </div>
       </div>
@@ -127,16 +153,16 @@
   <div class="modal-overlay hidden" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal">
       <div class="modal-header">
-        <h2 id="settings-title">Settings</h2>
+        <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
         <button class="btn btn-ghost btn-sm" id="btn-close-settings" aria-label="Close settings">&times;</button>
       </div>
       <div class="form-group">
-        <label for="settings-api-key">Access Token</label>
+        <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
         <div class="flex gap-1" style="align-items:center">
           <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
           <button class="btn btn-sm" id="btn-copy-api-key" title="Copy access token">Copy</button>
         </div>
-        <span class="text-muted" style="font-size:0.75rem">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
+        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
       </div>
       <div class="form-group">
         <label for="settings-nickname">Nickname</label>
@@ -150,6 +176,33 @@
           <option value="anonymous">Anonymous (show ID only)</option>
           <option value="nickname">Nickname (show your name to others)</option>
         </select>
+      </div>
+      <div class="form-group">
+        <label for="settings-language">Language</label>
+        <select id="settings-language">
+          <option value="en">English</option>
+          <option value="es">Español</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+          <option value="pt">Português</option>
+          <option value="it">Italiano</option>
+          <option value="nl">Nederlands</option>
+          <option value="ru">Русский</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="ar">العربية</option>
+          <option value="tr">Türkçe</option>
+          <option value="pl">Polski</option>
+          <option value="sv">Svenska</option>
+          <option value="th">ไทย</option>
+          <option value="hi">हिन्दी</option>
+          <option value="vi">Tiếng Việt</option>
+          <option value="id">Bahasa Indonesia</option>
+          <option value="uk">Українська</option>
+          <option value="cs">Čeština</option>
+        </select>
+        <span class="text-muted" style="font-size:0.75rem">Dashboard language. Community translations welcome!</span>
       </div>
       <div class="form-group">
         <label for="settings-contribution">Contribution Level</label>
@@ -344,11 +397,11 @@
   <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-labelledby="model-browser-title">
     <div class="modal modal-lg">
       <div class="modal-header">
-        <h2 id="model-browser-title">Browse Models</h2>
+        <h2 id="model-browser-title" data-i18n="model_browser.title">Browse Models</h2>
         <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" aria-label="Close model browser">&times;</button>
       </div>
       <div class="model-browser-search">
-        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, phi, gemma)...">
+        <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, phi, gemma)..." data-i18n-placeholder="model_browser.search_placeholder">
         <button class="btn btn-primary" id="btn-hf-search">Search</button>
       </div>
       <div class="model-browser-filters">
@@ -384,11 +437,11 @@
       <div class="logo">SwarmLLM</div>
     </div>
     <div class="header-center">
-      <button class="tab-btn tab-btn-chat" data-tab="chat">Chat</button>
-      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="leaderboard">Leaderboard</button>
-      <button class="tab-btn" data-tab="network-map">Network Map</button>
-      <button class="tab-btn" data-tab="compare">Compare</button>
+      <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
+      <button class="tab-btn active" data-tab="dashboard" data-i18n="nav.dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
+      <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
+      <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -406,6 +459,11 @@
         <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models" aria-label="Browse models">+</button>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>
+      <div class="header-lang-picker" style="position:relative">
+        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" title="Language" aria-label="Language" style="font-size:1rem">&#127760;</button>
+        <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
       <button class="btn btn-ghost btn-sm mode-toggle" id="btn-mode-toggle" title="Switch between Basic and Advanced view">Basic</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
@@ -424,7 +482,7 @@
     <!-- Sidebar: chat sessions -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-title">Chats</span>
+        <span class="sidebar-title" data-i18n="sidebar.title">Chats</span>
         <button class="btn btn-ghost btn-sm" id="btn-new-session" title="New chat">+</button>
       </div>
       <div class="session-list" id="session-list"></div>
@@ -446,8 +504,8 @@
           <div class="chat-messages" id="chat-messages">
             <div class="chat-empty" id="chat-empty">
               <div class="chat-empty-icon">&#11203;</div>
-              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Chat with AI</div>
-              <div style="color:var(--text-muted)">Pick a model from the dropdown above and start chatting</div>
+              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)" data-i18n="chat.empty_title">Chat with AI</div>
+              <div style="color:var(--text-muted)" data-i18n="chat.empty_hint">Pick a model from the dropdown above and start chatting</div>
             </div>
           </div>
           <div class="chat-input-area">
@@ -455,8 +513,8 @@
             <div class="chat-input-wrap">
               <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
               <button class="btn" id="image-upload-btn" title="Attach image (or paste/drag)" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
-              <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" rows="1"></textarea>
-              <button class="btn btn-primary" id="send-btn">Send</button>
+              <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" data-i18n-placeholder="chat.placeholder" rows="1"></textarea>
+              <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
               <div class="token-counter" id="token-counter"></div>
@@ -488,42 +546,42 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-peers">0</div>
-                <div class="stat-label">Peers <span class="stat-help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge adv-only" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge adv-only" id="lan-peer-badge" style="display:none">0 LAN</span></div>
               </div>
             </div>
             <div class="stat-card" title="Credits earned by helping others run AI">
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-credits">0</div>
-                <div class="stat-label">Credits <span class="stat-help" title="Earned by helping others, spent when you use the network">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.credits">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-requests-made">0</div>
-                <div class="stat-label">Requests <span class="stat-help" title="Messages you've sent to AI models">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.requests">Requests</span> <span class="stat-help" data-i18n-title="stats.requests_help" title="Messages you've sent to AI models">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Full inference requests completed by this node for others">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-served">0</div>
-                <div class="stat-label">Served <span class="stat-help" title="Requests your computer handled for others (earns credits)">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for others (earns credits)">?</span></div>
               </div>
             </div>
             <div class="stat-card adv-only" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-forwards">0</div>
-                <div class="stat-label">Forwards <span class="stat-help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.forwards">Forwards</span> <span class="stat-help" data-i18n-title="stats.forwards_help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
               </div>
             </div>
             <div class="stat-card" title="Currently running inference requests">
               <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-active">0</div>
-                <div class="stat-label">Active <span class="stat-help" title="AI requests currently being processed right now">?</span></div>
+                <div class="stat-label"><span data-i18n="stats.active">Active</span> <span class="stat-help" data-i18n-title="stats.active_help" title="AI requests currently being processed right now">?</span></div>
               </div>
             </div>
           </div>
@@ -722,8 +780,8 @@
         <div class="container">
           <div class="panel">
             <div class="panel-header" style="flex-wrap:wrap;gap:4px 12px">
-              <h2 style="margin:0">Model Compare</h2>
-              <span class="text-muted" style="font-size:0.8rem">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
+              <h2 style="margin:0" data-i18n="compare.title">Model Compare</h2>
+              <span class="text-muted" style="font-size:0.8rem" data-i18n="compare.subtitle">Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.</span>
             </div>
             <div class="compare-controls">
               <details style="margin-bottom:4px">
@@ -738,24 +796,24 @@
               </div>
                 <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px">
                   <div class="form-group" style="width:100px">
-                    <label for="compare-temp">Creativity</label>
+                    <label for="compare-temp" data-i18n="compare.creativity">Creativity</label>
                     <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem" title="Lower = more focused, Higher = more creative">
                   </div>
                   <div class="form-group" style="width:140px">
-                    <label for="compare-max-tokens">Max response length</label>
+                    <label for="compare-max-tokens" data-i18n="compare.max_length">Max response length</label>
                     <input type="number" id="compare-max-tokens" value="1024" min="1" max="8192" step="64" style="font-size:0.85rem">
                   </div>
                 </div>
               </details>
               <div class="compare-params">
                 <div class="form-group" style="flex:1;min-width:0">
-                  <label>Pick 2 or more models to compare</label>
+                  <label data-i18n="compare.pick_models">Pick 2 or more models to compare</label>
                   <div class="compare-model-list" id="compare-model-list">
                     <span class="text-muted" style="font-size:0.8rem">Loading models...</span>
                   </div>
                 </div>
                 <div style="display:flex;align-items:flex-end">
-                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap">Compare</button>
+                  <button class="btn btn-primary" id="btn-compare-run" style="height:38px;white-space:nowrap" data-i18n="compare.run">Compare</button>
                 </div>
               </div>
             </div>
@@ -799,6 +857,7 @@
     <button class="shard-ctx-btn" id="shard-ctx-action"></button>
   </div>
 
+  <script src="/static/js/i18n.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

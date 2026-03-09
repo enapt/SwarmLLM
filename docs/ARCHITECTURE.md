@@ -882,9 +882,15 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `/admin` — Dashboard SPA (single-page app — all routes serve index.html)
 - `/chat` — Chat interface
 - `/setup` — First-run wizard
-- `/static/*path` — Embedded static assets (CSS, JS)
+- `/static/*path` — Embedded static assets (CSS, JS, i18n JSON)
+- `/static/i18n/{lang}.json` — Translation files (20 languages)
 - `/health` — Health check endpoint
 - `/` → redirect to `/admin`
+
+### Frontend Features
+- **i18n**: 20 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. "Continue in English" UX for non-English users who prefer English.
+- **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
+- **Basic/Advanced mode**: Hides technical details (shard grids, GGUF metadata, etc.) in basic mode. Persisted in localStorage.
 
 ## Node Tiers
 
