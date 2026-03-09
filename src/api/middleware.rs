@@ -218,6 +218,8 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
             | "/setup"
             | "/favicon.ico"
     ) || path.starts_with("/static/")
+        || path.starts_with("/admin/")
+        || path.starts_with("/chat/")
     {
         return true;
     }

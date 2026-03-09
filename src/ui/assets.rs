@@ -11,6 +11,14 @@ pub async fn serve_dashboard() -> Html<&'static str> {
     Html(get_file_content("index.html").unwrap_or("<!-- missing index.html -->"))
 }
 
+/// SPA catch-all: serve index.html for sub-routes like /admin/leaderboard, /chat/session-id.
+/// This allows direct URL access (bookmarks, refresh) to work with client-side routing.
+pub async fn serve_dashboard_catchall(
+    axum::extract::Path(_path): axum::extract::Path<String>,
+) -> Html<&'static str> {
+    Html(get_file_content("index.html").unwrap_or("<!-- missing index.html -->"))
+}
+
 /// Serve static files from the embedded frontend directory.
 /// Handles paths like `/static/css/style.css` or `/static/js/app.js`.
 pub async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> Response {

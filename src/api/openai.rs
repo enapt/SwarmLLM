@@ -570,7 +570,7 @@ pub struct ModelInfo {
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(mut req): Json<ChatCompletionRequest>,
+    crate::api::server::JsonBody(mut req): crate::api::server::JsonBody<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     // Validate session_id length to prevent memory abuse
     if let Some(ref sid) = req.session_id {
@@ -2214,7 +2214,7 @@ fn default_encoding_format() -> String {
 /// will produce better results for retrieval tasks.
 pub async fn embeddings(
     State(state): State<AppState>,
-    Json(req): Json<EmbeddingRequest>,
+    crate::api::server::JsonBody(req): crate::api::server::JsonBody<EmbeddingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Check if we have a loaded split model with tok_embeddings
     let model_entry = state.shared_state.split_models.iter().next();

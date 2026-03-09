@@ -14,7 +14,15 @@ var SwarmLLM = (function() {
   var currentModel = '';
   var currentSessionId = null;
   var sessions = {};
-  var activeTab = 'dashboard';
+  // Determine initial tab from URL path for direct navigation / bookmarks
+  var activeTab = (function() {
+    var p = window.location.pathname;
+    if (p === '/chat' || p.startsWith('/chat/')) return 'chat';
+    if (p === '/admin/leaderboard') return 'leaderboard';
+    if (p === '/admin/network') return 'network-map';
+    if (p === '/admin/compare') return 'compare';
+    return 'dashboard';
+  })();
 
   // --- STORAGE KEYS ---
   var SESSIONS_KEY = 'swarmllm_sessions';
@@ -55,8 +63,19 @@ var SwarmLLM = (function() {
   // UI Module — tab switching, sidebar, modals
   // ========================================================================
   var ui = {
-    switchTab: function(tab) {
+    switchTab: function(tab, skipHistory) {
       activeTab = tab;
+      // Update URL to match tab (enables bookmarks and back/forward)
+      if (!skipHistory) {
+        var path = tab === 'chat' ? '/chat'
+          : tab === 'leaderboard' ? '/admin/leaderboard'
+          : tab === 'network-map' ? '/admin/network'
+          : tab === 'compare' ? '/admin/compare'
+          : '/admin';
+        if (window.location.pathname !== path) {
+          history.pushState({ tab: tab }, '', path);
+        }
+      }
       document.querySelectorAll('.tab-btn').forEach(function(b) {
         b.classList.toggle('active', b.dataset.tab === tab);
       });
@@ -373,7 +392,7 @@ var SwarmLLM = (function() {
     send: async function() {
       if (isStreaming) return;
       if (!currentModel) {
-        ui.showBanner('warning', 'No model available — download a model first');
+        ui.showBanner('warning', 'No model available — download a model or share your Network Code to find peers');
         return;
       }
 
@@ -2073,8 +2092,8 @@ var SwarmLLM = (function() {
         var models = await resp.json();
         if (!models || models.length === 0) {
           list.innerHTML = '<div class="empty-state" style="padding:20px 0">' +
-            '<p style="margin-bottom:8px">No models downloaded yet.</p>' +
-            '<p class="text-muted" style="font-size:0.85rem"><strong>Easiest option:</strong> Add a cloud provider API key in Settings after setup \u2014 no download needed.<br>Or browse and download models from HuggingFace using the <strong>Browse Models</strong> button on the dashboard.</p>' +
+            '<p style="margin-bottom:8px">No models on this node yet.</p>' +
+            '<p class="text-muted" style="font-size:0.85rem"><strong>Three ways to get started:</strong><br>1. Download models from HuggingFace using <strong>Browse Models</strong> on the dashboard<br>2. Share your Network Code to find peers who already have models<br>3. Add a cloud provider API key in Settings for instant access</p>' +
             '</div>';
         } else {
           list.innerHTML = '';
@@ -2574,7 +2593,7 @@ var SwarmLLM = (function() {
     list.innerHTML = '';
 
     if (!hasAny) {
-      list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Download a model or add a cloud provider in Settings</span></div>';
+      list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Download a model, find peers via Network Code, or add a cloud provider</span></div>';
       return;
     }
 
@@ -4102,11 +4121,12 @@ var SwarmLLM = (function() {
 
     // Delegated buttons for dynamic CTA actions
     document.addEventListener('click', function(e) {
-      var el = e.target.closest('[data-goto-chat],[data-goto-browse],[data-goto-settings],[data-goto-hf]') || e.target;
+      var el = e.target.closest('[data-goto-chat],[data-goto-browse],[data-goto-settings],[data-goto-hf],[data-goto-network-code]') || e.target;
       if (el.getAttribute('data-goto-chat')) { ui.switchTab('chat'); }
       if (el.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
       if (el.getAttribute('data-goto-settings')) { ui.openSettings(true); }
       if (el.getAttribute('data-goto-hf')) { ui.openModelBrowser(); }
+      if (el.getAttribute('data-goto-network-code')) { ui.switchTab('dashboard'); setTimeout(function() { var btn = document.getElementById('btn-share-network'); if (btn) btn.click(); }, 200); }
     });
 
     // Network discovery — share popover toggle
@@ -4379,15 +4399,16 @@ var SwarmLLM = (function() {
       } else {
         // Check if a model is currently downloading (WI-9)
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download model shards to join the swarm';
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 download a model or share your Network Code to find peers';
       }
     }
     if (emptyState && !hasModels) {
       emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
         '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">No Models Available</div>' +
-        '<div style="color:var(--text-muted);margin:8px 0">Download model shards to start chatting — connect with peers to run models too large for one machine</div>' +
+        '<div style="color:var(--text-muted);margin:8px 0">Download models or share your Network Code to find peers — the swarm splits models across nodes so no single machine needs everything</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
-          '<button class="btn btn-primary" data-goto-browse="1">Download Shards</button>' +
+          '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
+          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
         '</div>';
     }
   }
@@ -4501,20 +4522,20 @@ var SwarmLLM = (function() {
     } else if (cloudProviders.length > 0) {
       dot.className = 'mode-dot cloud';
       label.textContent = 'Cloud Only';
-      modeHelp = 'Using cloud providers — download shards and connect peers to unlock the swarm';
+      modeHelp = 'Using cloud providers — download models or share your Network Code for free swarm inference';
       if (indicator) indicator.classList.add('mode-cloud');
     } else {
       dot.className = 'mode-dot offline';
       label.textContent = 'Ready to Join';
-      modeHelp = 'Download model shards and connect with peers to start';
+      modeHelp = 'Download models or share your Network Code to find peers';
       if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download shards</u> to join the swarm</span>'];
+      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download models</u> or share your Network Code</span>'];
     }
     if (modeHelp) label.title = modeHelp;
 
     // Add quick-action button
     if (cloudProviders.length > 0 && !hasLocalModel && peers === 0) {
-      chips.push('<button class="btn btn-sm" data-goto-hf="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Download Shards</button>');
+      chips.push('<button class="btn btn-sm" data-goto-hf="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Download Model</button>');
     }
 
     detail.innerHTML = chips.join(' ');
@@ -4584,9 +4605,14 @@ var SwarmLLM = (function() {
       inputEl.addEventListener('input', updateTokenCounter);
     }
 
-    // Hide sidebar on non-chat pages (default is dashboard)
-    var sidebar = document.getElementById('sidebar');
-    if (sidebar && activeTab !== 'chat') sidebar.style.display = 'none';
+    // Apply initial tab from URL (handles direct navigation / bookmarks)
+    ui.switchTab(activeTab, true);
+
+    // Handle browser back/forward navigation
+    window.addEventListener('popstate', function(e) {
+      var tab = (e.state && e.state.tab) ? e.state.tab : 'dashboard';
+      ui.switchTab(tab, true);
+    });
 
     chat.loadSessions();
     chat.renderSessionList();
@@ -4656,7 +4682,7 @@ var SwarmLLM = (function() {
         });
 
         if (compare.models.length === 0) {
-          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available. Download models or configure cloud providers in Settings.</span>';
+          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available. Download models, find peers via Network Code, or configure cloud providers in Settings.</span>';
           return;
         }
 

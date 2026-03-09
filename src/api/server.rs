@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
-use axum::response::Redirect;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{DefaultBodyLimit, FromRequest, Request};
+use axum::response::{IntoResponse, Redirect};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
+use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
 use crate::api::{
@@ -35,6 +37,39 @@ pub struct AppState {
     pub shared_state: Arc<SharedState>,
     /// IP-based rate limiter.
     pub rate_limiter: middleware::RateLimiter,
+}
+
+/// Custom JSON extractor that returns OpenAI-format error responses on parse failure.
+///
+/// Axum's built-in `Json<T>` returns raw text on deserialization errors.
+/// This wrapper converts those into proper `{"error": {...}}` JSON responses.
+pub struct JsonBody<T>(pub T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for JsonBody<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+    axum::Json<T>: FromRequest<S, Rejection = JsonRejection>,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(JsonBody(value)),
+            Err(rejection) => {
+                let message = rejection.body_text();
+                let body = serde_json::json!({
+                    "error": {
+                        "message": message,
+                        "type": "invalid_request_error",
+                        "code": 400
+                    }
+                });
+                Err((axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response())
+            }
+        }
+    }
 }
 
 /// Build the Axum router with all routes.
@@ -171,8 +206,12 @@ pub fn build_router(state: AppState) -> Router {
         // WebSocket
         .route("/api/admin/ws", get(websocket::handler))
         // Static files (embedded frontend)
+        // SPA catch-all: serve index.html for all frontend sub-routes
+        // so direct URL access (bookmarks, refresh) works
         .route("/admin", get(assets::serve_dashboard))
+        .route("/admin/*path", get(assets::serve_dashboard_catchall))
         .route("/chat", get(assets::serve_dashboard))
+        .route("/chat/*path", get(assets::serve_dashboard_catchall))
         .route("/setup", get(assets::serve_dashboard))
         .route("/static/*path", get(assets::serve_static))
         // Root redirect

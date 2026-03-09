@@ -279,7 +279,7 @@ fn resolve_model(model: &str) -> &str {
 /// POST /v1/messages — Anthropic Messages API endpoint.
 pub async fn messages(
     State(state): State<AppState>,
-    Json(req): Json<MessagesRequest>,
+    crate::api::server::JsonBody(req): crate::api::server::JsonBody<MessagesRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     let model = resolve_model(&req.model).to_string();
