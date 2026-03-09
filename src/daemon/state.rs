@@ -319,9 +319,22 @@ impl TpAllReduceCollector {
 
     /// Sum all partial tensors (f32) and return the reduced bytes + shape.
     pub fn reduce_sum(&self) -> Result<(Vec<u8>, Vec<u32>), crate::error::SwarmError> {
-        let first = self.partials[0].as_ref().unwrap();
+        let first = self.partials[0].as_ref().ok_or_else(|| {
+            crate::error::SwarmError::Internal("AllReduce: missing rank 0 partial".into())
+        })?;
         let shape = first.shape.clone();
-        let elem_count: usize = shape.iter().map(|&s| s as usize).product();
+        let elem_count: usize = shape
+            .iter()
+            .try_fold(1usize, |acc, &s| acc.checked_mul(s as usize))
+            .ok_or_else(|| {
+                crate::error::SwarmError::Internal("AllReduce: shape overflow".into())
+            })?;
+        // Cap at 256MB worth of f32 elements (64M floats)
+        if elem_count > 64 * 1024 * 1024 {
+            return Err(crate::error::SwarmError::Internal(
+                "AllReduce: tensor too large".into(),
+            ));
+        }
 
         // Decompress first partial
         let decompressed = zstd::decode_all(std::io::Cursor::new(&first.partial_data))
@@ -334,8 +347,13 @@ impl TpAllReduceCollector {
         }
 
         // Add remaining partials
-        for partial in &self.partials[1..] {
-            let req = partial.as_ref().unwrap();
+        for (i, partial) in self.partials[1..].iter().enumerate() {
+            let req = partial.as_ref().ok_or_else(|| {
+                crate::error::SwarmError::Internal(format!(
+                    "AllReduce: missing rank {} partial",
+                    i + 1
+                ))
+            })?;
             let dec = zstd::decode_all(std::io::Cursor::new(&req.partial_data))
                 .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
             if dec.len() == elem_count * 4 {

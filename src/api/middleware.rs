@@ -293,16 +293,36 @@ pub async fn auth_middleware(
     }
 
     // Exempt internal forwarded requests authenticated with per-process secret token.
-    // Replaces the old x-swarm-forwarded header check which was guessable by any localhost process.
+    // Only on loopback — this is for local inter-process communication only.
     if addr.ip().is_loopback() {
         if let Some(token) = req
             .headers()
             .get("x-swarm-internal-token")
             .and_then(|v| v.to_str().ok())
         {
-            if token == state.shared_state.internal_auth_token {
+            if constant_time_eq(
+                token.as_bytes(),
+                state.shared_state.internal_auth_token.as_bytes(),
+            ) {
                 return next.run(req).await;
             }
+        }
+    }
+
+    // Exempt peer-forwarded requests from known peer IPs.
+    // Peers in peer_registry have already authenticated via Ed25519+Noise handshake
+    // on the P2P layer, so their IPs are trusted for HTTP forwarding.
+    if req.headers().get("x-swarm-forwarded").is_some() {
+        let source_ip = addr.ip().to_string();
+        let is_known_peer = state.shared_state.peer_registry.iter().any(|entry| {
+            entry.value().addresses.iter().any(|multiaddr| {
+                // Parse /ip4/<ip>/... from multiaddr
+                let parts: Vec<&str> = multiaddr.split('/').collect();
+                parts.windows(2).any(|w| w[0] == "ip4" && w[1] == source_ip)
+            })
+        });
+        if is_known_peer {
+            return next.run(req).await;
         }
     }
 

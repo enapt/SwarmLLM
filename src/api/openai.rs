@@ -581,6 +581,13 @@ pub async fn chat_completions(
         }
     }
 
+    // Limit message count to prevent excessive prompt construction overhead
+    if req.messages.len() > 4096 {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Too many messages (max 4096)".into(),
+        )));
+    }
+
     // Convert API messages to internal format (decode base64 images if present)
     let internal_messages = req.to_internal_messages().map_err(ApiError)?;
 
@@ -683,8 +690,9 @@ pub async fn chat_completions(
     // as long as the network collectively covers all layers.
     // The `x-swarm-forwarded` header prevents infinite forwarding loops between nodes.
     // Only trust this header from internal requests (authenticated with internal token).
-    let is_forwarded = headers.get("x-swarm-internal-token").is_some()
-        && headers.get("x-swarm-forwarded").is_some();
+    // Middleware already validates that x-swarm-forwarded only passes from known peer IPs
+    // or loopback with valid internal token, so we just check presence here.
+    let is_forwarded = headers.get("x-swarm-forwarded").is_some();
 
     if model_name.is_none() {
         // Priority 1: Check if all layers are covered across the network for
@@ -1190,7 +1198,6 @@ async fn forward_to_peer(
     let peer_resp = client
         .post(&url)
         .header("x-swarm-forwarded", "true")
-        .header("x-swarm-internal-token", "peer-forward")
         .json(req)
         .send()
         .await

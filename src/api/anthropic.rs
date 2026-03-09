@@ -281,6 +281,13 @@ pub async fn messages(
     State(state): State<AppState>,
     crate::api::server::JsonBody(req): crate::api::server::JsonBody<MessagesRequest>,
 ) -> Result<axum::response::Response, ApiError> {
+    // Limit message count to prevent excessive prompt construction overhead
+    if req.messages.len() > 4096 {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Too many messages (max 4096)".into(),
+        )));
+    }
+
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     let model = resolve_model(&req.model).to_string();
 

@@ -37,6 +37,8 @@ pub const TOPIC_POOLS: &str = "swarm/pools";
 
 /// Maximum message size for request_response protocol (256 MB).
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+/// Maximum JSON control message size (4 MB).
+const MAX_JSON_MSG_SIZE: usize = 4 * 1024 * 1024;
 
 /// Maximum activation payload size in layer results (128 MB).
 const MAX_ACTIVATION_SIZE: usize = 128 * 1024 * 1024;
@@ -120,7 +122,7 @@ impl request_response::Codec for SwarmCodec {
         // tensor/shard data allowed up to 256 MB
         let max_for_tag = match tag_buf[0] {
             WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
-            _ => 4 * 1024 * 1024, // 4 MB for JSON control messages
+            _ => MAX_JSON_MSG_SIZE,
         };
         if len > max_for_tag {
             return Err(io::Error::new(
@@ -177,7 +179,7 @@ impl request_response::Codec for SwarmCodec {
 
         let max_for_tag = match tag_buf[0] {
             WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
-            _ => 4 * 1024 * 1024,
+            _ => MAX_JSON_MSG_SIZE,
         };
         if len > max_for_tag {
             return Err(io::Error::new(
@@ -238,6 +240,16 @@ impl request_response::Codec for SwarmCodec {
             other => {
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                if data.len() > MAX_JSON_MSG_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "JSON message too large: {} bytes (max {})",
+                            data.len(),
+                            MAX_JSON_MSG_SIZE
+                        ),
+                    ));
+                }
                 let len = (data.len() as u32).to_be_bytes();
                 let mut frame = Vec::with_capacity(1 + 4 + data.len());
                 frame.push(WIRE_TAG_JSON);
@@ -276,6 +288,16 @@ impl request_response::Codec for SwarmCodec {
             other => {
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                if data.len() > MAX_JSON_MSG_SIZE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "JSON response too large: {} bytes (max {})",
+                            data.len(),
+                            MAX_JSON_MSG_SIZE
+                        ),
+                    ));
+                }
                 let len = (data.len() as u32).to_be_bytes();
                 let mut frame = Vec::with_capacity(1 + 4 + data.len());
                 frame.push(WIRE_TAG_JSON);
