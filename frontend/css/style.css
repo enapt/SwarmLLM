@@ -2124,6 +2124,9 @@ kbd {
 }
 .compare-model-chip.type-local .chip-type { color: var(--green); opacity: 0.8; }
 .compare-model-chip.type-cloud .chip-type { color: var(--purple); opacity: 0.8; }
+.btn-xs { padding: 1px 8px; font-size: 0.72rem; border-radius: 10px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; }
+.btn-xs:hover { border-color: var(--accent); color: var(--text-primary); }
+.btn-xs.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .compare-card {
   background: var(--bg-secondary); border: 1px solid var(--border);
   border-radius: var(--radius-lg); display: flex; flex-direction: column;

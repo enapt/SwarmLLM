@@ -2568,6 +2568,32 @@ impl SplitModel {
     /// The `ShardReader` uses the tensor entries to map virtual GGUF positions
     /// to shard-local offsets, so candle's GGUF parser works unchanged.
     #[allow(clippy::too_many_arguments)]
+    /// Load from shards, forcing CPU device (used as OOM fallback).
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_shards_cpu(
+        model_dir: &Path,
+        shard_files: Vec<(u32, PathBuf)>,
+        tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
+        total_gguf_size: u64,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+    ) -> Result<Self, SwarmError> {
+        Self::load_from_shards_inner(
+            model_dir,
+            shard_files,
+            tensor_entries,
+            total_gguf_size,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn load_from_shards(
         model_dir: &Path,
         shard_files: Vec<(u32, PathBuf)>,
@@ -2577,6 +2603,31 @@ impl SplitModel {
         layer_end: usize,
         is_first: bool,
         is_last: bool,
+    ) -> Result<Self, SwarmError> {
+        Self::load_from_shards_inner(
+            model_dir,
+            shard_files,
+            tensor_entries,
+            total_gguf_size,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_shards_inner(
+        model_dir: &Path,
+        shard_files: Vec<(u32, PathBuf)>,
+        tensor_entries: &[Vec<crate::types::ShardTensorEntry>],
+        total_gguf_size: u64,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+        force_cpu: bool,
     ) -> Result<Self, SwarmError> {
         let header_path = model_dir.join("gguf_header.bin");
         if !header_path.exists() {
@@ -2671,9 +2722,15 @@ impl SplitModel {
         }
 
         // From here, the exact same logic as load_from_gguf
-        let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+        let device = if force_cpu {
+            Device::Cpu
+        } else {
+            Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+        };
         if device.is_cuda() {
             tracing::info!("Split model using CUDA GPU");
+        } else if force_cpu {
+            tracing::info!("Split model using CPU (GPU OOM fallback)");
         } else {
             tracing::info!("Split model using CPU (no CUDA available)");
         }

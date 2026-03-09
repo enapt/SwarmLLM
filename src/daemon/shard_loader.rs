@@ -91,14 +91,35 @@ pub fn try_load_from_shards(
         "Loading split model from shard files (no full GGUF)"
     );
 
-    crate::inference::split::SplitModel::load_from_shards(
+    let result = crate::inference::split::SplitModel::load_from_shards(
         model_dir,
-        shard_files,
+        shard_files.clone(),
         &tensor_entries,
         params.manifest.total_size_bytes,
         layer_start,
         layer_end,
         is_first,
         is_last,
-    )
+    );
+
+    // GPU OOM fallback: retry on CPU so the model is still usable (slower but functional)
+    match &result {
+        Err(e) if e.to_string().contains("OUT_OF_MEMORY") => {
+            tracing::warn!(
+                model = %model_id,
+                "GPU OOM — retrying model load on CPU"
+            );
+            crate::inference::split::SplitModel::load_from_shards_cpu(
+                model_dir,
+                shard_files,
+                &tensor_entries,
+                params.manifest.total_size_bytes,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+            )
+        }
+        _ => result,
+    }
 }

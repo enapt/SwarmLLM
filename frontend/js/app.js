@@ -5078,6 +5078,22 @@ var SwarmLLM = (function() {
           });
           container.appendChild(chip);
         });
+
+        // Wire up filter buttons
+        var filters = document.getElementById('compare-filters');
+        if (filters) {
+          filters.querySelectorAll('.compare-filter').forEach(function(btn) {
+            btn.addEventListener('click', function() {
+              filters.querySelectorAll('.compare-filter').forEach(function(b) { b.classList.remove('active'); });
+              btn.classList.add('active');
+              var f = btn.getAttribute('data-filter');
+              container.querySelectorAll('.compare-model-chip').forEach(function(chip) {
+                if (f === 'all') { chip.style.display = ''; }
+                else { chip.style.display = chip.classList.contains('type-' + f) ? '' : 'none'; }
+              });
+            });
+          });
+        }
       } catch(e) {
         // non-critical
       }

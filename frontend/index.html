@@ -806,7 +806,14 @@
               </details>
               <div class="compare-params">
                 <div class="form-group" style="flex:1;min-width:0">
-                  <label data-i18n="compare.pick_models">Pick 2 or more models to compare</label>
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                    <label style="margin:0" data-i18n="compare.pick_models">Pick 2 or more models to compare</label>
+                    <div class="compare-filters" id="compare-filters" style="display:flex;gap:4px;margin-left:auto;font-size:0.72rem">
+                      <button class="btn btn-xs compare-filter active" data-filter="all">All</button>
+                      <button class="btn btn-xs compare-filter" data-filter="local">Local</button>
+                      <button class="btn btn-xs compare-filter" data-filter="cloud">Cloud</button>
+                    </div>
+                  </div>
                   <div class="compare-model-list" id="compare-model-list">
                     <span class="text-muted" style="font-size:0.8rem">Loading models...</span>
                   </div>
