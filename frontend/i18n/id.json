@@ -70,6 +70,8 @@
 
   "compare.title": "Bandingkan Model",
   "compare.subtitle": "Kirim prompt yang sama ke beberapa model dan bandingkan hasilnya berdampingan. Hasil bervariasi berdasarkan panjang konteks, kemampuan, dan spesialisasi.",
+  "compare.prompt_placeholder": "Masukkan prompt Anda di sini...",
+  "compare.advanced": "Lanjutan: prompt sistem & parameter",
   "compare.pick_models": "Pilih 2 model atau lebih untuk dibandingkan",
   "compare.run": "Bandingkan",
   "compare.creativity": "Kreativitas",

@@ -70,6 +70,8 @@
 
   "compare.title": "モデル比較",
   "compare.subtitle": "同じプロンプトを複数のモデルに送信し、結果を並べて比較します。結果はコンテキスト長、能力、専門分野により異なります。",
+  "compare.prompt_placeholder": "プロンプトを入力してください...",
+  "compare.advanced": "詳細：システムプロンプトとパラメータ",
   "compare.pick_models": "比較するモデルを2つ以上選択",
   "compare.run": "比較",
   "compare.creativity": "創造性",

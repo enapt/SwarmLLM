@@ -70,6 +70,8 @@
 
   "compare.title": "Comparar Modelos",
   "compare.subtitle": "Envie o mesmo prompt para vários modelos e compare resultados lado a lado. Resultados variam conforme comprimento de contexto, capacidades e especialização.",
+  "compare.prompt_placeholder": "Digite seu prompt aqui...",
+  "compare.advanced": "Avançado: prompt do sistema e parâmetros",
   "compare.pick_models": "Escolha 2 ou mais modelos para comparar",
   "compare.run": "Comparar",
   "compare.creativity": "Criatividade",

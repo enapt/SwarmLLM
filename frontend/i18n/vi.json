@@ -70,6 +70,8 @@
 
   "compare.title": "So sánh mô hình",
   "compare.subtitle": "Gửi cùng một prompt đến nhiều mô hình và so sánh kết quả cạnh nhau. Kết quả khác nhau tùy theo độ dài ngữ cảnh, khả năng và chuyên môn.",
+  "compare.prompt_placeholder": "Nhập prompt của bạn tại đây...",
+  "compare.advanced": "Nâng cao: prompt hệ thống và tham số",
   "compare.pick_models": "Chọn 2 mô hình trở lên để so sánh",
   "compare.run": "So sánh",
   "compare.creativity": "Sáng tạo",

@@ -70,6 +70,8 @@
 
   "compare.title": "Model Karşılaştırma",
   "compare.subtitle": "Aynı istemi birden fazla modele gönderin ve sonuçları yan yana karşılaştırın. Sonuçlar bağlam uzunluğu, yetenekler ve uzmanlığa göre değişir.",
+  "compare.prompt_placeholder": "İsteminizi buraya girin...",
+  "compare.advanced": "Gelişmiş: sistem istemi ve parametreler",
   "compare.pick_models": "Karşılaştırmak için 2 veya daha fazla model seçin",
   "compare.run": "Karşılaştır",
   "compare.creativity": "Yaratıcılık",

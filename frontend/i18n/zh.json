@@ -70,6 +70,8 @@
 
   "compare.title": "模型对比",
   "compare.subtitle": "将相同的提示词发送给多个模型，并排比较结果。结果因模型的上下文长度、能力和专长而异。",
+  "compare.prompt_placeholder": "在此输入提示词...",
+  "compare.advanced": "高级：系统提示词和参数",
   "compare.pick_models": "选择 2 个或更多模型进行对比",
   "compare.run": "对比",
   "compare.creativity": "创造力",

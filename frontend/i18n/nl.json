@@ -70,6 +70,8 @@
 
   "compare.title": "Modellen vergelijken",
   "compare.subtitle": "Stuur dezelfde prompt naar meerdere modellen en vergelijk de resultaten naast elkaar. Resultaten variëren per contextlengte, mogelijkheden en specialisatie.",
+  "compare.prompt_placeholder": "Voer hier uw prompt in...",
+  "compare.advanced": "Geavanceerd: systeemprompt & parameters",
   "compare.pick_models": "Kies 2 of meer modellen om te vergelijken",
   "compare.run": "Vergelijken",
   "compare.creativity": "Creativiteit",

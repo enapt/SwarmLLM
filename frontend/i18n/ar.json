@@ -70,6 +70,8 @@
 
   "compare.title": "مقارنة النماذج",
   "compare.subtitle": "أرسل نفس الأمر لعدة نماذج وقارن النتائج جنباً إلى جنب. تختلف النتائج حسب طول السياق والقدرات والتخصص.",
+  "compare.prompt_placeholder": "أدخل الطلب هنا...",
+  "compare.advanced": "متقدم: موجه النظام والمعلمات",
   "compare.pick_models": "اختر نموذجين أو أكثر للمقارنة",
   "compare.run": "مقارنة",
   "compare.creativity": "الإبداعية",

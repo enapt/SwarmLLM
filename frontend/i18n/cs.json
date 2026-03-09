@@ -70,6 +70,8 @@
 
   "compare.title": "Porovnání modelů",
   "compare.subtitle": "Pošlete stejný prompt více modelům a porovnejte výsledky vedle sebe. Výsledky se liší podle délky kontextu, schopností a specializace.",
+  "compare.prompt_placeholder": "Zadejte svůj prompt zde...",
+  "compare.advanced": "Pokročilé: systémový prompt a parametry",
   "compare.pick_models": "Vyberte 2 nebo více modelů k porovnání",
   "compare.run": "Porovnat",
   "compare.creativity": "Kreativita",
