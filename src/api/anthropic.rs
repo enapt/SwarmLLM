@@ -357,14 +357,14 @@ pub async fn messages(
     // Check if network has all shards for this model
     let network_available = crate::api::openai::all_shards_available(&state, &model);
 
-    // Fast path: if we have a complete local split model, generate directly.
+    // Fast path: if we have a complete local split model for the REQUESTED model, generate directly.
+    // Match by model ID — not just "any loaded model" (compare sends different model IDs).
+    let requested_mid = crate::types::ModelId(model.clone());
     let has_local_split_model = state
         .shared_state
         .split_models
         .iter()
-        .next()
-        .map(|e| e.value().is_complete)
-        .unwrap_or(false);
+        .any(|e| e.key().0 == requested_mid && e.value().is_complete);
 
     tracing::debug!(
         request_id = %request_id,
@@ -374,19 +374,6 @@ pub async fn messages(
     );
 
     if has_local_split_model {
-        let (tmpl, bos, eos) = {
-            let info = state.shared_state.loaded_model_info.read().await;
-            match info.as_ref() {
-                Some(i) => (
-                    i.chat_template.clone(),
-                    i.bos_token.clone(),
-                    i.eos_token.clone(),
-                ),
-                None => (None, String::new(), String::new()),
-            }
-        };
-        let prompt = chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
-
         if req.stream {
             return anthropic_split_stream(
                 &state,
@@ -394,12 +381,17 @@ pub async fn messages(
                 sampling_params,
                 request_id,
                 model,
-                prompt,
             )
             .await;
         } else {
-            return anthropic_split_non_stream(&state, sampling_params, request_id, model, prompt)
-                .await;
+            return anthropic_split_non_stream(
+                &state,
+                &internal_messages,
+                sampling_params,
+                request_id,
+                model,
+            )
+            .await;
         }
     }
 
@@ -973,14 +965,19 @@ fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static str, String
 /// SplitModel.forward() for maximum local inference speed.
 async fn anthropic_split_non_stream(
     state: &AppState,
+    messages: &[ChatMessage],
     params: SamplingParams,
     request_id: String,
     model: String,
-    prompt: String,
 ) -> Result<axum::response::Response, ApiError> {
     use crate::inference::split::sample_token;
 
-    let model_entry = state.shared_state.split_models.iter().next();
+    let requested_mid = crate::types::ModelId(model.clone());
+    let model_entry = state
+        .shared_state
+        .split_models
+        .iter()
+        .find(|e| e.key().0 == requested_mid);
     let model_ref = match model_entry {
         Some(entry) => entry,
         None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
@@ -988,6 +985,14 @@ async fn anthropic_split_non_stream(
     let entry = model_ref.value();
     let kv_store = state.shared_state.kv_cache_store.clone();
     let mut split_model = entry.model.lock().await;
+
+    // Build prompt using the model's own chat template (not global loaded_model_info)
+    let prompt = chat_template::build_prompt(
+        messages,
+        split_model.chat_template(),
+        split_model.bos_token(),
+        split_model.eos_token_str(),
+    );
 
     // Tokenize the prompt — forward() handles embedding internally
     let (input, prompt_tokens) = split_model.tokenize(&prompt)?;
@@ -1049,11 +1054,10 @@ async fn anthropic_split_non_stream(
 /// in Anthropic's streaming format.
 async fn anthropic_split_stream(
     state: &AppState,
-    _messages: Vec<ChatMessage>,
+    messages: Vec<ChatMessage>,
     params: SamplingParams,
     request_id: String,
     model: String,
-    prompt: String,
 ) -> Result<axum::response::Response, ApiError> {
     use crate::inference::split::sample_token;
 
@@ -1062,6 +1066,7 @@ async fn anthropic_split_stream(
     let state_clone = state.clone();
     let rid = request_id.clone();
     let model_clone = model.clone();
+    let model_for_lookup = model.clone();
 
     tokio::spawn(async move {
         // message_start
@@ -1077,7 +1082,12 @@ async fn anthropic_split_stream(
             .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
             .await;
 
-        let model_entry = state_clone.shared_state.split_models.iter().next();
+        let requested_mid = crate::types::ModelId(model_for_lookup);
+        let model_entry = state_clone
+            .shared_state
+            .split_models
+            .iter()
+            .find(|e| e.key().0 == requested_mid);
         let model_ref = match model_entry {
             Some(entry) => entry,
             None => {
@@ -1097,6 +1107,14 @@ async fn anthropic_split_stream(
         let entry = model_ref.value();
         let kv_store = state_clone.shared_state.kv_cache_store.clone();
         let mut split_model = entry.model.lock().await;
+
+        // Build prompt using the model's own chat template
+        let prompt = chat_template::build_prompt(
+            &messages,
+            split_model.chat_template(),
+            split_model.bos_token(),
+            split_model.eos_token_str(),
+        );
 
         // Tokenize — forward() handles embedding internally
         let (input, prompt_tokens) = match split_model.tokenize(&prompt) {
