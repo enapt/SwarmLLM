@@ -116,7 +116,13 @@ impl request_response::Codec for SwarmCodec {
         let len = u32::from_be_bytes(len_buf) as usize;
         tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_request header");
 
-        if len > MAX_MESSAGE_SIZE {
+        // Tiered size limits: JSON control messages capped at 4 MB,
+        // tensor/shard data allowed up to 256 MB
+        let max_for_tag = match tag_buf[0] {
+            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
+            _ => 4 * 1024 * 1024, // 4 MB for JSON control messages
+        };
+        if len > max_for_tag {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Message too large",
@@ -169,7 +175,11 @@ impl request_response::Codec for SwarmCodec {
         let len = u32::from_be_bytes(len_buf) as usize;
         tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response header");
 
-        if len > MAX_MESSAGE_SIZE {
+        let max_for_tag = match tag_buf[0] {
+            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
+            _ => 4 * 1024 * 1024,
+        };
+        if len > max_for_tag {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Response too large",

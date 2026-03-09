@@ -35,7 +35,10 @@ impl CachedSession {
 
     fn next_nonce(&self) -> Result<[u8; 12], SwarmError> {
         let counter = self.send_nonce.fetch_add(1, Ordering::SeqCst);
-        if counter == u64::MAX {
+        if counter >= u64::MAX - 1 {
+            // Prevent wrap-around: saturate at u64::MAX so subsequent calls
+            // also fail (session must be rekeyed).
+            self.send_nonce.store(u64::MAX - 1, Ordering::SeqCst);
             return Err(SwarmError::NonceOverflow);
         }
         let mut nonce = [0u8; 12];

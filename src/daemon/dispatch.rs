@@ -505,7 +505,23 @@ pub(crate) async fn dispatch_network_messages(
                                         ephemeral_pubkey: response_pub,
                                         is_initiator: false,
                                     });
-                                    let _ = network_tx.send(NetworkCommand::Broadcast(reply)).await;
+                                    // Send reply directly to the initiator (not broadcast)
+                                    // to prevent other peers from intercepting the ephemeral key.
+                                    let target = shared_state
+                                        .peer_id_map
+                                        .get(&exchange.node_id)
+                                        .map(|r| r.value().clone());
+                                    if let Some(target_bytes) = target {
+                                        let _ = network_tx.send(NetworkCommand::SendDirectMessage {
+                                            target_peer_bytes: target_bytes,
+                                            message: reply,
+                                        }).await;
+                                    } else {
+                                        tracing::warn!(
+                                            node_id = %exchange.node_id,
+                                            "Cannot reply to ephemeral key exchange — no PeerId mapping"
+                                        );
+                                    }
                                 } else {
                                     // Response to our initiation: complete the exchange
                                     sm.complete_ephemeral_session(

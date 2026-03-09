@@ -781,6 +781,18 @@ impl NetworkManager {
                         "No tracked connection address for Identify, used first listen_addr"
                     );
                 }
+                // Verify announced key matches the authenticated PeerId from Noise handshake
+                // to prevent NodeId spoofing via forged Identify messages.
+                let announced_peer_id = info.public_key.to_peer_id();
+                if announced_peer_id != peer_id {
+                    tracing::warn!(
+                        %peer_id,
+                        announced = %announced_peer_id,
+                        "Peer announced mismatched public key in Identify — ignoring"
+                    );
+                    return;
+                }
+
                 // Derive NodeId from the peer's Ed25519 public key (32 bytes)
                 // per spec: NodeId(verifying_key.to_bytes())
                 let node_id = if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
