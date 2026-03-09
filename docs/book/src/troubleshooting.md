@@ -41,6 +41,10 @@ lsof -i :8800                 # Find what's using 8800
 ./swarmllm status             # Check if another instance is running
 ```
 
+## Slow First Request
+
+If the first inference request to a model takes noticeably longer than subsequent ones, this is expected. SwarmLLM uses **on-demand model loading** — models whose shards are on disk but not loaded into VRAM are loaded when first requested. If VRAM is full, an LRU eviction occurs first. Subsequent requests to the same model will be fast.
+
 ## Slow Inference
 
 1. **GPU vs CPU:** CPU is 5-20x slower. Check Dashboard for GPU status.

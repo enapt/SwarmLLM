@@ -4,6 +4,30 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Model Trust & On-Demand Loading (Phase 14)
+- **Model Trust System** — demand-driven trust prevents trash models from auto-propagating
+  - `ModelTrustLevel` enum: Discovered → Pinned → DemandVerified → NetworkPopular
+  - Auto-manage only downloads shards for `DemandVerified`+ or user-`Pinned` models
+  - Models promoted to `DemandVerified` after 3 real inference requests
+  - `NetworkPopular` promotion when 3+ unique holder nodes serve a model
+  - 7-day inactivity decay (Pinned models immune), persisted to redb
+  - Trust level exposed in admin API (`trust_level` field on all model objects)
+- **On-Demand Shard Loading** — inference requests trigger auto-loading from disk
+  - Router detects shards on disk but not loaded in VRAM, triggers `check_and_load_model()`
+  - LRU eviction makes room automatically (protected: active pipeline models)
+  - Loading coordination via `DashMap<ModelId, Notify>` prevents concurrent loads
+  - No more need to pre-load all models at startup
+- **Kimi 2.5 support** — `k2*` prefix routing to Moonshot provider
+  - Static fallback models: kimi-k2-0527, moonshot-v1-8k/32k/128k
+  - Existing kimi* and moonshot-* routing preserved
+- **UI improvements**
+  - Trust level badges on model cards: Popular (green), Verified (accent), Pinned (yellow), Unverified (gray)
+  - HF browser: prominent "On Swarm — N nodes" badge vs "New to network"
+  - Download button renamed to "Add to node" (clarifies seed shard semantics)
+  - "Local only" indicator when no peers host the model
+- **Storage**: `get_all_json()` method on Database for key-value iteration with subkeys
+- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+
 ### Claude Code Integration (Phase 13)
 - **Full Anthropic Messages API** (`POST /v1/messages`) — complete Claude Code compatibility
   - `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking) request fields

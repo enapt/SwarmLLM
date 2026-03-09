@@ -39,6 +39,7 @@
 | hf_sources | `{model_id}` | HfSource metadata |
 | locked_shards | `{shard_id_json}` | bool |
 | resource_schedule | `"current"` | ResourceSchedule |
+| model_trust | `{model_id}` | ModelTrustEntry (level, request count, last seen) |
 
 ## Model Acquisition Pipeline
 

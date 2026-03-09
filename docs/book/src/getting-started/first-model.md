@@ -8,7 +8,7 @@ You need at least one AI model before you can chat.
 2. Click **Browse HuggingFace** in the Models section
 3. Search for a model (try `TinyLlama` for a small, fast model)
 4. Choose a quantization variant (Q4_K_M recommended for most hardware)
-5. Click **Download** — the node downloads its fair share of shards, and peers with auto-manage enabled auto-acquire the rest
+5. Click **Add to node** — the node downloads its fair share of shards, and peers with auto-manage enabled auto-acquire the rest
 6. The dashboard auto-refreshes when downloads complete (no page reload needed)
 
 ## Download via CLI
@@ -35,6 +35,10 @@ curl -X POST http://localhost:8800/api/admin/hf/download-shards \
 | 8 GB RAM, no GPU | Qwen2.5-3B Q4_K_M | ~2 GB |
 | 8 GB VRAM | Qwen2.5-7B Q4_K_M | ~4.5 GB |
 | 16+ GB VRAM | Llama-3-13B Q4_K_M | ~7 GB |
+
+## On-Demand Loading
+
+You do not need to pre-load models into VRAM. When you send an inference request for a model whose shards are on disk but not loaded, SwarmLLM automatically loads the model on the fly. If VRAM is full, the least-recently-used model is evicted to make room. The first request to a cold model may take a few extra seconds while loading completes.
 
 ## Start Chatting
 

@@ -93,7 +93,7 @@ Every configuration option, organized by section.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | boolean | `true` | Auto-download popular shards |
+| `enabled` | boolean | `true` | Auto-download popular shards (only for models at DemandVerified+ or Pinned trust level) |
 | `max_storage_mb` | integer | `0` | Max disk for auto-downloads. `0` = 50% of max_disk_mb |
 | `interval_minutes` | integer | `5` | Check interval for new shards |
 | `max_shards` | integer | `0` | Max shards. `0` = unlimited |

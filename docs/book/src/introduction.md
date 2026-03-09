@@ -14,7 +14,8 @@ SwarmLLM is a single Rust binary that turns your computer into a node in a distr
 - **Shard-Only Operation** — Nodes only need small pieces (shards) of a model. A phone with 2GB can contribute to running a 70B model.
 - **E2E Encryption** — All peer-to-peer communication is encrypted with X25519 + ChaCha20-Poly1305 with forward secrecy.
 - **Credit Incentives** — Earn credits by serving inference, hosting shards, and relaying traffic. Higher credits = higher priority.
-- **VRAM-Aware** — Automatic shard management based on available GPU memory.
+- **VRAM-Aware** — Automatic shard management based on available GPU memory with on-demand model loading and LRU eviction.
+- **Model Trust System** — Automatic trust levels (Discovered, Pinned, DemandVerified, NetworkPopular) gate shard downloads and pruning decisions.
 - **Zero-Config Networking** — LAN discovery via mDNS, peer exchange, persistent peer cache, invite codes.
 - **Multi-SDK** — Python, JavaScript/TypeScript, LangChain, and LlamaIndex integrations.
 - **Web Dashboard** — Built-in swarm-first UI with chat, model browser, network map, and model compare.

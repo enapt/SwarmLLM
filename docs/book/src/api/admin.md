@@ -25,7 +25,9 @@ Gracefully shut down the node. Localhost only, Bearer auth required.
 ## Model Management
 
 ### GET /api/admin/models
-List models with shard status, VRAM estimates, and acquisition state. Each model includes an `mmproj` field with `available` (bool), `local` (bool), and `holders` (count) for VLM vision encoder status.
+List models with shard status, VRAM estimates, and acquisition state. Each model includes:
+- `mmproj` field with `available` (bool), `local` (bool), and `holders` (count) for VLM vision encoder status
+- `trust_level` field: one of `"Discovered"`, `"Pinned"`, `"DemandVerified"`, or `"NetworkPopular"` indicating the model's trust status (auto-manage only downloads shards for DemandVerified+ or Pinned models)
 
 ### POST /api/admin/models/:id/add
 Trigger model acquisition from the network.
@@ -44,6 +46,9 @@ Per-model auto-manage policy (including prune toggle).
 
 ### PUT /api/admin/models/:id/shards/:index/lock
 Lock/unlock a shard to prevent auto-pruning.
+
+### PUT /api/admin/models/:id/trust
+Set a model's trust level (e.g., pin a model). Bearer auth required. Body: `{"trust_level": "Pinned"}`
 
 ## Storage & Shards
 
