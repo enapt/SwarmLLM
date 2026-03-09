@@ -1,6 +1,6 @@
 # SwarmLLM
 
-**The people are the power. Join the swarm.**
+**Join the swarm. Run AI together — for free.**
 
 SwarmLLM is a single Rust binary that turns your computer into a node in a distributed AI inference network. Multiple nodes combine their hardware to run large language models that no single machine could handle alone — for free, with no API tokens or cloud fees.
 

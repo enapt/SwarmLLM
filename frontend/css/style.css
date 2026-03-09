@@ -1886,13 +1886,8 @@ kbd {
 }
 .btn-outline:hover { border-color: var(--text-muted); color: var(--text-primary); }
 
-/* #31: Chat tab prominence */
+/* #31: Chat tab — no fake notification dot (was confusing on fresh installs) */
 .tab-btn-chat { position: relative; }
-.tab-btn-chat:not(.active)::before {
-  content: ''; position: absolute; right: 2px; top: 4px;
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent); opacity: 0.7;
-}
 
 /* #35: Model name ellipsis */
 .model-name {

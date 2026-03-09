@@ -4,7 +4,7 @@
 
 Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware or paid API tokens.
 
-**The people are the power. Join the swarm.**
+**Join the swarm. Run AI together — for free.**
 
 ## How It Works
 
