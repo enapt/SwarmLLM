@@ -108,7 +108,7 @@ encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
 # Frontend assets
-swarmllm-frontend = { path = "crates/swarmllm-frontend" }
+swarmllm-frontend = { path = "crates/swarmllm-frontend", default-features = false }
 
 # Memory-mapped I/O for fast model loading
 memmap2 = "0.9"
@@ -120,7 +120,7 @@ zstd = "0.13"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [features]
-default = []
+default = ["swarmllm-frontend/embedded"]
 dev = ["swarmllm-frontend/dev"]
 migrate-sled = ["sled"]
 llama = ["llama-cpp-2", "encoding_rs"]

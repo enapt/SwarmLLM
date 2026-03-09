@@ -71,7 +71,7 @@ var SwarmLLM = (function() {
     }
     document.documentElement.setAttribute('data-theme', resolved);
     var btn = document.getElementById('btn-theme-toggle');
-    var icons = { dark: '\u263E', light: '\u2600', system: '\uD83D\uDCBB' };
+    var icons = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
     if (btn) btn.textContent = icons[theme] || '\u263E';
   }
 
@@ -679,7 +679,7 @@ var SwarmLLM = (function() {
         var data = await resp.json();
         dashboard.updateFull(data);
       } catch (e) {
-        ui.showBanner('error', 'Can\\'t reach SwarmLLM — is it running?');
+        ui.showBanner('error', "Can't reach SwarmLLM — is it running?");
       }
 
       try {
@@ -4221,7 +4221,7 @@ var SwarmLLM = (function() {
     on('btn-theme-toggle', 'click', function() {
       var THEME_KEY = 'swarmllm_theme';
       var themes = ['dark', 'light', 'system'];
-      var icons = { dark: '\u263E', light: '\u2600', system: '\uD83D\uDCBB' };
+      var icons = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
       var cur = localStorage.getItem(THEME_KEY) || 'dark';
       var next = themes[(themes.indexOf(cur) + 1) % themes.length];
       localStorage.setItem(THEME_KEY, next);
