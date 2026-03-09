@@ -13,13 +13,12 @@ use tower_http::cors::CorsLayer;
 use crate::api::server::AppState;
 
 /// Constant-time byte comparison to prevent timing side-channel attacks on API key validation.
+/// Iterates over min(len) bytes even when lengths differ to avoid leaking length via timing.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    let mut diff = (a.len() != b.len()) as u8;
+    let min_len = a.len().min(b.len());
+    for i in 0..min_len {
+        diff |= a[i] ^ b[i];
     }
     diff == 0
 }
@@ -106,6 +105,15 @@ impl RateLimiter {
         }
     }
 
+    /// Remove entries that have been idle longer than the given window.
+    /// Call this periodically (e.g. every few minutes) to prevent unbounded growth
+    /// from unique client IPs accumulating over time.
+    pub fn cleanup(&self, max_idle: std::time::Duration) {
+        let now = Instant::now();
+        self.buckets
+            .retain(|_key, (_, last_refill)| now.duration_since(*last_refill) < max_idle);
+    }
+
     /// Try to consume one token for the given IP and path.
     /// Returns `true` if allowed, `false` if rate-limited.
     fn try_acquire(&self, ip: IpAddr, path: &str) -> bool {
@@ -167,10 +175,18 @@ pub async fn rate_limit_middleware(
             "error": {
                 "message": "Rate limit exceeded. Please slow down.",
                 "type": "rate_limit_error",
-                "code": 429
+                "param": null,
+                "code": "rate_limit_error"
             }
         });
-        return (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("content-type", "application/json")
+            .header("retry-after", "60")
+            .body(axum::body::Body::from(
+                serde_json::to_string(&body).unwrap_or_default(),
+            ))
+            .unwrap_or_else(|_| (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
     }
 
     next.run(req).await
@@ -225,6 +241,8 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
     }
 
     // Read-only dashboard endpoints — GET only
+    // NOTE: /api/admin/providers, /api/admin/network-code, and /api/admin/credits
+    // are NOT exempt — they expose sensitive data (provider config, invite codes, balances).
     if *method == Method::GET {
         return matches!(
             path,
@@ -232,13 +250,10 @@ fn is_exempt_request(path: &str, method: &Method) -> bool {
                 | "/api/admin/config"
                 | "/api/admin/models"
                 | "/api/admin/peers"
-                | "/api/admin/credits"
                 | "/api/admin/shard-storage"
                 | "/api/admin/hf/search"
                 | "/api/admin/hf/probe"
                 | "/api/admin/network-map"
-                | "/api/admin/network-code"
-                | "/api/admin/providers"
                 | "/api/admin/provider-models"
                 | "/api/admin/schedule"
         ) || path.starts_with("/api/admin/hf/source/")
@@ -309,20 +324,26 @@ pub async fn auth_middleware(
         }
     }
 
-    // Exempt peer-forwarded requests from known peer IPs.
-    // Peers in peer_registry have already authenticated via Ed25519+Noise handshake
-    // on the P2P layer, so their IPs are trusted for HTTP forwarding.
+    // Exempt peer-forwarded requests — loopback only.
+    // The x-swarm-forwarded header is only trusted from loopback to prevent
+    // remote attackers from spoofing it. Non-loopback forwarding requires
+    // the internal auth token.
     if req.headers().get("x-swarm-forwarded").is_some() {
-        let source_ip = addr.ip().to_string();
-        let is_known_peer = state.shared_state.peer_registry.iter().any(|entry| {
-            entry.value().addresses.iter().any(|multiaddr| {
-                // Parse /ip4/<ip>/... from multiaddr
-                let parts: Vec<&str> = multiaddr.split('/').collect();
-                parts.windows(2).any(|w| w[0] == "ip4" && w[1] == source_ip)
-            })
-        });
-        if is_known_peer {
+        if addr.ip().is_loopback() {
             return next.run(req).await;
+        }
+        // Non-loopback: require internal auth token alongside x-swarm-forwarded
+        if let Some(token) = req
+            .headers()
+            .get("x-swarm-internal-token")
+            .and_then(|v| v.to_str().ok())
+        {
+            if constant_time_eq(
+                token.as_bytes(),
+                state.shared_state.internal_auth_token.as_bytes(),
+            ) {
+                return next.run(req).await;
+            }
         }
     }
 
@@ -382,14 +403,16 @@ mod tests {
         assert!(is_exempt_request("/api/admin/config", &get));
         assert!(is_exempt_request("/api/admin/models", &get));
         assert!(is_exempt_request("/api/admin/peers", &get));
-        assert!(is_exempt_request("/api/admin/credits", &get));
         assert!(is_exempt_request("/api/admin/shard-storage", &get));
         assert!(is_exempt_request("/api/admin/hf/search", &get));
         assert!(is_exempt_request("/api/admin/hf/probe", &get));
         assert!(is_exempt_request("/api/admin/network-map", &get));
-        assert!(is_exempt_request("/api/admin/network-code", &get));
         assert!(is_exempt_request("/api/admin/schedule", &get));
         assert!(is_exempt_request("/api/admin/provider-models", &get));
+        // Sensitive endpoints require auth even for GET
+        assert!(!is_exempt_request("/api/admin/credits", &get));
+        assert!(!is_exempt_request("/api/admin/network-code", &get));
+        assert!(!is_exempt_request("/api/admin/providers", &get));
         assert!(is_exempt_request("/api/identity/nickname", &get));
         assert!(is_exempt_request("/api/pool/state", &get));
     }
@@ -617,5 +640,28 @@ mod tests {
             assert!(limiter.try_acquire(ip2, "/api/admin/api-key"));
         }
         assert!(!limiter.try_acquire(ip2, "/api/admin/api-key"));
+    }
+
+    #[test]
+    fn rate_limiter_cleanup_removes_stale_entries() {
+        let limiter = RateLimiter::new(10, 10);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        // Create an entry
+        limiter.try_acquire(ip, "/v1/chat/completions");
+        assert_eq!(limiter.buckets.len(), 1);
+        // Cleanup with zero window removes everything (all entries are "stale")
+        limiter.cleanup(std::time::Duration::from_secs(0));
+        assert_eq!(limiter.buckets.len(), 0);
+    }
+
+    #[test]
+    fn rate_limiter_cleanup_keeps_recent_entries() {
+        let limiter = RateLimiter::new(10, 10);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        limiter.try_acquire(ip, "/v1/chat/completions");
+        assert_eq!(limiter.buckets.len(), 1);
+        // Cleanup with large window keeps recent entries
+        limiter.cleanup(std::time::Duration::from_secs(3600));
+        assert_eq!(limiter.buckets.len(), 1);
     }
 }

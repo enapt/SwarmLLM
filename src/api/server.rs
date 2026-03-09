@@ -4,6 +4,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, FromRequest, Request};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{delete, get, post, put};
+use axum::Json;
 use axum::Router;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
@@ -238,8 +239,8 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
 }
 
 /// Start the Axum HTTP server on the configured port (standalone mode).

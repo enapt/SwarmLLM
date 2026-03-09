@@ -112,7 +112,7 @@ impl IntoResponse for ApiError {
             SwarmError::NoModelLoaded => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 self.0.to_string(),
-                "not_found_error",
+                "server_error",
             ),
             SwarmError::InferenceTimeout(_) => (
                 StatusCode::GATEWAY_TIMEOUT,
@@ -218,7 +218,8 @@ impl IntoResponse for ApiError {
         let mut error_obj = serde_json::json!({
             "message": message,
             "type": error_type,
-            "code": status.as_u16()
+            "param": null,
+            "code": error_type
         });
         if let Some(hint_text) = hint {
             error_obj["hint"] = serde_json::Value::String(hint_text.to_string());

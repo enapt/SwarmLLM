@@ -1157,7 +1157,11 @@ fn is_private_ip(ip: &str) -> bool {
             || (octets[0] == 192 && octets[1] == 168)                       // 192.168.0.0/16
             || octets[0] == 127                                             // 127.0.0.0/8
             || (octets[0] == 169 && octets[1] == 254)                       // 169.254.0.0/16
-            || octets[0] == 0; // 0.0.0.0/8
+            || octets[0] == 0                                               // 0.0.0.0/8
+            || (octets[0] == 100 && (64..=127).contains(&octets[1]))        // 100.64.0.0/10 (CGNAT)
+            || (octets[0] == 198 && (18..=19).contains(&octets[1]))         // 198.18.0.0/15 (benchmark)
+            || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)      // 192.0.0.0/24 (IETF)
+            || (octets[0] & 0xf0) == 224; // 224.0.0.0/4 (multicast)
     }
     if let Ok(addr) = ip.parse::<std::net::Ipv6Addr>() {
         let segs = addr.segments();
@@ -1212,9 +1216,10 @@ async fn forward_to_peer(
         let status = peer_resp.status();
         let body = peer_resp.text().await.unwrap_or_default();
         tracing::warn!(status = %status, body = %body, "Peer returned error");
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Peer returned error status {status}"
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ProviderError {
+            status: status.as_u16(),
+            body,
+        }));
     }
 
     if stream {
@@ -1494,15 +1499,13 @@ async fn router_inference_stream(
                 Ok(Err(e)) => {
                     tracing::debug!("DIAG: SSE fallback got pipeline error: {e}");
                     if sse_tx
-                        .send(StreamEvent::Delta {
-                            content: Some(format!("Error: {e}")),
-                            role: None,
-                            finish_reason: Some("stop".into()),
+                        .send(StreamEvent::Error {
+                            message: format!("{e}"),
                         })
                         .await
                         .is_err()
                     {
-                        tracing::debug!("DIAG: SSE error delta send failed — client disconnected");
+                        tracing::debug!("DIAG: SSE error event send failed — client disconnected");
                     }
                 }
                 Err(_) => {
@@ -1570,6 +1573,15 @@ async fn router_inference_stream(
                     String::new()
                 };
                 Ok::<_, Infallible>(Event::default().data(json))
+            }
+            StreamEvent::Error { message } => {
+                let error_json = serde_json::json!({
+                    "error": {
+                        "message": message,
+                        "type": "server_error"
+                    }
+                });
+                Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
             }
             StreamEvent::Done => Ok(Event::default().data("[DONE]")),
         });
@@ -1972,6 +1984,15 @@ async fn split_stream_response(
             };
             Ok(Event::default().data(json))
         }
+        StreamEvent::Error { message } => {
+            let error_json = serde_json::json!({
+                "error": {
+                    "message": message,
+                    "type": "server_error"
+                }
+            });
+            Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
+        }
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
 
@@ -2084,6 +2105,15 @@ async fn stream_response(
             let json = serde_json::to_string(&chunk).unwrap_or_default();
             Ok(Event::default().data(json))
         }
+        StreamEvent::Error { message } => {
+            let error_json = serde_json::json!({
+                "error": {
+                    "message": message,
+                    "type": "server_error"
+                }
+            });
+            Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
+        }
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
 
@@ -2097,6 +2127,9 @@ enum StreamEvent {
         content: Option<String>,
         role: Option<String>,
         finish_reason: Option<String>,
+    },
+    Error {
+        message: String,
     },
     Done,
 }
