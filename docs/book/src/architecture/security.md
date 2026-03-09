@@ -44,7 +44,7 @@ For GossipSub messages:
 | InvalidGossip | -0.05 |
 | SignatureViolation | -0.20 |
 
-Scores decay toward 0.5 over time (1% per health cycle). Trust factors into pipeline scheduling and credit tier weighting.
+Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Trust factors into pipeline scheduling and credit tier weighting.
 
 ## Sybil Resistance
 

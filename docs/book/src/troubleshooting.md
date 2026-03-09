@@ -62,7 +62,48 @@ rm -rf ~/.local/share/swarmllm/db
 ./swarmllm run
 ```
 
+## GPU Out of Memory
+
+If a model exceeds your GPU's VRAM, SwarmLLM automatically falls back to CPU inference. You'll see this in the logs:
+
+```
+WARN GPU OOM detected, retrying on CPU
+```
+
+CPU inference is 5-20x slower but works for any model size. To avoid OOM:
+- Use smaller quantizations (Q4 instead of Q8)
+- Use a model that fits in VRAM (check model size vs available VRAM in the dashboard)
+- For models too large for one GPU, use distributed inference across multiple nodes
+
+## Distributed Inference Issues
+
+**Peers visible but inference fails:**
+1. Ensure both nodes have the required shards loaded (check Dashboard > Models)
+2. Verify P2P TCP connectivity: port `<base_port> + 10` must be reachable
+3. Run with `-vv` and filter: `./swarmllm run -vv 2>&1 | grep "DIAG:"`
+4. Check for `DIAG: segment TIMED OUT` — indicates network or compute bottleneck
+
+**High latency per token:**
+- Distributed inference adds ~20-130ms per token for network round-trips
+- Use TCP bootstrap addresses (not QUIC) for lowest latency
+- Ensure nodes are on the same LAN for tensor parallelism
+
+**Pipeline assembly fails:**
+- The scheduler needs enough shard coverage to build a complete pipeline
+- Check `DIAG: assemble_pipeline_for` for candidate counts
+
+## Model Trust
+
+Models go through trust levels: Discovered → Pinned → DemandVerified → NetworkPopular. Auto-manage only downloads shards for models at sufficient trust levels.
+
+**Model stuck at "Discovered":**
+- Pin it manually from the Dashboard to promote to "Pinned"
+- Models reach "DemandVerified" after receiving inference requests
+- Models reach "NetworkPopular" when enough peers host them
+
 ## Still Stuck?
 
+- Run with full diagnostics: `./swarmllm run -vv 2>&1 | grep "DIAG:"`
+- See the [Diagnostics Guide](../DIAGNOSTICS.md) for detailed log instrumentation
 - Check [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
 - Open a new issue with: OS, hardware, `./swarmllm version`, and logs from `-vv`

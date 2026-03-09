@@ -87,9 +87,21 @@ Requests are routed based on the model name:
 | Model Pattern | Route | Details |
 |---|---|---|
 | Local GGUF model | Local inference | Tool calls and thinking blocks converted to text |
-| `claude-*` | Anthropic cloud | Full pass-through (all fields preserved including tools and thinking) |
-| `gpt-*`, `deepseek-*`, etc. | Cloud provider | Anthropic→OpenAI format translation proxy |
+| `claude-*` | Anthropic API | Full pass-through (all fields preserved including tools and thinking) |
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*` | OpenAI | Anthropic→OpenAI format translation |
+| `deepseek-*` | DeepSeek | Anthropic→OpenAI format translation |
+| `mistral-*`, `codestral-*`, `pixtral-*` | Mistral | Anthropic→OpenAI format translation |
+| `llama-*`, `groq-*` | Groq | Anthropic→OpenAI format translation |
+| `nim-*` | NVIDIA NIM | Anthropic→OpenAI format translation |
+| `cerebras-*` | Cerebras | Anthropic→OpenAI format translation |
+| `samba-*` | SambaNova | Anthropic→OpenAI format translation |
+| `fireworks-*`, `accounts/fireworks/*` | Fireworks AI | Anthropic→OpenAI format translation |
+| `together-*` | Together AI | Anthropic→OpenAI format translation |
+| `deepinfra-*` | DeepInfra | Anthropic→OpenAI format translation |
+| `moonshot-*`, `kimi-*` | Moonshot/Kimi | Anthropic→OpenAI format translation |
 | Network model | Distributed inference | Routed through swarm P2P network |
+
+All 12 cloud providers are supported. Configure API keys via the dashboard Settings page or by placing a `.env` file in the data directory (`~/.local/share/swarmllm/.env`) with standard variable names (e.g., `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`).
 
 ## System Blocks with Cache Control
 

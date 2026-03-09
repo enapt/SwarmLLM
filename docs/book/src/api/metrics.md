@@ -4,6 +4,8 @@ SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. No 
 
 ## Available Metrics
 
+### Core Metrics
+
 | Metric | Type | Description |
 |---|---|---|
 | `swarmllm_peers_connected` | gauge | Number of connected peers |
@@ -11,6 +13,16 @@ SwarmLLM exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. No 
 | `swarmllm_credits_balance` | gauge | Current credit balance |
 | `swarmllm_shards_hosted` | gauge | Number of locally hosted shards |
 | `swarmllm_inference_latency_seconds` | histogram | Inference request latency |
+
+### Channel Metrics
+
+Internal channel health metrics for monitoring backpressure:
+
+| Metric | Type | Description |
+|---|---|---|
+| `swarmllm_channel_capacity{channel="..."}` | gauge | Channel buffer capacity |
+| `swarmllm_channel_sent_total{channel="..."}` | counter | Messages sent through channel |
+| `swarmllm_channel_dropped_total{channel="..."}` | counter | Messages dropped due to backpressure |
 
 ### Histogram Buckets
 
