@@ -731,10 +731,17 @@ var SwarmLLM = (function() {
         var hw = data.hardware;
         if (hw.gpu_name) {
           document.getElementById('node-gpu').textContent = hw.gpu_name;
-          if (hw.gpu_vram_mb) document.getElementById('node-vram').textContent = formatMB(hw.gpu_vram_mb) + ' VRAM';
+          if (hw.gpu_vram_mb) {
+            var vramUsed = hw.gpu_vram_used_mb || 0;
+            document.getElementById('node-vram').textContent = formatMB(vramUsed) + ' / ' + formatMB(hw.gpu_vram_mb) + ' VRAM';
+            var vramPct = hw.gpu_vram_mb > 0 ? (vramUsed / hw.gpu_vram_mb * 100) : 0;
+            document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
+            document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
+          }
         } else {
           document.getElementById('node-gpu').textContent = 'CPU only';
           document.getElementById('node-vram').textContent = '';
+          document.getElementById('vram-bar').style.width = '0%';
         }
         document.getElementById('node-cpu').textContent = hw.cpu_name ? hw.cpu_name + ' (' + hw.cpu_cores + ' cores)' : 'Unknown';
 

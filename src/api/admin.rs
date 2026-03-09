@@ -372,14 +372,27 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
 
     // GPU info from llama.cpp device detection (set at startup)
     // Falls back to nvidia-smi when gpu_info is None (e.g. non-CUDA build)
-    let (gpu_name, gpu_vram_mb) = match &shared_state.gpu_info {
-        Some(gpu) => (Some(gpu.name.clone()), Some(gpu.vram_total_mb)),
-        None => detect_gpu_nvidia_smi(),
+    let (gpu_name, gpu_vram_mb, gpu_vram_used_mb) = match &shared_state.gpu_info {
+        Some(gpu) => {
+            // Query live VRAM usage via nvidia-smi for an up-to-date reading
+            let used = query_gpu_vram_used();
+            (
+                Some(gpu.name.clone()),
+                Some(gpu.vram_total_mb),
+                used.or(Some(gpu.vram_total_mb.saturating_sub(gpu.vram_free_mb))),
+            )
+        }
+        None => {
+            let (name, total) = detect_gpu_nvidia_smi();
+            let used = query_gpu_vram_used();
+            (name, total, used)
+        }
     };
 
     serde_json::json!({
         "gpu_name": gpu_name,
         "gpu_vram_mb": gpu_vram_mb,
+        "gpu_vram_used_mb": gpu_vram_used_mb,
         "total_ram_mb": total_ram_mb,
         "used_ram_mb": used_ram_mb,
         "available_disk_mb": available_disk_mb,
@@ -413,6 +426,19 @@ fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
         }
         _ => (None, None),
     }
+}
+
+/// Query current GPU VRAM usage via nvidia-smi (memory.used in MB).
+fn query_gpu_vram_used() -> Option<u64> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<u64>().ok()
 }
 
 /// GET /api/admin/network-map — Aggregated region data for the world heatmap.
