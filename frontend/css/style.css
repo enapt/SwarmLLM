@@ -2176,3 +2176,20 @@ kbd {
 .tab-bar .tab.active {
   border-bottom-width: 3px;
 }
+
+/* ---- Basic / Advanced mode toggle ---- */
+.adv-only { /* visible by default; hidden in basic mode */ }
+body:not(.mode-advanced) .adv-only { display: none !important; }
+.mode-toggle {
+  font-size: 0.65rem !important; letter-spacing: 0.04em;
+  text-transform: uppercase; padding: 2px 8px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 10px !important; white-space: nowrap;
+  transition: all var(--transition);
+}
+.mode-toggle:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+body.mode-advanced .mode-toggle {
+  background: var(--accent-glow) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}

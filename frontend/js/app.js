@@ -30,6 +30,7 @@ var SwarmLLM = (function() {
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
   var CHAT_LAYOUT_KEY = 'swarmllm_chat_layout';
   var HEALTH_INTERVAL_KEY = 'swarmllm_health_interval';
+  var MODE_KEY = 'swarmllm_ui_mode'; // 'basic' | 'advanced'
 
   // Provider health state: { provider: { status, latency_ms, detail, last_checked } }
   var providerHealth = {};
@@ -41,6 +42,24 @@ var SwarmLLM = (function() {
 
   // Clear stale chat sessions on each page load (dev mode)
   try { localStorage.removeItem(SESSIONS_KEY); localStorage.removeItem(ACTIVE_SESSION_KEY); } catch(e) {}
+
+  // --- BASIC / ADVANCED MODE ---
+  function isBasicMode() { return (localStorage.getItem(MODE_KEY) || 'basic') === 'basic'; }
+
+  function applyMode(mode) {
+    document.body.classList.toggle('mode-advanced', mode === 'advanced');
+    var btn = document.getElementById('btn-mode-toggle');
+    if (btn) btn.textContent = mode === 'basic' ? 'Basic' : 'Advanced';
+  }
+
+  function toggleMode() {
+    var cur = localStorage.getItem(MODE_KEY) || 'basic';
+    var next = cur === 'basic' ? 'advanced' : 'basic';
+    localStorage.setItem(MODE_KEY, next);
+    applyMode(next);
+    // Re-render model cards to show/hide shard grids etc.
+    if (dashboard && dashboard.loadInitial) dashboard.loadInitial();
+  }
 
   // --- HELPERS ---
   function escapeHtml(str) {
@@ -802,6 +821,7 @@ var SwarmLLM = (function() {
         }
 
         // Trust level badge
+        var basic = isBasicMode();
         var trustBadge = '';
         if (m.trust_level === 'network_popular') {
           trustBadge = '<span class="badge-trust badge-trust-popular" title="Widely hosted across the network">Popular</span>';
@@ -811,19 +831,20 @@ var SwarmLLM = (function() {
           trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
         } else if (m.source === 'network' && hostedShards === 0) {
           trustBadge = '<span class="badge-trust badge-trust-discovered" title="Discovered via gossip — not yet verified. Auto-manage will not download unless pinned or used.">Unverified</span>';
+        if (basic) trustBadge = '';
         }
 
         // Meta info
         var metaParts = [];
         metaParts.push(formatBytes(m.total_size_bytes || 0));
-        if (shardCount > 1) metaParts.push(shardCount + ' shards');
-        if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
+        if (!basic && shardCount > 1) metaParts.push(shardCount + ' shards');
+        if (!basic && m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
         if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) metaParts.push('<span style="color:var(--orange)">Local only</span>');
 
-        // Local file indicators (manifest + header needed to run shards)
+        // Local file indicators (manifest + header needed to run shards) — advanced only
         var fileIndicators = '';
-        if (hostedShards > 0 || isDownloading) {
+        if (!basic && (hostedShards > 0 || isDownloading)) {
           var hasManifest = m.has_manifest !== false;
           var hasHeader = m.has_header !== false;
           if (!hasManifest || !hasHeader) {
@@ -834,9 +855,9 @@ var SwarmLLM = (function() {
           }
         }
 
-        // Shard grid
+        // Shard grid — advanced only
         var shardHtml = '';
-        if (shards.length > 0) {
+        if (!basic && shards.length > 0) {
           shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shards.forEach(function(s) {
@@ -971,15 +992,15 @@ var SwarmLLM = (function() {
         // Probed badge — show when HF metadata fetched but no shards downloaded yet
         var probedBadge = '';
         if (m.probed && hostedShards === 0 && !isDownloading) {
-          probedBadge = '<span class="badge-probed">Probed</span>';
+          if (!basic) probedBadge = '<span class="badge-probed">Probed</span>';
         }
 
-        // Gear icon for per-model auto-manage settings
-        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
+        // Gear icon for per-model auto-manage settings — advanced only
+        var gearHtml = basic ? '' : '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
 
-        // GGUF metadata info button (only if header file exists)
+        // GGUF metadata info button (only if header file exists) — advanced only
         var metaBtnHtml = '';
-        if (m.has_header) {
+        if (!basic && m.has_header) {
           metaBtnHtml = '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>';
         }
 
@@ -4164,6 +4185,7 @@ var SwarmLLM = (function() {
     on('btn-copy-api-key', 'click', function() { settings.copyApiKey(); });
     on('btn-save-settings', 'click', function() { settings.save(); });
     on('btn-open-settings', 'click', function() { ui.openSettings(); });
+    on('btn-mode-toggle', 'click', function() { toggleMode(); });
     on('btn-rerun-setup', 'click', function() {
       localStorage.removeItem(SETUP_DONE_KEY);
       ui.closeSettings();
@@ -4831,6 +4853,7 @@ var SwarmLLM = (function() {
     chat.renderSessionList();
     chat.renderMessages();
 
+    applyMode(localStorage.getItem(MODE_KEY) || 'basic');
     setup.init();
     settings.init();
     settings.loadApiKey();
