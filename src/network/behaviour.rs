@@ -163,7 +163,7 @@ pub fn build_behaviour(
             autonat::Config::default(),
         ))
     } else {
-        tracing::info!("DIAG: autonat disabled by config");
+        tracing::debug!("DIAG: autonat disabled by config");
         None
     };
 
@@ -171,7 +171,7 @@ pub fn build_behaviour(
     let dcutr_behaviour = if enable_dcutr {
         Some(dcutr::Behaviour::new(local_peer_id))
     } else {
-        tracing::info!("DIAG: dcutr disabled by config");
+        tracing::debug!("DIAG: dcutr disabled by config");
         None
     };
 

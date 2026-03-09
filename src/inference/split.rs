@@ -1855,7 +1855,12 @@ impl SplitModel {
                             &device,
                         )
                         .ok()
-                        .map(|t| QMatMul::from_qtensor(t).unwrap());
+                        .map(|t| {
+                            QMatMul::from_qtensor(t).map_err(|e| {
+                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                            })
+                        })
+                        .transpose()?;
                     let shared_down = ct
                         .tensor(
                             &mut file,
@@ -1863,11 +1868,21 @@ impl SplitModel {
                             &device,
                         )
                         .ok()
-                        .map(|t| QMatMul::from_qtensor(t).unwrap());
+                        .map(|t| {
+                            QMatMul::from_qtensor(t).map_err(|e| {
+                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                            })
+                        })
+                        .transpose()?;
                     let shared_up = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
                         .ok()
-                        .map(|t| QMatMul::from_qtensor(t).unwrap());
+                        .map(|t| {
+                            QMatMul::from_qtensor(t).map_err(|e| {
+                                SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                            })
+                        })
+                        .transpose()?;
 
                     FfnVariant::MoE(MoeFfn {
                         gate: gate_inp
@@ -1925,9 +1940,24 @@ impl SplitModel {
                             .tensor(&mut file, &format!("{prefix}.attn_v.weight"), &device)
                             .ok();
                         (
-                            q.map(|t| QMatMul::from_qtensor(t).unwrap()),
-                            k.map(|t| QMatMul::from_qtensor(t).unwrap()),
-                            v.map(|t| QMatMul::from_qtensor(t).unwrap()),
+                            q.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
+                            k.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
+                            v.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
                         )
                     } else {
                         (None, None, None)
@@ -1960,7 +1990,13 @@ impl SplitModel {
 
                     layers.push(LayerVariant::Qwen35Ssm {
                         weights: DeltaNetWeights {
-                            wqkv: wqkv.map(|t| QMatMul::from_qtensor(t).unwrap()),
+                            wqkv: wqkv
+                                .map(|t| {
+                                    QMatMul::from_qtensor(t).map_err(|e| {
+                                        SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                    })
+                                })
+                                .transpose()?,
                             wq,
                             wk,
                             wv,
@@ -2000,9 +2036,24 @@ impl SplitModel {
                             .tensor(&mut file, &format!("{prefix}.attn_v.weight"), &device)
                             .ok();
                         (
-                            q.map(|t| QMatMul::from_qtensor(t).unwrap()),
-                            k.map(|t| QMatMul::from_qtensor(t).unwrap()),
-                            v.map(|t| QMatMul::from_qtensor(t).unwrap()),
+                            q.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
+                            k.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
+                            v.map(|t| {
+                                QMatMul::from_qtensor(t).map_err(|e| {
+                                    SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                })
+                            })
+                            .transpose()?,
                         )
                     } else {
                         (None, None, None)
@@ -2020,15 +2071,31 @@ impl SplitModel {
                     let q_norm = ct
                         .tensor(&mut file, &format!("{prefix}.attn_q_norm.weight"), &device)
                         .ok()
-                        .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps).unwrap());
+                        .map(|t| {
+                            RmsNorm::from_qtensor(t, rms_norm_eps).map_err(|e| {
+                                SwarmError::Internal(format!("RmsNorm load failed: {e}"))
+                            })
+                        })
+                        .transpose()?;
                     let k_norm = ct
                         .tensor(&mut file, &format!("{prefix}.attn_k_norm.weight"), &device)
                         .ok()
-                        .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps).unwrap());
+                        .map(|t| {
+                            RmsNorm::from_qtensor(t, rms_norm_eps).map_err(|e| {
+                                SwarmError::Internal(format!("RmsNorm load failed: {e}"))
+                            })
+                        })
+                        .transpose()?;
 
                     layers.push(LayerVariant::Qwen35Attn {
                         weights: Qwen35AttnWeights {
-                            wqkv: wqkv.map(|t| QMatMul::from_qtensor(t).unwrap()),
+                            wqkv: wqkv
+                                .map(|t| {
+                                    QMatMul::from_qtensor(t).map_err(|e| {
+                                        SwarmError::Internal(format!("QMatMul load failed: {e}"))
+                                    })
+                                })
+                                .transpose()?,
                             wq,
                             wk,
                             wv,
@@ -5245,7 +5312,7 @@ mod tests {
             // Create a random weight tensor and quantize it
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
 
         let max_seq_len = 128;
@@ -5267,7 +5334,7 @@ mod tests {
             let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
             let make_rms_norm = |w: &Tensor| {
                 let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-                RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+                RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
             };
             layers.push(LayerVariant::Dense(LayerWeights {
                 attention_wq: make_qmatmul(hidden_dim, hidden_dim),
@@ -5660,7 +5727,7 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
 
         let max_seq_len = 128;
@@ -5674,7 +5741,7 @@ mod tests {
             let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
             let make_rms_norm = |w: &Tensor| {
                 let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-                RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+                RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
             };
             layers.push(LayerVariant::Dense(LayerWeights {
                 attention_wq: make_qmatmul(hidden_dim, hidden_dim),
@@ -6057,7 +6124,7 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
 
         let max_seq_len = 128;
@@ -6066,7 +6133,7 @@ mod tests {
         let norm_w = Tensor::ones((hidden_dim,), DType::F32, &device).unwrap();
         let make_rms_norm = |w: &Tensor| {
             let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let layer = LayerWeights {
@@ -6204,7 +6271,7 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
 
         // Shared weights
@@ -6380,7 +6447,7 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
 
         let gate_exps =
@@ -6447,12 +6514,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let make_rms_norm = |dim: usize| -> RmsNorm {
             let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let nope_dim = key_length - rope_dim;
@@ -6502,12 +6569,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let make_rms_norm = |dim: usize| -> RmsNorm {
             let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let nope_dim = key_length - rope_dim;
@@ -6562,12 +6629,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let make_rms_norm = |dim: usize| -> RmsNorm {
             let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let nope_dim = key_length - rope_dim;
@@ -6682,12 +6749,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let make_rms_norm = |dim: usize| -> RmsNorm {
             let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let nope_dim = key_length - rope_dim;
@@ -6857,12 +6924,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
         let make_rms_norm = |w: &Tensor| {
             let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let lw = LayerWeights {
@@ -6933,12 +7000,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let norm_w = Tensor::ones((n_head * head_dim,), DType::F32, &device).unwrap();
         let make_rms_norm = |w: &Tensor| {
             let qt = QTensor::quantize(w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let lw = LayerWeights {
@@ -7062,12 +7129,12 @@ mod tests {
         let make_qmatmul = |in_d: usize, out_d: usize| -> QMatMul {
             let w = Tensor::randn(0f32, 0.02, (out_d, in_d), &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            QMatMul::from_qtensor(qt).unwrap()
+            QMatMul::from_qtensor(qt).expect("QMatMul load failed")
         };
         let make_rms_norm = |dim: usize| -> RmsNorm {
             let w = Tensor::ones((dim,), DType::F32, &device).unwrap();
             let qt = QTensor::quantize(&w, candle_core::quantized::GgmlDType::F32).unwrap();
-            RmsNorm::from_qtensor(qt, 1e-6).unwrap()
+            RmsNorm::from_qtensor(qt, 1e-6).expect("RmsNorm load failed")
         };
 
         let kv_dim = n_kv_head * head_dim;

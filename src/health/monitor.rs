@@ -182,7 +182,7 @@ impl HealthMonitor {
 
         let msg = NetworkCommand::Broadcast(SwarmMessage::NodeCapabilityUpdate(cap));
         if let Err(e) = self.network_tx.send(msg).await {
-            tracing::warn!(error = %e, "DIAG: failed to broadcast capability update");
+            tracing::debug!(error = %e, "DIAG: failed to broadcast capability update");
         }
 
         // Also broadcast shard announcements for our hosted models
@@ -195,7 +195,7 @@ impl HealthMonitor {
             };
             let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
             if let Err(e) = self.network_tx.send(msg).await {
-                tracing::warn!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
+                tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
             }
         }
     }
@@ -210,7 +210,7 @@ impl HealthMonitor {
             }
             let msg = NetworkCommand::Broadcast(SwarmMessage::ModelManifest(manifest.clone()));
             if let Err(e) = self.network_tx.send(msg).await {
-                tracing::warn!(error = %e, model = %manifest.id, "DIAG: failed to broadcast manifest");
+                tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast manifest");
             }
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source
@@ -224,7 +224,7 @@ impl HealthMonitor {
                 };
                 let msg = NetworkCommand::Broadcast(SwarmMessage::HfSourceGossip(gossip));
                 if let Err(e) = self.network_tx.send(msg).await {
-                    tracing::warn!(error = %e, model = %manifest.id, "DIAG: failed to broadcast HF source");
+                    tracing::debug!(error = %e, model = %manifest.id, "DIAG: failed to broadcast HF source");
                 }
             }
         }

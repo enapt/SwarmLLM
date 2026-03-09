@@ -568,6 +568,10 @@ pub struct VisionEncodeRequest {
     pub model_id: ModelId,
     /// JPEG-compressed image bytes (resized to vision encoder input, typically 336x336).
     pub image_data: Vec<u8>,
+    /// Populated locally after receiving from the network — not serialized over the wire.
+    /// Contains the libp2p PeerId bytes of the sender so we can route the response back.
+    #[serde(skip)]
+    pub sender_peer_bytes: Option<Vec<u8>>,
 }
 
 /// Response carrying pre-computed vision embeddings from the mmproj holder.
@@ -600,6 +604,10 @@ pub struct TpAllReduceRequest {
     pub shape: Vec<u32>,
     /// Reduction operation (currently only Sum).
     pub op: AllReduceOp,
+    /// Populated locally after receiving from the network — not serialized over the wire.
+    /// Contains the libp2p PeerId bytes of the sender so we can route the response back.
+    #[serde(skip)]
+    pub sender_peer_bytes: Option<Vec<u8>>,
 }
 
 /// AllReduce response: the reduced (summed) tensor from the coordinator.

@@ -149,8 +149,10 @@ pub struct SharedState {
     pub peer_credit_balances: DashMap<NodeId, i64>,
     /// Paged KV cache pool for PagedAttention (CUDA-only, feature-gated).
     /// When `None`, callers fall back to `KvCacheStore` (Phase 1 pre-allocated buffers).
+    #[cfg(feature = "paged-attn")]
     pub paged_kv_pool: Option<Arc<crate::inference::paged_kv::PagedKvPool>>,
     /// Paged KV store: per-request block table tracking.
+    #[cfg(feature = "paged-attn")]
     pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
     /// Per-model auto-manage policies (runtime-mutable, persisted to sled).
     pub model_auto_manage_policies:
@@ -530,8 +532,8 @@ impl SharedState {
             trust_manager,
             detected_region: RwLock::new(None),
             peer_credit_balances: DashMap::new(),
+            #[cfg(feature = "paged-attn")]
             paged_kv_pool: None,
-            paged_kv_store: None,
             model_auto_manage_policies,
             auto_manage_default_model_cap: AtomicU32::new(default_model_shard_cap),
             hf_probe_cache: DashMap::new(),

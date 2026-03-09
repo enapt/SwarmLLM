@@ -246,6 +246,7 @@ pub async fn hf_download(
         .insert(mid.clone(), hf_cancel_flag.clone());
 
     tokio::spawn(async move {
+        let mut shutdown_rx = shared.shutdown_rx();
         let (ptx, mut prx) =
             tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
 
@@ -275,14 +276,29 @@ pub async fn hf_download(
             }
         });
 
-        match crate::model::huggingface::download_model(
-            &repo_clone,
-            &file_clone,
-            &dest_dir,
-            Some(ptx),
-        )
-        .await
-        {
+        let download_result = tokio::select! {
+            result = crate::model::huggingface::download_model(
+                &repo_clone,
+                &file_clone,
+                &dest_dir,
+                Some(ptx),
+            ) => Some(result),
+            _ = shutdown_rx.wait_for(|v| *v) => {
+                tracing::info!(model = %download_mid, "Download cancelled by shutdown");
+                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                    entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                        reason: "Cancelled by daemon shutdown".into(),
+                    };
+                    entry.log.push("Cancelled by daemon shutdown".into());
+                }
+                None
+            }
+        };
+        let Some(download_result) = download_result else {
+            shared.download_cancel_flags.remove(&download_mid);
+            return;
+        };
+        match download_result {
             Ok(path) => {
                 tracing::info!(path = %path.display(), "HuggingFace download complete");
                 if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
@@ -674,6 +690,7 @@ pub async fn hf_download_shards(
     let network_tx = state.network_tx.clone();
 
     tokio::spawn(async move {
+        let shutdown_rx = shared.shutdown_rx();
         let download_mid = mid.clone();
         let download_shared = shared.clone();
 
@@ -913,15 +930,20 @@ pub async fn hf_download_shards(
         let mut failed = false;
 
         for &shard_idx in &shard_indices {
-            // Check cancellation flag before each shard download
-            if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
-                tracing::info!(model = %model_id_str, "Download cancelled by user");
+            // Check cancellation flag and shutdown before each shard download
+            if cancel_flag.load(std::sync::atomic::Ordering::Acquire) || *shutdown_rx.borrow() {
+                let reason = if *shutdown_rx.borrow() {
+                    "Cancelled by daemon shutdown"
+                } else {
+                    "Cancelled by user"
+                };
+                tracing::info!(model = %model_id_str, reason, "Download cancelled");
                 if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
                 {
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
-                        reason: "Cancelled by user".to_string(),
+                        reason: reason.to_string(),
                     };
-                    entry.log.push("Download cancelled by user".to_string());
+                    entry.log.push(reason.to_string());
                 }
                 // Clean up cancel flag
                 download_shared.download_cancel_flags.remove(&download_mid);

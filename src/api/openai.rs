@@ -889,7 +889,7 @@ pub async fn chat_completions(
                 ),
                 None => {
                     // Try loading template from GGUF header on disk
-                    let safe_id = req.model.replace(['/', '\\'], "_").replace("..", "_");
+                    let safe_id = crate::model::shard::sanitize_path_component(&req.model);
                     let header_path = state
                         .shared_state
                         .config
@@ -1416,7 +1416,7 @@ async fn router_inference_stream(
                     .await
                     .is_err()
                 {
-                    tracing::warn!(token_count, finish_reason = %reason, "DIAG: SSE finish delta send failed — client disconnected");
+                    tracing::debug!(token_count, finish_reason = %reason, "DIAG: SSE finish delta send failed — client disconnected");
                 }
                 break;
             }
@@ -1488,11 +1488,11 @@ async fn router_inference_stream(
                         .await
                         .is_err()
                     {
-                        tracing::warn!(finish_reason = %output.finish_reason, "DIAG: SSE fallback finish send failed");
+                        tracing::debug!(finish_reason = %output.finish_reason, "DIAG: SSE fallback finish send failed");
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!("DIAG: SSE fallback got pipeline error: {e}");
+                    tracing::debug!("DIAG: SSE fallback got pipeline error: {e}");
                     if sse_tx
                         .send(StreamEvent::Delta {
                             content: Some(format!("Error: {e}")),
@@ -1502,11 +1502,11 @@ async fn router_inference_stream(
                         .await
                         .is_err()
                     {
-                        tracing::warn!("DIAG: SSE error delta send failed — client disconnected");
+                        tracing::debug!("DIAG: SSE error delta send failed — client disconnected");
                     }
                 }
                 Err(_) => {
-                    tracing::warn!("DIAG: SSE result_rx channel dropped — pipeline task died without sending result");
+                    tracing::debug!("DIAG: SSE result_rx channel dropped — pipeline task died without sending result");
                     if sse_tx
                         .send(StreamEvent::Delta {
                             content: None,
@@ -1516,7 +1516,7 @@ async fn router_inference_stream(
                         .await
                         .is_err()
                     {
-                        tracing::warn!("DIAG: SSE channel-drop finish send also failed");
+                        tracing::debug!("DIAG: SSE channel-drop finish send also failed");
                     }
                 }
             }
@@ -1771,7 +1771,7 @@ async fn split_stream_response(
             .await
             .is_err()
         {
-            tracing::warn!("DIAG: split stream role delta send failed — client disconnected");
+            tracing::debug!("DIAG: split stream role delta send failed — client disconnected");
             return;
         }
 
@@ -1783,7 +1783,7 @@ async fn split_stream_response(
         let model_ref = match model_entry {
             Some(entry) => entry,
             None => {
-                tracing::warn!(model_id = %model_id, "DIAG: split stream model not found");
+                tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
@@ -1823,7 +1823,7 @@ async fn split_stream_response(
             }
         };
         let prefill_ms = prefill_start.elapsed().as_millis() as u64;
-        tracing::info!(model_id = %model_id, prompt_tokens, prefill_ms, "DIAG: split stream prefill complete");
+        tracing::debug!(model_id = %model_id, prompt_tokens, prefill_ms, "DIAG: split stream prefill complete");
 
         // logits shape: (1, vocab) — forward() already extracts the last token
         let mut next_token = match sample_token(&logits, params.temperature, params.top_p) {
@@ -1925,7 +1925,7 @@ async fn split_stream_response(
             .await
             .is_err()
         {
-            tracing::warn!(token_count, "DIAG: split stream finish delta send failed");
+            tracing::debug!(token_count, "DIAG: split stream finish delta send failed");
         }
         if tx.send(StreamEvent::Done).await.is_err() {
             tracing::debug!("DIAG: split stream Done send failed — client disconnected");
@@ -2007,7 +2007,7 @@ async fn stream_response(
             .await
             .is_err()
         {
-            tracing::warn!("DIAG: local stream role delta send failed — client disconnected");
+            tracing::debug!("DIAG: local stream role delta send failed — client disconnected");
             return;
         }
 
@@ -2045,7 +2045,7 @@ async fn stream_response(
             .await
             .is_err()
         {
-            tracing::warn!(token_count, finish_reason = %finish, "DIAG: local stream finish send failed");
+            tracing::debug!(token_count, finish_reason = %finish, "DIAG: local stream finish send failed");
         }
         if tx.send(StreamEvent::Done).await.is_err() {
             tracing::debug!("DIAG: local stream Done send failed — client disconnected");

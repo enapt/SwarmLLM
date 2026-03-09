@@ -48,7 +48,7 @@ pub fn bootstrap_peers(
                         dialed += 1;
                     }
                     Err(e) => {
-                        tracing::warn!(addr = %addr, peer_id = ?maybe_peer_id, error = %e, "DIAG: bootstrap dial failed");
+                        tracing::debug!(addr = %addr, peer_id = ?maybe_peer_id, error = %e, "DIAG: bootstrap dial failed");
                     }
                 }
             }

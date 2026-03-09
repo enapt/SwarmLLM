@@ -500,4 +500,122 @@ mod tests {
         assert!(limiter.try_acquire(ip2, "/v1/chat/completions"));
         assert!(!limiter.try_acquire(ip2, "/v1/chat/completions"));
     }
+
+    // --- constant_time_eq tests ---
+
+    #[test]
+    fn constant_time_eq_identical() {
+        assert!(constant_time_eq(b"secret-key-123", b"secret-key-123"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_content() {
+        assert!(!constant_time_eq(b"secret-key-123", b"secret-key-456"));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer-string"));
+    }
+
+    #[test]
+    fn constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_one_empty() {
+        assert!(!constant_time_eq(b"", b"notempty"));
+        assert!(!constant_time_eq(b"notempty", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_single_bit_difference() {
+        // Differ only in last bit of one byte
+        assert!(!constant_time_eq(b"\x00", b"\x01"));
+        assert!(!constant_time_eq(b"A", b"B")); // 0x41 vs 0x42
+    }
+
+    // --- Auth extraction logic tests ---
+
+    #[test]
+    fn bearer_token_extraction_from_header() {
+        // Simulate the token extraction logic from auth_middleware
+        let auth_header = Some("Bearer my-secret-key");
+        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+        assert_eq!(token, Some("my-secret-key"));
+    }
+
+    #[test]
+    fn bearer_token_extraction_missing_prefix() {
+        let auth_header = Some("Basic dXNlcjpwYXNz");
+        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn bearer_token_extraction_no_header() {
+        let auth_header: Option<&str> = None;
+        let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn x_api_key_fallback_logic() {
+        // When Authorization header has no Bearer prefix, fall back to x-api-key
+        let auth_header = Some("Basic dXNlcjpwYXNz"); // not Bearer
+        let x_api_key = Some("my-api-key-from-header");
+
+        let token = auth_header
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .or(x_api_key);
+        assert_eq!(token, Some("my-api-key-from-header"));
+    }
+
+    #[test]
+    fn bearer_takes_precedence_over_x_api_key() {
+        // When both Authorization: Bearer and x-api-key are present, Bearer wins
+        let auth_header = Some("Bearer bearer-token");
+        let x_api_key = Some("x-api-key-token");
+
+        let token = auth_header
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .or(x_api_key);
+        assert_eq!(token, Some("bearer-token"));
+    }
+
+    #[test]
+    fn auth_validation_with_constant_time_eq() {
+        let expected_key = "sk-swarm-abc123";
+
+        // Valid token
+        let token = Some("sk-swarm-abc123");
+        assert!(token.is_some_and(|t| constant_time_eq(t.as_bytes(), expected_key.as_bytes())));
+
+        // Invalid token
+        let token = Some("sk-swarm-wrong");
+        assert!(!token.is_some_and(|t| constant_time_eq(t.as_bytes(), expected_key.as_bytes())));
+
+        // Missing token
+        let token: Option<&str> = None;
+        assert!(!token.is_some_and(|t| constant_time_eq(t.as_bytes(), expected_key.as_bytes())));
+    }
+
+    #[test]
+    fn sensitive_admin_rate_limit() {
+        let limiter = RateLimiter::new(100, 100);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        // Sensitive endpoints get 5/min regardless of configured rpm
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(ip, "/api/admin/providers"));
+        }
+        assert!(!limiter.try_acquire(ip, "/api/admin/providers"));
+
+        // Same for api-key endpoint
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(ip2, "/api/admin/api-key"));
+        }
+        assert!(!limiter.try_acquire(ip2, "/api/admin/api-key"));
+    }
 }

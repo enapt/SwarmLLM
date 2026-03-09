@@ -426,4 +426,90 @@ mod tests {
         store.delete_shard(&model_id, 0).unwrap();
         assert!(!store.shard_path(&model_id, 0).exists());
     }
+
+    // --- sanitize_path_component tests ---
+
+    #[test]
+    fn sanitize_replaces_forward_slash() {
+        assert_eq!(sanitize_path_component("a/b/c"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_replaces_backslash() {
+        assert_eq!(sanitize_path_component("a\\b\\c"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_replaces_dot_dot() {
+        assert_eq!(sanitize_path_component(".."), "_");
+        // "/" replaced first → "a_.._b", then ".." replaced → "a___b"
+        assert_eq!(sanitize_path_component("a/../b"), "a___b");
+    }
+
+    #[test]
+    fn sanitize_combined_traversal_attack() {
+        // "../../etc/passwd" → replace / → ".._.._etc_passwd" → replace .. → "____etc_passwd"
+        let result = sanitize_path_component("../../etc/passwd");
+        assert!(!result.contains(".."), "must not contain '..'");
+        assert!(!result.contains('/'), "must not contain '/'");
+        assert_eq!(result, "____etc_passwd");
+    }
+
+    #[test]
+    fn sanitize_normal_strings_unchanged() {
+        assert_eq!(sanitize_path_component("my-model-v1"), "my-model-v1");
+        assert_eq!(
+            sanitize_path_component("TinyLlama-1.1B-Q4_K_M"),
+            "TinyLlama-1.1B-Q4_K_M"
+        );
+        assert_eq!(
+            sanitize_path_component("meta-llama_Llama-3-8B"),
+            "meta-llama_Llama-3-8B"
+        );
+    }
+
+    #[test]
+    fn sanitize_empty_string() {
+        assert_eq!(sanitize_path_component(""), "");
+    }
+
+    #[test]
+    fn sanitize_single_dot() {
+        // A single dot is fine — it's not ".."
+        assert_eq!(sanitize_path_component("."), ".");
+    }
+
+    #[test]
+    fn sanitize_triple_dots() {
+        // "..." contains ".." so the first two dots become "_", leaving "_."
+        assert_eq!(sanitize_path_component("..."), "_.");
+    }
+
+    #[test]
+    fn sanitize_unicode() {
+        // Unicode should pass through — only /, \, and .. are dangerous
+        assert_eq!(sanitize_path_component("模型-v1"), "模型-v1");
+        assert_eq!(sanitize_path_component("café-model"), "café-model");
+    }
+
+    #[test]
+    fn sanitize_mixed_separators() {
+        // "a/b\c/../d" → replace /,\ → "a_b_c_.._d" → replace .. → "a_b_c___d"
+        assert_eq!(sanitize_path_component("a/b\\c/../d"), "a_b_c___d");
+    }
+
+    #[test]
+    fn shard_path_sanitizes_model_id() {
+        let store = ShardStore::new(Path::new("/data"));
+        // Path traversal in model_id should be neutralized
+        let path = store.shard_path(&ModelId("../../etc".into()), 0);
+        assert!(
+            !path.to_string_lossy().contains(".."),
+            "Path should not contain '..' after sanitization: {}",
+            path.display()
+        );
+        // "../../etc" → replace / → "_.._etc" wait no: ".._._etc" no.
+        // "../../etc" → replace / → ".._.._etc" → replace .. → "____etc"
+        assert_eq!(path.to_string_lossy(), "/data/models/____etc/shard_000.bin");
+    }
 }

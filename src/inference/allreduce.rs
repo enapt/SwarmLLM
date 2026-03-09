@@ -111,6 +111,7 @@ pub async fn allreduce_sum(
         partial_data: partial_data_compressed,
         shape,
         op: AllReduceOp::Sum,
+        sender_peer_bytes: None,
     };
 
     if is_coordinator {
@@ -208,6 +209,7 @@ mod tests {
             partial_data: compressed,
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
+            sender_peer_bytes: None,
         };
 
         assert!(collector.insert(req, None));
@@ -250,6 +252,7 @@ mod tests {
             partial_data: c0,
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
+            sender_peer_bytes: None,
         };
         let req1 = TpAllReduceRequest {
             request_id,
@@ -259,6 +262,7 @@ mod tests {
             partial_data: c1,
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
+            sender_peer_bytes: None,
         };
 
         assert!(!collector.insert(req0, None)); // not all arrived yet
@@ -318,6 +322,7 @@ mod tests {
                 partial_data: compressed,
                 shape: vec![1, 1, 3],
                 op: AllReduceOp::Sum,
+                sender_peer_bytes: None,
             };
             let all = collector.insert(req, None);
             assert_eq!(all, rank == 3); // only last one completes
@@ -351,6 +356,7 @@ mod tests {
                 partial_data: compressed,
                 shape: vec![1, 1, 1],
                 op: AllReduceOp::Sum,
+                sender_peer_bytes: None,
             };
             collector.insert(req, None);
         }

@@ -102,7 +102,7 @@ impl Database {
                 )));
             }
         };
-        tracing::info!(path = %db_path.display(), "DIAG: db_open");
+        tracing::debug!(path = %db_path.display(), "DIAG: db_open");
 
         let db = Self {
             inner: Arc::new(inner),

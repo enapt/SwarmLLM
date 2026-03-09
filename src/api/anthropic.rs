@@ -477,7 +477,7 @@ pub async fn messages(
             let api_key = entry.api_key.clone();
             drop(config);
 
-            tracing::info!(model = %req.model, "DIAG: anthropic proxying to cloud API");
+            tracing::debug!(model = %req.model, "DIAG: anthropic proxying to cloud API");
             let body = serde_json::to_value(&ProxyMessagesRequest {
                 model: &req.model,
                 max_tokens: req.max_tokens,

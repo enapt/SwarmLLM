@@ -133,7 +133,7 @@ impl ModelManifest {
     /// Get the path to a specific shard file within the data directory.
     /// Sanitizes model_id to prevent path traversal attacks.
     pub fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf {
-        let safe_id = model_id.replace(['/', '\\'], "_").replace("..", "_");
+        let safe_id = crate::model::shard::sanitize_path_component(model_id);
         data_dir
             .join("models")
             .join(&safe_id)

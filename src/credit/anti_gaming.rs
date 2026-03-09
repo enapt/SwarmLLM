@@ -53,7 +53,7 @@ impl AntiGaming {
     ) -> Result<SpotCheckDecision, AntiGamingViolation> {
         // Check self-dealing
         if from == to {
-            tracing::warn!(from = %from, "DIAG: anti_gaming violation — self dealing");
+            tracing::debug!(from = %from, "DIAG: anti_gaming violation — self dealing");
             return Err(AntiGamingViolation::SelfDealing);
         }
 

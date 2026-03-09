@@ -1,10 +1,10 @@
 pub mod allreduce;
 pub mod chat_template;
 pub mod executor;
-pub mod json_grammar;
 pub mod kv_cache;
 pub(crate) mod layers;
 pub(crate) mod model_arch;
+#[cfg(feature = "paged-attn")]
 pub mod paged_kv;
 pub mod pipeline;
 pub mod prefix_cache;

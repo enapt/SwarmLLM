@@ -247,6 +247,7 @@ impl PipelineExecutor {
             request_id: self.request.id,
             model_id: model_id.clone(),
             image_data: jpeg_bytes,
+            sender_peer_bytes: None,
         };
         let target_peer_bytes = self
             .shared_state

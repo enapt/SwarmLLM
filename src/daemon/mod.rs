@@ -31,14 +31,6 @@ use manifest::{extract_tied_output_weight, regenerate_manifest_from_header};
 
 /// Maximum restart attempts before a subsystem is considered permanently failed.
 const MAX_RESTART_ATTEMPTS: u32 = 5;
-/// Base backoff duration for subsystem restarts (doubles each attempt, capped at 16s).
-/// Note: Not currently wired for production restart logic — channel-bound subsystems
-/// cannot be restarted. Kept for tests and future use.
-#[allow(dead_code)]
-const RESTART_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(1);
-/// Maximum backoff duration for subsystem restarts.
-#[allow(dead_code)]
-const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(16);
 
 /// Whether a subsystem is critical to daemon operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,17 +39,6 @@ pub enum SubsystemCriticality {
     Critical,
     /// Daemon can continue without this subsystem.
     NonCritical,
-}
-
-/// Compute the backoff duration for a given restart attempt.
-/// Note: Not currently wired for production restart logic — channel-bound subsystems
-/// cannot be restarted. Kept for tests and future use.
-#[allow(dead_code)]
-fn restart_backoff(attempt: u32) -> std::time::Duration {
-    let secs = RESTART_BACKOFF_BASE
-        .as_secs()
-        .saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
-    std::time::Duration::from_secs(secs).min(RESTART_BACKOFF_CAP)
 }
 
 /// Top-level daemon orchestrating all SwarmLLM subsystems.
@@ -1456,22 +1437,6 @@ async fn detect_region_from_ip() -> Option<String> {
 mod tests {
     use super::*;
     use std::time::Duration;
-
-    #[test]
-    fn restart_backoff_doubles_each_attempt() {
-        assert_eq!(restart_backoff(0), Duration::from_secs(1));
-        assert_eq!(restart_backoff(1), Duration::from_secs(2));
-        assert_eq!(restart_backoff(2), Duration::from_secs(4));
-        assert_eq!(restart_backoff(3), Duration::from_secs(8));
-        assert_eq!(restart_backoff(4), Duration::from_secs(16));
-    }
-
-    #[test]
-    fn restart_backoff_caps_at_16_seconds() {
-        assert_eq!(restart_backoff(5), Duration::from_secs(16));
-        assert_eq!(restart_backoff(10), Duration::from_secs(16));
-        assert_eq!(restart_backoff(100), Duration::from_secs(16));
-    }
 
     #[test]
     fn subsystem_criticality_classification() {

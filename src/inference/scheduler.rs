@@ -477,7 +477,8 @@ impl PipelineScheduler {
                     .get(&candidate.node_id)
                     .map(|p| (p.is_lan_peer, p.latency_ms))
                     .unwrap_or((false, None));
-                let low_latency = measured_latency.is_some_and(|ms| ms <= 10);
+                let tp_max_ms = self.shared_state.config.inference.tp_max_latency_ms;
+                let low_latency = measured_latency.is_some_and(|ms| ms <= tp_max_ms);
                 if !is_lan && !low_latency {
                     continue;
                 }

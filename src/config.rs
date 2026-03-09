@@ -264,6 +264,15 @@ pub struct InferenceConfig {
     /// This prevents user prompts from being written to disk. Default: false.
     #[serde(default)]
     pub privacy_mode: bool,
+    /// Maximum peer RTT (ms) to consider for tensor parallelism AllReduce.
+    /// Peers with measured latency above this threshold are excluded from TP groups.
+    /// Default: 10ms (LAN-only).
+    #[serde(default = "default_tp_max_latency_ms")]
+    pub tp_max_latency_ms: u32,
+}
+
+fn default_tp_max_latency_ms() -> u32 {
+    10
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1019,6 +1028,7 @@ impl Default for InferenceConfig {
             max_split_model_memory_mb: None,
             prefix_cache_max_entries: default_prefix_cache_entries(),
             privacy_mode: false,
+            tp_max_latency_ms: default_tp_max_latency_ms(),
         }
     }
 }

@@ -1130,7 +1130,7 @@ impl NetworkManager {
         channel: request_response::ResponseChannel<SwarmResponse>,
     ) {
         match request {
-            SwarmRequest::Message(msg) => {
+            SwarmRequest::Message(mut msg) => {
                 // Handle PEX messages inline instead of forwarding to dispatcher
                 match *msg {
                     SwarmMessage::PeerExchangeRequest => {
@@ -1172,6 +1172,16 @@ impl NetworkManager {
                         return;
                     }
                     _ => {
+                        // Attach sender peer identity for messages that need it
+                        match &mut *msg {
+                            SwarmMessage::VisionEncodeRequest(ref mut req) => {
+                                req.sender_peer_bytes = Some(peer.to_bytes());
+                            }
+                            SwarmMessage::TpAllReduceRequest(ref mut req) => {
+                                req.sender_peer_bytes = Some(peer.to_bytes());
+                            }
+                            _ => {}
+                        }
                         // Forward all other messages to dispatcher
                         tracing::debug!(%peer, "Handling protocol message request");
                         if let Err(e) = self.outbound_tx.try_send(*msg) {

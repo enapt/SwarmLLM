@@ -242,7 +242,7 @@ impl UpdateChecker {
     /// Apply the downloaded update: atomic rename of binaries.
     /// Does NOT restart the daemon — the user must restart manually.
     pub fn apply_update(&self, tmp_path: &std::path::Path) -> Result<(), SwarmError> {
-        tracing::info!(path = %tmp_path.display(), "DIAG: apply_update starting");
+        tracing::debug!(path = %tmp_path.display(), "DIAG: apply_update starting");
         if !tmp_path.exists() {
             return Err(SwarmError::Internal(
                 "Update file not found — download first".to_string(),

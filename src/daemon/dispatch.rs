@@ -11,6 +11,8 @@ use super::state::{SharedState, TpAllReduceCollector};
 
 /// Maximum number of concurrent LayerForward tasks.
 const MAX_CONCURRENT_FORWARDS: usize = 64;
+/// Zstd compression level for tensor wire payloads.
+const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
 /// Dispatch inbound network messages to the appropriate subsystem.
 ///
@@ -541,7 +543,7 @@ pub(crate) async fn dispatch_network_messages(
 
                                 // Extract sender peer bytes from the request context
                                 // (embedded by NetworkManager when receiving the rr request)
-                                let sender_peer = None; // TODO: plumb sender peer from rr handler
+                                let sender_peer = req.sender_peer_bytes.clone();
 
                                 let all_arrived = {
                                     let mut entry = ss.pending_tp_partials
@@ -1346,7 +1348,8 @@ async fn handle_vision_encode_request(
                 })
                 .unwrap_or_default();
             let compressed =
-                zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3).unwrap_or(raw_bytes);
+                zstd::encode_all(std::io::Cursor::new(&raw_bytes), ZSTD_COMPRESS_LEVEL)
+                    .unwrap_or(raw_bytes);
 
             let response = crate::types::VisionEncodeResponse {
                 request_id: req.request_id,
@@ -1363,10 +1366,15 @@ async fn handle_vision_encode_request(
                 "VisionEncodeRequest completed, sending response"
             );
 
-            // TODO: Send response directly to the requesting node instead of broadcast.
-            // Currently the dispatcher doesn't pass the sender's identity, so we fall back
-            // to broadcast. Only the originator consumes the response (via pending_vision_results).
-            let msg = NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response));
+            let msg = if let Some(target_bytes) = &req.sender_peer_bytes {
+                NetworkCommand::SendDirectMessage {
+                    target_peer_bytes: target_bytes.clone(),
+                    message: SwarmMessage::VisionEncodeResponse(response),
+                }
+            } else {
+                // Fallback to broadcast if sender unknown (backward compat)
+                NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response))
+            };
             if let Err(e) = network_tx.send(msg).await {
                 tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");
             }
