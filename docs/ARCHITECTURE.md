@@ -630,6 +630,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 - Cooldown not expired (5 min per model)
 
 **Resource Pressure** — `max(disk_pressure, vram_pressure)`:
+- VRAM pressure uses live `nvidia-smi` query (every 5 min tick) for actual GPU memory usage, with fallback to internal loaded-model tracking when nvidia-smi is unavailable
 - < 0.5: relaxed (+1 to target, keep extras)
 - 0.5–0.8: normal
 - 0.8–0.95: eager (-1 from target)
