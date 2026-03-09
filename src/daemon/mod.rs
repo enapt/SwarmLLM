@@ -81,6 +81,17 @@ impl Daemon {
         // Load .env file from data dir (or cwd) into process environment
         crate::config::load_dotenv(&self.config.node.data_dir);
 
+        // Log detected provider API keys from environment
+        let env_keys = crate::config::ProvidersConfig::detect_env_keys();
+        if !env_keys.is_empty() {
+            let names: Vec<&str> = env_keys.iter().map(|(_, name)| *name).collect();
+            tracing::info!(
+                providers = ?names,
+                count = env_keys.len(),
+                "Detected provider API keys in environment"
+            );
+        }
+
         // Log resolved configuration at startup
         let auto_interval = self
             .config

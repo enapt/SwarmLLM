@@ -195,8 +195,15 @@
         <div class="mt-2" style="font-size:0.8rem">
           <span class="text-muted">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">.env</code> file in your data directory (e.g. <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">OPENAI_API_KEY=sk-...</code>).</span>
         </div>
-        <div class="mt-2" style="margin-bottom:8px">
-          <input type="text" id="provider-filter" placeholder="Filter providers..." style="width:100%;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+        <div class="mt-2" style="margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px">Key source:
+            <select id="provider-key-source" style="font-size:0.78rem;padding:3px 6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+              <option value="auto">Auto (dashboard, then .env)</option>
+              <option value="env">.env / environment only</option>
+              <option value="dashboard">Dashboard only</option>
+            </select>
+          </label>
+          <input type="text" id="provider-filter" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
         </div>
         <div id="provider-cards" class="mt-2">
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">

@@ -1863,6 +1863,11 @@ var SwarmLLM = (function() {
             if (section) section.open = true;
           }
         }
+        // Set key source dropdown
+        if (data.key_source) {
+          var sel = document.getElementById('provider-key-source');
+          if (sel) sel.value = data.key_source;
+        }
       } catch (e) {
         ui.showBanner('error', 'Failed to load provider status');
       }
@@ -4151,6 +4156,21 @@ var SwarmLLM = (function() {
         cards.forEach(function(card) {
           var name = (card.querySelector('strong') || {}).textContent || '';
           card.style.display = name.toLowerCase().indexOf(q) >= 0 ? '' : 'none';
+        });
+      });
+    }
+
+    // Key source dropdown
+    var keySourceSel = document.getElementById('provider-key-source');
+    if (keySourceSel) {
+      keySourceSel.addEventListener('change', function() {
+        authFetch('/api/admin/providers', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key_source: this.value })
+        }).then(function() {
+          ui.showBanner('success', 'Key source updated to: ' + keySourceSel.value);
+          settings.loadProviders();
         });
       });
     }

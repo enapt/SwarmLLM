@@ -44,7 +44,13 @@ pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Va
         })
         .collect();
 
-    Json(serde_json::json!({ "providers": providers }))
+    let key_source = match config.key_source {
+        crate::config::ProviderKeySource::Auto => "auto",
+        crate::config::ProviderKeySource::Env => "env",
+        crate::config::ProviderKeySource::Dashboard => "dashboard",
+    };
+
+    Json(serde_json::json!({ "providers": providers, "key_source": key_source }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +79,9 @@ pub struct ProvidersUpdate {
     pub deepinfra_key: Option<String>,
     #[serde(default)]
     pub moonshot_key: Option<String>,
+    /// Key source mode: "auto", "env", or "dashboard".
+    #[serde(default)]
+    pub key_source: Option<String>,
 }
 
 /// PUT /api/admin/providers — Update provider API keys. Empty string = remove key.
@@ -132,6 +141,17 @@ pub async fn update_providers(
     update_entry(&mut config.together, body.together_key);
     update_entry(&mut config.deepinfra, body.deepinfra_key);
     update_entry(&mut config.moonshot, body.moonshot_key);
+
+    // Update key source mode if provided
+    if let Some(ref ks) = body.key_source {
+        config.key_source = match ks.as_str() {
+            "env" => crate::config::ProviderKeySource::Env,
+            "dashboard" => crate::config::ProviderKeySource::Dashboard,
+            _ => crate::config::ProviderKeySource::Auto,
+        };
+        // Re-apply env vars with the new mode
+        config.fill_from_env();
+    }
 
     // Encrypt keys before persisting to database
     let signing_key_bytes = state.shared_state.identity.signing_key_bytes();

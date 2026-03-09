@@ -606,9 +606,25 @@ impl ModelConfig {
     }
 }
 
+/// Controls how provider API keys are sourced.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKeySource {
+    /// Dashboard/database keys take priority; env vars fill gaps (default).
+    #[default]
+    Auto,
+    /// Environment variables / .env file always override dashboard keys.
+    Env,
+    /// Only use dashboard-entered keys; ignore environment variables entirely.
+    Dashboard,
+}
+
 /// Cloud provider configuration for multi-provider API gateway.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProvidersConfig {
+    /// Controls key source priority: auto (db > env), env (env > db), dashboard (db only).
+    #[serde(default)]
+    pub key_source: ProviderKeySource,
     #[serde(default)]
     pub anthropic: Option<ProviderEntry>,
     #[serde(default)]
@@ -671,42 +687,66 @@ impl Drop for CustomProvider {
 }
 
 impl ProvidersConfig {
-    /// Fill empty provider entries from environment variables.
-    /// Standard env var names: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
-    /// Only fills providers that don't already have a key configured.
-    pub fn fill_from_env(&mut self) {
-        let mappings: &[(&str, &str)] = &[
-            ("OPENAI_API_KEY", "openai"),
-            ("ANTHROPIC_API_KEY", "anthropic"),
-            ("DEEPSEEK_API_KEY", "deepseek"),
-            ("MISTRAL_API_KEY", "mistral"),
-            ("GROQ_API_KEY", "groq"),
-            ("NVIDIA_NIM_API_KEY", "nvidia_nim"),
-            ("CEREBRAS_API_KEY", "cerebras"),
-            ("SAMBANOVA_API_KEY", "sambanova"),
-            ("FIREWORKS_API_KEY", "fireworks"),
-            ("TOGETHER_API_KEY", "together"),
-            ("DEEPINFRA_API_KEY", "deepinfra"),
-            ("MOONSHOT_API_KEY", "moonshot"),
-        ];
+    /// Standard env var name → provider name mappings.
+    const ENV_MAPPINGS: &[(&str, &str)] = &[
+        ("OPENAI_API_KEY", "openai"),
+        ("ANTHROPIC_API_KEY", "anthropic"),
+        ("DEEPSEEK_API_KEY", "deepseek"),
+        ("MISTRAL_API_KEY", "mistral"),
+        ("GROQ_API_KEY", "groq"),
+        ("NVIDIA_NIM_API_KEY", "nvidia_nim"),
+        ("CEREBRAS_API_KEY", "cerebras"),
+        ("SAMBANOVA_API_KEY", "sambanova"),
+        ("FIREWORKS_API_KEY", "fireworks"),
+        ("TOGETHER_API_KEY", "together"),
+        ("DEEPINFRA_API_KEY", "deepinfra"),
+        ("MOONSHOT_API_KEY", "moonshot"),
+    ];
 
-        for (env_var, name) in mappings {
+    /// Apply environment variable keys according to `key_source` mode.
+    /// - `Auto`: env fills gaps (only where no key is set)
+    /// - `Env`: env always overwrites existing keys
+    /// - `Dashboard`: env vars ignored entirely
+    pub fn fill_from_env(&mut self) {
+        if self.key_source == ProviderKeySource::Dashboard {
+            return;
+        }
+        let force = self.key_source == ProviderKeySource::Env;
+
+        for (env_var, name) in Self::ENV_MAPPINGS {
             if let Ok(key) = std::env::var(env_var) {
                 let key = key.trim().to_string();
                 if key.is_empty() {
                     continue;
                 }
                 let field = self.field_mut(name);
-                if field.is_none() {
-                    tracing::info!(env_var, "Loaded provider key from environment");
+                if force || field.is_none() {
+                    if field.is_some() && force {
+                        tracing::info!(env_var, "Environment key overriding dashboard key");
+                    } else {
+                        tracing::info!(env_var, "Loaded provider key from environment");
+                    }
                     *field = Some(ProviderEntry {
                         api_key: key,
-                        default_model: None,
+                        default_model: field.as_ref().and_then(|e| e.default_model.clone()),
                     });
                     self.env_sourced.insert(name.to_string());
                 }
             }
         }
+    }
+
+    /// Check which env vars are available (for setup detection).
+    pub fn detect_env_keys() -> Vec<(&'static str, &'static str)> {
+        Self::ENV_MAPPINGS
+            .iter()
+            .filter(|(env_var, _)| {
+                std::env::var(env_var)
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .copied()
+            .collect()
     }
 
     fn field_mut(&mut self, name: &str) -> &mut Option<ProviderEntry> {
