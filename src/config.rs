@@ -538,7 +538,7 @@ impl Default for AutoManageConfig {
 }
 
 fn default_max_concurrent_downloads() -> usize {
-    1
+    3
 }
 
 fn default_min_replicas() -> u32 {
@@ -989,8 +989,8 @@ impl Default for NetworkConfig {
             relay_max_circuits: default_relay_max_circuits(),
             auto_relay: true,
             enable_mdns: true,
-            enable_autonat: false,
-            enable_dcutr: false,
+            enable_autonat: true,
+            enable_dcutr: true,
             enable_encryption: true,
             gossip_network_id: None,
             tensor_compression: true,
@@ -1392,9 +1392,9 @@ auto_relay = false
     }
 
     #[test]
-    fn max_concurrent_downloads_defaults_to_1() {
+    fn max_concurrent_downloads_defaults_to_3() {
         let config = Config::default();
-        assert_eq!(config.auto_manage.max_concurrent_downloads, 1);
+        assert_eq!(config.auto_manage.max_concurrent_downloads, 3);
     }
 
     #[test]

@@ -382,7 +382,12 @@ pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmErro
         TensorFormat::INT8 => 2,
     };
     buf.push(fmt_tag);
-    // data length (4 bytes LE)
+    // data length (4 bytes LE) — guard against >4GiB payloads
+    if data_len > u32::MAX as usize {
+        return Err(SwarmError::Network(
+            "Activation payload exceeds 4GiB wire format limit".into(),
+        ));
+    }
     buf.extend_from_slice(&(data_len as u32).to_le_bytes());
     // activation data
     buf.extend_from_slice(&forward.activations);

@@ -2518,7 +2518,7 @@ mod tests {
     #[test]
     fn default_max_concurrent_downloads() {
         let config = crate::config::AutoManageConfig::default();
-        assert_eq!(config.max_concurrent_downloads, 1);
+        assert_eq!(config.max_concurrent_downloads, 3);
     }
 
     #[tokio::test]

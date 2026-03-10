@@ -69,7 +69,7 @@ fn extract_subkey(composite: &[u8]) -> Option<&[u8]> {
 /// Wrapper around redb embedded database.
 ///
 /// Uses a single redb table with composite keys ("{tree}\0{key}") to emulate
-/// sled's named trees. All values are stored as raw bytes (typically JSON).
+/// a named-tree pattern. All values are stored as raw bytes (typically JSON).
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<redb::Database>,

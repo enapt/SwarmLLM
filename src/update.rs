@@ -325,23 +325,19 @@ impl UpdateChecker {
                         "Update available"
                     );
 
-                    let mut should_download = self.config.auto_restart;
-
                     // Auto-download if configured
                     let mut info = info;
-                    if should_download {
+                    if self.config.auto_restart {
                         match self.download_update(&info).await {
                             Ok(_path) => {
                                 info.downloaded = true;
                                 tracing::info!("Update downloaded and ready to apply");
                             }
                             Err(e) => {
-                                should_download = false;
                                 tracing::warn!(error = %e, "Failed to auto-download update");
                             }
                         }
                     }
-                    let _ = should_download; // suppress unused warning
 
                     // Store in shared state and notify WebSocket clients
                     {

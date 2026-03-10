@@ -2643,7 +2643,6 @@ impl SplitModel {
     ///
     /// The `ShardReader` uses the tensor entries to map virtual GGUF positions
     /// to shard-local offsets, so candle's GGUF parser works unchanged.
-    #[allow(clippy::too_many_arguments)]
     /// Load from shards, forcing CPU device (used as OOM fallback).
     #[allow(clippy::too_many_arguments)]
     pub fn load_from_shards_cpu(
