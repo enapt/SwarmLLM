@@ -32,14 +32,12 @@ jobs:
             archive: swarmllm-linux-x86_64-cuda.tar.gz
             features: "--features candle-cuda"
             cuda: true
-          # macOS aarch64 temporarily disabled — ring 0.17.14 CAPS_STATIC assertion
-          # fails on GitHub Actions macos-14 runners. Tracking: ring#2073
-          # - name: macOS aarch64
-          #   runner: macos-14
-          #   target: aarch64-apple-darwin
-          #   binary: swarmllm
-          #   archive: swarmllm-macos-aarch64.tar.gz
-          #   features: ""
+          - name: macOS aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            binary: swarmllm
+            archive: swarmllm-macos-aarch64.tar.gz
+            features: ""
           - name: Windows x86_64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
