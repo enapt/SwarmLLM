@@ -298,9 +298,23 @@ impl AllReduceRegistry {
         }
     }
 
-    /// Clean up stale entries older than the given duration.
+    /// Clean up stale entries where the receiver has been dropped (timed out).
     pub fn cleanup_stale(&self) {
-        // Entries are removed on delivery or timeout; no-op for now.
+        let stale_keys: Vec<(Uuid, u32)> = self
+            .pending
+            .iter()
+            .filter(|entry| entry.value().is_closed())
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_keys.is_empty() {
+            tracing::debug!(
+                count = stale_keys.len(),
+                "Cleaning up stale AllReduce entries"
+            );
+            for key in stale_keys {
+                self.pending.remove(&key);
+            }
+        }
     }
 }
 

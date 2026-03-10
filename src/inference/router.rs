@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::credit::priority;
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::chat_template;
@@ -260,8 +261,8 @@ impl InferenceRouter {
         result_tx: InferenceResultTx,
         token_tx: Option<StreamingTokenTx>,
     ) {
-        // Check credit balance — Bronze tier nodes are deprioritized but not blocked
-        // per spec: "Credit errors: degrade priority tier, never block"
+        // Calculate priority tier from credit balance and network percentile.
+        // Per spec: "Credit errors: degrade priority tier, never block"
         let balance = {
             if let Ok(bal) = self.shared_state.credit_balance.try_read() {
                 bal.balance
@@ -270,17 +271,24 @@ impl InferenceRouter {
             }
         };
 
-        let priority = if balance < 0 {
-            // Negative balance → force Bronze tier
-            tracing::debug!(
-                request_id = %request.id,
-                balance,
-                "Negative credit balance, degrading to Bronze tier"
-            );
-            crate::types::PriorityTier::Bronze
-        } else {
-            request.priority
+        // Compute network percentile from peer credit balances
+        let network_percentile = {
+            let mut balances: Vec<i64> = self
+                .shared_state
+                .peer_credit_balances
+                .iter()
+                .map(|e| *e.value())
+                .collect();
+            if balances.is_empty() {
+                0.5 // No peers known, default to median
+            } else {
+                balances.sort();
+                let rank = balances.partition_point(|&b| b < balance);
+                rank as f32 / balances.len() as f32
+            }
         };
+
+        let priority = priority::calculate_tier(balance, network_percentile);
 
         let mut adjusted_request = request;
         adjusted_request.priority = priority;
@@ -412,8 +420,18 @@ impl InferenceRouter {
     /// a single model lock acquisition — requests are processed sequentially
     /// within the batch but without re-acquiring the lock between them.
     async fn drain_queue(&mut self) {
-        while self.active_count.load(Ordering::Relaxed) < self.max_concurrent {
-            if self.queue.is_empty() {
+        while !self.queue.is_empty() {
+            // Enforce per-tier concurrent limits: the next request's tier
+            // determines how many slots it can use (Bronze=1/4, Silver=1/2,
+            // Gold=base, Platinum=2x).
+            let active = self.active_count.load(Ordering::Relaxed);
+            let next_tier = self
+                .queue
+                .peek()
+                .map(|q| q.request.priority)
+                .unwrap_or(crate::types::PriorityTier::Bronze);
+            let tier_max = priority::max_concurrent_for_tier(next_tier, self.max_concurrent);
+            if active >= tier_max {
                 break;
             }
 
@@ -506,6 +524,17 @@ impl InferenceRouter {
     /// hit, the tensor-level KV-cache is preserved and `start_pos` is set
     /// to skip redundant prefill.
     fn dispatch_single(&mut self, queued: QueuedRequest) {
+        // Pipeline affinity: get previous pipeline assignment for KV cache locality
+        let preferred_pipeline = if let Some(ref session_id) = queued.request.session_id {
+            if let Some(internal_id) = self.kv_cache.get_internal_id(session_id) {
+                self.kv_cache.get_previous_pipeline(&internal_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Check for multi-turn KV-cache reuse
         let cache_start_pos = if let Some(ref session_id) = queued.request.session_id {
             // Collect active peer IDs for pipeline validation
@@ -629,6 +658,7 @@ impl InferenceRouter {
                 scheduler,
                 request.clone(),
                 token_tx,
+                preferred_pipeline,
             )
             .await;
 
@@ -986,6 +1016,7 @@ async fn execute_distributed_batch(
                 scheduler,
                 request.clone(),
                 token_tx,
+                None, // No pipeline affinity for batched requests
             )
             .await;
 
@@ -1017,6 +1048,7 @@ async fn execute_request(
     scheduler: PipelineScheduler,
     request: InferenceRequest,
     token_tx: Option<StreamingTokenTx>,
+    preferred_pipeline: Option<PipelineAssignment>,
 ) -> Result<InferenceOutput, SwarmError> {
     let model_id = &request.model_id;
 
@@ -1180,7 +1212,27 @@ async fn execute_request(
         "Assembling distributed pipeline"
     );
 
-    let assignment = scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?;
+    // Pipeline affinity: reuse previous pipeline if all nodes are still connected
+    let assignment = if let Some(prev) = preferred_pipeline {
+        let all_connected = prev.segments.iter().all(|seg| {
+            seg.node_id == local_node_id || shared_state.peer_registry.contains_key(&seg.node_id)
+        });
+        if all_connected && !prev.segments.is_empty() {
+            tracing::info!(
+                request_id = %request.id,
+                segments = prev.segments.len(),
+                "Reusing previous pipeline (KV cache affinity)"
+            );
+            PipelineAssignment {
+                request_id: request.id,
+                ..prev
+            }
+        } else {
+            scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?
+        }
+    } else {
+        scheduler.assemble_pipeline_for(model_id, &local_node_id, request.id)?
+    };
     let schedule_ms = schedule_start.elapsed().as_millis() as u64;
 
     tracing::info!(
@@ -1209,6 +1261,7 @@ async fn execute_request(
 
     // Execute the distributed pipeline
     let execute_start = std::time::Instant::now();
+    let network_tx_for_error = network_tx.clone();
     let mut pipeline = PipelineExecutor::new(
         shared_state.clone(),
         network_tx,
@@ -1252,13 +1305,40 @@ async fn execute_request(
             )
             .await;
         }
-        Err(e) => {
+        Err(ref e) => {
             tracing::error!(
                 request_id = %request.id,
                 schedule_ms,
                 execute_ms,
                 "DIAG: execute_request failed: {e}"
             );
+
+            // Apply credit penalty for distributed inference failure
+            let penalty = shared_state.config.pool.credit_rates.penalty_serve_failure;
+            if let Err(pe) = crate::credit::ledger::apply_credit_direct(
+                &shared_state.credit_balance,
+                &shared_state.db,
+                -penalty,
+                false,
+            )
+            .await
+            {
+                tracing::warn!(error = %pe, "Failed to apply failure penalty");
+            } else {
+                tracing::info!(
+                    penalty,
+                    request_id = %request.id,
+                    "Applied credit penalty for distributed inference failure"
+                );
+            }
+
+            // Broadcast pipeline error so peers can update shard availability
+            crate::inference::pipeline::broadcast_pipeline_error(
+                &network_tx_for_error,
+                request.id,
+                &e.to_string(),
+            )
+            .await;
         }
     }
     result
