@@ -10,6 +10,7 @@ use crate::health::rebalancer::ShardRebalancer;
 use crate::identity::Identity;
 use crate::inference::router::{InferenceRouter, RouterCommand};
 use crate::model::acquisition::{AcquisitionCommand, AcquisitionManager};
+use crate::model::manifest::ModelManifestExt;
 use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;

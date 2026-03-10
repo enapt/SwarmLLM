@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SwarmError;
 use crate::storage::db::Database;
+// Re-export NicknameRecord from swarmllm-types crate
+pub use crate::types::NicknameRecord;
 use crate::types::NodeId;
 
 /// Sled tree name for nickname records.
@@ -10,19 +12,23 @@ pub const TREE_NICKNAMES: &str = "nicknames";
 /// Sled tree name for local identity preferences.
 pub const TREE_IDENTITY_PREFS: &str = "identity_prefs";
 
-/// A cryptographically signed nickname claim for a node.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NicknameRecord {
-    pub node_id: NodeId,
-    pub nickname: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Ed25519 signature over the signing payload.
-    pub signature: Vec<u8>,
+/// Extension methods for NicknameRecord (defined in swarmllm-types crate).
+pub trait NicknameRecordExt {
+    fn signing_payload(
+        node_id: &NodeId,
+        nickname: &str,
+        timestamp: &chrono::DateTime<chrono::Utc>,
+    ) -> Vec<u8>;
+    fn new_signed(
+        identity: &crate::identity::Identity,
+        nickname: String,
+    ) -> Result<NicknameRecord, SwarmError>;
+    fn verify(&self) -> Result<(), SwarmError>;
 }
 
-impl NicknameRecord {
+impl NicknameRecordExt for NicknameRecord {
     /// Build the signing payload: `"swarmllm-nickname|{hex_node_id}|{nickname}|{timestamp}"`
-    pub fn signing_payload(
+    fn signing_payload(
         node_id: &NodeId,
         nickname: &str,
         timestamp: &chrono::DateTime<chrono::Utc>,
@@ -37,10 +43,10 @@ impl NicknameRecord {
     }
 
     /// Create a new signed nickname record using the node's identity.
-    pub fn new_signed(
+    fn new_signed(
         identity: &crate::identity::Identity,
         nickname: String,
-    ) -> Result<Self, SwarmError> {
+    ) -> Result<NicknameRecord, SwarmError> {
         validate_nickname(&nickname)?;
         let timestamp = chrono::Utc::now();
         let payload = Self::signing_payload(identity.node_id(), &nickname, &timestamp);
@@ -60,7 +66,7 @@ impl NicknameRecord {
 
     /// Verify the Ed25519 signature on this record.
     /// SEC-I3: Also rejects records older than 24 hours to prevent stale replay.
-    pub fn verify(&self) -> Result<(), SwarmError> {
+    fn verify(&self) -> Result<(), SwarmError> {
         // Timestamp freshness check: reject records older than 24 hours
         // (matches the gossip dispatcher's age filter in dispatch.rs)
         let age = chrono::Utc::now() - self.timestamp;

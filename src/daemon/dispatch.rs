@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::error::SwarmError;
+use crate::identity::nickname::NicknameRecordExt;
 use crate::inference::router::RouterCommand;
+use crate::model::manifest::ModelManifestExt;
 use crate::types::{AuthenticatedMessage, EphemeralKeyExchange, NetworkCommand, SwarmMessage};
 
 use super::shard_loader::{try_load_from_shards, ShardLoadParams};

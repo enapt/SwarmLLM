@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::model::manifest::ModelManifestExt;
 use crate::model::shard::ShardStore;
 
 use super::map_gguf_architecture;

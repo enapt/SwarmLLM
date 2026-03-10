@@ -5,6 +5,7 @@ use chrono::Timelike;
 use tokio::sync::{mpsc, watch};
 
 use crate::daemon::SharedState;
+use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, NetworkCommand, NodeId, ShardId};
 
 /// Estimate VRAM required to run a model based on size and quantization.

@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::SwarmError;
+// Re-export ContributionMode from swarmllm-types crate
+pub use crate::types::ContributionMode;
 
 /// Hot-reloadable operational parameters that can be changed without restart.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -82,15 +84,6 @@ pub struct NodeConfig {
     pub listen_port: u16,
     #[serde(default)]
     pub contribution: ContributionMode,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ContributionMode {
-    #[default]
-    Minimal,
-    Moderate,
-    Maximum,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

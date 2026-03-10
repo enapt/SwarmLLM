@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::api::server::AppState;
 use crate::error::ApiError;
+use crate::model::manifest::ModelManifestExt;
 
 /// SEC: Validate HuggingFace repo_id format (owner/repo).
 /// Only allows alphanumeric, hyphens, dots, underscores in each segment.

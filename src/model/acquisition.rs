@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, watch};
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::model::distribution::ShardDistributor;
+use crate::model::manifest::ModelManifestExt;
 use crate::model::shard::ShardStore;
 use crate::types::{ModelId, ModelManifest, NetworkCommand, NodeId, ShardId};
 

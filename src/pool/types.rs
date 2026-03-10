@@ -2,74 +2,12 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+// Re-export pool types that moved to swarmllm-types crate
 use crate::types::NodeId;
-
-/// Pool identity is the owner's NodeId.
-pub type PoolId = NodeId;
-
-/// State of a device pool — owner + list of members.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolState {
-    pub pool_id: PoolId,
-    pub name: String,
-    pub members: Vec<PoolMembership>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub owner_signature: Vec<u8>,
-    pub total_lifetime_credits: i64,
-}
-
-/// A single pool member record.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolMembership {
-    pub node_id: NodeId,
-    pub credits_contributed: i64,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
-    pub acceptance_signature: Vec<u8>,
-    pub invitation_id: uuid::Uuid,
-}
-
-/// Owner-signed invitation targeting a specific invitee.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolInvitation {
-    pub id: uuid::Uuid,
-    pub pool_id: PoolId,
-    pub invitee_node_id: NodeId,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub owner_signature: Vec<u8>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Invitee-signed acceptance of an invitation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolAcceptance {
-    pub invitation_id: uuid::Uuid,
-    pub pool_id: PoolId,
-    pub invitee_node_id: NodeId,
-    pub invitee_signature: Vec<u8>,
-    pub accepted_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Owner-signed removal of a member.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolRemoval {
-    pub pool_id: PoolId,
-    pub removed_node_id: NodeId,
-    pub owner_signature: Vec<u8>,
-    pub removed_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Dual-signed credit forwarding transaction from member to pool owner.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PoolCreditForward {
-    pub id: uuid::Uuid,
-    pub pool_id: PoolId,
-    pub from_node_id: NodeId,
-    pub to_node_id: NodeId,
-    pub amount: i64,
-    pub member_signature: Vec<u8>,
-    pub owner_signature: Vec<u8>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-}
+pub use crate::types::{
+    BlindedPoolInvitation, PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation,
+    PoolMembership, PoolRemoval, PoolState,
+};
 
 /// Commands sent to the PoolManager task.
 #[derive(Debug)]
@@ -185,21 +123,6 @@ pub struct LeaderboardEntry {
 
 // ---- Privacy-preserving blinded broadcast invitation (SEC-M18) ----
 
-/// A pool invitation broadcast that hides the invitee's identity.
-/// Instead of broadcasting `invitee_node_id`, we broadcast a BLAKE3
-/// commitment: H("pool_invitee_commit_v1" || invitee_node_id || invitation_id).
-/// Only the actual invitee can recognize the invitation by recomputing the hash.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BlindedPoolInvitation {
-    pub id: uuid::Uuid,
-    pub pool_id: PoolId,
-    /// H("pool_invitee_commit_v1" || invitee_node_id || invitation_id)
-    pub invitee_commitment: [u8; 32],
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub owner_signature: Vec<u8>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
 /// Compute the invitee commitment for a blinded invitation.
 pub fn compute_invitee_commitment(
     invitee_node_id: &NodeId,
@@ -212,10 +135,14 @@ pub fn compute_invitee_commitment(
     *h.finalize().as_bytes()
 }
 
-impl BlindedPoolInvitation {
-    /// Create a blinded invitation from a full invitation.
-    pub fn from_invitation(inv: &PoolInvitation) -> Self {
-        Self {
+/// Extension methods for BlindedPoolInvitation.
+pub trait BlindedPoolInvitationExt {
+    fn from_invitation(inv: &PoolInvitation) -> BlindedPoolInvitation;
+}
+
+impl BlindedPoolInvitationExt for BlindedPoolInvitation {
+    fn from_invitation(inv: &PoolInvitation) -> BlindedPoolInvitation {
+        BlindedPoolInvitation {
             id: inv.id,
             pool_id: inv.pool_id.clone(),
             invitee_commitment: compute_invitee_commitment(&inv.invitee_node_id, &inv.id),
@@ -233,7 +160,6 @@ impl BlindedPoolInvitation {
 pub struct BlindingFactor(pub [u8; 32]);
 
 /// A blinded token sent from invitee to pool creator.
-/// The pool creator cannot see the underlying invitation identity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlindedToken {
     /// H(invitation_id || blinding_factor) — the blinded commitment
@@ -256,7 +182,6 @@ pub struct BlindSignature {
 }
 
 /// The unblinded token held by the invitee to prove membership.
-/// The invitee reveals this to verifiers who can check the signature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UnblindedToken {
     /// The original invitation_id

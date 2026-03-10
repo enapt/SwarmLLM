@@ -1,25 +1,11 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
 use x25519_dalek::PublicKey;
 
 use crate::error::SwarmError;
-
-/// A sealed inference prompt: the prompt is encrypted with a random request key,
-/// and the request key is wrapped (ephemeral-sealed) for the first pipeline node.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SealedPrompt {
-    pub request_id: uuid::Uuid,
-    /// ChaCha20-Poly1305 encrypted prompt bytes.
-    pub encrypted_prompt: Vec<u8>,
-    /// 12-byte nonce used for prompt encryption.
-    pub nonce: [u8; 12],
-    /// Ephemeral X25519 public key (32 bytes) of the sealer.
-    pub ephemeral_pub: [u8; 32],
-    /// The request_key encrypted for the first pipeline node's X25519 key.
-    pub key_envelope: Vec<u8>,
-}
+// Re-export SealedPrompt from swarmllm-types crate
+pub use crate::types::SealedPrompt;
 
 /// Seal a prompt for a specific pipeline node.
 /// The prompt is encrypted with a random symmetric key, and that key is

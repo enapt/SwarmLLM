@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::identity::nickname::{
-    display_name, IdentityPrefs, NicknameRecord, NicknameStore, VisibilityMode,
+    display_name, IdentityPrefs, NicknameRecord, NicknameRecordExt, NicknameStore, VisibilityMode,
 };
 use crate::types::{NetworkCommand, NicknameGossip, SwarmMessage};
 

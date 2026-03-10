@@ -2,6 +2,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::SwarmError;
+use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, ShardInfo};
 
 /// Sanitize a path component to prevent path traversal attacks.

@@ -3,11 +3,18 @@ use std::path::Path;
 use crate::error::SwarmError;
 use crate::types::{Blake3Hash, ModelManifest};
 
-impl ModelManifest {
-    /// Load a manifest from a model directory.
-    ///
-    /// Reads `manifest.json` from the given directory and deserializes it.
-    pub fn load_from_dir(dir: &Path) -> Result<Self, SwarmError> {
+/// Extension methods for ModelManifest (defined in swarmllm-types crate).
+pub trait ModelManifestExt {
+    fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError>;
+    fn verify_hash(&self) -> Result<(), SwarmError>;
+    fn verify_hash_strict(&self) -> Result<(), SwarmError>;
+    fn compute_hash(&self) -> Blake3Hash;
+    fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError>;
+    fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf;
+}
+
+impl ModelManifestExt for ModelManifest {
+    fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError> {
         let manifest_path = dir.join("manifest.json");
         if !manifest_path.exists() {
             return Err(SwarmError::Config(format!(
@@ -44,7 +51,7 @@ impl ModelManifest {
     ///
     /// Allows zero-hash manifests (not yet computed, e.g. from local HF downloads).
     /// For network-received manifests, use `verify_hash_strict()` instead.
-    pub fn verify_hash(&self) -> Result<(), SwarmError> {
+    fn verify_hash(&self) -> Result<(), SwarmError> {
         // Allow manifests with a zero hash (not yet computed, e.g. from partial
         // HF downloads before hash is set). Local-only — see verify_hash_strict.
         if self.manifest_hash == [0u8; 32] {
@@ -68,7 +75,7 @@ impl ModelManifest {
 
     /// Strict hash verification for network-received manifests.
     /// Rejects zero-hash manifests to prevent gossip-based poisoning.
-    pub fn verify_hash_strict(&self) -> Result<(), SwarmError> {
+    fn verify_hash_strict(&self) -> Result<(), SwarmError> {
         if self.manifest_hash == [0u8; 32] {
             return Err(SwarmError::ShardIntegrity {
                 expected: "non-zero manifest hash".into(),
@@ -88,7 +95,7 @@ impl ModelManifest {
     /// Compute the BLAKE3 hash of the manifest content.
     ///
     /// Hashes a canonical representation that excludes the manifest_hash field.
-    pub fn compute_hash(&self) -> Blake3Hash {
+    fn compute_hash(&self) -> Blake3Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(self.id.0.as_bytes());
         hasher.update(self.name.as_bytes());
@@ -120,7 +127,7 @@ impl ModelManifest {
     }
 
     /// Save the manifest to a model directory as `manifest.json`.
-    pub fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError> {
+    fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError> {
         std::fs::create_dir_all(dir).map_err(SwarmError::Io)?;
         let json = serde_json::to_string_pretty(self).map_err(SwarmError::Serialization)?;
         // Atomic write: write to temp file then rename to prevent corruption on kill/crash
@@ -132,7 +139,7 @@ impl ModelManifest {
 
     /// Get the path to a specific shard file within the data directory.
     /// Sanitizes model_id to prevent path traversal attacks.
-    pub fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf {
+    fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf {
         let safe_id = crate::model::shard::sanitize_path_component(model_id);
         data_dir
             .join("models")

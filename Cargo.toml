@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = [".", "crates/swarmllm-frontend"]
+members = [".", "crates/swarmllm-frontend", "crates/swarmllm-types"]
 exclude = ["vendor/candle-paged-attention", "vendor/libp2p-request-response"]
 
 [package]
@@ -105,6 +105,9 @@ fancy-regex = "0.17"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 encoding_rs = { version = "0.8", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Core types
+swarmllm-types = { path = "crates/swarmllm-types" }
 
 # Frontend assets
 swarmllm-frontend = { path = "crates/swarmllm-frontend", default-features = false }

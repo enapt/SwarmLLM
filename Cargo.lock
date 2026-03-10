@@ -5062,6 +5062,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "swarmllm-frontend",
+ "swarmllm-types",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
@@ -5087,6 +5088,16 @@ dependencies = [
  "include_dir",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "swarmllm-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "serde",
+ "uuid",
 ]
 
 [[package]]
