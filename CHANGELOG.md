@@ -4,8 +4,15 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
-### Security Audit (Phase 16)
-- **24 hardening items across 5 rounds**: mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, rate limiter cleanup, queue caps, input limits, WebSocket Origin validation, credit signature verification, XSS fixes
+### Security Audit (Phase 16) — ~90 fixes across 5 rounds
+- **Round 1-3**: Mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, rate limiter cleanup, queue caps, input limits, WebSocket Origin validation, credit signature verification, XSS fixes
+- **Round 4**: StreamingToken auth guard, peer IP bypass scoped to inference paths only, `.env` loader blocks dangerous env vars (LD_PRELOAD/PATH/DYLD_*), TOCTOU guard via `loading_models` DashMap with RAII `LoadGuard`, metadata hostname blocklist (Azure/AWS/DO/Oracle/Alibaba), IPv6 multiaddr extraction
+- **Round 5**: All dispatch handlers require `authenticated_sender` (LayerResult, InferenceRequest, PipelineAssignment, InferenceError, TpAllReduceResponse), plaintext fallback removed (seal failure → drop), PEX SSRF filter (private/loopback/link-local IPs), shard serve requires peer_registry membership, pending_tensor_channels capped at 256, pending_tp_partials capped at 512, image_data 20MB cap, PoolMessage identity binding (CreditForward.from_node_id/MemberLeft.node_id must match sender), tool params size limits, lora_adapter validation, peer error body truncation/scrubbing, invite code capped at 4K, MCP research restricted to local/network models
+
+### Frontend Polish
+- CSS: removed unused variables, fixed hardcoded colors → CSS vars, removed duplicate rules, `@media (prefers-reduced-motion)`, light theme semantic color overrides
+- Accessibility: `role="alert"` + `aria-live` on WebSocket banner, `aria-expanded` on hamburger, `aria-live="polite"` on chat messages, `scope="col"` on table headers
+- JS: replaced inline styles with CSS classes, wired aria-expanded toggle
 
 ### Bug Fixes (Post-Audit)
 - **Critical**: Credit balance overflow (`i64 +=` → `saturating_add`) and missing persistence in `track_forward_participation` — credits now survive daemon restart
@@ -21,7 +28,7 @@ All notable changes to SwarmLLM are documented here.
 - **Package distribution**: Homebrew formula, AUR PKGBUILD, deb/rpm packages, systemd service file
 - **macOS CI**: Re-enabled on macos-15 runner
 - **Docker**: Fixed Dockerfiles for workspace build
-- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### UX & Internationalization
 - **i18n** — 20 languages (Arabic, Chinese, Czech, Dutch, English, French, German, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian, Vietnamese)
@@ -36,7 +43,7 @@ All notable changes to SwarmLLM are documented here.
 ### Codebase Quality
 - **Refactored**: `daemon.rs` (4015 lines → module directory), `admin.rs` (4225 lines → 4 modules), `split.rs` (10K lines → 6 modules)
 - **Extracted**: `swarmllm-frontend` crate with dev mode for instant UI changes without full rebuild
-- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### Model Trust & On-Demand Loading (Phase 14)
 - **Model Trust System** — demand-driven trust prevents trash models from auto-propagating

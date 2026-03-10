@@ -1,10 +1,39 @@
 # SwarmLLM
 
 [![CI](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
+[![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
+[![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
 
 Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware or paid API tokens.
 
 **Join the swarm. Run AI together — for free.**
+
+> **Status:** Alpha — actively developed. Distributed inference stable and tested on real LAN. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+
+---
+
+<details>
+<summary><strong>Table of Contents</strong></summary>
+
+- [What Is This?](#what-is-this)
+- [How It Works](#how-it-works)
+- [Quick Start](#quick-start)
+- [Connecting to the Network](#connecting-to-the-network)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Supported Models](#supported-models)
+- [Benchmarks](#benchmarks)
+- [Installation](#installation)
+- [CLI](#cli)
+- [Configuration](#configuration)
+- [API Endpoints](#api-endpoints)
+- [How SwarmLLM Compares](#how-swarmllm-compares)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
 
 ## What Is This?
 
@@ -156,7 +185,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing, and authenticated sealed gossip. Mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay
-- **Security Hardened** — 24-item security audit (Phase 16): signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin validation, credit signature verification, XSS fixes
+- **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
 - **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations (currently returns placeholder data; full integration planned)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
@@ -226,7 +255,7 @@ Key source directories:
 - `src/pool/` — device pool management, crypto, credit forwarding
 - `frontend/` — vanilla HTML/CSS/JS dashboard with 20 language translations
 
-671 tests (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+674 tests (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -516,7 +545,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
 | **i18n** | 20 languages | English | English | English |
 | **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Security Audit** | 24-item hardening (Phase 16) | Limited | Limited | Varies |
+| **Security Audit** | ~90-fix, 5-round hardening | Limited | Limited | Varies |
 
 ## Documentation
 
@@ -527,10 +556,25 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 - **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
 - **[Troubleshooting](docs/book/src/troubleshooting.md)** — Common issues and solutions
 - **[Diagnostics Guide](docs/DIAGNOSTICS.md)** — DIAG: log instrumentation for debugging
-- **[Contributing](CONTRIBUTING.md)** — Build from source, run tests, submit PRs
 - **[Security Policy](SECURITY.md)** — Responsible disclosure
 
 See the full [mdBook documentation](docs/book/) for detailed guides on networking, inference, credits, security, deployment, and monitoring.
+
+## Contributing
+
+Contributions are welcome! Whether it's bug reports, feature ideas, code, or documentation — all help is appreciated.
+
+- **[Contributing Guide](CONTRIBUTING.md)** — Build from source, run tests, submit PRs
+- **[Open Issues](https://github.com/enapt/SwarmLLM/issues)** — Browse or file bug reports and feature requests
+- **Security vulnerabilities** — See [SECURITY.md](SECURITY.md) for responsible disclosure
+
+```bash
+# Quick dev setup
+git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
+cargo test                # 674 tests
+cargo clippy -- -D warnings  # Zero warnings policy
+cargo run -- run          # Start a node
+```
 
 ## License
 
