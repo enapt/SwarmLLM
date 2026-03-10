@@ -333,7 +333,14 @@ impl AutoShardManager {
             return 0;
         }
 
-        max_bytes.saturating_sub(current_bytes)
+        // Scale budget by ContributionMode
+        let effective_max = match self.shared_state.config.node.contribution {
+            swarmllm_types::ContributionMode::Minimal => max_bytes / 4,
+            swarmllm_types::ContributionMode::Moderate => max_bytes,
+            swarmllm_types::ContributionMode::Maximum => max_bytes.saturating_mul(3) / 2,
+        };
+
+        effective_max.saturating_sub(current_bytes)
     }
 
     /// Gather all candidate shards we don't already hold, scored by value.
@@ -724,11 +731,28 @@ impl AutoShardManager {
             usize::MAX
         };
 
-        // Per-cycle cap: in small networks (< 5 peers), download only 1 shard per
-        // cycle to give peers time to discover and download their assigned shards.
-        // In larger networks, allow 2 per cycle for faster seeding.
+        // Per-cycle cap scaled by ContributionMode:
+        // Minimal: 1 shard/cycle regardless of network size
+        // Moderate: 1-2 based on peer count (original behavior)
+        // Maximum: 2-4 for aggressive seeding
         let peers = self.shared_state.peer_registry.len();
-        let per_cycle_cap = if peers < 5 { 1 } else { 2 };
+        let per_cycle_cap = match self.shared_state.config.node.contribution {
+            swarmllm_types::ContributionMode::Minimal => 1,
+            swarmllm_types::ContributionMode::Moderate => {
+                if peers < 5 {
+                    1
+                } else {
+                    2
+                }
+            }
+            swarmllm_types::ContributionMode::Maximum => {
+                if peers < 5 {
+                    2
+                } else {
+                    4
+                }
+            }
+        };
 
         // Track which specific shards are currently downloading so we don't
         // start a duplicate. We check per-shard progress, NOT per-model — otherwise

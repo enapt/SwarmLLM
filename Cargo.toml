@@ -126,13 +126,9 @@ default = ["swarmllm-frontend/embedded"]
 dev = ["swarmllm-frontend/dev"]
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
-candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
-mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 paged-attn = ["candle-cuda", "dep:candle-paged-attention"]
 cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn", "paged-attn"]
-metal = ["llama", "llama-cpp-2/metal", "candle-metal"]
-rocm = ["llama", "llama-cpp-2/rocm"]
 
 [dev-dependencies]
 tempfile = "3"

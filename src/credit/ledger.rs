@@ -377,6 +377,10 @@ impl CreditLedger {
         let mut persist_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         persist_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Earn shard hosting credits every hour
+        let mut hosting_interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        hosting_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
@@ -421,6 +425,41 @@ impl CreditLedger {
                 _ = persist_interval.tick() => {
                     if let Err(e) = self.persist_balance().await {
                         tracing::warn!(error = %e, "Failed to persist credit balance");
+                    }
+                }
+                _ = hosting_interval.tick() => {
+                    // Earn credits for each shard we're hosting
+                    if let Some(ref ss) = self.shared_state {
+                        let mut total_earned: i64 = 0;
+                        let mut shard_count: u32 = 0;
+                        for manifest in ss.model_registry.models() {
+                            for shard in &manifest.shards {
+                                let shard_id = ShardId {
+                                    model_id: manifest.id.clone(),
+                                    index: shard.index,
+                                };
+                                let holders = ss.model_registry.shard_holders(&shard_id);
+                                if holders.contains(&self.node_id) {
+                                    let size_gb = shard.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                                    match self.earn_shard_hosting(&shard_id, size_gb, 1.0).await {
+                                        Ok(earned) => {
+                                            total_earned += earned;
+                                            shard_count += 1;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Failed to earn shard hosting credit");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if shard_count > 0 {
+                            tracing::info!(
+                                shards = shard_count,
+                                credits_earned = total_earned,
+                                "Earned shard hosting credits"
+                            );
+                        }
                     }
                 }
             }

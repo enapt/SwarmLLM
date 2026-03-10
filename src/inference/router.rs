@@ -1143,6 +1143,7 @@ async fn execute_request(
     }
 
     // Store assignment in shared state for monitoring
+    let assignment_ref = assignment.clone();
     shared_state
         .active_pipelines
         .insert(request.id, assignment.clone());
@@ -1170,6 +1171,17 @@ async fn execute_request(
                 finish_reason = %output.finish_reason,
                 "DIAG: execute_request completed successfully"
             );
+
+            // Update trust for all remote peers that participated in the pipeline
+            for seg in &assignment_ref.segments {
+                if seg.node_id != local_node_id {
+                    shared_state.trust_manager.update_trust(
+                        &shared_state.peer_registry,
+                        &seg.node_id,
+                        crate::credit::trust::TrustEvent::InferenceSuccess,
+                    );
+                }
+            }
         }
         Err(e) => {
             tracing::error!(
