@@ -10,7 +10,7 @@
 </head>
 <body>
   <!-- WebSocket reconnect banner -->
-  <div class="ws-banner" id="ws-banner"></div>
+  <div class="ws-banner" id="ws-banner" role="alert" aria-live="assertive"></div>
 
   <!-- Setup wizard modal (first-run only) -->
   <div class="modal-overlay hidden" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
@@ -433,7 +433,7 @@
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
-      <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle sidebar">&#9776;</button>
+      <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
       <div class="logo">SwarmLLM</div>
     </div>
     <div class="header-center">
@@ -501,11 +501,11 @@
         </div>
         <div class="chat-container">
           <div class="chat-session-header" id="chat-session-header"></div>
-          <div class="chat-messages" id="chat-messages">
+          <div class="chat-messages" id="chat-messages" aria-live="polite">
             <div class="chat-empty" id="chat-empty">
               <div class="chat-empty-icon">&#11203;</div>
-              <div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)" data-i18n="chat.empty_title">Chat with AI</div>
-              <div style="color:var(--text-muted)" data-i18n="chat.empty_hint">Pick a model from the dropdown above and start chatting</div>
+              <div class="chat-empty-title" data-i18n="chat.empty_title">Chat with AI</div>
+              <div class="chat-empty-hint" data-i18n="chat.empty_hint">Pick a model from the dropdown above and start chatting</div>
             </div>
           </div>
           <div class="chat-input-area">
@@ -841,10 +841,10 @@
             <table class="data-table" id="leaderboard-table">
               <thead>
                 <tr>
-                  <th style="width:60px">#</th>
-                  <th>Node</th>
-                  <th>Credits</th>
-                  <th>Tier</th>
+                  <th scope="col" style="width:60px">#</th>
+                  <th scope="col">Node</th>
+                  <th scope="col">Credits</th>
+                  <th scope="col">Tier</th>
                 </tr>
               </thead>
               <tbody id="leaderboard-body">

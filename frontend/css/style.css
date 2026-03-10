@@ -4,7 +4,6 @@
   --bg-secondary: #12171f;
   --bg-tertiary: #1a2030;
   --bg-hover: #222d3d;
-  --bg-card: #141a24;
   --border: #1e2a3a;
   --border-light: #2a3a4e;
   --text-primary: #e2e8f0;
@@ -40,7 +39,6 @@
   --bg-secondary: #ffffff;
   --bg-tertiary: #f1f5f9;
   --bg-hover: #e2e8f0;
-  --bg-card: #ffffff;
   --border: #e2e8f0;
   --border-light: #cbd5e1;
   --text-primary: #1e293b;
@@ -192,7 +190,7 @@ a:hover { color: var(--accent-hover); }
   color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .model-dropdown-item:hover { background: var(--accent); color: #fff; border-radius: 2px; }
-.model-dropdown-item.selected { background: rgba(99,102,241,0.15); }
+.model-dropdown-item.selected { background: var(--accent-glow); }
 .model-dropdown-item.hidden { display: none; }
 .model-dropdown-empty { padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.8rem; }
 .model-selector select {
@@ -976,6 +974,8 @@ input[type="range"]::-webkit-slider-thumb {
   gap: 10px;
 }
 .chat-empty .chat-empty-icon { font-size: 2.5rem; opacity: 0.4; }
+.chat-empty-title { font-size: 1.2rem; font-weight: 600; color: var(--text-primary); }
+.chat-empty-hint { color: var(--text-muted); }
 
 /* ---- Chat Layout: Linear (default) ---- */
 .chat-msg {
@@ -1957,13 +1957,7 @@ kbd {
 .map-region { stroke-dasharray: none; }
 .map-region[style*="var(--bg-tertiary)"] { stroke: var(--border-light); stroke-width: 0.8; }
 
-/* #30: Collapsed panels */
-.panel-header[data-collapse] { cursor: pointer; user-select: none; }
-.panel-header[data-collapse]::after {
-  content: '\25BC'; font-size: 0.6rem; opacity: 0.5; margin-left: auto; transition: transform 0.2s;
-}
-.panel-header.collapsed::after { transform: rotate(-90deg); }
-.panel-body.collapsed { display: none; }
+/* #30: Collapsed panels — merged into main collapsible panels block above */
 
 /* #36: Provider status states */
 .badge-error { background: var(--red-dim); color: var(--red); }
@@ -2234,4 +2228,24 @@ body.mode-advanced .mode-toggle {
   background: var(--accent-glow) !important;
   border-color: var(--accent) !important;
   color: var(--accent) !important;
+}
+
+/* ---- Reduced motion preference ---- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- Light theme semantic color overrides ---- */
+[data-theme="light"] {
+  --green: #16a34a;
+  --red: #dc2626;
+  --orange: #d97706;
+  --yellow: #ca8a04;
+  --purple: #7c3aed;
+  --cyan: #0891b2;
 }

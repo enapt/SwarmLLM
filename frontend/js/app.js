@@ -156,6 +156,8 @@ var SwarmLLM = (function() {
 
     toggleMobileSidebar: function() {
       document.body.classList.toggle('sidebar-open');
+      var btn = document.getElementById('hamburger-btn');
+      if (btn) btn.setAttribute('aria-expanded', document.body.classList.contains('sidebar-open'));
     },
 
     openSettings: function(scrollToProviders) {
@@ -3740,9 +3742,9 @@ var SwarmLLM = (function() {
     div.className = 'chat-empty';
     div.id = 'chat-empty';
     div.innerHTML = '<div class="chat-empty-icon">&#11088;</div>' +
-      '<div style="font-size:1.2rem;font-weight:600;color:var(--text-primary)">Chat with AI</div>' +
-      '<div style="color:var(--text-muted);margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
-      '<div style="color:var(--text-muted);font-size:0.8rem;margin-top:4px">Pick a model from the dropdown above \u2022 <kbd>Shift+Enter</kbd> for new line</div>';
+      '<div class="chat-empty-title">Chat with AI</div>' +
+      '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
+      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">Pick a model from the dropdown above \u2022 <kbd>Shift+Enter</kbd> for new line</div>';
     return div;
   }
 
@@ -4739,8 +4741,8 @@ var SwarmLLM = (function() {
     }
     if (emptyState && !hasModels) {
       emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
-        '<div style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">No Models Available</div>' +
-        '<div style="color:var(--text-muted);margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
+        '<div class="chat-empty-title" style="font-size:1.1rem">No Models Available</div>' +
+        '<div class="chat-empty-hint" style="margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
           '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
           '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
