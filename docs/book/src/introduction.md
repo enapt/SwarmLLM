@@ -41,7 +41,7 @@ Single-node inference on an NVIDIA RTX 3070 Laptop (8GB VRAM):
 │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │  P2P     │  │  HTTP API    │  │  Admin UI    │  │
 │  │  Node    │  │  Server      │  │  (embedded)  │  │
-│  │  (QUIC)  │  │  (Axum)      │  │              │  │
+│  │(TCP+QUIC)│  │  (Axum)      │  │              │  │
 │  └──────────┘  └──────────────┘  └──────────────┘  │
 │                                                     │
 │         All running on a single port (8800)          │
@@ -49,10 +49,10 @@ Single-node inference on an NVIDIA RTX 3070 Laptop (8GB VRAM):
 ```
 
 Each SwarmLLM node:
-1. Connects to the P2P network over QUIC/UDP
+1. Connects to the P2P network over TCP (Noise+Yamux) and QUIC/UDP
 2. Downloads and hosts shard files for popular models
 3. Participates in distributed inference pipelines
-4. Serves an OpenAI-compatible HTTP API on the same port
+4. Serves OpenAI + Anthropic compatible HTTP APIs and an MCP server on the same port
 5. Provides a web dashboard for monitoring and chat
 
 ## Quick Start

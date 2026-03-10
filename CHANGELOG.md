@@ -4,6 +4,25 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Security Audit (Phase 16)
+- **24 hardening items across 5 rounds**: mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, rate limiter cleanup, queue caps, input limits, WebSocket Origin validation, credit signature verification, XSS fixes
+
+### Bug Fixes (Post-Audit)
+- **Critical**: Credit balance overflow (`i64 +=` → `saturating_add`) and missing persistence in `track_forward_participation` — credits now survive daemon restart
+- **High**: Divide-by-zero panic from malformed GGUF with `head_count == 0` (4 sites, remotely triggerable via HF probe)
+- **High**: Silent null body sent to cloud provider on serialization failure (`unwrap_or_default` → proper error propagation)
+- **Medium**: `model_request_counts` DashMap unbounded growth — now gated on registered models only
+- **Medium**: `peer_shard_downloads` orphaned entries on peer disconnect — cleanup in ConnectionClosed handler
+- **Medium**: Rate limiter cleanup task ignoring shutdown signal — now uses `tokio::select` with `shutdown_rx`
+
+### Infrastructure
+- **Workspace migration**: 3-crate Cargo workspace (`swarmllm`, `swarmllm-types`, `swarmllm-frontend`)
+- **Ring AllReduce**: Bandwidth-optimal for ≥4 TP ranks, auto-selected by `choose_allreduce_strategy()`
+- **Package distribution**: Homebrew formula, AUR PKGBUILD, deb/rpm packages, systemd service file
+- **macOS CI**: Re-enabled on macos-15 runner
+- **Docker**: Fixed Dockerfiles for workspace build
+- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+
 ### UX & Internationalization
 - **i18n** — 20 languages (Arabic, Chinese, Czech, Dutch, English, French, German, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian, Vietnamese)
 - **Theme toggle** — Light / Dark / System theme with persistent preference
@@ -17,7 +36,7 @@ All notable changes to SwarmLLM are documented here.
 ### Codebase Quality
 - **Refactored**: `daemon.rs` (4015 lines → module directory), `admin.rs` (4225 lines → 4 modules), `split.rs` (10K lines → 6 modules)
 - **Extracted**: `swarmllm-frontend` crate with dev mode for instant UI changes without full rebuild
-- 669 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 671 tests passing (603 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### Model Trust & On-Demand Loading (Phase 14)
 - **Model Trust System** — demand-driven trust prevents trash models from auto-propagating
