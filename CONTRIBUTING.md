@@ -67,9 +67,28 @@ Open a [GitHub Issue](https://github.com/enapt/SwarmLLM/issues) using the bug re
 
 Open a [GitHub Issue](https://github.com/enapt/SwarmLLM/issues) using the feature request template. Describe the use case, not just the solution.
 
+## Docker
+
+```bash
+# CPU image
+docker build -t swarmllm .
+docker run -p 8800:8800 -v swarmllm-data:/data swarmllm
+
+# CUDA GPU image
+docker build -f Dockerfile.cuda -t swarmllm:cuda .
+docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm:cuda
+
+# 3-node test cluster
+docker compose up
+```
+
 ## Project Structure
 
-The codebase is a Cargo workspace. The main binary lives in `src/`, with the frontend assets crate in `crates/swarmllm-frontend/`. See `CLAUDE.md` for the full repository layout and architecture overview.
+The codebase is a Cargo workspace with three crates:
+
+- **`swarmllm`** (root) — main binary and all subsystem logic
+- **`crates/swarmllm-types/`** — shared data types (69 types: NodeId, ModelManifest, SwarmMessage, etc.)
+- **`crates/swarmllm-frontend/`** — embedded or dev-mode frontend asset serving
 
 Key directories:
 - `src/daemon/` — startup, shared state, message dispatch

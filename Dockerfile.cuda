@@ -1,8 +1,8 @@
 # ============================================================================
 # SwarmLLM — CUDA GPU-accelerated Docker Image
 # ============================================================================
-# Build:  docker build -f Dockerfile.cuda -t swarmllm/swarmllm:cuda .
-# Run:    docker run --gpus all -p 8800:8800 swarmllm/swarmllm:cuda
+# Build:  docker build -f Dockerfile.cuda -t swarmllm:cuda .
+# Run:    docker run --gpus all -p 8800:8800 -p 8810:8810 swarmllm:cuda
 # ============================================================================
 
 # ---------------------------------------------------------------------------
@@ -19,34 +19,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libssl-dev \
     pkg-config \
-    protobuf-compiler \
     libclang-dev \
-    capnproto \
     git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust via rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.75.0
+    sh -s -- -y --default-toolchain 1.80.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
 # Cache dependency compilation
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY proto/ proto/
-RUN mkdir -p src && \
+COPY vendor/ vendor/
+COPY crates/swarmllm-frontend/Cargo.toml crates/swarmllm-frontend/Cargo.toml
+COPY crates/swarmllm-types/Cargo.toml crates/swarmllm-types/Cargo.toml
+
+# Create dummy sources for dependency caching
+RUN mkdir -p src crates/swarmllm-frontend/src crates/swarmllm-types/src && \
     echo 'fn main() { println!("dummy"); }' > src/main.rs && \
     echo '' > src/lib.rs && \
+    echo '' > crates/swarmllm-frontend/src/lib.rs && \
+    echo '' > crates/swarmllm-types/src/lib.rs && \
     cargo build --release --features candle-cuda 2>/dev/null || true && \
-    rm -rf src
+    rm -rf src crates/swarmllm-frontend/src crates/swarmllm-types/src
 
 # Copy full source and build with CUDA support
 COPY src/ src/
+COPY crates/ crates/
 COPY frontend/ frontend/
 COPY config/ config/
-RUN cargo build --release --features candle-cuda && \
-    strip target/release/swarmllm
+RUN cargo build --release --features candle-cuda
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime (CUDA runtime image)
@@ -65,8 +69,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash swarmllm
 
-# Copy binary from builder
+# Copy binary from builder (already stripped via profile.release.strip = true)
 COPY --from=builder /build/target/release/swarmllm /usr/local/bin/swarmllm
+COPY config/default.toml /etc/swarmllm/default.toml
 
 # Create data directory and set ownership
 RUN mkdir -p /data && chown swarmllm:swarmllm /data
@@ -79,9 +84,13 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV SWARMLLM_NODE_DATA_DIR=/data
 ENV SWARMLLM_NODE_LISTEN_PORT=8800
 ENV SWARMLLM_LOGGING_LEVEL=info
+ENV SWARMLLM_UI_OPEN_BROWSER_ON_START=false
 
-# Expose port 8800 for both HTTP (TCP) and P2P/QUIC (UDP)
-EXPOSE 8800/tcp 8800/udp
+# Expose ports:
+#   8800/tcp  — HTTP API + admin dashboard
+#   8810/tcp  — P2P (Noise+Yamux, primary transport)
+#   8800/udp  — P2P (QUIC, optional)
+EXPOSE 8800/tcp 8810/tcp 8800/udp
 
 # Persistent data volume
 VOLUME /data
@@ -94,4 +103,4 @@ USER swarmllm
 WORKDIR /data
 
 ENTRYPOINT ["swarmllm"]
-CMD ["run", "--data-dir", "/data"]
+CMD ["run"]

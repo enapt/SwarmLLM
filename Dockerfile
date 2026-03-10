@@ -2,18 +2,14 @@
 # SwarmLLM — Multi-stage Docker Image
 # ============================================================================
 # CPU:   docker build -t swarmllm .
-# CUDA:  docker build --build-arg FEATURES="candle-cuda" -t swarmllm:cuda .
 # Run:   docker run -p 8800:8800 -p 8810:8810 swarmllm
 # Data:  docker run -p 8800:8800 -p 8810:8810 -v swarmllm-data:/data swarmllm
-# GPU:   docker run --gpus all -p 8800:8800 -p 8810:8810 swarmllm:cuda
 # ============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: Builder
 # ---------------------------------------------------------------------------
 FROM rust:1.80-bookworm AS builder
-
-ARG FEATURES=""
 
 # Install system dependencies required for compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,21 +23,24 @@ WORKDIR /build
 # the cargo registry and compile deps, then replace with real source.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY vendor/ vendor/
-RUN mkdir -p src && \
+COPY crates/swarmllm-frontend/Cargo.toml crates/swarmllm-frontend/Cargo.toml
+COPY crates/swarmllm-types/Cargo.toml crates/swarmllm-types/Cargo.toml
+
+# Create dummy sources for dependency caching
+RUN mkdir -p src crates/swarmllm-frontend/src crates/swarmllm-types/src && \
     echo 'fn main() { println!("dummy"); }' > src/main.rs && \
     echo '' > src/lib.rs && \
+    echo '' > crates/swarmllm-frontend/src/lib.rs && \
+    echo '' > crates/swarmllm-types/src/lib.rs && \
     cargo build --release 2>/dev/null || true && \
-    rm -rf src
+    rm -rf src crates/swarmllm-frontend/src crates/swarmllm-types/src
 
 # Copy full source and build the real binary
 COPY src/ src/
+COPY crates/ crates/
 COPY frontend/ frontend/
 COPY config/ config/
-RUN if [ -n "$FEATURES" ]; then \
-        cargo build --release --features "$FEATURES"; \
-    else \
-        cargo build --release; \
-    fi
+RUN cargo build --release
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
