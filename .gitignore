@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target/
 **/*.rs.bk
+*.orig
 
 # IDE
 .idea/
@@ -20,6 +21,9 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+*.pem
+*.key
+*.p12
 
 # Claude Code (entire directory — dev tooling, not part of the project)
 .claude/
