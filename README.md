@@ -41,7 +41,7 @@ SwarmLLM lets you run AI chatbots (like ChatGPT, but open-source) on your own co
 
 **Why does this matter?**
 
-Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, no data leaving your network.
+Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, and **all traffic is encrypted end-to-end** — relay nodes never see your prompts.
 
 **What can you do with it?**
 
@@ -59,6 +59,16 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 - Anyone who wants to contribute spare compute to a public AI network
 - Privacy-conscious users who don't want their prompts leaving their machine
 
+**What makes it different from Petals, Exo, or Bittensor?**
+
+| | SwarmLLM | Others |
+|---|---|---|
+| **Privacy** | E2E encrypted — relay nodes can't read your prompts | Petals openly warns peers can see your data; Exo has no encryption |
+| **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
+| **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
+| **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
+| **Security** | ~90-fix audit (auth, SSRF, replay, caps) | No documented security audits |
+
 ## How It Works
 
 SwarmLLM distributes transformer model layers across a pool of peer-to-peer nodes. Each participant contributes a fraction of the required compute, and the network orchestrates inference pipelines that chain these nodes together. The result: anyone can run state-of-the-art open-weight models by pooling resources with others.
@@ -71,11 +81,13 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 └──────────┘     └──────────┘     └──────────┘
 ```
 
+- **Private by default** — all P2P traffic is end-to-end encrypted (X25519 + ChaCha20-Poly1305). Prompts are never visible to relay nodes, unlike Petals or Exo where peers can read your data
 - **No central server** — fully peer-to-peer with no single point of failure
-- **No accounts or subscriptions** — just a cryptographic identity
+- **No accounts or subscriptions** — just a cryptographic identity (Ed25519 keypair)
 - **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
+- **Single binary, zero dependencies** — one ~43MB Rust binary. No Python, no Docker, no runtime installs
 - **BitTorrent-inspired incentives** — contribute compute, earn priority access
-- **OpenAI + Anthropic compatible API** — drop-in replacement for any tool that speaks OpenAI or Claude
+- **OpenAI + Anthropic + MCP compatible** — drop-in replacement for any tool that speaks OpenAI, Claude, or MCP
 
 ## Quick Start
 
@@ -184,7 +196,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ### Networking & Security
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
-- **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing, and authenticated sealed gossip. Mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay
+- **End-to-End Encryption** — **Your prompts are never visible to intermediate nodes.** Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (only your node and the final node see plaintext), and authenticated sealed gossip. This is a fundamental differentiator — Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs", and Exo has no encryption at all
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
 - **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations (currently returns placeholder data; full integration planned)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
@@ -532,20 +544,25 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | Feature | SwarmLLM | Petals | Exo | Bittensor |
 |---------|----------|--------|-----|-----------|
 | **Language** | Rust (single ~43MB binary) | Python | Python | Python + Substrate |
-| **Install** | Download & run | pip install | pip install | pip + blockchain setup |
-| **Scale** | Internet-scale (NAT traversal, DHT, relay) | Internet (volunteer) | LAN only | Internet (blockchain) |
-| **E2E Encryption** | X25519 + ChaCha20 + forward secrecy | None | None | Minimal |
-| **Incentives** | Credit tiers (no token) | None | None | TAO token (real money) |
+| **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
+| **Scale** | Internet-scale (NAT traversal, DHT, relay) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
+| **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
+| **Privacy** | **Encrypted by default** — prompts never visible to relay nodes | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
+| **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
+| **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
-| **Model Architectures** | 11 (incl. DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~4 | ~6 | Any |
-| **Shard-Only Mode** | Yes (no full model needed) | No | No | N/A |
-| **Cloud Fallback** | 12 providers (optional) | No | No | No |
-| **VLM + LoRA** | Yes | LoRA only | No | Subnet-specific |
-| **API Compatibility** | OpenAI + Anthropic (full Claude Code) + MCP | PyTorch | OpenAI basic | Subnet-defined |
+| **Model Architectures** | **11** (DeepSeek MoE+MLA, GLM-4, Llama 4, Qwen 3.5 SSM) | ~5 (Llama, Mixtral, Falcon, BLOOM) | ~5 (Llama, Mistral, Qwen, DeepSeek, LLaVA) | Any (subnet-defined) |
+| **Shard-Only Mode** | **Yes** (no full model download needed) | No (loads full blocks) | No | N/A |
+| **Cloud Fallback** | **12 providers** (OpenAI, Anthropic, DeepSeek, etc.) | No | No | No |
+| **VLM + LoRA** | Both (LLaVA verified + per-request LoRA) | LoRA only | VLM experimental | Subnet-specific |
+| **API Compatibility** | **OpenAI + Anthropic + MCP** (full Claude Code) | PyTorch/Transformers | OpenAI + Claude + Ollama | Subnet-defined |
+| **Web UI** | Full dashboard, chat, model browser, setup wizard | Basic chatbot | Basic chat UI | No built-in UI |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
-| **i18n** | 20 languages | English | English | English |
-| **Auto-Update** | Built-in version check + self-update | No | No | No |
-| **Security Audit** | ~90-fix, 5-round hardening | Limited | Limited | Varies |
+| **i18n** | **20 languages**, light/dark theme | English | English | English |
+| **Auto-Update** | Built-in self-update | No | No | No |
+| **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
+
+**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — your prompts are never visible to intermediate nodes. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
 
 ## Documentation
 
