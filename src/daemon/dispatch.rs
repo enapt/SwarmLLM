@@ -155,11 +155,16 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // StreamingToken: route to registered streaming channel
                             SwarmMessage::StreamingToken(ref token) => {
-                                if let Some(ref sender) = authenticated_sender {
-                                    if !shared_state.peer_registry.contains_key(sender) {
-                                        tracing::warn!(sender = %sender, "StreamingToken from unknown peer — dropping");
+                                let sender = match authenticated_sender {
+                                    Some(ref s) => s,
+                                    None => {
+                                        tracing::warn!("StreamingToken from unauthenticated peer — dropping");
                                         continue;
                                     }
+                                };
+                                if !shared_state.peer_registry.contains_key(sender) {
+                                    tracing::warn!(sender = %sender, "StreamingToken from unknown peer — dropping");
+                                    continue;
                                 }
                                 // Clone the sender to drop the DashMap Ref (read lock) before
                                 // awaiting send() or calling remove() — avoids deadlock.

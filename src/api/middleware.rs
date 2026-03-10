@@ -221,6 +221,19 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
     response
 }
 
+/// Extract the IP address from a multiaddr string.
+/// Handles both `/ip4/<addr>/...` and `/ip6/<addr>/...` formats.
+fn extract_ip_from_multiaddr(multiaddr: &str) -> Option<String> {
+    let parts: Vec<&str> = multiaddr.split('/').collect();
+    // Multiaddr format: /ip4/<ip>/tcp/... → ["", "ip4", "<ip>", "tcp", ...]
+    // or /ip6/<ip>/tcp/... → ["", "ip6", "<ip>", "tcp", ...]
+    if parts.len() >= 3 && (parts[1] == "ip4" || parts[1] == "ip6") {
+        Some(parts[2].to_string())
+    } else {
+        None
+    }
+}
+
 /// Check whether a request is exempt from Bearer token authentication.
 ///
 /// Frontend routes, health checks, and static assets are always exempt.
@@ -323,11 +336,13 @@ pub async fn auth_middleware(
         }
     }
 
-    // Exempt peer-forwarded requests.
-    // WARNING: Loopback-gated exemptions assume direct client connections.
-    // If deployed behind a reverse proxy, all connections appear as loopback.
-    // Set `api.require_auth_loopback = true` in config to disable loopback exemptions.
+    // Exempt peer-forwarded inference requests.
+    // Only scoped to inference paths (/v1/chat/completions, /v1/messages) to prevent
+    // known peers from bypassing auth on admin/management endpoints.
     if req.headers().get("x-swarm-forwarded").is_some() {
+        let is_inference_path =
+            path.starts_with("/v1/chat/completions") || path.starts_with("/v1/messages");
+
         if addr.ip().is_loopback() {
             // Loopback requires internal token (prevents localhost bypass)
             if let Some(token) = req
@@ -335,22 +350,24 @@ pub async fn auth_middleware(
                 .get("x-swarm-internal-token")
                 .and_then(|v| v.to_str().ok())
             {
-                if constant_time_eq(
-                    token.as_bytes(),
-                    state.shared_state.internal_auth_token.as_bytes(),
-                ) {
+                if is_inference_path
+                    && constant_time_eq(
+                        token.as_bytes(),
+                        state.shared_state.internal_auth_token.as_bytes(),
+                    )
+                {
                     return next.run(req).await;
                 }
             }
             // Loopback without valid token: fall through to normal Bearer auth
-        } else {
-            // Non-loopback: verify it's from a known peer IP
+        } else if is_inference_path {
+            // Non-loopback: verify it's from a known peer IP (inference only)
             let peer_ip = addr.ip().to_string();
             let is_known_peer = state.shared_state.peer_registry.iter().any(|entry| {
                 entry.value().addresses.iter().any(|a| {
-                    // Extract IP from multiaddr format: /ip4/<ip>/... or /ip6/<ip>/...
-                    let parts: Vec<&str> = a.split('/').collect();
-                    parts.len() >= 3 && parts[2] == peer_ip
+                    extract_ip_from_multiaddr(a)
+                        .map(|ip| ip == peer_ip)
+                        .unwrap_or(false)
                 })
             });
             if is_known_peer {
@@ -396,6 +413,32 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_ip_from_multiaddr_ipv4() {
+        assert_eq!(
+            extract_ip_from_multiaddr("/ip4/192.168.1.1/tcp/8810"),
+            Some("192.168.1.1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ip_from_multiaddr_ipv6() {
+        assert_eq!(
+            extract_ip_from_multiaddr("/ip6/::1/tcp/8810"),
+            Some("::1".to_string())
+        );
+        assert_eq!(
+            extract_ip_from_multiaddr("/ip6/fe80::1/tcp/8810/p2p/12D3abc"),
+            Some("fe80::1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ip_from_multiaddr_invalid() {
+        assert_eq!(extract_ip_from_multiaddr("/dns4/example.com/tcp/80"), None);
+        assert_eq!(extract_ip_from_multiaddr(""), None);
+    }
 
     #[test]
     fn exempt_get_requests_loopback() {

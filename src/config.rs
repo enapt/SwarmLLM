@@ -794,6 +794,43 @@ pub fn load_dotenv(data_dir: &std::path::Path) {
                             .and_then(|v| v.strip_suffix('"'))
                             .or_else(|| val.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                             .unwrap_or(val);
+                        // SEC: Only allow known-safe env vars from .env file.
+                        // Dangerous vars like LD_PRELOAD, PATH, LD_LIBRARY_PATH could
+                        // be used for code execution if .env file is writable.
+                        const BLOCKED_ENV_PREFIXES: &[&str] = &[
+                            "LD_",
+                            "DYLD_",
+                            "PATH",
+                            "HOME",
+                            "USER",
+                            "SHELL",
+                            "PYTHONPATH",
+                            "RUBYLIB",
+                            "PERL5LIB",
+                            "NODE_PATH",
+                            "CARGO",
+                            "RUSTFLAGS",
+                            "CC",
+                            "CXX",
+                            "CFLAGS",
+                            "LDFLAGS",
+                            "http_proxy",
+                            "https_proxy",
+                            "HTTP_PROXY",
+                            "HTTPS_PROXY",
+                            "no_proxy",
+                            "NO_PROXY",
+                            "ALL_PROXY",
+                        ];
+                        let key_upper = key.to_uppercase();
+                        let is_blocked = BLOCKED_ENV_PREFIXES.iter().any(|prefix| {
+                            key_upper == prefix.to_uppercase()
+                                || key_upper.starts_with(&format!("{}_", prefix.to_uppercase()))
+                        });
+                        if is_blocked {
+                            tracing::warn!(key = key, "Blocked dangerous env var from .env file");
+                            continue;
+                        }
                         if !key.is_empty() && std::env::var(key).is_err() {
                             std::env::set_var(key, val);
                             count += 1;

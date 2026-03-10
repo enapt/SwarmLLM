@@ -2311,6 +2311,40 @@ pub async fn check_and_load_model(
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let mut any_loaded = false;
 
+    // TOCTOU guard: use loading_models to prevent concurrent duplicate loads.
+    // If another task is already loading this model, skip silently.
+    let _loading_guard = {
+        use dashmap::mapref::entry::Entry;
+        match shared.loading_models.entry(model_id.clone()) {
+            Entry::Vacant(e) => {
+                e.insert(std::sync::Arc::new(tokio::sync::Notify::new()));
+                Some(model_id.clone()) // We hold the guard
+            }
+            Entry::Occupied(_) => {
+                tracing::debug!(model = %model_id, "check_and_load_model: another load in progress, skipping");
+                return;
+            }
+        }
+    };
+    // Ensure we remove the guard when done (RAII via scope + defer pattern)
+    struct LoadGuard<'a> {
+        shared: &'a std::sync::Arc<crate::daemon::SharedState>,
+        model_id: Option<ModelId>,
+    }
+    impl<'a> Drop for LoadGuard<'a> {
+        fn drop(&mut self) {
+            if let Some(ref mid) = self.model_id {
+                if let Some((_, notify)) = self.shared.loading_models.remove(mid) {
+                    notify.notify_waiters();
+                }
+            }
+        }
+    }
+    let _guard = LoadGuard {
+        shared,
+        model_id: _loading_guard,
+    };
+
     for &(layer_start, layer_end) in &ranges {
         if layer_start >= layer_end {
             continue;

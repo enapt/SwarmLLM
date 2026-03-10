@@ -1145,20 +1145,21 @@ async fn execute_request(
                     "On-demand loading: model has shards on disk but not loaded"
                 );
 
-                // Coordination: only one task loads a model at a time
-                let notify = shared_state
+                // check_and_load_model has internal TOCTOU guard via loading_models.
+                // If another task is already loading, it returns immediately.
+                // We then wait on the notify for up to 60s.
+                let maybe_notify = shared_state
                     .loading_models
-                    .entry(model_id.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
-                    .clone();
+                    .get(model_id)
+                    .map(|r| r.value().clone());
 
-                // Check again after getting the entry (another task may have loaded it)
-                let still_not_loaded = !shared_state
-                    .split_models
-                    .iter()
-                    .any(|e| e.key().0 == *model_id);
-
-                if still_not_loaded {
+                if let Some(notify) = maybe_notify {
+                    // Another task is loading — wait for it
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(60), notify.notified())
+                            .await;
+                } else {
+                    // No one loading — trigger load (guard inside check_and_load_model)
                     let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state);
                     crate::model::auto_manage::check_and_load_model(
                         &shared_state,
@@ -1166,11 +1167,6 @@ async fn execute_request(
                         vram_budget,
                     )
                     .await;
-                    notify.notify_waiters();
-                    shared_state.loading_models.remove(model_id);
-                } else {
-                    // Already loaded by another task
-                    shared_state.loading_models.remove(model_id);
                 }
             }
         }

@@ -298,6 +298,17 @@ fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError>
         "metadata.gcp.internal",
         "instance-data",
         "169.254.169.254",
+        // Azure IMDS
+        "metadata.azure.com",
+        "169.254.169.254",
+        // AWS IMDSv1/v2
+        "instance-data.ec2.internal",
+        // DigitalOcean
+        "metadata.digitalocean.com",
+        // Oracle Cloud
+        "169.254.169.254",
+        // Alibaba Cloud
+        "100.100.100.200",
     ];
     let host_lower = host.to_lowercase();
     for blocked in &blocked_hosts {
