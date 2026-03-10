@@ -1,16 +1,19 @@
-//! AllReduce coordinator for tensor-parallel inference.
+//! AllReduce for tensor-parallel inference.
 //!
-//! When multiple nodes compute partial results for the same layer,
-//! the AllReduce coordinator collects all partials and sums them.
+//! Two strategies:
 //!
-//! **Flow (star topology, coordinator = rank-0 node):**
-//! 1. Each TP rank computes its partial output for one layer.
-//! 2. Each rank sends `TpAllReduceRequest` to the coordinator (rank 0).
-//! 3. Coordinator collects all partials, sums, and broadcasts `TpAllReduceResponse`.
-//! 4. Each rank receives the reduced tensor and continues to the next layer.
+//! **Star topology** (current default, optimal for tp_size ≤ 3):
+//! 1. Each TP rank sends its full partial to the coordinator (rank 0).
+//! 2. Coordinator collects all partials, sums, broadcasts result.
+//! 3. Bandwidth: coordinator sees 2N tensor transfers (bottleneck).
 //!
-//! Ring-AllReduce optimization (C6) replaces this with bandwidth-optimal
-//! scatter-reduce + allgather for larger tensors.
+//! **Ring topology** (optimal for tp_size ≥ 4, large tensors):
+//! 1. Scatter-reduce: N-1 steps, each rank sends one chunk to right neighbor,
+//!    receives from left, accumulates. After this, each rank holds one fully-reduced chunk.
+//! 2. Allgather: N-1 steps, each rank sends its reduced chunk around the ring.
+//!    After this, all ranks have the complete reduced tensor.
+//! 3. Bandwidth: each node sends/receives 2*(N-1)/N of the tensor total.
+//!    For N=4, that's 1.5x vs star's 2x at the coordinator.
 
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -25,9 +28,234 @@ use crate::types::{
 /// Timeout for AllReduce collection from all ranks.
 const ALLREDUCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Minimum tensor size (f32 elements) to prefer ring over star.
+const RING_MIN_TENSOR_ELEMENTS: usize = 1024;
+
+/// Minimum TP group size to prefer ring over star.
+const RING_MIN_TP_SIZE: u32 = 4;
+
+// ─── Strategy selection ──────────────────────────────────────────────────────
+
+/// Strategy for performing allreduce across TP ranks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AllReduceStrategy {
+    /// Star: all ranks → coordinator → broadcast. Good for small groups.
+    Star,
+    /// Ring: scatter-reduce + allgather. Bandwidth-optimal for large groups.
+    Ring,
+}
+
+/// Choose strategy based on group size and tensor size.
+pub fn choose_allreduce_strategy(tp_size: u32, tensor_elements: usize) -> AllReduceStrategy {
+    if tp_size >= RING_MIN_TP_SIZE && tensor_elements >= RING_MIN_TENSOR_ELEMENTS {
+        AllReduceStrategy::Ring
+    } else {
+        AllReduceStrategy::Star
+    }
+}
+
+// ─── Ring schedule types ─────────────────────────────────────────────────────
+
+/// Phase of the ring allreduce algorithm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RingPhase {
+    /// Scatter-reduce: accumulate partial sums in chunks around the ring.
+    ScatterReduce,
+    /// Allgather: propagate fully-reduced chunks around the ring.
+    Allgather,
+}
+
+/// One communication step in the ring allreduce.
+#[derive(Clone, Debug)]
+pub struct RingAllReduceStep {
+    /// Step index within the phase (0..n-1).
+    pub step: usize,
+    /// Phase.
+    pub phase: RingPhase,
+    /// Chunk index to send to right neighbor.
+    pub send_chunk_idx: usize,
+    /// Chunk index to receive from left neighbor.
+    pub recv_chunk_idx: usize,
+}
+
+/// Compute the full ring schedule for a given rank in a group of `n` ranks.
+/// Returns `2*(n-1)` steps: first `n-1` scatter-reduce, then `n-1` allgather.
+pub fn compute_ring_schedule(rank: usize, n: usize) -> Vec<RingAllReduceStep> {
+    if n <= 1 {
+        return vec![];
+    }
+    let mut steps = Vec::with_capacity(2 * (n - 1));
+
+    // Scatter-reduce phase
+    for s in 0..(n - 1) {
+        steps.push(RingAllReduceStep {
+            step: s,
+            phase: RingPhase::ScatterReduce,
+            send_chunk_idx: (rank + n - s) % n,
+            recv_chunk_idx: (rank + n - 1 - s) % n,
+        });
+    }
+
+    // Allgather phase
+    for s in 0..(n - 1) {
+        steps.push(RingAllReduceStep {
+            step: s,
+            phase: RingPhase::Allgather,
+            send_chunk_idx: (rank + n + 1 - s) % n,
+            recv_chunk_idx: (rank + n - s) % n,
+        });
+    }
+
+    steps
+}
+
+// ─── Ring allreduce (local simulation) ───────────────────────────────────────
+
+/// Perform ring allreduce (sum) locally across N partial f32 tensors.
+///
+/// This simulates the full ring scatter-reduce + allgather algorithm.
+/// For actual distributed execution, each step would be a network send/recv pair.
+pub fn ring_allreduce_sum_local(partials: &[Vec<f32>]) -> Result<Vec<f32>, SwarmError> {
+    let n = partials.len();
+    if n == 0 {
+        return Err(SwarmError::Internal("Ring allreduce: no partials".into()));
+    }
+    if n == 1 {
+        return Ok(partials[0].clone());
+    }
+    let len = partials[0].len();
+    for (i, p) in partials.iter().enumerate() {
+        if p.len() != len {
+            return Err(SwarmError::Internal(format!(
+                "Ring allreduce: rank {i} has length {} but rank 0 has {len}",
+                p.len()
+            )));
+        }
+    }
+    if len == 0 {
+        return Ok(vec![]);
+    }
+
+    let chunk_size = len.div_ceil(n);
+
+    // Split each rank's tensor into n chunks
+    let mut rank_chunks: Vec<Vec<Vec<f32>>> = partials
+        .iter()
+        .map(|p| {
+            (0..n)
+                .map(|c| {
+                    let start = c * chunk_size;
+                    let end = (start + chunk_size).min(len);
+                    if start < len {
+                        p[start..end].to_vec()
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Scatter-reduce: N-1 steps
+    for s in 0..(n - 1) {
+        // Snapshot the chunks to send before mutating
+        let send_chunks: Vec<Vec<f32>> = (0..n)
+            .map(|rank| {
+                let send_idx = (rank + n - s) % n;
+                rank_chunks[rank][send_idx].clone()
+            })
+            .collect();
+
+        for (rank, chunks) in rank_chunks.iter_mut().enumerate() {
+            let recv_idx = (rank + n - 1 - s) % n;
+            let left = (rank + n - 1) % n;
+            let received = &send_chunks[left];
+            for (j, val) in received.iter().enumerate() {
+                if j < chunks[recv_idx].len() {
+                    chunks[recv_idx][j] += val;
+                }
+            }
+        }
+    }
+
+    // Allgather: N-1 steps
+    for s in 0..(n - 1) {
+        let send_chunks: Vec<Vec<f32>> = (0..n)
+            .map(|rank| {
+                let send_idx = (rank + n + 1 - s) % n;
+                rank_chunks[rank][send_idx].clone()
+            })
+            .collect();
+
+        for (rank, chunks) in rank_chunks.iter_mut().enumerate() {
+            let recv_idx = (rank + n - s) % n;
+            let left = (rank + n - 1) % n;
+            chunks[recv_idx] = send_chunks[left].clone();
+        }
+    }
+
+    // Reassemble from rank 0 (all ranks are identical now)
+    let mut result = Vec::with_capacity(len);
+    for chunk in &rank_chunks[0] {
+        result.extend_from_slice(chunk);
+    }
+    result.truncate(len);
+    Ok(result)
+}
+
+/// Ring allreduce over zstd-compressed partial tensors.
+///
+/// Drop-in replacement for `TpAllReduceCollector::reduce_sum()` using the ring algorithm.
+/// Input: one compressed f32 tensor per rank, all with the same shape.
+/// Output: compressed reduced tensor + shape.
+pub fn ring_allreduce_sum_compressed(
+    compressed_partials: &[Vec<u8>],
+    shape: &[u32],
+) -> Result<(Vec<u8>, Vec<u32>), SwarmError> {
+    let elem_count: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &s| acc.checked_mul(s as usize))
+        .ok_or_else(|| SwarmError::Internal("Ring allreduce: shape overflow".into()))?;
+
+    if elem_count > 64 * 1024 * 1024 {
+        return Err(SwarmError::Internal(
+            "Ring allreduce: tensor too large".into(),
+        ));
+    }
+
+    // Decompress each partial into Vec<f32>
+    let partials: Vec<Vec<f32>> = compressed_partials
+        .iter()
+        .enumerate()
+        .map(|(i, data)| {
+            let dec = zstd::decode_all(std::io::Cursor::new(data))
+                .map_err(|e| SwarmError::Internal(format!("Ring allreduce: zstd rank {i}: {e}")))?;
+            if dec.len() != elem_count * 4 {
+                return Err(SwarmError::Internal(format!(
+                    "Ring allreduce: rank {i} size mismatch: {} vs expected {}",
+                    dec.len(),
+                    elem_count * 4
+                )));
+            }
+            Ok(dec
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let reduced = ring_allreduce_sum_local(&partials)?;
+
+    // Compress result
+    let raw: Vec<u8> = reduced.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1)
+        .map_err(|e| SwarmError::Internal(format!("Ring allreduce: zstd compress: {e}")))?;
+    Ok((compressed, shape.to_vec()))
+}
+
+// ─── Existing infrastructure (unchanged) ─────────────────────────────────────
+
 /// Pending AllReduce response channel, keyed by (request_id, layer_idx).
-/// The pipeline executor registers this before sending its partial,
-/// and the daemon dispatcher fires it when the reduced result arrives.
 type PendingAllReduceMap = dashmap::DashMap<(Uuid, u32), oneshot::Sender<TpAllReduceResponse>>;
 
 /// Shared registry of pending AllReduce responses.
@@ -73,17 +301,14 @@ impl AllReduceRegistry {
     /// Clean up stale entries older than the given duration.
     pub fn cleanup_stale(&self) {
         // Entries are removed on delivery or timeout; no-op for now.
-        // Could add timestamps if needed.
     }
 }
 
 /// Send this node's partial tensor to the coordinator (rank 0) and wait for the reduced result.
 ///
-/// If we ARE rank 0, the partial is inserted directly into the collector and we wait
-/// for all other ranks to arrive (handled by the daemon dispatcher).
-///
-/// If we are NOT rank 0, we send the partial via the network and wait for the
-/// broadcast response.
+/// Currently uses the **star topology**. When `choose_allreduce_strategy()` returns `Ring`,
+/// a future network implementation would use chunk-level ring messaging instead.
+/// The ring algorithm itself is implemented and tested in `ring_allreduce_sum_local()`.
 #[allow(clippy::too_many_arguments)]
 pub async fn allreduce_sum(
     shared_state: &Arc<SharedState>,
@@ -99,6 +324,12 @@ pub async fn allreduce_sum(
     let tp_size = tp_group.tp_size() as u32;
     let coordinator = &tp_group.nodes[0];
     let is_coordinator = local_rank == 0;
+
+    // Note: ring strategy selection for future network-level ring implementation:
+    // let _strategy = choose_allreduce_strategy(tp_size, elem_count);
+    // Currently always uses star topology over the network.
+    // The ring algorithm is available via ring_allreduce_sum_local() for local use
+    // and will be wired to network chunk messaging in a future update.
 
     // Register to receive the reduced result
     let rx = allreduce_registry.register(request_id, layer_idx);
@@ -139,13 +370,8 @@ pub async fn allreduce_sum(
                 };
                 // Deliver to ourselves
                 allreduce_registry.deliver(resp.clone());
-                // No need to broadcast — other ranks will get their own delivery
-                // from the daemon dispatcher when it processes their partials.
-                // Actually for tp_size=1 there are no other ranks.
             }
         }
-        // else: other ranks haven't arrived yet, daemon dispatcher will handle
-        // reduction when all partials arrive and broadcast the response.
     } else {
         // Send partial to coordinator via point-to-point
         let peer_bytes = shared_state.peer_id_map.get(coordinator).map(|r| r.clone());
@@ -191,38 +417,39 @@ mod tests {
     use super::*;
     use crate::daemon::TpAllReduceCollector;
 
+    // ── Helper ───────────────────────────────────────────────────────────
+
+    fn compress_f32(vals: &[f32]) -> Vec<u8> {
+        let raw: Vec<u8> = vals.iter().flat_map(|f| f.to_le_bytes()).collect();
+        zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap()
+    }
+
+    fn decompress_f32(data: &[u8]) -> Vec<f32> {
+        let dec = zstd::decode_all(std::io::Cursor::new(data)).unwrap();
+        dec.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    // ── Existing star topology tests ─────────────────────────────────────
+
     #[test]
     fn test_allreduce_collector_single_rank() {
         let mut collector = TpAllReduceCollector::new(1);
-        // Create a small f32 tensor [1.0, 2.0, 3.0], compress it
-        let raw: Vec<u8> = [1.0f32, 2.0, 3.0]
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
-
         let req = TpAllReduceRequest {
             request_id: Uuid::new_v4(),
             layer_idx: 0,
             tp_rank: 0,
             tp_size: 1,
-            partial_data: compressed,
+            partial_data: compress_f32(&[1.0, 2.0, 3.0]),
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
             sender_peer_bytes: None,
         };
-
         assert!(collector.insert(req, None));
         let (reduced, shape) = collector.reduce_sum().unwrap();
         assert_eq!(shape, vec![1, 1, 3]);
-
-        // Decompress and verify
-        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
-        let vals: Vec<f32> = dec
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+        assert_eq!(decompress_f32(&reduced), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
@@ -230,26 +457,12 @@ mod tests {
         let mut collector = TpAllReduceCollector::new(2);
         let request_id = Uuid::new_v4();
 
-        // Rank 0: [1.0, 2.0, 3.0]
-        let raw0: Vec<u8> = [1.0f32, 2.0, 3.0]
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        let c0 = zstd::encode_all(std::io::Cursor::new(&raw0), 1).unwrap();
-
-        // Rank 1: [4.0, 5.0, 6.0]
-        let raw1: Vec<u8> = [4.0f32, 5.0, 6.0]
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        let c1 = zstd::encode_all(std::io::Cursor::new(&raw1), 1).unwrap();
-
         let req0 = TpAllReduceRequest {
             request_id,
             layer_idx: 5,
             tp_rank: 0,
             tp_size: 2,
-            partial_data: c0,
+            partial_data: compress_f32(&[1.0, 2.0, 3.0]),
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
             sender_peer_bytes: None,
@@ -259,25 +472,17 @@ mod tests {
             layer_idx: 5,
             tp_rank: 1,
             tp_size: 2,
-            partial_data: c1,
+            partial_data: compress_f32(&[4.0, 5.0, 6.0]),
             shape: vec![1, 1, 3],
             op: AllReduceOp::Sum,
             sender_peer_bytes: None,
         };
 
-        assert!(!collector.insert(req0, None)); // not all arrived yet
-        assert!(collector.insert(req1, None)); // all arrived
-
+        assert!(!collector.insert(req0, None));
+        assert!(collector.insert(req1, None));
         let (reduced, shape) = collector.reduce_sum().unwrap();
         assert_eq!(shape, vec![1, 1, 3]);
-
-        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
-        let vals: Vec<f32> = dec
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        // [1+4, 2+5, 3+6] = [5.0, 7.0, 9.0]
-        assert_eq!(vals, vec![5.0, 7.0, 9.0]);
+        assert_eq!(decompress_f32(&reduced), vec![5.0, 7.0, 9.0]);
     }
 
     #[test]
@@ -296,8 +501,6 @@ mod tests {
         assert!(registry.deliver(resp.clone()));
         let received = rx.try_recv().unwrap();
         assert_eq!(received.layer_idx, 3);
-
-        // Delivering again should fail (already consumed)
         assert!(!registry.deliver(resp));
     }
 
@@ -306,36 +509,24 @@ mod tests {
         let mut collector = TpAllReduceCollector::new(4);
         let request_id = Uuid::new_v4();
 
-        // 4 ranks each contributing [rank, rank, rank]
         for rank in 0..4u32 {
             let val = rank as f32;
-            let raw: Vec<u8> = [val, val, val]
-                .iter()
-                .flat_map(|f| f.to_le_bytes())
-                .collect();
-            let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
             let req = TpAllReduceRequest {
                 request_id,
                 layer_idx: 0,
                 tp_rank: rank,
                 tp_size: 4,
-                partial_data: compressed,
+                partial_data: compress_f32(&[val, val, val]),
                 shape: vec![1, 1, 3],
                 op: AllReduceOp::Sum,
                 sender_peer_bytes: None,
             };
             let all = collector.insert(req, None);
-            assert_eq!(all, rank == 3); // only last one completes
+            assert_eq!(all, rank == 3);
         }
 
         let (reduced, _) = collector.reduce_sum().unwrap();
-        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
-        let vals: Vec<f32> = dec
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        // 0+1+2+3 = 6.0
-        assert_eq!(vals, vec![6.0, 6.0, 6.0]);
+        assert_eq!(decompress_f32(&reduced), vec![6.0, 6.0, 6.0]);
     }
 
     #[test]
@@ -343,17 +534,14 @@ mod tests {
         let mut collector = TpAllReduceCollector::new(3);
         let request_id = Uuid::new_v4();
 
-        // Insert rank 2, then 0, then 1
         for &rank in &[2u32, 0, 1] {
             let val = (rank + 1) as f32;
-            let raw: Vec<u8> = [val].iter().flat_map(|f| f.to_le_bytes()).collect();
-            let compressed = zstd::encode_all(std::io::Cursor::new(&raw), 1).unwrap();
             let req = TpAllReduceRequest {
                 request_id,
                 layer_idx: 7,
                 tp_rank: rank,
                 tp_size: 3,
-                partial_data: compressed,
+                partial_data: compress_f32(&[val]),
                 shape: vec![1, 1, 1],
                 op: AllReduceOp::Sum,
                 sender_peer_bytes: None,
@@ -362,21 +550,13 @@ mod tests {
         }
 
         let (reduced, _) = collector.reduce_sum().unwrap();
-        let dec = zstd::decode_all(std::io::Cursor::new(&reduced)).unwrap();
-        let vals: Vec<f32> = dec
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        // 1+2+3 = 6.0
-        assert_eq!(vals, vec![6.0]);
+        assert_eq!(decompress_f32(&reduced), vec![6.0]);
     }
 
     #[test]
     fn test_registry_undelivered() {
         let registry = AllReduceRegistry::new();
         let rid = Uuid::new_v4();
-
-        // Deliver without registering — should return false
         let resp = TpAllReduceResponse {
             request_id: rid,
             layer_idx: 0,
@@ -384,5 +564,180 @@ mod tests {
             shape: vec![],
         };
         assert!(!registry.deliver(resp));
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    /// Naive element-wise sum of N f32 tensors. Reference for ring correctness.
+    fn naive_sum(partials: &[Vec<f32>]) -> Vec<f32> {
+        let len = partials[0].len();
+        let mut result = vec![0.0f32; len];
+        for p in partials {
+            for (i, &v) in p.iter().enumerate() {
+                result[i] += v;
+            }
+        }
+        result
+    }
+
+    // ── Ring allreduce tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_ring_allreduce_two_ranks() {
+        let partials = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        assert_eq!(result, vec![5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_three_ranks() {
+        let partials = vec![
+            vec![1.0, 1.0, 1.0],
+            vec![2.0, 2.0, 2.0],
+            vec![3.0, 3.0, 3.0],
+        ];
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        assert_eq!(result, vec![6.0, 6.0, 6.0]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_four_ranks() {
+        let partials: Vec<Vec<f32>> = (0..4).map(|r| vec![r as f32; 4]).collect();
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        // 0+1+2+3 = 6
+        assert_eq!(result, vec![6.0; 4]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_eight_ranks() {
+        let partials: Vec<Vec<f32>> = (0..8).map(|r| vec![r as f32; 16]).collect();
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        // 0+1+2+3+4+5+6+7 = 28
+        assert_eq!(result, vec![28.0; 16]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_non_divisible_length() {
+        // 3 ranks, 5 elements (not divisible by 3 → chunks of size 2, last chunk size 1)
+        let partials = vec![
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![10.0, 20.0, 30.0, 40.0, 50.0],
+            vec![100.0, 200.0, 300.0, 400.0, 500.0],
+        ];
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        assert_eq!(result, vec![111.0, 222.0, 333.0, 444.0, 555.0]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_single_rank() {
+        let partials = vec![vec![42.0, 99.0]];
+        let result = ring_allreduce_sum_local(&partials).unwrap();
+        assert_eq!(result, vec![42.0, 99.0]);
+    }
+
+    #[test]
+    fn test_ring_allreduce_compressed() {
+        let shape = vec![1u32, 1, 4];
+        let compressed: Vec<Vec<u8>> = vec![
+            compress_f32(&[1.0, 2.0, 3.0, 4.0]),
+            compress_f32(&[10.0, 20.0, 30.0, 40.0]),
+            compress_f32(&[100.0, 200.0, 300.0, 400.0]),
+            compress_f32(&[1000.0, 2000.0, 3000.0, 4000.0]),
+        ];
+        let (reduced, out_shape) = ring_allreduce_sum_compressed(&compressed, &shape).unwrap();
+        assert_eq!(out_shape, shape);
+        assert_eq!(
+            decompress_f32(&reduced),
+            vec![1111.0, 2222.0, 3333.0, 4444.0]
+        );
+    }
+
+    #[test]
+    fn test_choose_strategy() {
+        assert_eq!(choose_allreduce_strategy(2, 4096), AllReduceStrategy::Star);
+        assert_eq!(choose_allreduce_strategy(4, 4096), AllReduceStrategy::Ring);
+        assert_eq!(choose_allreduce_strategy(4, 512), AllReduceStrategy::Star);
+        assert_eq!(choose_allreduce_strategy(8, 8192), AllReduceStrategy::Ring);
+        assert_eq!(
+            choose_allreduce_strategy(3, 100_000),
+            AllReduceStrategy::Star
+        );
+    }
+
+    #[test]
+    fn test_ring_schedule_four_ranks() {
+        let schedule = compute_ring_schedule(0, 4);
+        assert_eq!(schedule.len(), 6); // 2*(4-1)
+
+        // First 3 steps are ScatterReduce
+        for step in &schedule[..3] {
+            assert_eq!(step.phase, RingPhase::ScatterReduce);
+        }
+        // Last 3 steps are Allgather
+        for step in &schedule[3..] {
+            assert_eq!(step.phase, RingPhase::Allgather);
+        }
+
+        // Verify scatter-reduce send/recv indices for rank 0 in N=4:
+        // step 0: send chunk (0+4-0)%4=0, recv chunk (0+4-1-0)%4=3
+        // step 1: send chunk (0+4-1)%4=3, recv chunk (0+4-1-1)%4=2
+        // step 2: send chunk (0+4-2)%4=2, recv chunk (0+4-1-2)%4=1
+        assert_eq!(schedule[0].send_chunk_idx, 0);
+        assert_eq!(schedule[0].recv_chunk_idx, 3);
+        assert_eq!(schedule[1].send_chunk_idx, 3);
+        assert_eq!(schedule[1].recv_chunk_idx, 2);
+        assert_eq!(schedule[2].send_chunk_idx, 2);
+        assert_eq!(schedule[2].recv_chunk_idx, 1);
+    }
+
+    #[test]
+    fn test_ring_schedule_empty_for_single() {
+        assert!(compute_ring_schedule(0, 1).is_empty());
+    }
+
+    #[test]
+    fn test_ring_matches_star() {
+        // Verify ring produces identical results to naive sum for various configurations
+        for n in [2, 3, 4, 5, 8] {
+            for len in [1, 3, 7, 16, 100] {
+                let partials: Vec<Vec<f32>> = (0..n)
+                    .map(|r| (0..len).map(|i| r as f32 * 1000.0 + i as f32).collect())
+                    .collect();
+
+                let ring_result = ring_allreduce_sum_local(&partials).unwrap();
+                let naive_result = naive_sum(&partials);
+
+                assert_eq!(
+                    ring_result.len(),
+                    naive_result.len(),
+                    "Length mismatch for n={n}, len={len}"
+                );
+                for (j, (r, n_val)) in ring_result.iter().zip(naive_result.iter()).enumerate() {
+                    assert!(
+                        (r - n_val).abs() < 1e-3,
+                        "Mismatch at index {j} for n={n}, len={len}: ring={r}, naive={n_val}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ring_allreduce_large_tensor() {
+        // 4 ranks, 4096 elements each (realistic hidden dimension)
+        let partials: Vec<Vec<f32>> = (0..4)
+            .map(|r| (0..4096).map(|i| (r * 4096 + i) as f32 * 0.001).collect())
+            .collect();
+
+        let ring_result = ring_allreduce_sum_local(&partials).unwrap();
+        let naive_result = naive_sum(&partials);
+        assert_eq!(ring_result.len(), 4096);
+
+        for (j, (r, n_val)) in ring_result.iter().zip(naive_result.iter()).enumerate() {
+            assert!(
+                (r - n_val).abs() < 1e-1,
+                "Mismatch at {j}: ring={r}, naive={n_val}"
+            );
+        }
     }
 }
