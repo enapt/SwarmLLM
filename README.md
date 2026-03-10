@@ -162,7 +162,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
 
 ### Economy & Identity
-- **Credit System** — Earn credits by serving inference (active) and forwarding activations (active). Shard hosting and seeding credits are defined but not yet wired. Anti-gaming protection, transaction replay prevention. Credit escrow is implemented but not yet active in the daemon
+- **Credit System** — Earn credits by serving inference, forwarding activations, and hosting shards (hourly). Seeding credits are defined but not yet wired. Anti-gaming protection, transaction replay prevention. Credit escrow is implemented but not yet active in the daemon
 - **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
 - **Model Trust** — Demand-driven trust system (Discovered→Pinned→DemandVerified→NetworkPopular) gates auto-manage to prevent trash model propagation
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
@@ -242,8 +242,8 @@ Key source directories:
 |--------|--------|--------|
 | Serve inference | +credits (per layer per token) | Active |
 | Forward activations | +credits (per layer processed) | Active |
+| Host model shards | +credits (per GB per hour) | Active |
 | Submit inference request | -credits (per layer per token) | Active |
-| Host model shards | +credits (per GB per hour) | Defined, not yet wired |
 | Seed shard data | +credits (per GB transferred) | Defined, not yet wired |
 
 Credits determine your priority tier:
@@ -415,7 +415,7 @@ The `.env` file is loaded at startup and does not override existing environment 
 
 | Section | Key Settings |
 |---------|-------------|
-| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum — not yet enforced), `data_dir` |
+| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
 | `[resources.schedule]` | `enabled`, `reduced_hours_start/end`, `prune_aggressiveness` |
 | `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
