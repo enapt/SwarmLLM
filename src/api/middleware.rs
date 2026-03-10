@@ -316,15 +316,13 @@ pub async fn auth_middleware(
         }
     }
 
-    // Exempt peer-forwarded requests — loopback only.
-    // The x-swarm-forwarded header is only trusted from loopback to prevent
-    // remote attackers from spoofing it. Non-loopback forwarding requires
-    // the internal auth token.
+    // Exempt peer-forwarded requests — requires internal auth token.
+    // WARNING: Loopback-gated exemptions assume direct client connections.
+    // If deployed behind a reverse proxy, all connections appear as loopback.
+    // Set `api.require_auth_loopback = true` in config to disable loopback exemptions.
     if req.headers().get("x-swarm-forwarded").is_some() {
-        if addr.ip().is_loopback() {
-            return next.run(req).await;
-        }
-        // Non-loopback: require internal auth token alongside x-swarm-forwarded
+        // Both loopback and non-loopback forwarding require the internal auth token
+        // to prevent unauthenticated bypass via crafted x-swarm-forwarded header.
         if let Some(token) = req
             .headers()
             .get("x-swarm-internal-token")

@@ -7,6 +7,9 @@ use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{NodeId, PipelineAssignment};
 
+/// Maximum number of multi-turn sessions to prevent unbounded memory growth.
+const MAX_MULTI_TURN_SESSIONS: usize = 10_000;
+
 /// Unique identifier for a KV-cache session (conversation).
 pub type SessionId = uuid::Uuid;
 
@@ -123,6 +126,19 @@ impl KvCacheManager {
             cache_holders,
             cached_prompt: prompt,
         };
+
+        // Evict oldest session if at capacity to prevent unbounded growth
+        if self.multi_turn_sessions.len() >= MAX_MULTI_TURN_SESSIONS {
+            if let Some(oldest_key) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, v)| v.last_accessed)
+                .map(|(k, _)| *k)
+            {
+                self.sessions.remove(&oldest_key);
+                self.multi_turn_sessions.retain(|_, id| *id != oldest_key);
+            }
+        }
 
         self.sessions.insert(internal_id, entry);
         self.multi_turn_sessions

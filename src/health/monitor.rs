@@ -65,6 +65,7 @@ impl HealthMonitor {
                     self.cleanup_acquisition_progress();
                     self.cleanup_stale_channels();
                     self.cleanup_model_vote_tallies();
+                    self.cleanup_stale_peer_id_map();
                     // Cleanup expired anti-gaming rate limit entries
                     self.shared_state.anti_gaming.lock().await.cleanup();
                     // Decay trust scores toward default (0.5) on each health ping cycle
@@ -370,6 +371,29 @@ impl HealthMonitor {
             for key in to_remove {
                 self.shared_state.model_vote_tallies.remove(&key);
             }
+        }
+    }
+
+    /// Clean stale peer_id_map entries for peers no longer in peer_registry.
+    /// Only runs when the map exceeds 1000 entries to avoid removing entries
+    /// that are intentionally kept across disconnects for short periods.
+    fn cleanup_stale_peer_id_map(&self) {
+        if self.shared_state.peer_id_map.len() <= 1_000 {
+            return;
+        }
+        let stale_peers: Vec<_> = self
+            .shared_state
+            .peer_id_map
+            .iter()
+            .filter(|entry| !self.shared_state.peer_registry.contains_key(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect();
+        let removed = stale_peers.len();
+        for nid in stale_peers {
+            self.shared_state.peer_id_map.remove(&nid);
+        }
+        if removed > 0 {
+            tracing::debug!(removed, remaining = self.shared_state.peer_id_map.len(), "Cleaned stale peer_id_map entries");
         }
     }
 

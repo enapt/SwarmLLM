@@ -314,8 +314,9 @@ pub struct TpAllReduceCollector {
 
 impl TpAllReduceCollector {
     pub fn new(tp_size: u32) -> Self {
-        // Clamp tp_size to at least 1 to prevent panics from empty partials vec
-        let safe_size = tp_size.max(1) as usize;
+        // Clamp tp_size to [1, 32] to prevent panics from empty partials vec
+        // and bound memory allocation from malicious requests
+        let safe_size = tp_size.clamp(1, 32) as usize;
         Self {
             tp_size,
             partials: vec![None; safe_size],

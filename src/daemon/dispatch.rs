@@ -150,6 +150,16 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // T13: VisionEncodeRequest — encode image using local mmproj
                             SwarmMessage::VisionEncodeRequest(req) => {
+                                // SEC: Only accept from known peers
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(
+                                            sender = %sender,
+                                            "VisionEncodeRequest from unknown peer — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
                                 tokio::spawn(async move {
@@ -158,6 +168,16 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // T13: VisionEncodeResponse — fire pending oneshot
                             SwarmMessage::VisionEncodeResponse(resp) => {
+                                // NOTE: pending_vision_results stores only the oneshot sender,
+                                // not the expected responding node_id, so we cannot verify the
+                                // responder identity here. The request_id (UUID) provides
+                                // correlation but not authentication. Log for audit trail.
+                                if authenticated_sender.is_none() {
+                                    tracing::warn!(
+                                        request_id = %resp.request_id,
+                                        "VisionEncodeResponse received without authenticated sender"
+                                    );
+                                }
                                 if let Some((_, tx)) = shared_state
                                     .pending_vision_results
                                     .remove(&resp.request_id)
@@ -194,11 +214,16 @@ pub(crate) async fn dispatch_network_messages(
                                     &credit_peer_balances,
                                     &gossip,
                                 ).await;
-                                // Store per-peer balance for leaderboard display
-                                shared_state.peer_credit_balances.insert(
-                                    gossip.node_id.clone(),
-                                    gossip.balance_bucket,
-                                );
+                                // Store per-peer balance for leaderboard display (capped at 10k entries)
+                                const MAX_PEER_CREDIT_ENTRIES: usize = 10_000;
+                                if shared_state.peer_credit_balances.len() < MAX_PEER_CREDIT_ENTRIES
+                                    || shared_state.peer_credit_balances.contains_key(&gossip.node_id)
+                                {
+                                    shared_state.peer_credit_balances.insert(
+                                        gossip.node_id.clone(),
+                                        gossip.balance_bucket,
+                                    );
+                                }
                             }
                             SwarmMessage::ModelVote(vote) => {
                                 tracing::info!(
@@ -386,6 +411,17 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Process capability updates from peers
                             SwarmMessage::NodeCapabilityUpdate(cap) => {
+                                // SEC: Verify sender matches claimed node_id
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &cap.node_id {
+                                        tracing::warn!(
+                                            claimed = %cap.node_id,
+                                            actual = %sender,
+                                            "NodeCapabilityUpdate sender mismatch — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 tracing::debug!(
                                     node_id = %cap.node_id,
                                     hosted_shards = cap.hosted_shards.len(),
@@ -515,6 +551,26 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // HuggingFace source gossip — store so auto-manage can download shards
                             SwarmMessage::HfSourceGossip(gossip) => {
+                                // SEC: Verify sender matches claimed publisher
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &gossip.publisher {
+                                        tracing::warn!(
+                                            claimed = %gossip.publisher,
+                                            actual = %sender,
+                                            "HfSourceGossip sender mismatch — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                // SEC: Length limits on untrusted strings
+                                if gossip.repo_id.len() > 256 || gossip.filename.len() > 256 {
+                                    tracing::warn!(
+                                        repo_id_len = gossip.repo_id.len(),
+                                        filename_len = gossip.filename.len(),
+                                        "HfSourceGossip strings too long — dropping"
+                                    );
+                                    continue;
+                                }
                                 let mid = gossip.model_id.clone();
                                 if !shared_state.hf_sources.contains_key(&mid) {
                                     tracing::info!(
@@ -537,6 +593,17 @@ pub(crate) async fn dispatch_network_messages(
                                 }
                             }
                             SwarmMessage::ShardDownloadProgress(progress) => {
+                                // SEC: Verify sender matches claimed node_id
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &progress.node_id {
+                                        tracing::warn!(
+                                            claimed = %progress.node_id,
+                                            actual = %sender,
+                                            "ShardDownloadProgress sender mismatch — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 // Update peer download state in shared state
                                 let local_nid = shared_state.identity.node_id();
                                 if progress.node_id != *local_nid {
@@ -680,6 +747,10 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Tensor-parallel AllReduce: collect partial from a TP rank
                             SwarmMessage::TpAllReduceRequest(req) => {
+                                if req.tp_size as usize > 32 {
+                                    tracing::warn!(tp_size = req.tp_size, "TpAllReduceRequest tp_size exceeds maximum — dropping");
+                                    continue;
+                                }
                                 let key = (req.request_id, req.layer_idx);
                                 let tp_size = req.tp_size;
                                 let ss = shared_state.clone();
