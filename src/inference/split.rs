@@ -3981,6 +3981,27 @@ impl SplitModel {
         self.forward_with_lora(input, index_pos, kv_cache_store, request_id, None)
     }
 
+    /// Forward pass that captures hidden states at specified layers.
+    /// Returns (output_tensor, captured_hidden_states) where captured is
+    /// a HashMap from absolute layer index to the post-layer hidden state tensor.
+    pub fn forward_with_hidden_capture(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        capture_layers: &std::collections::HashSet<usize>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        self.forward_inner(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            Some(capture_layers),
+        )
+    }
+
     /// Forward pass with optional LoRA adapter applied per-layer.
     ///
     /// When `lora_adapter` is `Some`, the adapter's low-rank deltas are applied
@@ -3993,6 +4014,28 @@ impl SplitModel {
         request_id: &str,
         lora_adapter: Option<&LoraAdapter>,
     ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            None,
+        )?;
+        Ok(output)
+    }
+
+    /// Inner forward pass implementation. When `capture_layers` is Some, captures
+    /// hidden states at the specified absolute layer indices.
+    fn forward_inner(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        capture_layers: Option<&std::collections::HashSet<usize>>,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         let forward_start = std::time::Instant::now();
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
@@ -4074,6 +4117,7 @@ impl SplitModel {
         };
 
         let max_seq_len = self.max_seq_len;
+        let mut captured: HashMap<usize, Tensor> = HashMap::new();
 
         // Run through our layers
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -4173,6 +4217,13 @@ impl SplitModel {
                 layer_ms = layer_start_time.elapsed().as_millis() as u64,
                 "DIAG: layer forward complete"
             );
+
+            // Capture hidden state if requested (zero overhead when not capturing)
+            if let Some(layers_to_capture) = capture_layers {
+                if layers_to_capture.contains(&abs_layer) {
+                    captured.insert(abs_layer, layer_in.clone());
+                }
+            }
         }
 
         // Write the updated KV-caches and SSM states back to the store.
@@ -4230,7 +4281,7 @@ impl SplitModel {
             "DIAG: SplitModel forward pass complete"
         );
 
-        result
+        result.map(|t| (t, captured))
     }
 
     /// Tensor-parallel forward pass for a single layer.

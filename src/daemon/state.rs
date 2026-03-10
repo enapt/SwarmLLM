@@ -141,6 +141,8 @@ pub struct SharedState {
     pub config_watch_tx: watch::Sender<crate::config::OperationalParams>,
     /// Trust score manager — tracks per-peer reputation, persisted to redb.
     pub trust_manager: crate::credit::trust::TrustManager,
+    /// Credit escrow manager — holds credits during large inference requests.
+    pub escrow_manager: Arc<crate::credit::escrow::EscrowManager>,
     /// Auto-detected country code from IP geolocation (e.g. "US", "DE").
     /// Falls back to config.identity.region if geolocation fails.
     pub detected_region: RwLock<Option<String>>,
@@ -452,6 +454,10 @@ impl SharedState {
         let initial_ops = crate::config::OperationalParams::from_config(&config);
         let (config_watch_tx, _config_watch_rx) = watch::channel(initial_ops);
         let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
+        let escrow_manager = Arc::new(crate::credit::escrow::EscrowManager::new(
+            db.clone(),
+            crate::credit::escrow::DEFAULT_ESCROW_THRESHOLD,
+        ));
 
         // Hydrate per-model auto-manage policies from database + config
         let model_auto_manage_policies = {
@@ -530,6 +536,7 @@ impl SharedState {
             is_ready: AtomicBool::new(false),
             config_watch_tx,
             trust_manager,
+            escrow_manager,
             detected_region: RwLock::new(None),
             peer_credit_balances: DashMap::new(),
             #[cfg(feature = "paged-attn")]

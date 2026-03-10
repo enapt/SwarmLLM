@@ -63,6 +63,24 @@ enum Commands {
     Version,
     /// Show node status (queries running daemon)
     Status,
+    /// Interactive terminal chat with a running daemon
+    Chat {
+        /// Model to use (auto-selects first available if omitted)
+        #[arg(long)]
+        model: Option<String>,
+        /// Maximum tokens per response
+        #[arg(long, default_value = "1024")]
+        max_tokens: u32,
+        /// Sampling temperature
+        #[arg(long, default_value = "0.7")]
+        temperature: f32,
+    },
+    /// List connected peers with latency and trust scores
+    Peers {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check for updates and apply if available
     Update {
         /// Only check, do not download or apply
@@ -119,6 +137,30 @@ async fn main() -> anyhow::Result<()> {
         no_update_check: false,
     });
 
+    let resolve_data_dir = |cli_data_dir: &Option<PathBuf>| -> PathBuf {
+        cli_data_dir
+            .clone()
+            .or_else(|| {
+                std::env::var("SWARMLLM_NODE_DATA_DIR")
+                    .ok()
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| {
+                dirs::data_dir()
+                    .unwrap_or_else(|| {
+                        #[cfg(unix)]
+                        {
+                            PathBuf::from("/var/lib/swarmllm")
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            PathBuf::from(".")
+                        }
+                    })
+                    .join("swarmllm")
+            })
+    };
+
     match command {
         Commands::Run { .. } => run_daemon(cli, no_update_check).await,
         Commands::Version => {
@@ -127,29 +169,22 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => {
             let port = cli.port.unwrap_or(8800);
-            let data_dir = cli
-                .data_dir
-                .clone()
-                .or_else(|| {
-                    std::env::var("SWARMLLM_NODE_DATA_DIR")
-                        .ok()
-                        .map(PathBuf::from)
-                })
-                .unwrap_or_else(|| {
-                    dirs::data_dir()
-                        .unwrap_or_else(|| {
-                            #[cfg(unix)]
-                            {
-                                PathBuf::from("/var/lib/swarmllm")
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                PathBuf::from(".")
-                            }
-                        })
-                        .join("swarmllm")
-                });
+            let data_dir = resolve_data_dir(&cli.data_dir);
             query_status(port, &data_dir).await
+        }
+        Commands::Chat {
+            model,
+            max_tokens,
+            temperature,
+        } => {
+            let port = cli.port.unwrap_or(8800);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            run_chat(port, &data_dir, model, max_tokens, temperature).await
+        }
+        Commands::Peers { json } => {
+            let port = cli.port.unwrap_or(8800);
+            let data_dir = resolve_data_dir(&cli.data_dir);
+            query_peers(port, &data_dir, json).await
         }
         Commands::Update { check_only } => run_update_command(check_only).await,
         Commands::TestSplit { max_tokens, prompt } => {
@@ -163,19 +198,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             let port = cli.port.unwrap_or(8800);
-            let data_dir = cli
-                .data_dir
-                .clone()
-                .or_else(|| {
-                    std::env::var("SWARMLLM_NODE_DATA_DIR")
-                        .ok()
-                        .map(PathBuf::from)
-                })
-                .unwrap_or_else(|| {
-                    dirs::data_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join("swarmllm")
-                });
+            let data_dir = resolve_data_dir(&cli.data_dir);
             run_bench(
                 port,
                 &data_dir,
@@ -518,6 +541,190 @@ fn init_tracing(verbose: u8) {
         .with_target(true)
         .with_thread_ids(false)
         .init();
+}
+
+/// Interactive terminal chat with a running SwarmLLM daemon.
+async fn run_chat(
+    port: u16,
+    data_dir: &std::path::Path,
+    model_override: Option<String>,
+    max_tokens: u32,
+    temperature: f32,
+) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    let key_path = data_dir.join("api_key");
+    let api_key = std::fs::read_to_string(&key_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if api_key.is_empty() {
+        anyhow::bail!(
+            "No API key at {} — is the daemon running?",
+            key_path.display()
+        );
+    }
+
+    let base = format!("http://localhost:{port}");
+    let client = reqwest::Client::new();
+
+    // Discover model
+    let model = if let Some(m) = model_override {
+        m
+    } else {
+        let models_resp: serde_json::Value = client
+            .get(format!("{base}/v1/models"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send()
+            .await?
+            .json()
+            .await?;
+        models_resp["data"][0]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No models available — load a model first"))?
+            .to_string()
+    };
+
+    println!("SwarmLLM Chat — model: {model}");
+    println!("Type your message and press Enter. Type 'quit' or Ctrl-D to exit.\n");
+
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let stdin = std::io::stdin();
+
+    loop {
+        print!("You: ");
+        std::io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line)? == 0 {
+            // EOF (Ctrl-D)
+            println!();
+            break;
+        }
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if input == "quit" || input == "exit" {
+            break;
+        }
+
+        messages.push(serde_json::json!({"role": "user", "content": input}));
+
+        let resp: serde_json::Value = client
+            .post(format!("{base}/v1/chat/completions"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&serde_json::json!({
+                "model": &model,
+                "messages": &messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.get("error") {
+            eprintln!("Error: {}", err);
+            // Remove the last user message since it failed
+            messages.pop();
+            continue;
+        }
+
+        let content = resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("(no response)");
+        println!("\nAssistant: {content}\n");
+
+        messages.push(serde_json::json!({"role": "assistant", "content": content}));
+    }
+
+    Ok(())
+}
+
+/// List connected peers from a running SwarmLLM daemon.
+async fn query_peers(
+    port: u16,
+    data_dir: &std::path::Path,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let key_path = data_dir.join("api_key");
+    let api_key = std::fs::read_to_string(&key_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if api_key.is_empty() {
+        eprintln!("Warning: no API key found at {}", key_path.display());
+    }
+
+    let url = format!("http://localhost:{port}/api/admin/peers");
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let body = resp.text().await?;
+            if json_output {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                } else {
+                    println!("{body}");
+                }
+            } else {
+                let peers: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+                if peers.is_empty() {
+                    println!("No connected peers.");
+                } else {
+                    let header = format!(
+                        "{:<18} {:>8} {:>6} {:>7} {}",
+                        "NODE ID", "LATENCY", "TRUST", "STATUS", "MODELS"
+                    );
+                    println!("{header}");
+                    println!("{}", "-".repeat(70));
+                    for p in &peers {
+                        let node_id = p["node_id"].as_str().unwrap_or("?");
+                        let latency = p["latency_ms"]
+                            .as_u64()
+                            .map(|l| format!("{l}ms"))
+                            .unwrap_or_else(|| "—".to_string());
+                        let trust = p["trust_score"]
+                            .as_f64()
+                            .map(|t| format!("{t:.2}"))
+                            .unwrap_or_else(|| "—".to_string());
+                        let healthy = if p["healthy"].as_bool().unwrap_or(false) {
+                            "OK"
+                        } else {
+                            "DOWN"
+                        };
+                        let models: Vec<&str> = p["hosted_models"]
+                            .as_array()
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        let model_str = if models.is_empty() {
+                            "—".to_string()
+                        } else {
+                            models.join(", ")
+                        };
+                        println!(
+                            "{:<18} {:>8} {:>6} {:>7} {}",
+                            node_id, latency, trust, healthy, model_str
+                        );
+                    }
+                    println!("\n{} peer(s) connected.", peers.len());
+                }
+            }
+        }
+        Err(_) => {
+            eprintln!("Error: SwarmLLM daemon is not running on port {port}");
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
 }
 
 /// Run inference benchmarks against a running SwarmLLM daemon.

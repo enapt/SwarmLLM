@@ -586,6 +586,43 @@ impl InferenceRouter {
                 priority = ?request.priority,
                 "DIAG: dispatch_single starting inference"
             );
+
+            // Create escrow for large requests (estimated cost > threshold)
+            let estimated_cost = crate::credit::ledger::RATE_INFERENCE_CONSUME
+                * request.sampling_params.max_tokens as i64;
+            let escrow_id = if shared_state.escrow_manager.needs_escrow(estimated_cost) {
+                match shared_state
+                    .escrow_manager
+                    .create_escrow(
+                        request.id,
+                        estimated_cost,
+                        &request.requester,
+                        &shared_state.credit_balance,
+                    )
+                    .await
+                {
+                    Ok(id) => {
+                        tracing::debug!(
+                            request_id = %request.id,
+                            escrow_id = %id,
+                            amount = estimated_cost,
+                            "Credit escrow created"
+                        );
+                        Some(id)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = %request.id,
+                            error = %e,
+                            "Failed to create escrow — proceeding without"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let output = execute_request(
                 shared_state.clone(),
                 network_tx,
@@ -627,6 +664,32 @@ impl InferenceRouter {
             }
 
             finalize_request(&shared_state, &request, &output).await;
+
+            // Release or refund escrow
+            if let Some(eid) = escrow_id {
+                match &output {
+                    Ok(_) => {
+                        // Release escrow — credits stay deducted (already charged)
+                        if let Err(e) = shared_state
+                            .escrow_manager
+                            .release_escrow(eid, shared_state.identity.node_id())
+                            .await
+                        {
+                            tracing::warn!(escrow_id = %eid, error = %e, "Failed to release escrow");
+                        }
+                    }
+                    Err(_) => {
+                        // Refund escrow — return credits on failure
+                        if let Err(e) = shared_state
+                            .escrow_manager
+                            .refund_escrow(eid, &shared_state.credit_balance)
+                            .await
+                        {
+                            tracing::warn!(escrow_id = %eid, error = %e, "Failed to refund escrow");
+                        }
+                    }
+                }
+            }
 
             // Update multi-turn KV-cache with actual token count so subsequent
             // turns can skip prefill via start_pos

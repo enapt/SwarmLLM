@@ -381,6 +381,11 @@ impl CreditLedger {
         let mut hosting_interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         hosting_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Clean up expired escrows every 5 minutes
+        let mut escrow_cleanup_interval =
+            tokio::time::interval(std::time::Duration::from_secs(300));
+        escrow_cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         loop {
@@ -458,6 +463,18 @@ impl CreditLedger {
                                 shards = shard_count,
                                 credits_earned = total_earned,
                                 "Earned shard hosting credits"
+                            );
+                        }
+                    }
+                }
+                _ = escrow_cleanup_interval.tick() => {
+                    // Clean up expired escrows (refund credits for timed-out requests)
+                    if let Some(ref ss) = self.shared_state {
+                        let cleaned = ss.escrow_manager.cleanup_expired(&self.balance).await;
+                        if cleaned > 0 {
+                            tracing::info!(
+                                cleaned,
+                                "Cleaned up expired escrows"
                             );
                         }
                     }
