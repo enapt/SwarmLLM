@@ -236,6 +236,9 @@ pub struct SharedState {
     /// AllReduce response registry — pipeline executors register here to receive
     /// reduced tensors after the coordinator completes the allreduce.
     pub allreduce_registry: Arc<crate::inference::allreduce::AllReduceRegistry>,
+    /// Cumulative bytes served for shard transfers since last credit tick.
+    /// NetworkManager increments on each chunk served; CreditLedger drains periodically.
+    pub shard_bytes_served: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -632,6 +635,7 @@ impl SharedState {
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
+            shard_bytes_served: AtomicU64::new(0),
             shutdown_tx,
         });
 

@@ -10,7 +10,7 @@ use crate::inference::chat_template;
 use crate::inference::kv_cache::KvCacheManager;
 use crate::inference::pipeline::PipelineExecutor;
 use crate::inference::scheduler::PipelineScheduler;
-use crate::types::{InferenceRequest, NetworkCommand, SwarmMessage};
+use crate::types::{InferenceRequest, NetworkCommand, NodeId, PipelineAssignment, SwarmMessage};
 
 /// Result channel for returning inference output to API callers.
 pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>>;
@@ -1241,6 +1241,16 @@ async fn execute_request(
                     );
                 }
             }
+
+            // Spot-check: probabilistically verify remote peer output
+            spot_check_distributed_result(
+                &shared_state,
+                &request,
+                &assignment_ref,
+                &local_node_id,
+                output,
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(
@@ -1252,6 +1262,119 @@ async fn execute_request(
         }
     }
     result
+}
+
+/// Probabilistic spot-check of distributed inference results.
+///
+/// After a successful distributed inference, randomly selects remote peers
+/// (based on AntiGaming spot-check rate) and validates the output is plausible.
+/// On failure, reduces trust for the offending peer.
+async fn spot_check_distributed_result(
+    shared_state: &Arc<SharedState>,
+    request: &InferenceRequest,
+    assignment: &PipelineAssignment,
+    local_node_id: &NodeId,
+    output: &InferenceOutput,
+) {
+    // Only spot-check if there are remote peers in the pipeline
+    let remote_peers: Vec<NodeId> = assignment
+        .segments
+        .iter()
+        .filter(|s| s.node_id != *local_node_id)
+        .map(|s| s.node_id.clone())
+        .collect();
+    if remote_peers.is_empty() {
+        return;
+    }
+
+    // Ask anti-gaming whether this request should be spot-checked
+    let should_check = {
+        let ag = shared_state.anti_gaming.lock().await;
+        let rate = ag.effective_spot_check_rate(&remote_peers[0]);
+        rand::random::<f64>() < rate
+    };
+
+    if !should_check {
+        return;
+    }
+
+    tracing::info!(
+        request_id = %request.id,
+        remote_peers = remote_peers.len(),
+        "Spot-check: verifying distributed inference result"
+    );
+
+    // Validation 1: Check output is non-empty and reasonable
+    let text = &output.content;
+    if text.is_empty() && output.completion_tokens > 0 {
+        tracing::warn!(
+            request_id = %request.id,
+            "Spot-check FAIL: empty text with non-zero completion_tokens"
+        );
+        for peer in &remote_peers {
+            report_spot_check_failure(shared_state, peer).await;
+        }
+        return;
+    }
+
+    // Validation 2: Check for garbage output (all same char, all whitespace for long outputs)
+    if output.completion_tokens > 10 {
+        let chars: Vec<char> = text.chars().collect();
+        if !chars.is_empty() {
+            let first = chars[0];
+            if chars.iter().all(|&c| c == first) {
+                tracing::warn!(
+                    request_id = %request.id,
+                    repeated_char = ?first,
+                    "Spot-check FAIL: output is all repeated characters"
+                );
+                for peer in &remote_peers {
+                    report_spot_check_failure(shared_state, peer).await;
+                }
+                return;
+            }
+        }
+    }
+
+    // Validation 3: Token count consistency
+    if output.completion_tokens == 0 && !text.is_empty() {
+        tracing::warn!(
+            request_id = %request.id,
+            text_len = text.len(),
+            "Spot-check FAIL: non-empty text but zero completion_tokens"
+        );
+        for peer in &remote_peers {
+            report_spot_check_failure(shared_state, peer).await;
+        }
+        return;
+    }
+
+    tracing::debug!(
+        request_id = %request.id,
+        "Spot-check PASS: output appears valid"
+    );
+}
+
+/// Report a spot-check failure for a peer: reduce trust and log the penalty.
+async fn report_spot_check_failure(shared_state: &Arc<SharedState>, peer: &NodeId) {
+    // Update trust score
+    shared_state.trust_manager.update_trust(
+        &shared_state.peer_registry,
+        peer,
+        crate::credit::trust::TrustEvent::SpotCheckFail,
+    );
+
+    // Report to anti-gaming
+    let penalty = {
+        let mut ag = shared_state.anti_gaming.lock().await;
+        ag.report_spot_check_failure(peer)
+    };
+
+    tracing::warn!(
+        peer = %peer,
+        penalty = ?penalty,
+        "Spot-check failure reported — trust reduced"
+    );
 }
 
 #[cfg(test)]

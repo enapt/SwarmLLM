@@ -197,7 +197,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ### Networking & Security
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
-- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing infrastructure for prompt/response confidentiality, and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. During distributed inference, participating pipeline nodes process activation tensors — see [Security Limitations](docs/book/src/architecture/security.md#known-limitations) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
+- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
 - **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations with real forward pass capture
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
@@ -286,7 +286,7 @@ Key source directories:
 | Forward activations | +credits (per layer processed) | Active |
 | Host model shards | +credits (per GB per hour) | Active |
 | Submit inference request | -credits (per layer per token) | Active |
-| Seed shard data | +credits (per GB transferred) | Defined, not yet wired |
+| Seed shard data | +credits (per GB transferred) | Active |
 
 Credits determine your priority tier:
 
@@ -563,7 +563,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Auto-Update** | Built-in self-update | No | No | No |
 | **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
 
-**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, and pipeline sealing infrastructure is in place for prompt confidentiality. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
+**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, and pipeline sealing ensures output tokens are encrypted for the requester. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
 
 ## Documentation
 

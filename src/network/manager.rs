@@ -393,6 +393,7 @@ impl NetworkManager {
                                     "Tensor forward timed out".to_string(),
                                 )),
                                 activations: vec![],
+                                sealed_token_ids: None,
                             };
                             if let Err(e) = self.dispatch_authenticated(
                                 Some(&target_peer),
@@ -607,6 +608,7 @@ impl NetworkManager {
                             "OutboundFailure: {error}"
                         ))),
                         activations: vec![],
+                        sealed_token_ids: None,
                     };
                     if let Err(e) = self.dispatch_authenticated(
                         Some(&peer),
@@ -1308,14 +1310,27 @@ impl NetworkManager {
                     }),
                 };
 
+                // Track bytes served for seeding credits
+                let bytes_served = match &response {
+                    SwarmResponse::ShardData(ref sr) => sr.data.len() as u64,
+                    _ => 0,
+                };
+
                 // NET-M7: Log send_response errors
                 if self
                     .swarm
                     .behaviour_mut()
                     .request_response
                     .send_response(channel, response)
-                    .is_err()
+                    .is_ok()
                 {
+                    // Only credit bytes if the response was actually sent
+                    if bytes_served > 0 {
+                        self.shared_state
+                            .shard_bytes_served
+                            .fetch_add(bytes_served, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
                     tracing::debug!(%peer, "Failed to send shard data response (channel closed)");
                 }
             }
@@ -1794,6 +1809,7 @@ impl NetworkManager {
                     "Peer not connected".to_string(),
                 )),
                 activations: vec![],
+                sealed_token_ids: None,
             };
             if let Err(e) =
                 self.dispatch_authenticated(Some(&peer_id), SwarmMessage::LayerResult(error_result))

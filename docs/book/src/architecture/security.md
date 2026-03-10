@@ -19,7 +19,7 @@ For inference prompts and responses:
 - Sealed prompt/response
 - Wire tag: `TENSOR_TAG_ENCRYPTED = 0x10`
 
-> **Status**: Cryptographic infrastructure implemented (`src/crypto/pipeline_seal.rs`), not yet wired into the active inference pipeline. Currently, Tier 1 pairwise encryption protects activations in transit between nodes, but participating pipeline nodes can observe activation tensors during processing. See [Known Limitations](#known-limitations).
+> Pipeline sealing is active: the final segment encrypts output token IDs for the requester's X25519 public key. Intermediate nodes process activation tensors (protected by Tier 1 in transit) but never see the final plaintext output. See [Known Limitations](#known-limitations) for activation inference risks.
 
 ### Tier 3: Sealed Gossip (Broadcasts)
 
@@ -114,8 +114,8 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 These are architectural properties that cannot be fully mitigated with code changes:
 
 - **Gossip epoch key is publicly derivable** — derived from "swarmllm-mainnet-v1". Gossip encryption is defense-in-depth; Ed25519 signing is the primary security mechanism.
-- **Prompt inference via intermediate activations** — peers hosting pipeline segments can theoretically reconstruct input from embeddings. Mitigation: first-segment-local scheduling preference.
-- **Byzantine tensor manipulation** — malicious peers can send garbage activations. Mitigation: probabilistic spot-check re-computation, trust scoring.
+- **Prompt inference via intermediate activations** — peers hosting pipeline segments can theoretically reconstruct input from embeddings. Mitigation: first-segment-local scheduling preference, pipeline sealing encrypts output tokens for the requester's X25519 key.
+- **Byzantine tensor manipulation** — malicious peers can send garbage activations. Mitigation: probabilistic spot-check validation (5% rate, 25% for subnet-clustered peers) with trust score reduction on failure.
 - **Sybil credit farming** — Ed25519 keys are free. Anti-gaming heuristics help but are not bulletproof.
 - **GGUF parser vulnerabilities** — llama.cpp CVEs. BLAKE3 content hash gates shard loading but parser bugs remain upstream.
 - **Kademlia eclipse attacks** — strategic Sybil node IDs can control DHT routing. K-bucket eviction policies help.

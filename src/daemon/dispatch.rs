@@ -16,6 +16,61 @@ const MAX_CONCURRENT_FORWARDS: usize = 64;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
+/// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
+/// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
+/// the plaintext `token_ids`. Falls back silently on crypto errors (result sent unsealed).
+fn seal_layer_result(result: &mut crate::types::LayerResult, requester_node_id: Option<&[u8; 32]>) {
+    let requester_bytes = match requester_node_id {
+        Some(b) => b,
+        None => return,
+    };
+    if result.token_ids.is_empty() {
+        return; // Only seal final-segment results that have token IDs
+    }
+    let requester_x25519 = match crate::crypto::session::ed25519_pubkey_to_x25519(requester_bytes) {
+        Some(pk) => pk,
+        None => {
+            tracing::warn!(request_id = %result.request_id, "Pipeline seal: invalid requester pubkey");
+            return;
+        }
+    };
+    // Serialize token IDs to JSON bytes, then seal
+    let token_json = serde_json::to_vec(&result.token_ids).unwrap_or_default();
+    match crate::crypto::pipeline_seal::seal_prompt(
+        result.request_id,
+        &token_json,
+        &requester_x25519,
+    ) {
+        Ok(sealed) => {
+            match serde_json::to_vec(&sealed) {
+                Ok(sealed_bytes) => {
+                    tracing::debug!(
+                        request_id = %result.request_id,
+                        num_tokens = result.token_ids.len(),
+                        "Pipeline seal: sealed token IDs for requester"
+                    );
+                    result.sealed_token_ids = Some(sealed_bytes);
+                    result.token_ids.clear(); // Don't send plaintext
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = %result.request_id,
+                        error = %e,
+                        "Pipeline seal: failed to serialize SealedPrompt"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                request_id = %result.request_id,
+                error = %e,
+                "Pipeline seal: encryption failed — sending unsealed"
+            );
+        }
+    }
+}
+
 /// Track inference participation: increment forwards_served and earn credits (non-blocking).
 /// `max_layers` caps the credited range to the model's actual layer count,
 /// preventing credit inflation from forged layer_range values.
@@ -1358,6 +1413,7 @@ async fn handle_layer_forward(
                         token_ids: vec![token_id],
                         finish_reason: finish,
                         activations: vec![],
+                        sealed_token_ids: None,
                     }
                 }
                 Err(e) => {
@@ -1378,6 +1434,7 @@ async fn handle_layer_forward(
                     token_ids: vec![],
                     finish_reason: None,
                     activations: activation_bytes,
+                    sealed_token_ids: None,
                 },
                 Err(e) => {
                     send_error_result(
@@ -1406,6 +1463,12 @@ async fn handle_layer_forward(
         );
 
         track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
+
+        // Pipeline sealing: encrypt token IDs for requester if this is the final segment
+        let mut result = result;
+        if is_last {
+            seal_layer_result(&mut result, forward.requester_node_id.as_ref());
+        }
 
         if let Err(e) = network_tx
             .send(NetworkCommand::SendTensorResult {
@@ -1588,6 +1651,7 @@ async fn handle_layer_forward(
                     token_ids: vec![token_id],
                     finish_reason: finish,
                     activations: vec![],
+                    sealed_token_ids: None,
                 })
             } else {
                 let activation_bytes =
@@ -1597,6 +1661,7 @@ async fn handle_layer_forward(
                     token_ids: vec![],
                     finish_reason: None,
                     activations: activation_bytes,
+                    sealed_token_ids: None,
                 })
             }
         });
@@ -1622,6 +1687,12 @@ async fn handle_layer_forward(
     );
 
     track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
+
+    // Pipeline sealing: encrypt token IDs for requester if this is the final segment
+    let mut result = result;
+    if is_last {
+        seal_layer_result(&mut result, forward.requester_node_id.as_ref());
+    }
 
     // Send back as a separate request to the originating peer
     if let Err(e) = network_tx
@@ -1798,6 +1869,7 @@ async fn send_error_result(
         token_ids: vec![],
         finish_reason: Some(crate::types::NetworkFinishReason::Error(error.to_string())),
         activations: vec![],
+        sealed_token_ids: None,
     };
     let _ = network_tx
         .send(NetworkCommand::SendTensorResult {

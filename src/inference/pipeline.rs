@@ -1188,6 +1188,54 @@ impl PipelineExecutor {
 
     /// Forward activation data through all pipeline segments in order.
     ///
+    /// Pipeline sealing: unseal a LayerResult if it contains sealed token IDs.
+    /// Recovers the real token_ids from the sealed envelope using this node's X25519 secret.
+    fn unseal_result(&self, mut result: LayerResult) -> LayerResult {
+        if let Some(ref sealed_bytes) = result.sealed_token_ids {
+            match serde_json::from_slice::<crate::types::SealedPrompt>(sealed_bytes) {
+                Ok(sealed) => {
+                    let local_secret = crate::crypto::session::ed25519_to_x25519_secret(
+                        &self.shared_state.identity.signing_key_bytes(),
+                    );
+                    match crate::crypto::pipeline_seal::open_prompt(&sealed, &local_secret) {
+                        Ok(plaintext) => {
+                            // Deserialize token IDs from the decrypted payload
+                            if let Ok(token_ids) = serde_json::from_slice::<Vec<u32>>(&plaintext) {
+                                tracing::debug!(
+                                    request_id = %result.request_id,
+                                    num_tokens = token_ids.len(),
+                                    "Pipeline seal: unsealed token IDs from final segment"
+                                );
+                                result.token_ids = token_ids;
+                                result.sealed_token_ids = None;
+                            } else {
+                                tracing::warn!(
+                                    request_id = %result.request_id,
+                                    "Pipeline seal: failed to deserialize unsealed token IDs"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                request_id = %result.request_id,
+                                error = %e,
+                                "Pipeline seal: failed to unseal result — using plaintext fallback"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = %result.request_id,
+                        error = %e,
+                        "Pipeline seal: failed to parse SealedPrompt from result"
+                    );
+                }
+            }
+        }
+        result
+    }
+
     /// If tensor-parallel groups are available for a segment's layer range,
     /// the executor uses layer-by-layer AllReduce across the TP group instead
     /// of sending the full layer range to a single node.
@@ -1261,6 +1309,7 @@ impl PipelineExecutor {
                         token_ids: vec![token_id],
                         finish_reason: finish,
                         activations: vec![],
+                        sealed_token_ids: None,
                     });
                 } else {
                     // Intermediate segment: strip the 0x00 tag and continue
@@ -1327,6 +1376,9 @@ impl PipelineExecutor {
                     vision_embeddings: vision_for_wire,
                     sender_peer_bytes: None,
                     tp_meta: None,
+                    // Pipeline sealing: attach our node ID so the final segment
+                    // can seal the result tokens for our X25519 key.
+                    requester_node_id: Some(self.shared_state.identity.node_id().0),
                 };
 
                 // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
@@ -1432,6 +1484,8 @@ impl PipelineExecutor {
                                     pipeline_ms = pipeline_start.elapsed().as_millis() as u64,
                                     "DIAG: forward_through_segments completed (last segment remote)"
                                 );
+                                // Pipeline sealing: unseal token IDs if the final node sealed them
+                                let result = self.unseal_result(result);
                                 return Ok(result);
                             }
                             activations = result.activations;
@@ -1700,6 +1754,7 @@ impl PipelineExecutor {
                     token_ids: vec![token_id],
                     finish_reason: finish,
                     activations: vec![],
+                    sealed_token_ids: None,
                 });
             } else {
                 let activation_bytes = split::tensor_to_bytes(&output)?;
@@ -1708,6 +1763,7 @@ impl PipelineExecutor {
                     token_ids: vec![],
                     finish_reason: None,
                     activations: activation_bytes,
+                    sealed_token_ids: None,
                 });
             }
         }
@@ -2078,6 +2134,7 @@ impl PipelineExecutor {
                 token_ids: vec![token_id],
                 finish_reason: finish,
                 activations: vec![],
+                sealed_token_ids: None,
             })
         } else {
             // Intermediate segment: return hidden states for next segment
@@ -2087,6 +2144,7 @@ impl PipelineExecutor {
                 token_ids: vec![],
                 finish_reason: None,
                 activations: activation_bytes,
+                sealed_token_ids: None,
             })
         }
     }
@@ -2259,6 +2317,7 @@ impl PipelineExecutor {
                     tp_meta: None,
                     vision_embeddings: None,
                     sender_peer_bytes: None,
+                    requester_node_id: Some(self.shared_state.identity.node_id().0),
                 };
 
                 let target_peer_bytes = match self

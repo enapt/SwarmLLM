@@ -465,6 +465,34 @@ impl CreditLedger {
                                 "Earned shard hosting credits"
                             );
                         }
+
+                        // Earn credits for seeding (serving shard data to peers)
+                        let bytes_served = ss.shard_bytes_served.swap(
+                            0,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if bytes_served > 0 {
+                            let dummy_shard = ShardId {
+                                model_id: crate::types::ModelId("__seeding__".into()),
+                                index: 0,
+                            };
+                            match self.earn_shard_seeding(&dummy_shard, bytes_served).await {
+                                Ok(earned) if earned > 0 => {
+                                    tracing::info!(
+                                        bytes_served,
+                                        credits_earned = earned,
+                                        "Earned shard seeding credits"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to earn shard seeding credit"
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ = escrow_cleanup_interval.tick() => {

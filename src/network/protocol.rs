@@ -520,6 +520,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         tp_meta: None,
         vision_embeddings: None,
         sender_peer_bytes: None,
+        requester_node_id: None,
     })
 }
 
@@ -671,6 +672,7 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
         token_ids,
         finish_reason,
         activations,
+        sealed_token_ids: None,
     })
 }
 
@@ -834,6 +836,7 @@ pub fn decode_layer_forward_encrypted(
         tp_meta: None,
         vision_embeddings: None,
         sender_peer_bytes: None,
+        requester_node_id: None,
     };
 
     Ok((forward, sealed, aad))
@@ -1031,6 +1034,7 @@ mod tests {
             tp_meta: None,
             vision_embeddings: None,
             sender_peer_bytes: None,
+            requester_node_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1062,6 +1066,7 @@ mod tests {
                 tp_meta: None,
                 vision_embeddings: None,
                 sender_peer_bytes: None,
+                requester_node_id: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1089,6 +1094,7 @@ mod tests {
             tp_meta: None,
             vision_embeddings: None,
             sender_peer_bytes: None,
+            requester_node_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1110,6 +1116,7 @@ mod tests {
             tp_meta: None,
             vision_embeddings: None,
             sender_peer_bytes: None,
+            requester_node_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1136,6 +1143,7 @@ mod tests {
             tp_meta: None,
             vision_embeddings: None,
             sender_peer_bytes: None,
+            requester_node_id: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1151,6 +1159,7 @@ mod tests {
             token_ids: vec![100, 200, 300],
             finish_reason: Some(NetworkFinishReason::Stop),
             activations: vec![],
+            sealed_token_ids: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1171,6 +1180,7 @@ mod tests {
             token_ids: vec![42],
             finish_reason: None,
             activations: vec![],
+            sealed_token_ids: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1185,6 +1195,7 @@ mod tests {
             token_ids: vec![],
             finish_reason: Some(NetworkFinishReason::Error("OOM".to_string())),
             activations: vec![],
+            sealed_token_ids: None,
         };
 
         let encoded = encode_layer_result(&result).unwrap();
@@ -1294,6 +1305,7 @@ mod tests {
             tp_meta: None,
             vision_embeddings: None,
             sender_peer_bytes: None,
+            requester_node_id: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 

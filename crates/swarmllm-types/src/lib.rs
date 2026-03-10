@@ -686,6 +686,11 @@ pub struct LayerForward {
     /// Contains the libp2p PeerId bytes of the sender so we can route the result back.
     #[serde(skip)]
     pub sender_peer_bytes: Option<Vec<u8>>,
+    /// Pipeline sealing: Ed25519 public key of the requesting node (32 bytes).
+    /// Present on distributed pipeline forwards so the final segment can seal
+    /// the result (token IDs) for the requester's X25519 key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_node_id: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -770,6 +775,11 @@ pub struct LayerResult {
     /// Empty for the final segment (which returns token_ids instead).
     #[serde(default)]
     pub activations: Vec<u8>,
+    /// Pipeline sealing: sealed token IDs (SealedPrompt JSON).
+    /// When present, `token_ids` is empty and the requester must unseal this
+    /// with their X25519 secret to recover the real token IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_token_ids: Option<Vec<u8>>,
 }
 
 /// A single token streamed back from the final pipeline node to the originator.
