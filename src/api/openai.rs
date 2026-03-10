@@ -624,6 +624,18 @@ pub async fn chat_completions(
                 "Too many stop sequences (max 16)".into(),
             )));
         }
+        if v.iter().any(|s| s.len() > 256) {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Stop sequence too long (max 256 chars)".into(),
+            )));
+        }
+    }
+    if let Some(crate::api::openai::StopSequence::Single(ref s)) = req.stop {
+        if s.len() > 256 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Stop sequence too long (max 256 chars)".into(),
+            )));
+        }
     }
 
     // Convert API messages to internal format (decode base64 images if present)

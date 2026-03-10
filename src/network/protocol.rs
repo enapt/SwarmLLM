@@ -135,6 +135,8 @@ impl request_response::Codec for SwarmCodec {
         io.read_exact(&mut buf).await?;
 
         match tag_buf[0] {
+            WIRE_TAG_JSON => serde_json::from_slice(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_TENSOR => Ok(SwarmRequest::TensorPayload(buf)),
             WIRE_TAG_TENSOR_COMPRESSED => {
                 let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
@@ -155,8 +157,10 @@ impl request_response::Codec for SwarmCodec {
                 );
                 Ok(SwarmRequest::TensorPayload(decompressed))
             }
-            _ => serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            unknown => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unknown wire tag: 0x{:02x}", unknown),
+            )),
         }
     }
 
@@ -193,6 +197,8 @@ impl request_response::Codec for SwarmCodec {
         tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response done");
 
         match tag_buf[0] {
+            WIRE_TAG_JSON => serde_json::from_slice(&buf)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
             WIRE_TAG_TENSOR_COMPRESSED => {
                 let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
@@ -213,8 +219,10 @@ impl request_response::Codec for SwarmCodec {
                 );
                 Ok(SwarmResponse::TensorPayload(decompressed))
             }
-            _ => serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            unknown => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unknown wire tag: 0x{:02x}", unknown),
+            )),
         }
     }
 

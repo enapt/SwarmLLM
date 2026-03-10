@@ -295,6 +295,20 @@ pub async fn messages(
         )));
     }
 
+    // Validate stop sequences
+    if let Some(ref stops) = req.stop_sequences {
+        if stops.len() > 16 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Too many stop sequences (max 16)".into(),
+            )));
+        }
+        if stops.iter().any(|s| s.len() > 256) {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Stop sequence too long (max 256 chars)".into(),
+            )));
+        }
+    }
+
     // Limit tools array
     if let Some(ref tools) = req.tools {
         if tools.len() > 128 {

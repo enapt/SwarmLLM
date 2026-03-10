@@ -42,27 +42,29 @@ pub async fn handler(
             }
         }
     }
-    // Enforce a global WebSocket connection limit to prevent resource exhaustion.
-    const MAX_WS_CONNECTIONS: usize = 100;
     let shared = state.shared_state.clone();
-    let current = shared
+    ws.on_upgrade(move |socket| handle_socket(socket, shared))
+}
+
+async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
+    // Enforce a global WebSocket connection limit to prevent resource exhaustion.
+    // Incrementing inside handle_socket (not before on_upgrade) prevents counter
+    // leaks when the HTTP upgrade itself fails.
+    const MAX_WS_CONNECTIONS: usize = 100;
+    let current = shared_state
         .ws_connection_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if current >= MAX_WS_CONNECTIONS {
-        shared
+        shared_state
             .ws_connection_count
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
             current = current,
             max = MAX_WS_CONNECTIONS,
-            "WebSocket connection limit reached — rejecting"
+            "WebSocket connection limit reached — dropping"
         );
-        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        return;
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, shared))
-}
-
-async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     tracing::debug!("DIAG: websocket client connected");
     let (mut sender, mut receiver) = socket.split();
 

@@ -346,11 +346,13 @@ pub async fn auth_middleware(
         } else {
             // Non-loopback: verify it's from a known peer IP
             let peer_ip = addr.ip().to_string();
-            let is_known_peer = state
-                .shared_state
-                .peer_registry
-                .iter()
-                .any(|entry| entry.value().addresses.iter().any(|a| a.contains(&peer_ip)));
+            let is_known_peer = state.shared_state.peer_registry.iter().any(|entry| {
+                entry.value().addresses.iter().any(|a| {
+                    // Extract IP from multiaddr format: /ip4/<ip>/... or /ip6/<ip>/...
+                    let parts: Vec<&str> = a.split('/').collect();
+                    parts.len() >= 3 && parts[2] == peer_ip
+                })
+            });
             if is_known_peer {
                 return next.run(req).await;
             }

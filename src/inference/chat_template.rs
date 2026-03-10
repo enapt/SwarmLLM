@@ -573,7 +573,26 @@ fn split_filter(expr: &str) -> Option<(&str, &str)> {
 fn apply_filter(val: &str, filter: &str) -> String {
     match filter {
         "trim" => val.trim().to_string(),
-        "tojson" => format!("\"{}\"", val.replace('\\', "\\\\").replace('"', "\\\"")),
+        "tojson" => {
+            use std::fmt::Write;
+            let mut out = String::with_capacity(val.len() + 2);
+            out.push('"');
+            for c in val.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => {
+                        write!(out, "\\u{:04x}", c as u32).unwrap();
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
         "upper" => val.to_uppercase(),
         "lower" => val.to_lowercase(),
         _ => val.to_string(),

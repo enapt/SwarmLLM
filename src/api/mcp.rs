@@ -394,6 +394,9 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: model");
         }
     };
+    if model.len() > 256 {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "Model name too long");
+    }
 
     let messages = match args.get("messages").and_then(|v| v.as_array()) {
         Some(msgs) => msgs.clone(),
@@ -401,15 +404,20 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: messages");
         }
     };
+    if messages.len() > 4096 {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "Too many messages (max 4096)");
+    }
 
     let temperature = args
         .get("temperature")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.7) as f32;
+        .unwrap_or(0.7)
+        .clamp(0.0, 2.0) as f32;
     let max_tokens = args
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(512) as u32;
+        .unwrap_or(512)
+        .min(32768) as u32;
 
     let chat_messages: Vec<crate::types::ChatMessage> = messages
         .iter()
@@ -576,11 +584,13 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
     let temperature = args
         .get("temperature")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.7) as f32;
+        .unwrap_or(0.7)
+        .clamp(0.0, 2.0) as f32;
     let max_tokens = args
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1024) as u32;
+        .unwrap_or(1024)
+        .min(32768) as u32;
 
     // Build the Anthropic Messages API request body for each model
     let mut messages = Vec::new();
@@ -721,11 +731,16 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         }
     };
 
-    let max_models = args.get("max_models").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let max_models = args
+        .get("max_models")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5)
+        .min(20) as usize;
     let max_tokens = args
         .get("max_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(2048) as u32;
+        .unwrap_or(2048)
+        .min(32768) as u32;
     let system = args
         .get("system")
         .and_then(|v| v.as_str())
@@ -950,11 +965,13 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
         let max_tokens = task
             .get("max_tokens")
             .and_then(|v| v.as_u64())
-            .unwrap_or(1024) as u32;
+            .unwrap_or(1024)
+            .min(32768) as u32;
         let temperature = task
             .get("temperature")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.7) as f32;
+            .unwrap_or(0.7)
+            .clamp(0.0, 2.0) as f32;
 
         let url = format!("{base}/v1/messages");
         let client = client.clone();

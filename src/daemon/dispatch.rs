@@ -17,11 +17,18 @@ const MAX_CONCURRENT_FORWARDS: usize = 64;
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
 /// Track inference participation: increment forwards_served and earn credits (non-blocking).
-fn track_forward_participation(shared_state: &SharedState, layer_start: usize, layer_end: usize) {
+/// `max_layers` caps the credited range to the model's actual layer count,
+/// preventing credit inflation from forged layer_range values.
+fn track_forward_participation(
+    shared_state: &SharedState,
+    layer_start: usize,
+    layer_end: usize,
+    max_layers: usize,
+) {
     if let Ok(mut stats) = shared_state.node_stats.try_write() {
         stats.forwards_served += 1;
     }
-    let layers_processed = (layer_end.saturating_sub(layer_start)) as i64;
+    let layers_processed = (layer_end.saturating_sub(layer_start)).min(max_layers) as i64;
     let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
     if let Ok(mut bal) = shared_state.credit_balance.try_write() {
         // SEC-I1: saturating arithmetic to prevent overflow (matches apply_credit_direct)
@@ -132,14 +139,17 @@ pub(crate) async fn dispatch_network_messages(
                                     has_sender = forward.sender_peer_bytes.is_some(),
                                     "DIAG: dispatcher received LayerForward, spawning handler"
                                 );
+                                let permit = match forward_semaphore.clone().try_acquire_owned() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        tracing::warn!("LayerForward rejected — forward semaphore full");
+                                        continue;
+                                    }
+                                };
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
-                                let sem = forward_semaphore.clone();
                                 tokio::spawn(async move {
-                                    let _permit = match sem.acquire().await {
-                                        Ok(p) => p,
-                                        Err(_) => return, // semaphore closed
-                                    };
+                                    let _permit = permit;
                                     handle_layer_forward(ss, ntx, forward).await;
                                 });
                             }
@@ -171,7 +181,7 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // T13: VisionEncodeRequest — encode image using local mmproj
                             SwarmMessage::VisionEncodeRequest(req) => {
-                                // SEC: Only accept from known peers
+                                // SEC: Only accept from known, authenticated peers
                                 if let Some(ref sender) = authenticated_sender {
                                     if !shared_state.peer_registry.contains_key(sender) {
                                         tracing::warn!(
@@ -180,10 +190,21 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::warn!("VisionEncodeRequest without authenticated sender — dropping");
+                                    continue;
                                 }
+                                let permit = match forward_semaphore.clone().try_acquire_owned() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        tracing::warn!("VisionEncodeRequest rejected — forward semaphore full");
+                                        continue;
+                                    }
+                                };
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
                                 tokio::spawn(async move {
+                                    let _permit = permit;
                                     handle_vision_encode_request(ss, ntx, req).await;
                                 });
                             }
@@ -239,6 +260,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated CreditGossip");
+                                    continue;
                                 }
                                 crate::credit::ledger::process_balance_gossip(
                                     &credit_peer_balances,
@@ -256,6 +280,10 @@ pub(crate) async fn dispatch_network_messages(
                                 }
                             }
                             SwarmMessage::ModelVote(vote) => {
+                                if authenticated_sender.is_none() {
+                                    tracing::warn!("ModelVote without authenticated sender — dropping");
+                                    continue;
+                                }
                                 tracing::info!(
                                     voter = %vote.voter,
                                     manifest_hash = hex::encode(&vote.model_manifest_hash[..8]),
@@ -300,6 +328,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated CreditTransaction");
+                                    continue;
                                 }
                                 // SEC-C3: Reject duplicate transactions (UUID replay check)
                                 if let Ok(Some(_)) = shared_state.db.get_json::<crate::types::CreditTransaction>(
@@ -390,6 +421,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated ShardAnnounce");
+                                    continue;
                                 }
                                 tracing::info!(
                                     node_id = %announce.node_id,
@@ -420,6 +454,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated ModelManifest");
+                                    continue;
                                 }
                                 tracing::info!(
                                     model = %manifest.id,
@@ -462,6 +499,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated NodeCapabilityUpdate");
+                                    continue;
                                 }
                                 tracing::debug!(
                                     node_id = %cap.node_id,
@@ -487,6 +527,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated NicknameGossip");
+                                    continue;
                                 }
                                 // Age check: reject messages older than 24 hours
                                 let age = chrono::Utc::now() - record.timestamp;
@@ -543,6 +586,10 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Route pool messages to the PoolManager
                             SwarmMessage::PoolMessage(pool_msg) => {
+                                if authenticated_sender.is_none() {
+                                    tracing::warn!("PoolMessage without authenticated sender — dropping");
+                                    continue;
+                                }
                                 if let Some(ref tx) = *shared_state.pool_tx.read().await {
                                     let cmd = match pool_msg {
                                         crate::types::PoolMessage::Invitation(inv) => {
@@ -602,6 +649,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated HfSourceGossip");
+                                    continue;
                                 }
                                 // SEC: Length limits on untrusted strings
                                 if gossip.repo_id.len() > 256 || gossip.filename.len() > 256 {
@@ -644,6 +694,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated ShardDownloadProgress");
+                                    continue;
                                 }
                                 // Update peer download state in shared state
                                 let local_nid = shared_state.identity.node_id();
@@ -691,6 +744,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated HealthPing");
+                                    continue;
                                 }
                                 // Update the sender's active request count in peer_registry
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
@@ -722,6 +778,9 @@ pub(crate) async fn dispatch_network_messages(
                                     if sender != &sender_id {
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated HealthPong");
+                                    continue;
                                 }
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&sender_id) {
                                     peer.active_request_count = active_request_count;
@@ -744,6 +803,9 @@ pub(crate) async fn dispatch_network_messages(
                                         );
                                         continue;
                                     }
+                                } else {
+                                    tracing::debug!("Dropping unauthenticated EphemeralKeyExchange");
+                                    continue;
                                 }
                                 let sm = shared_state.session_manager.clone();
                                 let our_id = shared_state.identity.node_id().clone();
@@ -1290,7 +1352,7 @@ async fn handle_layer_forward(
             "DIAG: LayerForward processed via batch forwarder"
         );
 
-        track_forward_participation(&shared_state, layer_start, layer_end);
+        track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
 
         if let Err(e) = network_tx
             .send(NetworkCommand::SendTensorResult {
@@ -1506,7 +1568,7 @@ async fn handle_layer_forward(
         "DIAG: LayerForward processed, sending result back"
     );
 
-    track_forward_participation(&shared_state, layer_start, layer_end);
+    track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
 
     // Send back as a separate request to the originating peer
     if let Err(e) = network_tx
