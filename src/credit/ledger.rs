@@ -21,8 +21,8 @@ pub const RATE_INFERENCE_CONSUME: i64 = 10; // per layer per token (cost) — ba
 pub const PENALTY_SERVE_FAILURE: i64 = 50; // per incident
 
 /// Database tree name for credit data.
-const TREE_CREDITS: &str = "credits";
-const KEY_BALANCE: &str = "balance";
+pub const TREE_CREDITS: &str = "credits";
+pub const KEY_BALANCE: &str = "balance";
 /// Tree name for credit transaction history (spec: `credit_txns`).
 pub const TREE_TRANSACTIONS: &str = "credit_txns";
 

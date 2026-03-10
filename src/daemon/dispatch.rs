@@ -24,9 +24,16 @@ fn track_forward_participation(shared_state: &SharedState, layer_start: usize, l
     let layers_processed = (layer_end.saturating_sub(layer_start)) as i64;
     let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
     if let Ok(mut bal) = shared_state.credit_balance.try_write() {
-        bal.balance += earned;
-        bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned as u64);
+        // SEC-I1: saturating arithmetic to prevent overflow (matches apply_credit_direct)
+        bal.balance = bal.balance.saturating_add(earned);
+        bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned.unsigned_abs());
         bal.last_updated = chrono::Utc::now();
+        // Persist updated balance to redb so credits survive daemon restart
+        let _ = shared_state.db.put_json(
+            crate::credit::ledger::TREE_CREDITS,
+            crate::credit::ledger::KEY_BALANCE,
+            &*bal,
+        );
     }
 }
 

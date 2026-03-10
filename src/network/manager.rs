@@ -643,12 +643,15 @@ impl NetworkManager {
                     ..
                 },
             )) => {
+                // Note: pending_tensor_channels is keyed by Uuid (from the parsed
+                // message), not InboundRequestId — we can't directly remove the entry
+                // here. The stale timeout cleanup (every 30s) handles orphaned channels.
                 tracing::warn!(
                     %peer,
                     ?request_id,
                     %error,
                     pending_channels = self.pending_tensor_channels.len(),
-                    "DIAG: InboundFailure — response send may have failed"
+                    "DIAG: InboundFailure — response send may have failed, stale cleanup will reclaim"
                 );
             }
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RequestResponse(
@@ -1088,11 +1091,24 @@ impl NetworkManager {
                         }
                     }
 
+                    // NET-I3: Clean up peer_shard_downloads for disconnected peer.
+                    // Entries for peers that disconnect mid-download would otherwise
+                    // be orphaned permanently, accumulating stale data.
+                    let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
+                    if let Some(ref nid) = node_id_for_cleanup {
+                        self.shared_state
+                            .peer_shard_downloads
+                            .retain(|_shard_id, peers| {
+                                peers.retain(|(n, _)| n != nid);
+                                !peers.is_empty()
+                            });
+                    }
+
                     // NET-I2: Remove peer from registry, but skip if in active pipelines.
                     // Clone the NodeId and drop the DashMap Ref BEFORE calling remove(),
                     // otherwise get() holds a read lock and remove() needs a write lock
                     // on the same shard → synchronous deadlock that freezes the event loop.
-                    let node_id_opt = self.peer_to_node.get(&peer_id).map(|r| r.clone());
+                    let node_id_opt = node_id_for_cleanup;
                     if let Some(node_id) = node_id_opt {
                         let in_active_pipeline =
                             self.shared_state.active_pipelines.iter().any(|entry| {

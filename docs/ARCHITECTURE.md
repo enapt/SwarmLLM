@@ -834,7 +834,9 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `POST /v1/messages` — Anthropic Messages API (full Claude Code compatibility — tools, tool_choice, thinking, cache_control, metadata)
 - `POST /v1/embeddings` — Text embeddings
 - `GET  /v1/models` — List available models
+- `GET  /v1/providers` — List configured cloud providers and their available models
 - `GET  /v1/status` — SwarmLLM node status
+- `POST /v1/internal/hidden-states` — Extract hidden states from model layers (gated by `api.expose_hidden_states` config)
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
@@ -873,7 +875,6 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
 - `GET     /api/admin/ws` — WebSocket for live updates
-- `GET     /api/admin/models/:id/gguf-meta` — GGUF metadata browser (context length, quantization, layers)
 - `GET     /api/admin/download-queue` — Download queue with priorities and progress
 
 ### HuggingFace Integration
@@ -881,6 +882,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
 - `POST /api/admin/hf/download` — Download full GGUF model
 - `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution)
+- `GET  /api/admin/hf/source/:model_id` — Lookup HuggingFace source info for a model
 
 ### Identity API
 - `GET/PUT/DELETE /api/identity/nickname` — Manage local nickname
@@ -906,11 +908,23 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `POST   /api/admin/config/reload` — Hot-reload operational config parameters
 - `POST   /api/admin/downloads/:model_id/cancel` — Cancel in-progress HF download
 - `DELETE /api/admin/models/:model_id` — Remove model (shards + manifest + state)
+- `POST   /api/admin/models/:id/unload` — Unload model from VRAM (keep shards on disk)
 - `DELETE /api/admin/models/:id/shards/:index` — Delete a single shard
 - `GET/PUT /api/admin/models/:id/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
 - `PUT    /api/admin/models/:id/shards/:index/lock` — Lock/unlock a shard (prevent auto-pruning)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events
+- `GET/POST /api/admin/adapters` — List/register LoRA adapters
+- `DELETE /api/admin/adapters/:id` — Delete a LoRA adapter
+- `GET/PUT /api/admin/providers` — View/configure cloud provider API keys
+- `GET    /api/admin/provider-models` — List models available from cloud providers
+- `GET    /api/admin/provider-health` — Probe cloud provider availability
+- `POST   /api/admin/provider-model-status` — Check specific model availability on provider
+- `GET    /api/admin/version` — Version info (binary version, git hash, build features)
+- `POST   /api/admin/update/check` — Check for new SwarmLLM releases
+- `POST   /api/admin/update/apply` — Download and apply update
+- `GET    /api/admin/network-map` — Network topology heatmap data
+- `GET    /api/admin/models/:id/metadata` — GGUF metadata (context length, quantization, layers)
 - `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
 - `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 

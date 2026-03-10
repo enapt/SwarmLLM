@@ -43,6 +43,12 @@ Every configuration option, organized by section.
 | `auto_relay` | boolean | `true` | Auto-use relay when NAT detected |
 | `relay_max_circuit_duration_secs` | integer | `3600` | Max relay circuit duration |
 | `relay_max_circuits` | integer | `16` | Max relay circuits to serve |
+| `enable_encryption` | boolean | `true` | E2E encryption for tensor forwards and control messages |
+| `enable_autonat` | boolean | `true` | NAT detection. Disable on WSL2 to reduce noise |
+| `enable_dcutr` | boolean | `true` | Hole punching. Disable on WSL2 to reduce noise |
+| `tensor_compression` | boolean | `true` | Zstd compression for tensor payloads |
+| `tensor_compress_level` | integer | `1` | Zstd compression level (1-22, 1 = fastest) |
+| `tensor_compress_threshold` | integer | `1024` | Min payload bytes before compression |
 
 ## `[inference]` — AI Model Inference
 
@@ -61,6 +67,7 @@ Every configuration option, organized by section.
 | `draft_model_path` | path | none | Path to draft model |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
 | `chunked_prefill_size` | integer | `512` | Chunk size for long-prompt prefill. `0` = disable |
+| `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups |
 
 ## `[logging]` — Log Output
 
@@ -82,6 +89,9 @@ Every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api_key` | string | none | Bearer token. Empty = auto-generated |
+| `expose_hidden_states` | boolean | `false` | Enable `/v1/internal/hidden-states` endpoint for research |
+| `rate_limit_rpm` | integer | `60` | Rate limit for `/v1/` endpoints (requests/min) |
+| `rate_limit_admin_rpm` | integer | `200` | Rate limit for `/api/admin/` endpoints (requests/min) |
 
 ## `[model]` — Model Storage
 

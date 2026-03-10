@@ -384,6 +384,9 @@ fn build_tensor_meta_from_content(
     let head_count = md_get("attention.head_count")?
         .to_u32()
         .map_err(|e| e.to_string())? as usize;
+    if head_count == 0 {
+        return Err("attention.head_count is zero".into());
+    }
     let head_count_kv = md_get("attention.head_count_kv")?
         .to_u32()
         .map_err(|e| e.to_string())? as usize;

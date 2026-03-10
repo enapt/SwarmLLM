@@ -572,6 +572,11 @@ impl GgufTensorMeta {
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
             as usize;
+        if head_count == 0 {
+            return Err(SwarmError::Inference(
+                "GGUF metadata error: attention.head_count is zero".into(),
+            ));
+        }
         let head_count_kv = md_get("attention.head_count_kv")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(format!("Bad metadata: {e}")))?
@@ -1095,6 +1100,11 @@ impl SplitModel {
         let head_count = md_get("attention.head_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
+        if head_count == 0 {
+            return Err(SwarmError::Inference(
+                "GGUF metadata error: attention.head_count is zero".into(),
+            ));
+        }
         let head_count_kv = md_get("attention.head_count_kv")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
@@ -2829,6 +2839,11 @@ impl SplitModel {
         let head_count = md_get("attention.head_count")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
+        if head_count == 0 {
+            return Err(SwarmError::Inference(
+                "GGUF metadata error: attention.head_count is zero".into(),
+            ));
+        }
         let head_count_kv = md_get("attention.head_count_kv")?
             .to_u32()
             .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;

@@ -773,7 +773,11 @@ pub async fn chat_completions(
         // Cloud provider fast-path: if the model matches a configured cloud provider,
         // route immediately without cold-start waiting. Cloud models are never local.
         {
-            let body = serde_json::to_value(&req).unwrap_or_default();
+            let body = serde_json::to_value(&req).map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "serialize request: {e}"
+                )))
+            })?;
             if let Some(response) =
                 crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
             {
@@ -845,7 +849,11 @@ pub async fn chat_completions(
         }
 
         // Cloud provider fallback: proxy to configured cloud provider if model matches
-        let body = serde_json::to_value(&req).unwrap_or_default();
+        let body = serde_json::to_value(&req).map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "serialize request: {e}"
+            )))
+        })?;
         if let Some(response) =
             crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
         {

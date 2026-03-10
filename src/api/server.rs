@@ -318,11 +318,16 @@ pub async fn run_server_with_state(
     // Periodically clean up stale rate-limiter entries to prevent memory exhaustion
     // from unique IPs accumulating over time (DashMap never shrinks otherwise).
     let cleanup_limiter = state.rate_limiter.clone();
+    let mut cleanup_shutdown = state.shared_state.shutdown_rx();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
-            interval.tick().await;
-            cleanup_limiter.cleanup(std::time::Duration::from_secs(600));
+            tokio::select! {
+                _ = interval.tick() => {
+                    cleanup_limiter.cleanup(std::time::Duration::from_secs(600));
+                }
+                _ = cleanup_shutdown.changed() => break,
+            }
         }
     });
 
