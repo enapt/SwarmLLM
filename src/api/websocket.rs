@@ -21,25 +21,24 @@ pub async fn handler(
     headers: axum::http::HeaderMap,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    // Validate Origin header for non-loopback connections to prevent CSWSH attacks.
-    // Browsers always send Origin on WebSocket upgrades — a missing Origin from a
-    // non-loopback IP likely means a non-browser client, which must use the API key.
-    if !addr.ip().is_loopback() {
-        if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
-            let origin_str = origin.to_str().unwrap_or("");
-            let port = state.config.node.listen_port;
-            let allowed = [
-                format!("http://localhost:{port}"),
-                format!("http://127.0.0.1:{port}"),
-            ];
-            if !allowed.iter().any(|a| a == origin_str) {
-                tracing::warn!(
-                    origin = %origin_str,
-                    remote = %addr,
-                    "WebSocket connection rejected: origin not allowed"
-                );
-                return axum::http::StatusCode::FORBIDDEN.into_response();
-            }
+    // Validate Origin header for ALL connections (including loopback) to prevent
+    // DNS rebinding attacks where a malicious page rebinds to 127.0.0.1 and opens
+    // a WebSocket to exfiltrate dashboard data.
+    // Missing Origin is allowed (non-browser clients like CLIs don't send it).
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+        let origin_str = origin.to_str().unwrap_or("");
+        let port = state.config.node.listen_port;
+        let allowed = [
+            format!("http://localhost:{port}"),
+            format!("http://127.0.0.1:{port}"),
+        ];
+        if !allowed.iter().any(|a| a == origin_str) {
+            tracing::warn!(
+                origin = %origin_str,
+                remote = %addr,
+                "WebSocket connection rejected: origin not allowed"
+            );
+            return axum::http::StatusCode::FORBIDDEN.into_response();
         }
     }
     let shared = state.shared_state.clone();

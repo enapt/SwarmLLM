@@ -752,7 +752,9 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     } else {
-        // Auto-select: local models first, then cloud providers
+        // Auto-select: local models only when no explicit models specified.
+        // SEC: Do NOT auto-discover cloud providers — prevents unintended cost drain
+        // from MCP clients triggering paid API calls without explicit model selection.
         let mut auto_models = Vec::new();
         if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
             let slug = info
@@ -762,11 +764,15 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                 .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
             auto_models.push(slug);
         }
-        for entry in state.shared_state.provider_model_map.iter() {
+        // Only add network-available models (not cloud providers)
+        for entry in state.shared_state.split_models.iter() {
             if auto_models.len() >= max_models {
                 break;
             }
-            auto_models.push(entry.key().clone());
+            let model_id = &entry.key().0;
+            if !auto_models.iter().any(|m| m == &model_id.0) {
+                auto_models.push(model_id.0.clone());
+            }
         }
         auto_models
     };

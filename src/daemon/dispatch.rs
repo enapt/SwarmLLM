@@ -74,11 +74,16 @@ pub(crate) async fn dispatch_network_messages(
                         match msg {
                             // LayerResult: route to pending pipeline executor via oneshot channel
                             SwarmMessage::LayerResult(ref result) => {
-                                if let Some(ref sender) = authenticated_sender {
-                                    if !shared_state.peer_registry.contains_key(sender) {
-                                        tracing::warn!(sender = %sender, "LayerResult from unknown peer — dropping");
+                                let sender = match authenticated_sender {
+                                    Some(ref s) => s,
+                                    None => {
+                                        tracing::warn!("LayerResult from unauthenticated peer — dropping");
                                         continue;
                                     }
+                                };
+                                if !shared_state.peer_registry.contains_key(sender) {
+                                    tracing::warn!(sender = %sender, "LayerResult from unknown peer — dropping");
+                                    continue;
                                 }
                                 tracing::info!(
                                     request_id = %result.request_id,
@@ -244,6 +249,16 @@ pub(crate) async fn dispatch_network_messages(
                             msg @ SwarmMessage::InferenceRequest(_)
                             | msg @ SwarmMessage::PipelineAssignment(_)
                             | msg @ SwarmMessage::InferenceError(_) => {
+                                // SEC: Require authenticated sender for all inference control messages
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "Inference message from unknown peer — dropping");
+                                        continue;
+                                    }
+                                } else {
+                                    tracing::warn!("Inference message without authenticated sender — dropping");
+                                    continue;
+                                }
                                 if let Err(e) = router_tx
                                     .send(RouterCommand::NetworkMessage(msg))
                                     .await
@@ -591,8 +606,26 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Route pool messages to the PoolManager
                             SwarmMessage::PoolMessage(pool_msg) => {
-                                if authenticated_sender.is_none() {
-                                    tracing::warn!("PoolMessage without authenticated sender — dropping");
+                                let sender = match authenticated_sender {
+                                    Some(ref s) => s,
+                                    None => {
+                                        tracing::warn!("PoolMessage without authenticated sender — dropping");
+                                        continue;
+                                    }
+                                };
+                                // SEC: Verify inner identity matches authenticated sender
+                                // to prevent spoofing pool messages from other nodes
+                                let inner_ok = match &pool_msg {
+                                    crate::types::PoolMessage::CreditForward(fwd) => fwd.from_node_id == *sender,
+                                    crate::types::PoolMessage::MemberLeft { node_id, .. } => node_id == sender,
+                                    // Invitation/Acceptance/Removal are verified by crypto sigs in pool manager
+                                    _ => true,
+                                };
+                                if !inner_ok {
+                                    tracing::warn!(
+                                        sender = %sender,
+                                        "PoolMessage inner identity mismatch — dropping"
+                                    );
                                     continue;
                                 }
                                 if let Some(ref tx) = *shared_state.pool_tx.read().await {
@@ -876,6 +909,15 @@ pub(crate) async fn dispatch_network_messages(
                                 // (embedded by NetworkManager when receiving the rr request)
                                 let sender_peer = req.sender_peer_bytes.clone();
 
+                                // SEC: Cap pending_tp_partials to prevent OOM from AllReduce flooding
+                                const MAX_PENDING_TP_PARTIALS: usize = 512;
+                                if !ss.pending_tp_partials.contains_key(&key)
+                                    && ss.pending_tp_partials.len() >= MAX_PENDING_TP_PARTIALS
+                                {
+                                    tracing::warn!("pending_tp_partials full ({MAX_PENDING_TP_PARTIALS}) — dropping TpAllReduceRequest");
+                                    continue;
+                                }
+
                                 let all_arrived = {
                                     let mut entry = ss.pending_tp_partials
                                         .entry(key)
@@ -917,9 +959,15 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Tensor-parallel AllReduce response: deliver to waiting pipeline
                             SwarmMessage::TpAllReduceResponse(resp) => {
-                                if let Some(ref sender) = authenticated_sender {
-                                    if !shared_state.peer_registry.contains_key(sender) {
-                                        tracing::warn!(sender = %sender, "TpAllReduceResponse from unknown peer — dropping");
+                                match authenticated_sender {
+                                    Some(ref sender) => {
+                                        if !shared_state.peer_registry.contains_key(sender) {
+                                            tracing::warn!(sender = %sender, "TpAllReduceResponse from unknown peer — dropping");
+                                            continue;
+                                        }
+                                    }
+                                    None => {
+                                        tracing::warn!("TpAllReduceResponse from unauthenticated peer — dropping");
                                         continue;
                                     }
                                 }
@@ -1642,6 +1690,18 @@ async fn handle_vision_encode_request(
             }
         }
     };
+
+    // SEC: Reject oversized image payloads before decode to prevent OOM
+    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
+    if req.image_data.len() > MAX_IMAGE_BYTES {
+        tracing::warn!(
+            request_id = %req.request_id,
+            size = req.image_data.len(),
+            max = MAX_IMAGE_BYTES,
+            "VisionEncodeRequest image_data too large — rejecting"
+        );
+        return;
+    }
 
     // Decode JPEG image into ImageData
     let img = match image::load_from_memory(&req.image_data) {

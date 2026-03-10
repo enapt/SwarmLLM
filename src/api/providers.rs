@@ -378,8 +378,9 @@ pub async fn proxy_openai_compatible(
         let raw_body = resp.text().await.unwrap_or_default();
         let scrubbed_body = crate::crypto::scrub_api_keys(&raw_body);
         tracing::warn!(status = %status, body = %scrubbed_body, "Provider returned error");
-        // Try to extract a human-readable message from the provider's JSON error
-        let friendly = serde_json::from_str::<serde_json::Value>(&raw_body)
+        // SEC: Extract friendly message from scrubbed body (not raw) to prevent
+        // leaking API keys or internal details from upstream provider errors.
+        let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed_body)
             .ok()
             .and_then(|v| {
                 v.get("detail")
@@ -387,7 +388,7 @@ pub async fn proxy_openai_compatible(
                     .or_else(|| v.get("message"))
                     .and_then(|m| m.as_str().map(|s| s.to_string()))
             })
-            .unwrap_or(raw_body);
+            .unwrap_or(scrubbed_body);
         // Truncate to prevent leaking large error bodies from upstream providers
         let friendly = if friendly.len() > 500 {
             format!("{}...", &friendly[..500])

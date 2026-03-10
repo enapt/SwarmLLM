@@ -615,6 +615,40 @@ pub async fn chat_completions(
                 "Too many tools (max 128)".into(),
             )));
         }
+        // SEC: Limit individual tool field sizes to prevent OOM via format_tool_system_prompt
+        for t in tools {
+            if t.function.name.len() > 256 {
+                return Err(ApiError(crate::error::SwarmError::Validation(
+                    "Tool function name too long (max 256 chars)".into(),
+                )));
+            }
+            if t.function.description.as_deref().unwrap_or("").len() > 4096 {
+                return Err(ApiError(crate::error::SwarmError::Validation(
+                    "Tool function description too long (max 4096 chars)".into(),
+                )));
+            }
+            if let Some(ref params) = t.function.parameters {
+                if params.to_string().len() > 65536 {
+                    return Err(ApiError(crate::error::SwarmError::Validation(
+                        "Tool parameters JSON too large (max 64KB)".into(),
+                    )));
+                }
+            }
+        }
+    }
+
+    // Validate lora_adapter to prevent path traversal and DashMap memory abuse
+    if let Some(ref adapter) = req.lora_adapter {
+        if adapter.len() > 256 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "lora_adapter name too long (max 256 chars)".into(),
+            )));
+        }
+        if adapter.contains("..") || adapter.contains('/') || adapter.contains('\\') {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "lora_adapter contains invalid characters".into(),
+            )));
+        }
     }
 
     // Limit stop sequences to prevent excessive tokenization overhead
@@ -1274,6 +1308,13 @@ async fn forward_to_peer(
     if !peer_resp.status().is_success() {
         let status = peer_resp.status();
         let body = peer_resp.text().await.unwrap_or_default();
+        let body = crate::crypto::scrub_api_keys(&body);
+        // Truncate to prevent large peer error bodies from being forwarded
+        let body = if body.len() > 500 {
+            format!("{}...", &body[..500])
+        } else {
+            body
+        };
         tracing::warn!(status = %status, body = %body, "Peer returned error");
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),

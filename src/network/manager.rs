@@ -1124,7 +1124,11 @@ impl NetworkManager {
                             });
                         // Clear encryption session on full disconnect to
                         // prevent epoch desync after reconnection.
-                        self.shared_state.session_manager.remove_session(&node_id);
+                        // Only remove if no new connection has been established
+                        // (prevents race where reconnect arrives before close is processed).
+                        if !self.swarm.is_connected(&peer_id) {
+                            self.shared_state.session_manager.remove_session(&node_id);
+                        }
 
                         if !in_active_pipeline {
                             self.shared_state.peer_registry.remove(&node_id);
@@ -1254,6 +1258,33 @@ impl NetworkManager {
                 }
             }
             SwarmRequest::ShardTransfer(shard_req) => {
+                // SEC: Only serve shards to peers in our peer_registry (authenticated + known).
+                // Without this, any node that completes a Noise handshake can exfiltrate shards.
+                let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                if let Some(ref nid) = peer_node_id {
+                    if !self.shared_state.peer_registry.contains_key(nid) {
+                        tracing::warn!(%peer, "Shard transfer from unknown peer — rejecting");
+                        let _ = self.swarm.behaviour_mut().request_response.send_response(
+                            channel,
+                            SwarmResponse::ShardData(crate::types::ShardResponse {
+                                data: vec![],
+                                total_size: 0,
+                            }),
+                        );
+                        return;
+                    }
+                } else {
+                    tracing::warn!(%peer, "Shard transfer from unmapped peer — rejecting");
+                    let _ = self.swarm.behaviour_mut().request_response.send_response(
+                        channel,
+                        SwarmResponse::ShardData(crate::types::ShardResponse {
+                            data: vec![],
+                            total_size: 0,
+                        }),
+                    );
+                    return;
+                }
+
                 tracing::info!(
                     %peer,
                     model = %shard_req.shard_id.model_id,
@@ -1297,13 +1328,20 @@ impl NetworkManager {
                 if let Some(request_id) = self.handle_tensor_payload(peer, &payload) {
                     // Store the ResponseChannel so we can send the computed result as
                     // the actual response (single substream per token, no separate request).
-                    self.pending_tensor_channels.insert(request_id, channel);
-                    tracing::info!(
-                        %peer,
-                        %request_id,
-                        pending_channels = self.pending_tensor_channels.len(),
-                        "DIAG: stored ResponseChannel for tensor forward"
-                    );
+                    // SEC: Cap to prevent memory exhaustion from request flooding.
+                    const MAX_PENDING_TENSOR_CHANNELS: usize = 256;
+                    if self.pending_tensor_channels.len() >= MAX_PENDING_TENSOR_CHANNELS {
+                        tracing::warn!(%peer, "pending_tensor_channels full — dropping");
+                        // Drop channel (sends implicit error to requester)
+                    } else {
+                        self.pending_tensor_channels.insert(request_id, channel);
+                        tracing::info!(
+                            %peer,
+                            %request_id,
+                            pending_channels = self.pending_tensor_channels.len(),
+                            "DIAG: stored ResponseChannel for tensor forward"
+                        );
+                    }
                 } else {
                     // LayerResult or decode failure — just ACK since there's no round-trip
                     if self
@@ -1692,6 +1730,9 @@ impl NetworkManager {
                     }
                 },
                 Err(e) => {
+                    // SEC: Never fall back to plaintext — fail the forward instead.
+                    // Plaintext fallback would silently strip encryption, allowing
+                    // eavesdroppers to read intermediate tensor activations.
                     tracing::warn!(
                         error = %e,
                         request_id = %forward.request_id,
@@ -1699,15 +1740,9 @@ impl NetworkManager {
                         node_id = %node_id,
                         aad_len = aad.len(),
                         has_session = self.shared_state.session_manager.has_session(&node_id),
-                        "DIAG: seal() failed, falling back to plaintext"
+                        "DIAG: seal() failed — dropping forward (no plaintext fallback)"
                     );
-                    match protocol::encode_layer_forward(&forward) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Failed to encode tensor forward");
-                            return;
-                        }
-                    }
+                    return;
                 }
             }
         } else {
@@ -2252,6 +2287,29 @@ impl NetworkManager {
                 break;
             }
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                // SEC: Filter out private/link-local/loopback IPs to prevent SSRF
+                // via malicious PEX responses pointing at internal network addresses.
+                let has_private_ip = addr.iter().any(|proto| {
+                    match proto {
+                        libp2p::multiaddr::Protocol::Ip4(ip) => {
+                            ip.is_private()
+                                || ip.is_loopback()
+                                || ip.is_link_local()
+                                || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                        }
+                        libp2p::multiaddr::Protocol::Ip6(ip) => {
+                            ip.is_loopback()
+                                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local
+                                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local
+                        }
+                        _ => false,
+                    }
+                });
+                if has_private_ip {
+                    tracing::debug!(addr = %addr_str, "PEX: skipping private/loopback address");
+                    continue;
+                }
+
                 // Extract peer ID to check if already connected
                 let maybe_peer_id = addr.iter().find_map(|proto| {
                     if let libp2p::multiaddr::Protocol::P2p(pid) = proto {
