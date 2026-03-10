@@ -41,7 +41,7 @@ SwarmLLM lets you run AI chatbots (like ChatGPT, but open-source) on your own co
 
 **Why does this matter?**
 
-Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, and **all traffic is encrypted end-to-end** — relay nodes never see your prompts.
+Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. With SwarmLLM, the model gets split into pieces — your computer handles some layers, your friend's handles others, and together you can run models none of you could run alone. No cloud subscription, no API fees, and **all traffic is encrypted end-to-end** — relay nodes never see your data.
 
 **What can you do with it?**
 
@@ -82,7 +82,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 └──────────┘     └──────────┘     └──────────┘
 ```
 
-- **Private by default** — all P2P traffic is end-to-end encrypted (X25519 + ChaCha20-Poly1305). Prompts are never visible to relay nodes, unlike Petals or Exo where peers can read your data
+- **Private by default** — all P2P traffic is end-to-end encrypted (X25519 + ChaCha20-Poly1305). Relay nodes never see your data, unlike Petals or Exo where peers have no encryption layer
 - **No central server** — fully peer-to-peer with no single point of failure
 - **No accounts or subscriptions** — just a cryptographic identity (Ed25519 keypair)
 - **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
@@ -197,7 +197,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 ### Networking & Security
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
-- **End-to-End Encryption** — **Your prompts are never visible to intermediate nodes.** Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (only your node and the final node see plaintext), and authenticated sealed gossip. This is a fundamental differentiator — Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs", and Exo has no encryption at all
+- **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing infrastructure for prompt/response confidentiality, and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. During distributed inference, participating pipeline nodes process activation tensors — see [Security Limitations](docs/book/src/architecture/security.md#known-limitations) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
 - **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations (currently returns placeholder data; full integration planned)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
@@ -548,7 +548,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
-| **Privacy** | **Encrypted by default** — prompts never visible to relay nodes | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
+| **Privacy** | **Encrypted by default** — all traffic encrypted in transit | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
 | **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
@@ -563,7 +563,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Auto-Update** | Built-in self-update | No | No | No |
 | **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
 
-**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — your prompts are never visible to intermediate nodes. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
+**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, and pipeline sealing infrastructure is in place for prompt confidentiality. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
 
 ## Documentation
 

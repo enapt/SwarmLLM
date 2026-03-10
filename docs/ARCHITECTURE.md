@@ -721,6 +721,8 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │  Tier 2: Pipeline Sealing (inference prompts)               │
 │    Per-request ephemeral key → sealed prompt/response       │
 │    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
+│    Status: infrastructure implemented, not yet wired into   │
+│    active inference pipeline (planned)                      │
 │                                                             │
 │  Tier 3: Sealed Gossip (broadcasts)                         │
 │    Mandatory Ed25519 signing — unsigned messages rejected   │

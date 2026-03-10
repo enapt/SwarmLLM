@@ -12,7 +12,7 @@ SwarmLLM is a single Rust binary that turns your computer into a node in a distr
 - **Anthropic Messages API** — Full `POST /v1/messages` compatibility. Use SwarmLLM as a Claude Code backend to access all models through one endpoint.
 - **MCP Server** — Native Model Context Protocol server with 6 tools (`chat`, `models`, `compare`, `research`, `batch_prompts`, `node_info`) for Claude Code, VS Code Copilot, Cursor, and MCP-compatible agents. Offload research and batch tasks to cheap models in parallel.
 - **Shard-Only Operation** — Nodes only need small pieces (shards) of a model. A phone with 2GB can contribute to running a 70B model.
-- **Private by Default** — All peer-to-peer communication is end-to-end encrypted (X25519 + ChaCha20-Poly1305 with forward secrecy). Prompts are never visible to relay nodes — unlike other distributed inference tools where peers can read your data.
+- **Private by Default** — All peer-to-peer communication is end-to-end encrypted (X25519 + ChaCha20-Poly1305 with forward secrecy). Relay nodes never see your data — unlike other distributed inference tools where peers have no encryption layer.
 - **Credit Incentives** — Earn credits by serving inference, hosting shards, and relaying traffic. Higher credits = higher priority.
 - **VRAM-Aware** — Automatic shard management based on available GPU memory with on-demand model loading and LRU eviction.
 - **Model Trust System** — Automatic trust levels (Discovered, Pinned, DemandVerified, NetworkPopular) gate shard downloads and pruning decisions.

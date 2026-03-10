@@ -19,6 +19,8 @@ For inference prompts and responses:
 - Sealed prompt/response
 - Wire tag: `TENSOR_TAG_ENCRYPTED = 0x10`
 
+> **Status**: Cryptographic infrastructure implemented (`src/crypto/pipeline_seal.rs`), not yet wired into the active inference pipeline. Currently, Tier 1 pairwise encryption protects activations in transit between nodes, but participating pipeline nodes can observe activation tensors during processing. See [Known Limitations](#known-limitations).
+
 ### Tier 3: Sealed Gossip (Broadcasts)
 
 For GossipSub messages:
