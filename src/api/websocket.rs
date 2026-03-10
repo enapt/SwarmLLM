@@ -42,7 +42,24 @@ pub async fn handler(
             }
         }
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, state.shared_state.clone()))
+    // Enforce a global WebSocket connection limit to prevent resource exhaustion.
+    const MAX_WS_CONNECTIONS: usize = 100;
+    let shared = state.shared_state.clone();
+    let current = shared
+        .ws_connection_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if current >= MAX_WS_CONNECTIONS {
+        shared
+            .ws_connection_count
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            current = current,
+            max = MAX_WS_CONNECTIONS,
+            "WebSocket connection limit reached — rejecting"
+        );
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    ws.on_upgrade(move |socket| handle_socket(socket, shared))
 }
 
 async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
@@ -194,6 +211,9 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
             tracing::debug!("DIAG: websocket receiver loop exited first");
         }
     }
+    shared_state
+        .ws_connection_count
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     tracing::debug!("DIAG: websocket client disconnected");
 }
 

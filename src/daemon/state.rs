@@ -209,6 +209,8 @@ pub struct SharedState {
     /// Populated by `list_provider_models` so that `try_proxy_openai` can route
     /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
     pub provider_model_map: DashMap<String, String>,
+    /// Active WebSocket connection count — capped to prevent resource exhaustion.
+    pub ws_connection_count: std::sync::atomic::AtomicUsize,
     /// Persistent NodeId → PeerId bytes mapping. Populated by the identify handler
     /// and NEVER cleared on disconnect. Solves the race where the scheduler picks a
     /// peer from shard_holders but the peer_registry entry was removed on disconnect
@@ -218,11 +220,16 @@ pub struct SharedState {
     /// Populated when an mmproj.gguf is found alongside a model's shards.
     pub vision_modules: DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
     /// Pending VisionEncodeResponse channels for distributed vision encoding.
-    /// Keyed by request_id. Pipeline registers a oneshot sender before sending
-    /// VisionEncodeRequest to a remote mmproj holder; the network dispatcher fires it
-    /// when the VisionEncodeResponse arrives.
-    pub pending_vision_results:
-        DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::VisionEncodeResponse>>,
+    /// Keyed by request_id. Pipeline registers a (expected_responder, oneshot sender) before
+    /// sending VisionEncodeRequest to a remote mmproj holder; the network dispatcher fires it
+    /// when the VisionEncodeResponse arrives from the expected responder.
+    pub pending_vision_results: DashMap<
+        uuid::Uuid,
+        (
+            crate::types::NodeId,
+            tokio::sync::oneshot::Sender<crate::types::VisionEncodeResponse>,
+        ),
+    >,
     /// Pending tensor-parallel AllReduce partials, keyed by (request_id, layer_idx).
     /// Coordinator collects partials from all TP ranks, sums them, and responds.
     pub pending_tp_partials: DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
@@ -383,6 +390,13 @@ impl TpAllReduceCollector {
                     sum[i] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 }
             }
+        }
+
+        // Check for NaN/Inf in reduced result (possible tensor poisoning)
+        if sum.iter().any(|v| !v.is_finite()) {
+            return Err(crate::error::SwarmError::Internal(
+                "AllReduce result contains NaN/Inf — possible tensor poisoning".into(),
+            ));
         }
 
         // Compress reduced result
@@ -612,6 +626,7 @@ impl SharedState {
             models_changed_tx: broadcast::channel(16).0,
             system_notify_tx: broadcast::channel(32).0,
             provider_model_map: DashMap::new(),
+            ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
             pending_vision_results: DashMap::new(),

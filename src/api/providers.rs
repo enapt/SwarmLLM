@@ -292,6 +292,21 @@ fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError>
             ));
         }
     }
+    // Block known cloud metadata endpoints to mitigate DNS rebinding attacks
+    let blocked_hosts = [
+        "metadata.google.internal",
+        "metadata.gcp.internal",
+        "instance-data",
+        "169.254.169.254",
+    ];
+    let host_lower = host.to_lowercase();
+    for blocked in &blocked_hosts {
+        if host_lower.contains(blocked) {
+            return Err(crate::error::SwarmError::Config(
+                "Provider base_url points to blocked internal hostname".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -300,6 +315,11 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
         std::net::IpAddr::V6(v6) => {
+            // Check IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) — these can bypass
+            // naive V6-only checks to reach private V4 addresses.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_private() || v4.is_loopback() || v4.is_link_local();
+            }
             // fe80::/10 link-local, fc00::/7 unique local, ::1 loopback
             let segments = v6.segments();
             v6.is_loopback() || (segments[0] & 0xffc0) == 0xfe80 || (segments[0] & 0xfe00) == 0xfc00

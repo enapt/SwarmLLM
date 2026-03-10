@@ -67,6 +67,12 @@ pub(crate) async fn dispatch_network_messages(
                         match msg {
                             // LayerResult: route to pending pipeline executor via oneshot channel
                             SwarmMessage::LayerResult(ref result) => {
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "LayerResult from unknown peer — dropping");
+                                        continue;
+                                    }
+                                }
                                 tracing::info!(
                                     request_id = %result.request_id,
                                     tokens = result.token_ids.len(),
@@ -109,6 +115,15 @@ pub(crate) async fn dispatch_network_messages(
                             // LayerForward: process locally using split inference engine,
                             // then send back a LayerResult to the requesting node.
                             SwarmMessage::LayerForward(forward) => {
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "LayerForward from unknown peer — dropping");
+                                        continue;
+                                    }
+                                } else {
+                                    tracing::warn!("LayerForward without authenticated sender — dropping");
+                                    continue;
+                                }
                                 tracing::info!(
                                     request_id = %forward.request_id,
                                     seq = forward.sequence_num,
@@ -130,6 +145,12 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // StreamingToken: route to registered streaming channel
                             SwarmMessage::StreamingToken(ref token) => {
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "StreamingToken from unknown peer — dropping");
+                                        continue;
+                                    }
+                                }
                                 // Clone the sender to drop the DashMap Ref (read lock) before
                                 // awaiting send() or calling remove() — avoids deadlock.
                                 let maybe_tx = shared_state
@@ -168,20 +189,29 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // T13: VisionEncodeResponse — fire pending oneshot
                             SwarmMessage::VisionEncodeResponse(resp) => {
-                                // NOTE: pending_vision_results stores only the oneshot sender,
-                                // not the expected responding node_id, so we cannot verify the
-                                // responder identity here. The request_id (UUID) provides
-                                // correlation but not authentication. Log for audit trail.
-                                if authenticated_sender.is_none() {
-                                    tracing::warn!(
-                                        request_id = %resp.request_id,
-                                        "VisionEncodeResponse received without authenticated sender"
-                                    );
-                                }
-                                if let Some((_, tx)) = shared_state
+                                // Verify the authenticated sender matches the expected responder
+                                // stored when the VisionEncodeRequest was sent.
+                                if let Some((_, (expected_node, tx))) = shared_state
                                     .pending_vision_results
                                     .remove(&resp.request_id)
                                 {
+                                    if let Some(ref sender) = authenticated_sender {
+                                        if sender != &expected_node {
+                                            tracing::warn!(
+                                                request_id = %resp.request_id,
+                                                expected = %expected_node,
+                                                actual = %sender,
+                                                "VisionEncodeResponse sender mismatch — dropping"
+                                            );
+                                            continue;
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            request_id = %resp.request_id,
+                                            "VisionEncodeResponse without authenticated sender — dropping"
+                                        );
+                                        continue;
+                                    }
                                     let _ = tx.send(resp);
                                 }
                             }
@@ -380,6 +410,17 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Process model manifests from peers — register in model_registry
                             SwarmMessage::ModelManifest(manifest) => {
+                                // SEC: Verify publisher identity matches transport-authenticated sender
+                                if let Some(ref sender) = authenticated_sender {
+                                    if sender != &manifest.publisher {
+                                        tracing::warn!(
+                                            claimed = %manifest.publisher,
+                                            actual = %sender,
+                                            "ModelManifest publisher mismatch — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
                                 tracing::info!(
                                     model = %manifest.id,
                                     name = %manifest.name,
@@ -747,6 +788,14 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Tensor-parallel AllReduce: collect partial from a TP rank
                             SwarmMessage::TpAllReduceRequest(req) => {
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "TpAllReduceRequest from unknown peer — dropping");
+                                        continue;
+                                    }
+                                } else {
+                                    continue;
+                                }
                                 if req.tp_size as usize > 32 {
                                     tracing::warn!(tp_size = req.tp_size, "TpAllReduceRequest tp_size exceeds maximum — dropping");
                                     continue;
@@ -801,6 +850,12 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Tensor-parallel AllReduce response: deliver to waiting pipeline
                             SwarmMessage::TpAllReduceResponse(resp) => {
+                                if let Some(ref sender) = authenticated_sender {
+                                    if !shared_state.peer_registry.contains_key(sender) {
+                                        tracing::warn!(sender = %sender, "TpAllReduceResponse from unknown peer — dropping");
+                                        continue;
+                                    }
+                                }
                                 let delivered = shared_state.allreduce_registry.deliver(resp.clone());
                                 tracing::debug!(
                                     request_id = %resp.request_id,
@@ -1324,25 +1379,35 @@ async fn handle_layer_forward(
     {
         match zstd::decode_all(std::io::Cursor::new(compressed)) {
             Ok(raw_bytes) => {
-                let num_f16 = raw_bytes.len() / 2;
-                // Infer hidden dimension from common VLM sizes.
-                const COMMON_HIDDEN_DIMS: &[usize] = &[4096, 2048, 1024];
-                let hidden_dim = COMMON_HIDDEN_DIMS
-                    .iter()
-                    .copied()
-                    .find(|&d| num_f16 % d == 0)
-                    .unwrap_or(1024);
-                let num_tokens = num_f16 / hidden_dim;
-                let f32_values: Vec<f32> = raw_bytes
-                    .chunks_exact(2)
-                    .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-                    .collect();
-                candle_core::Tensor::from_vec(
-                    f32_values,
-                    &[num_tokens, hidden_dim],
-                    &candle_core::Device::Cpu,
-                )
-                .ok()
+                const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024; // 50MB
+                if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES {
+                    tracing::warn!(
+                        size = raw_bytes.len(),
+                        max = MAX_VISION_EMBEDDING_BYTES,
+                        "Vision embeddings too large after decompression, dropping"
+                    );
+                    None
+                } else {
+                    let num_f16 = raw_bytes.len() / 2;
+                    // Infer hidden dimension from common VLM sizes.
+                    const COMMON_HIDDEN_DIMS: &[usize] = &[4096, 2048, 1024];
+                    let hidden_dim = COMMON_HIDDEN_DIMS
+                        .iter()
+                        .copied()
+                        .find(|&d| num_f16 % d == 0)
+                        .unwrap_or(1024);
+                    let num_tokens = num_f16 / hidden_dim;
+                    let f32_values: Vec<f32> = raw_bytes
+                        .chunks_exact(2)
+                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+                        .collect();
+                    candle_core::Tensor::from_vec(
+                        f32_values,
+                        &[num_tokens, hidden_dim],
+                        &candle_core::Device::Cpu,
+                    )
+                    .ok()
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");

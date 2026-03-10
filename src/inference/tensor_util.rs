@@ -83,7 +83,22 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
     );
     pos += 4;
 
-    let num_elements: usize = shape.iter().product();
+    let num_elements: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| SwarmError::Internal("Tensor shape overflow".into()))?;
+
+    const MAX_TENSOR_ELEMENTS: usize = 64 * 1024 * 1024; // 64M elements = 256MB of f32
+    if num_elements > MAX_TENSOR_ELEMENTS {
+        return Err(SwarmError::Internal(format!(
+            "Tensor too large: {} elements (max {})",
+            num_elements, MAX_TENSOR_ELEMENTS
+        )));
+    }
+    if num_elements == 0 {
+        return Err(SwarmError::Internal("Tensor has zero elements".into()));
+    }
+
     let mut data = Vec::with_capacity(num_elements);
     for _ in 0..num_elements {
         if pos + 4 > bytes.len() {

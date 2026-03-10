@@ -581,6 +581,19 @@ pub async fn chat_completions(
         }
     }
 
+    // Bind session_id to the caller's API key so different users cannot
+    // hijack each other's KV-cache sessions by guessing session IDs.
+    if let Some(ref mut sid) = req.session_id {
+        let api_key = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+            .unwrap_or("");
+        let key_hash = &blake3::hash(api_key.as_bytes()).to_hex()[..16];
+        *sid = format!("{}:{}", key_hash, sid);
+    }
+
     // Validate model field length to prevent DashMap memory exhaustion from unique keys
     if req.model.len() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(

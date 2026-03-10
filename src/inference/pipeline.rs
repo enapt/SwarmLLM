@@ -236,11 +236,11 @@ impl PipelineExecutor {
         let first_image = &images[0];
         let jpeg_bytes = self.compress_image_jpeg(first_image)?;
 
-        // Register response channel
+        // Register response channel with expected responder for auth verification
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.shared_state
             .pending_vision_results
-            .insert(self.request.id, tx);
+            .insert(self.request.id, (remote_node.clone(), tx));
 
         // Send VisionEncodeRequest directly to the selected remote node (not broadcast)
         let req = crate::types::VisionEncodeRequest {

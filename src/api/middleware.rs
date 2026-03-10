@@ -124,7 +124,7 @@ impl RateLimiter {
             (BucketKind::SensitiveAdmin, 5)
         } else if path.starts_with("/api/admin/") {
             (BucketKind::Admin, self.admin_rpm)
-        } else if path.starts_with("/v1/") || path.starts_with("/api/chat") {
+        } else if path.starts_with("/v1/") || path.starts_with("/api/chat") || path == "/mcp" {
             (BucketKind::Api, self.rpm)
         } else {
             // Non-rate-limited paths (health, static, frontend)
@@ -323,24 +323,38 @@ pub async fn auth_middleware(
         }
     }
 
-    // Exempt peer-forwarded requests — requires internal auth token.
+    // Exempt peer-forwarded requests.
     // WARNING: Loopback-gated exemptions assume direct client connections.
     // If deployed behind a reverse proxy, all connections appear as loopback.
     // Set `api.require_auth_loopback = true` in config to disable loopback exemptions.
     if req.headers().get("x-swarm-forwarded").is_some() {
-        // Both loopback and non-loopback forwarding require the internal auth token
-        // to prevent unauthenticated bypass via crafted x-swarm-forwarded header.
-        if let Some(token) = req
-            .headers()
-            .get("x-swarm-internal-token")
-            .and_then(|v| v.to_str().ok())
-        {
-            if constant_time_eq(
-                token.as_bytes(),
-                state.shared_state.internal_auth_token.as_bytes(),
-            ) {
+        if addr.ip().is_loopback() {
+            // Loopback requires internal token (prevents localhost bypass)
+            if let Some(token) = req
+                .headers()
+                .get("x-swarm-internal-token")
+                .and_then(|v| v.to_str().ok())
+            {
+                if constant_time_eq(
+                    token.as_bytes(),
+                    state.shared_state.internal_auth_token.as_bytes(),
+                ) {
+                    return next.run(req).await;
+                }
+            }
+            // Loopback without valid token: fall through to normal Bearer auth
+        } else {
+            // Non-loopback: verify it's from a known peer IP
+            let peer_ip = addr.ip().to_string();
+            let is_known_peer = state
+                .shared_state
+                .peer_registry
+                .iter()
+                .any(|entry| entry.value().addresses.iter().any(|a| a.contains(&peer_ip)));
+            if is_known_peer {
                 return next.run(req).await;
             }
+            // Unknown IP with x-swarm-forwarded: fall through to normal auth
         }
     }
 
