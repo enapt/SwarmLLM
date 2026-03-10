@@ -59,6 +59,19 @@ pub struct InferenceOutput {
     /// The session ID for multi-turn KV-cache reuse. Echoed back from the
     /// request or auto-generated if the router created one.
     pub session_id: Option<String>,
+    /// Per-token log probabilities (populated when logprobs=true in request).
+    pub token_logprobs: Vec<TokenLogProbEntry>,
+}
+
+/// A single token's log probability info for the logprobs response field.
+#[derive(Debug, Clone)]
+pub struct TokenLogProbEntry {
+    /// The token text.
+    pub token: String,
+    /// Log probability of this token.
+    pub logprob: f32,
+    /// Top-N alternative tokens with their logprobs.
+    pub top_logprobs: Vec<(String, f32)>,
 }
 
 /// Sender for incremental streaming tokens from distributed inference.
@@ -951,6 +964,7 @@ async fn execute_local_batch(
                             completion_tokens: gen_result.completion_tokens,
                             finish_reason: gen_result.finish_reason.as_str().to_string(),
                             session_id,
+                            token_logprobs: vec![],
                         })
                     }
                     Err(e) => Err(e),
@@ -964,6 +978,7 @@ async fn execute_local_batch(
                         completion_tokens: gen_result.completion_tokens,
                         finish_reason: gen_result.finish_reason.as_str().to_string(),
                         session_id: request.session_id.clone(),
+                        token_logprobs: vec![],
                     }),
                     Err(e) => Err(e),
                 }
@@ -1136,6 +1151,7 @@ async fn execute_request(
                 completion_tokens: gen_result.completion_tokens,
                 finish_reason: gen_result.finish_reason.as_str().to_string(),
                 session_id: request.session_id.clone(),
+                token_logprobs: vec![],
             });
         }
 
@@ -1148,6 +1164,7 @@ async fn execute_request(
             completion_tokens: gen_result.completion_tokens,
             finish_reason: gen_result.finish_reason.as_str().to_string(),
             session_id: request.session_id.clone(),
+            token_logprobs: vec![],
         });
     }
 

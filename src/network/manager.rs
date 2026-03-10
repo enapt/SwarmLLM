@@ -697,7 +697,7 @@ impl NetworkManager {
 
             // ── Relay server events ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::RelayServer(event)) => {
-                crate::network::relay::handle_relay_server_event(event);
+                crate::network::relay::handle_relay_server_event(event, &self.shared_state);
             }
 
             // ── AutoNAT status changes ──
@@ -923,7 +923,33 @@ impl NetworkManager {
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
                 libp2p::kad::Event::OutboundQueryProgressed { result, .. },
             )) => {
-                tracing::debug!(?result, "Kademlia query progressed");
+                use libp2p::kad::QueryResult;
+                match result {
+                    QueryResult::GetRecord(Ok(libp2p::kad::GetRecordOk::FoundRecord(
+                        peer_record,
+                    ))) => {
+                        // Verify Ed25519 signature on DHT records before trusting
+                        match crate::network::discovery::verify_dht_value(&peer_record.record.value)
+                        {
+                            Ok((pubkey, _payload)) => {
+                                tracing::debug!(
+                                    key = ?peer_record.record.key,
+                                    signer = %hex::encode(&pubkey[..8]),
+                                    "DHT record verified"
+                                );
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    key = ?peer_record.record.key,
+                                    "DHT record failed signature verification — ignoring"
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::debug!(?result, "Kademlia query progressed");
+                    }
+                }
             }
 
             // ── mDNS ──

@@ -7,7 +7,9 @@ use tokio::sync::mpsc;
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
 use crate::inference::chat_template;
-use crate::inference::router::{InferenceOutput, StreamingTokenEvent, StreamingTokenTx};
+use crate::inference::router::{
+    InferenceOutput, StreamingTokenEvent, StreamingTokenTx, TokenLogProbEntry,
+};
 use crate::types::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkCommand,
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
@@ -133,6 +135,9 @@ pub struct PipelineExecutor {
     network_tx: mpsc::Sender<NetworkCommand>,
     request: InferenceRequest,
     assignment: PipelineAssignment,
+    /// Collected per-token logprobs during token generation.
+    /// Uses Mutex because process_local_segment takes &self.
+    collected_logprobs: std::sync::Mutex<Vec<TokenLogProbEntry>>,
 }
 
 impl PipelineExecutor {
@@ -147,6 +152,7 @@ impl PipelineExecutor {
             network_tx,
             request,
             assignment,
+            collected_logprobs: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -500,6 +506,7 @@ impl PipelineExecutor {
                     completion_tokens: gen_result.completion_tokens,
                     finish_reason: gen_result.finish_reason.as_str().to_string(),
                     session_id: self.request.session_id.clone(),
+                    token_logprobs: vec![],
                 });
             }
         }
@@ -518,6 +525,7 @@ impl PipelineExecutor {
             completion_tokens: gen_result.completion_tokens,
             finish_reason: gen_result.finish_reason.as_str().to_string(),
             session_id: self.request.session_id.clone(),
+            token_logprobs: vec![],
         })
     }
 
@@ -869,6 +877,12 @@ impl PipelineExecutor {
                 finish_reason
             },
             session_id: self.request.session_id.clone(),
+            token_logprobs: self
+                .collected_logprobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect(),
         })
     }
 
@@ -1742,8 +1756,32 @@ impl PipelineExecutor {
             };
 
             if is_last {
-                let token_id =
-                    split::sample_token_with_params(&output, &self.request.sampling_params)?;
+                let (token_id, logprob_info) = if self.request.sampling_params.logprobs {
+                    crate::inference::tensor_util::sample_token_with_params_and_logprobs(
+                        &output,
+                        &self.request.sampling_params,
+                    )?
+                } else {
+                    (
+                        split::sample_token_with_params(&output, &self.request.sampling_params)?,
+                        None,
+                    )
+                };
+
+                // Collect logprobs if available
+                if let Some(top) = logprob_info {
+                    if let Ok(mut lp) = self.collected_logprobs.lock() {
+                        lp.push(TokenLogProbEntry {
+                            token: format!("{token_id}"),
+                            logprob: top.first().map(|t| t.1).unwrap_or(-9999.0),
+                            top_logprobs: top
+                                .iter()
+                                .map(|(tid, lp)| (format!("{tid}"), *lp))
+                                .collect(),
+                        });
+                    }
+                }
+
                 let finish = if cached_eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
                 } else {
@@ -2119,7 +2157,30 @@ impl PipelineExecutor {
                     }
                 }
             }
-            let token_id = split::sample_token_with_params(&output, &self.request.sampling_params)?;
+            let (token_id, logprob_info) = if self.request.sampling_params.logprobs {
+                crate::inference::tensor_util::sample_token_with_params_and_logprobs(
+                    &output,
+                    &self.request.sampling_params,
+                )?
+            } else {
+                (
+                    split::sample_token_with_params(&output, &self.request.sampling_params)?,
+                    None,
+                )
+            };
+
+            if let Some(top) = logprob_info {
+                if let Ok(mut lp) = self.collected_logprobs.lock() {
+                    lp.push(TokenLogProbEntry {
+                        token: format!("{token_id}"),
+                        logprob: top.first().map(|t| t.1).unwrap_or(-9999.0),
+                        top_logprobs: top
+                            .iter()
+                            .map(|(tid, lp)| (format!("{tid}"), *lp))
+                            .collect(),
+                    });
+                }
+            }
 
             // EOS detection: use tokens loaded from GGUF metadata
             let eos_tokens = split_model.eos_tokens();

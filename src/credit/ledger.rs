@@ -493,6 +493,30 @@ impl CreditLedger {
                                 _ => {}
                             }
                         }
+
+                        // Drain accumulated relay service seconds and earn credits
+                        let relay_secs = ss.relay_seconds_served.swap(
+                            0,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        if relay_secs > 0 {
+                            match self.earn_relay_service(relay_secs).await {
+                                Ok(earned) if earned > 0 => {
+                                    tracing::info!(
+                                        relay_seconds = relay_secs,
+                                        credits_earned = earned,
+                                        "Earned relay service credits"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to earn relay service credit"
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 _ = escrow_cleanup_interval.tick() => {

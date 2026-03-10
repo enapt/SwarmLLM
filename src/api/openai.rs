@@ -1405,7 +1405,30 @@ async fn router_inference(
                 tool_calls: None,
             },
             finish_reason: output.finish_reason,
-            logprobs: None,
+            logprobs: if output.token_logprobs.is_empty() {
+                None
+            } else {
+                Some(ChoiceLogProbs {
+                    content: output
+                        .token_logprobs
+                        .iter()
+                        .map(|entry| TokenLogProb {
+                            token: entry.token.clone(),
+                            logprob: entry.logprob,
+                            bytes: None,
+                            top_logprobs: entry
+                                .top_logprobs
+                                .iter()
+                                .map(|(t, lp)| TopLogProb {
+                                    token: t.clone(),
+                                    logprob: *lp,
+                                    bytes: None,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            },
         }],
         usage: Usage {
             prompt_tokens: output.prompt_tokens,

@@ -57,7 +57,11 @@ pub fn relay_listen_addr(relay_peer_id: &PeerId, relay_addr: &Multiaddr) -> Mult
 }
 
 /// Handle relay server events — log reservations and circuit lifecycle.
-pub fn handle_relay_server_event(event: libp2p::relay::Event) {
+/// Tracks circuit open/close for relay service credit accrual.
+pub fn handle_relay_server_event(
+    event: libp2p::relay::Event,
+    shared_state: &std::sync::Arc<crate::daemon::SharedState>,
+) {
     use libp2p::relay::Event;
     match event {
         Event::ReservationReqAccepted {
@@ -79,12 +83,28 @@ pub fn handle_relay_server_event(event: libp2p::relay::Event) {
                 dst = %dst_peer_id,
                 "Relay circuit opened"
             );
+            // Track circuit start time for credit accrual
+            shared_state
+                .active_relay_circuits
+                .insert((src_peer_id, dst_peer_id), std::time::Instant::now());
         }
         Event::CircuitClosed {
             src_peer_id,
             dst_peer_id,
             error,
         } => {
+            // Calculate circuit duration and accumulate relay seconds
+            if let Some((_, start)) = shared_state
+                .active_relay_circuits
+                .remove(&(src_peer_id, dst_peer_id))
+            {
+                let duration_secs = start.elapsed().as_secs();
+                if duration_secs > 0 {
+                    shared_state
+                        .relay_seconds_served
+                        .fetch_add(duration_secs, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             tracing::debug!(
                 src = %src_peer_id,
                 dst = %dst_peer_id,

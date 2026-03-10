@@ -239,6 +239,11 @@ pub struct SharedState {
     /// Cumulative bytes served for shard transfers since last credit tick.
     /// NetworkManager increments on each chunk served; CreditLedger drains periodically.
     pub shard_bytes_served: AtomicU64,
+    /// Cumulative relay circuit seconds since last credit tick.
+    /// Incremented when relay circuits close; CreditLedger drains periodically.
+    pub relay_seconds_served: AtomicU64,
+    /// Active relay circuits: maps (src_peer, dst_peer) to start time.
+    pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -636,6 +641,8 @@ impl SharedState {
             pending_tp_partials: DashMap::new(),
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
             shard_bytes_served: AtomicU64::new(0),
+            relay_seconds_served: AtomicU64::new(0),
+            active_relay_circuits: DashMap::new(),
             shutdown_tx,
         });
 
