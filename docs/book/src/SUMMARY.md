@@ -44,4 +44,5 @@
 # Operations
 
 - [Deployment Guide](./operations/deployment.md)
+- [Tailscale & WAN Access](./operations/tailscale-wan.md)
 - [Monitoring with Grafana](./operations/monitoring.md)

@@ -50,6 +50,7 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 - **Use it with Claude Code** — SwarmLLM speaks the Anthropic API natively, so you can use it as a backend for Claude Code with any model.
 - **Access cloud models too** — Configure API keys for OpenAI, Anthropic, DeepSeek, or 9 other providers, and access everything through one endpoint.
 - **Run it on a LAN** — Two laptops on the same Wi-Fi find each other automatically. No configuration needed.
+- **Access remotely via Tailscale** — Connect nodes across the internet with [Tailscale](https://tailscale.com), WireGuard, or any VPN. Chat with your home GPU from anywhere. [Setup guide →](docs/book/src/operations/tailscale-wan.md)
 
 **Who is this for?**
 
@@ -545,7 +546,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 |---------|----------|--------|-----|-----------|
 | **Language** | Rust (single ~43MB binary) | Python | Python | Python + Substrate |
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
-| **Scale** | Internet-scale (NAT traversal, DHT, relay) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
+| **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
 | **Privacy** | **Encrypted by default** — prompts never visible to relay nodes | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
 | **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
@@ -571,6 +572,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 - **[Configuration Guide](docs/book/src/configuration.md)** — Environment variables, CLI flags, `.env` files
 - **[API Reference](docs/ARCHITECTURE.md#http-api-routes)** — Complete HTTP API route documentation
 - **[Architecture](docs/ARCHITECTURE.md)** — Deep dive into subsystems, protocols, and security model
+- **[Tailscale & WAN Access](docs/book/src/operations/tailscale-wan.md)** — Access your node remotely via Tailscale, WireGuard, or any VPN
 - **[Troubleshooting](docs/book/src/troubleshooting.md)** — Common issues and solutions
 - **[Diagnostics Guide](docs/DIAGNOSTICS.md)** — DIAG: log instrumentation for debugging
 - **[Security Policy](SECURITY.md)** — Responsible disclosure
