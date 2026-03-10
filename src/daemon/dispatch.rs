@@ -998,6 +998,19 @@ async fn handle_layer_forward(
                 match std::fs::read_to_string(&source_path_file) {
                     Ok(p) => {
                         let p = std::path::PathBuf::from(p.trim());
+                        // Verify source_path is within the data models directory
+                        // to prevent path traversal attacks via crafted source_path files.
+                        let data_models = shard_store.models_dir();
+                        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                        if !canonical.starts_with(&data_models) {
+                            tracing::warn!(
+                                path = %canonical.display(),
+                                "source_path outside data directory — ignoring"
+                            );
+                            return Err(crate::error::SwarmError::Internal(
+                                "source_path outside data directory".into(),
+                            ));
+                        }
                         if p.exists() {
                             tracing::info!(
                                 model = %model_id,

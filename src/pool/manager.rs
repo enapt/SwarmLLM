@@ -485,6 +485,18 @@ impl PoolManager {
             return;
         }
 
+        // Validate that to_node_id matches this node (the pool owner) to prevent
+        // credit forwarding to arbitrary nodes via forged to_node_id.
+        let my_id = self.shared_state.identity.node_id();
+        if forward.to_node_id != *my_id {
+            tracing::warn!(
+                from = %forward.from_node_id,
+                to = %forward.to_node_id,
+                "Credit forward to_node_id doesn't match pool owner — rejecting"
+            );
+            return;
+        }
+
         // Dedup check: reject replayed credit forwards
         if let Ok(Some(_)) = self
             .shared_state

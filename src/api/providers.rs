@@ -377,6 +377,12 @@ pub async fn proxy_openai_compatible(
                     .and_then(|m| m.as_str().map(|s| s.to_string()))
             })
             .unwrap_or(raw_body);
+        // Truncate to prevent leaking large error bodies from upstream providers
+        let friendly = if friendly.len() > 500 {
+            format!("{}...", &friendly[..500])
+        } else {
+            friendly
+        };
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),
             body: friendly,
