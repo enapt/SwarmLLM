@@ -70,7 +70,7 @@ Single Rust binary, three simultaneous functions:
 
 | From | To | Channel | Message Types |
 |---|---|---|---|
-| NetworkManager | MessageDispatcher | `network_out_tx` | All inbound SwarmMessage variants |
+| NetworkManager | MessageDispatcher | `network_out_tx` | AuthenticatedMessage (transport-verified sender + SwarmMessage) |
 | MessageDispatcher | InferenceRouter | `router_cmd_tx` | InferenceRequest, LayerForward, LayerResult, PipelineAssignment, InferenceError |
 | InferenceRouter | NetworkManager | `network_tx` | SwarmMessage (outgoing P2P) |
 | HealthMonitor | NetworkManager | `network_tx` | HealthPing |
@@ -701,8 +701,9 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │    Ed25519 → X25519 → ECDH → ChaCha20-Poly1305            │
 │    Forward secrecy: ephemeral X25519 re-keying every 10min  │
 │    Nonce reuse prevented by session clearing on disconnect   │
-│    Replay protection: atomic fetch_max on recv nonce        │
-│    (rejects nonce ≤ last_seen via lock-free TOCTOU-safe op) │
+│    Replay protection: RFC 6479 sliding window (128-bit      │
+│      bitmap) — allows reordered packets, rejects duplicates │
+│    Pending ephemeral keys expire after 60s (memory safety)  │
 │    Static DH fallback for initial session before first reke │
 │                                                             │
 │  Tier 2: Pipeline Sealing (inference prompts)               │
@@ -710,14 +711,26 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
 │                                                             │
 │  Tier 3: Sealed Gossip (broadcasts)                         │
-│    Epoch-based group key + Ed25519 origin signature         │
-│    Verifies sender authenticity before processing           │
+│    Mandatory Ed25519 signing — unsigned messages rejected   │
+│    Epoch-based group key + origin signature                 │
+│    Transport-authenticated sender validation in dispatch    │
 │    1hr rotation cycle                                       │
 │                                                             │
 │  Modules: src/crypto/{session, pipeline_seal, gossip_seal,  │
 │           key_rotation}.rs                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+## Transport-Authenticated Dispatch
+
+All inbound network messages are wrapped in `AuthenticatedMessage` with the transport-verified sender `NodeId` (from libp2p Noise protocol). The MessageDispatcher validates sender identity against message claims for all security-sensitive message types (ShardAnnounce, CreditTransaction, CreditGossip, NicknameGossip, HealthPing/Pong, EphemeralKeyExchange). Mismatched messages are logged and dropped.
+
+## Signed DHT Records
+
+Kademlia DHT records for capability and shard announcements are Ed25519-signed:
+- Format: `[32B pubkey][64B signature][payload]`
+- Functions: `sign_dht_value()` / `verify_dht_value()` in `src/network/discovery.rs`
+- Records expire after 1 hour with automatic re-publication
 
 ## Identity & Nicknames
 
@@ -770,14 +783,20 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 
 ## API Authentication
 
-- Bearer token middleware in `src/api/middleware.rs`
+- Bearer token middleware in `src/api/middleware.rs` (constant-time comparison)
 - Auto-generated 32-byte hex API key on first run, persisted in redb
 - **Protected paths**: `/v1/*` (inference), `/api/admin/config` (PUT), `/api/admin/shutdown`,
-  `/api/admin/hf/*` (downloads), `/api/admin/api-key`
+  `/api/admin/hf/*` (downloads), `/api/admin/api-key`, `/api/admin/provider-models`
 - **Exempt paths**: `/`, `/health`, `/admin`, `/chat`, `/setup`, `/static/*`,
   read-only admin dashboard endpoints (GET `/api/admin/stats`, `/api/admin/models`, etc.)
 - Request body size limit: 32MB (configurable via `DefaultBodyLimit`, raised from 2MB for VLM image payloads)
-- Content-Security-Policy header enforced on all responses
+- Content-Security-Policy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`
+- WebSocket Origin validation (prevents cross-site WebSocket hijacking)
+- Input validation: model name 256 chars, tools max 128, stop sequences max 16
+- HuggingFace inputs validated (repo_id format, filename .gguf extension, no path traversal)
+- HTTP timeout: 5 minutes (tower-http TimeoutLayer, Slowloris protection)
+- Per-IP rate limiter with periodic 5-minute cleanup of stale entries
+- Inference queue depth cap: 512 requests
 
 ## Shard-Only Mode
 
