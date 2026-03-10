@@ -133,6 +133,13 @@ impl RateLimiter {
 
         let now = Instant::now();
         let key = (ip, kind);
+
+        // Cap total tracked buckets to prevent memory exhaustion from IP spoofing
+        const MAX_RATE_BUCKETS: usize = 50_000;
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
+            return false;
+        }
+
         let mut entry = self.buckets.entry(key).or_insert((limit, now));
         let (ref mut tokens, ref mut last_refill) = *entry;
 

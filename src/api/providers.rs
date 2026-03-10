@@ -260,6 +260,53 @@ pub async fn try_proxy_openai(
     Ok(Some(response))
 }
 
+/// Validate that a provider base_url uses an allowed scheme and does not target
+/// private/internal IP ranges (SSRF prevention for custom providers).
+fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
+    if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
+        return Err(crate::error::SwarmError::Config(
+            "Provider base_url must use http or https scheme".into(),
+        ));
+    }
+    // Extract host portion: strip scheme, then take up to the next '/' or ':'
+    let after_scheme = if let Some(rest) = base_url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = base_url.strip_prefix("http://") {
+        rest
+    } else {
+        return Ok(());
+    };
+    let host = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    // Strip IPv6 brackets if present
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(crate::error::SwarmError::Config(
+                "Provider base_url must not point to private/internal IP ranges".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check if an IP address is in a private or link-local range.
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            // fe80::/10 link-local, fc00::/7 unique local, ::1 loopback
+            let segments = v6.segments();
+            v6.is_loopback() || (segments[0] & 0xffc0) == 0xfe80 || (segments[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
 /// Generic OpenAI-compatible proxy: rewrite base URL + auth header, forward as-is.
 pub async fn proxy_openai_compatible(
     base_url: &str,
@@ -267,6 +314,9 @@ pub async fn proxy_openai_compatible(
     body: &serde_json::Value,
     stream: bool,
 ) -> Result<axum::response::Response, ApiError> {
+    // SEC: Validate base_url to prevent SSRF via custom provider configuration.
+    validate_provider_url(base_url).map_err(ApiError)?;
+
     let client = get_provider_client();
     let url = format!("{}/chat/completions", base_url);
 

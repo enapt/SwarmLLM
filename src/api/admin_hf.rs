@@ -85,6 +85,11 @@ pub async fn hf_search(
     if query.is_empty() {
         return Ok(Json(vec![]));
     }
+    if query.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Search query too long (max 256 chars)".into(),
+        )));
+    }
 
     let results = crate::model::huggingface::search_gguf_models(&query)
         .await
@@ -215,22 +220,26 @@ pub async fn hf_download(
         )));
     }
 
+    // SEC: Validate repo_id format (owner/repo) to prevent URL injection/SSRF.
+    if !is_valid_hf_repo_id(&repo_id) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid repo_id format. Expected: owner/repo (alphanumeric, hyphens, dots, underscores)"
+                .into(),
+        )));
+    }
+    // SEC: Validate filename to prevent URL metacharacter injection.
+    if !is_valid_hf_filename(&filename) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid filename. Must be alphanumeric with hyphens, dots, underscores, ending in .gguf"
+                .into(),
+        )));
+    }
+
     // Sanitize repo_id to prevent path traversal — reject ".." and backslash
     let sanitized_repo = repo_id.replace(['/', '\\'], "_");
     if sanitized_repo.contains("..") || sanitized_repo.starts_with('.') {
         return Err(ApiError(crate::error::SwarmError::Config(
             "Invalid repo_id: path traversal detected".into(),
-        )));
-    }
-
-    // Sanitize filename to prevent path traversal
-    if filename.contains("..")
-        || filename.starts_with('.')
-        || filename.contains('/')
-        || filename.contains('\\')
-    {
-        return Err(ApiError(crate::error::SwarmError::Config(
-            "Invalid filename: path traversal detected".into(),
         )));
     }
 
