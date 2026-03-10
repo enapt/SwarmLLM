@@ -884,7 +884,9 @@ impl NetworkManager {
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
                 // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
-                if self.shared_state.peer_id_map.len() < 10_000 || self.shared_state.peer_id_map.contains_key(&node_id) {
+                if self.shared_state.peer_id_map.len() < 10_000
+                    || self.shared_state.peer_id_map.contains_key(&node_id)
+                {
                     self.shared_state
                         .peer_id_map
                         .insert(node_id.clone(), peer_id.to_bytes());

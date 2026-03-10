@@ -393,7 +393,11 @@ impl HealthMonitor {
             self.shared_state.peer_id_map.remove(&nid);
         }
         if removed > 0 {
-            tracing::debug!(removed, remaining = self.shared_state.peer_id_map.len(), "Cleaned stale peer_id_map entries");
+            tracing::debug!(
+                removed,
+                remaining = self.shared_state.peer_id_map.len(),
+                "Cleaned stale peer_id_map entries"
+            );
         }
     }
 

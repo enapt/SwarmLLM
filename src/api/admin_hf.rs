@@ -517,6 +517,19 @@ pub async fn hf_probe(
                 unique_peers.len()
             };
 
+            // Cap probe cache at 1000 entries — evict oldest by probed_at
+            const MAX_PROBE_CACHE: usize = 1_000;
+            if state.shared_state.hf_probe_cache.len() >= MAX_PROBE_CACHE {
+                if let Some(oldest) = state
+                    .shared_state
+                    .hf_probe_cache
+                    .iter()
+                    .min_by_key(|entry| entry.value().probed_at)
+                    .map(|entry| entry.key().clone())
+                {
+                    state.shared_state.hf_probe_cache.remove(&oldest);
+                }
+            }
             state.shared_state.hf_probe_cache.insert(mid, probe_info);
 
             let arch_str = &info.tensor_meta.architecture;
