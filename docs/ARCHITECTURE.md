@@ -1,5 +1,17 @@
 # SwarmLLM Architecture Reference
 
+## Workspace Structure
+
+Cargo workspace with three crates:
+
+| Crate | Path | Purpose |
+|-------|------|---------|
+| `swarmllm` | `/` (root) | Main binary — daemon, networking, inference, API, all subsystems |
+| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (69 types: NodeId, ModelManifest, SwarmMessage, etc.) |
+| `swarmllm-frontend` | `crates/swarmllm-frontend/` | Frontend asset serving (embedded in release, disk-based in dev mode) |
+
+Extension traits (`ModelManifestExt`, `NicknameRecordExt`, `BlindedPoolInvitationExt`) provide methods for types in `swarmllm-types` that depend on main crate functionality (filesystem, crypto, blake3).
+
 ## System Overview
 
 Single Rust binary, three simultaneous functions:
