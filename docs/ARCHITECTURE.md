@@ -327,6 +327,7 @@ Node A (rank 0, coordinator)          Node B (rank 1)
 - **TP group formation**: Requires `is_lan_peer` OR measured `latency_ms ≤ 10`
 - **Weight splitting**: Dynamic slicing at inference time (`forward_attn_tp` slices attention heads, `forward_tp` slices FFN intermediate dimension)
 - **Wire format**: Partials zstd-compressed, sent via `SendAllReduceRequest` / `SendAllReduceResponse` NetworkCommand variants
+- **Registry cleanup**: `AllReduceRegistry::cleanup_stale()` runs on each HealthMonitor tick (30s), removing entries where the receiver was dropped (timed out)
 - **Files**: `src/inference/allreduce.rs` (coordinator + registry), `src/inference/scheduler.rs` (TP group detection)
 
 ### Vision Language Models (VLM)
@@ -479,14 +480,28 @@ Earning (default rates, configurable per pool):
 
 Spending (default rates, configurable per pool):
   -8  credits  per layer per token requested
-  -50 credits  per serve failure (timeout)
+  -50 credits  per distributed inference failure (automatic penalty)
 
-Tiers:
-  Platinum  (≥90th percentile)  → immediate queue
-  Gold      (≥70th percentile)  → 1-3s queue
-  Silver    (positive balance)  → 5-15s queue
-  Bronze    (zero/negative)     → 30s+ queue
+Tiers (enforced per-request in InferenceRouter):
+  Platinum  (≥90th percentile)  → immediate queue, 2× concurrent slots
+  Gold      (≥70th percentile)  → 1-3s queue, base concurrent slots
+  Silver    (positive balance)  → 5-15s queue, ½ concurrent slots
+  Bronze    (zero/negative)     → 30s+ queue, ¼ concurrent slots
 ```
+
+**Tier enforcement flow**: On each `handle_submit()`, the router computes the network percentile
+from `peer_credit_balances` (populated via credit gossip), calls `calculate_tier()`, and sets the
+request priority. In `drain_queue()`, `max_concurrent_for_tier()` limits how many concurrent
+execution slots each tier can use. Higher tiers dequeue first via `tier_weight()` ordering.
+
+**Relay credits**: NetworkManager tracks active relay circuits via `active_relay_circuits` DashMap.
+On `CircuitReqAccepted`, records start time. On `CircuitClosed`, computes duration and adds to
+`relay_seconds_served` atomic counter. CreditLedger drains this counter periodically and calls
+`earn_relay_service()`.
+
+**Failure penalties**: When distributed inference fails in `execute_request()`, the router applies
+`penalty_serve_failure` credits (default -50) and broadcasts `InferenceError` to all pipeline
+participants via `broadcast_pipeline_error()`.
 
 Credit earn/spend rates are configurable per pool via the pool configuration API.
 

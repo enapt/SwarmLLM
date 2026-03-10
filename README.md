@@ -191,7 +191,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), distributed mmproj encoding, and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput (requires `llama` feature flag)
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation, filling pipeline bubbles in distributed inference
-- **Multi-turn KV-cache** — Session-aware cache reuse, cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool), VRAM-aware LRU eviction
+- **Multi-turn KV-cache** — Session-aware cache reuse with pipeline affinity (multi-turn sessions reuse the same nodes for KV-cache locality), cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool), VRAM-aware LRU eviction
 - **On-Demand Loading** — Models with shards on disk auto-load into VRAM on first inference request, with LRU eviction to make room
 
 ### Networking & Security
@@ -204,7 +204,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
 
 ### Economy & Identity
-- **Credit System** — Earn credits by serving inference, forwarding activations, and hosting shards (hourly). Anti-gaming protection, transaction replay prevention, credit escrow with automatic refund on failure
+- **Credit System** — Earn credits by serving inference, forwarding activations, hosting shards (hourly), seeding data, and relaying traffic. Priority tiers enforced per-request (Platinum/Gold/Silver/Bronze) with concurrent limits. Anti-gaming protection, failure penalties, transaction replay prevention, credit escrow with automatic refund on failure
 - **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
 - **Model Trust** — Demand-driven trust system (Discovered→Pinned→DemandVerified→NetworkPopular) gates auto-manage to prevent trash model propagation
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
@@ -285,8 +285,10 @@ Key source directories:
 | Serve inference | +credits (per layer per token) | Active |
 | Forward activations | +credits (per layer processed) | Active |
 | Host model shards | +credits (per GB per hour) | Active |
-| Submit inference request | -credits (per layer per token) | Active |
 | Seed shard data | +credits (per GB transferred) | Active |
+| Relay traffic | +credits (per connection hour) | Active |
+| Submit inference request | -credits (per layer per token) | Active |
+| Distributed failure | -credits (penalty) | Active |
 
 Credits determine your priority tier:
 

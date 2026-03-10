@@ -37,8 +37,8 @@ curl http://localhost:8800/v1/chat/completions \
 | `presence_penalty` | float | no | `0.0` | Presence penalty (-2.0 to 2.0) |
 | `tools` | array | no | — | Tool/function definitions for function calling |
 | `tool_choice` | string or object | no | — | `"none"`, `"auto"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
-| `logprobs` | boolean | no | `false` | Return log probabilities for output tokens |
-| `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`) |
+| `logprobs` | boolean | no | `false` | Return log probabilities for output tokens. Supported on split model (candle) inference paths |
+| `top_logprobs` | integer | no | — | Number of top log probabilities per token (0-20, requires `logprobs: true`). Uses post-temperature softmax probabilities |
 | `session_id` | string | no | — | Reuse KV-cache from a previous request |
 | `lora_adapter` | string | no | — | LoRA adapter ID for fine-tuned inference |
 

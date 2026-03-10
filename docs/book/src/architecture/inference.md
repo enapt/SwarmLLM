@@ -24,13 +24,16 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 ## Pipeline Assembly
 
 1. Fetch model manifest to determine layer ranges
-2. Query model_registry.shard_holders for hosting nodes
-3. Fetch node load/latency from peer_registry
-4. Sort candidates by (latency ASC, load ASC, trust DESC)
-5. Greedy assignment: widest contiguous layer range per node
-6. Merge contiguous segments on same node
-7. Identify standby nodes per segment (failover)
-8. Send PipelineAssignment, wait for ACKs, begin forwarding
+2. **Pipeline affinity check**: if multi-turn session has a previous pipeline and all nodes are still connected, reuse it (KV cache locality)
+3. Query model_registry.shard_holders for hosting nodes
+4. Fetch node load/latency from peer_registry
+5. Sort candidates by (latency ASC, load ASC, trust DESC)
+6. Greedy assignment: widest contiguous layer range per node
+7. Merge contiguous segments on same node
+8. Identify standby nodes per segment (failover)
+9. Send PipelineAssignment, wait for ACKs, begin forwarding
+
+Pipeline affinity means that multi-turn conversations (with `session_id`) prefer to route through the same nodes, preserving KV-cache state and avoiding cold restarts on every turn.
 
 ## Architecture Detection
 
@@ -63,6 +66,8 @@ The SplitModel loader reads `general.architecture` from GGUF metadata and applie
 - **Chunked Prefill** — Long prompts split into chunks to reduce peak memory
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
 - **PagedAttention** — Block-pool KV-cache allocation (CUDA-only, `paged-attn` feature)
+- **Logprobs** — Per-token log probabilities via `sample_token_with_params_and_logprobs()`. When `logprobs: true` in the request, the sampling layer collects top-N token probabilities and returns them in the OpenAI-compatible response. Available on split model (candle) inference paths
+- **Pipeline Error Broadcast** — On distributed inference failure, `broadcast_pipeline_error()` notifies all participants so peers can update shard availability and route around failures
 
 ## Vision Language Models (VLM)
 
