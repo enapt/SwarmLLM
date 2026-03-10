@@ -69,15 +69,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                             } else {
                                 0
                             };
-                            shard_json.as_object_mut().unwrap().insert(
-                                "download".to_string(),
-                                serde_json::json!({
-                                    "state": "Downloading",
-                                    "progress_pct": pct,
-                                    "downloaded_bytes": sp.downloaded_bytes,
-                                    "total_bytes": sp.total_bytes,
-                                }),
-                            );
+                            if let Some(obj) = shard_json.as_object_mut() {
+                                obj.insert(
+                                    "download".to_string(),
+                                    serde_json::json!({
+                                        "state": "Downloading",
+                                        "progress_pct": pct,
+                                        "downloaded_bytes": sp.downloaded_bytes,
+                                        "total_bytes": sp.total_bytes,
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
@@ -95,10 +97,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                         })
                         .collect();
                     if !peers.is_empty() {
-                        shard_json
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("peer_downloads".to_string(), serde_json::json!(peers));
+                        if let Some(obj) = shard_json.as_object_mut() {
+                            obj.insert("peer_downloads".to_string(), serde_json::json!(peers));
+                        }
                     }
                 }
 
@@ -599,17 +600,15 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 "locked": locked,
             });
             if let Some(dl) = download_state {
-                shard_json
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("download".to_string(), dl);
+                if let Some(obj) = shard_json.as_object_mut() {
+                    obj.insert("download".to_string(), dl);
+                }
             }
             if let Some(peers_dl) = peer_downloading {
                 if !peers_dl.is_empty() {
-                    shard_json
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("peer_downloads".to_string(), serde_json::json!(peers_dl));
+                    if let Some(obj) = shard_json.as_object_mut() {
+                        obj.insert("peer_downloads".to_string(), serde_json::json!(peers_dl));
+                    }
                     any_downloading = true;
                 }
             }

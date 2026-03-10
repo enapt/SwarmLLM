@@ -863,7 +863,8 @@ pub async fn chat_completions(
         return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
     }
 
-    let model_name = model_name.unwrap();
+    let model_name =
+        model_name.expect("model_name guaranteed Some — None case returns early above");
     let params = req.to_sampling_params();
 
     // Fast path: if we have a complete local split model (all layers), generate directly.
