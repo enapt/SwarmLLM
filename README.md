@@ -157,12 +157,12 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing, and authenticated sealed gossip. Mandatory gossip signing, transport-authenticated dispatch, RFC 6479 anti-replay
 - **Security Hardened** — 24-item security audit (Phase 16): signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin validation, credit signature verification, XSS fixes
-- **Hidden States API** — `/v1/internal/hidden-states` exposes per-layer activations for research (adapter insertion, activation inspection)
+- **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations (currently returns placeholder data; full integration planned)
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
 
 ### Economy & Identity
-- **Credit System** — Earn credits by serving inference, hosting shards, and seeding data. Higher contribution = faster responses. Anti-gaming protection, transaction replay prevention, and credit escrow for large requests
+- **Credit System** — Earn credits by serving inference (active) and forwarding activations (active). Shard hosting and seeding credits are defined but not yet wired. Anti-gaming protection, transaction replay prevention. Credit escrow is implemented but not yet active in the daemon
 - **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
 - **Model Trust** — Demand-driven trust system (Discovered→Pinned→DemandVerified→NetworkPopular) gates auto-manage to prevent trash model propagation
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
@@ -238,12 +238,13 @@ Key source directories:
 
 ## Credit System
 
-| Action | Effect |
-|--------|--------|
-| Serve inference | +credits (per layer per token) |
-| Host model shards | +credits (per GB per hour) |
-| Seed shard data | +credits (per GB transferred) |
-| Submit inference request | -credits (per layer per token) |
+| Action | Effect | Status |
+|--------|--------|--------|
+| Serve inference | +credits (per layer per token) | Active |
+| Forward activations | +credits (per layer processed) | Active |
+| Submit inference request | -credits (per layer per token) | Active |
+| Host model shards | +credits (per GB per hour) | Defined, not yet wired |
+| Seed shard data | +credits (per GB transferred) | Defined, not yet wired |
 
 Credits determine your priority tier:
 
@@ -358,8 +359,8 @@ cargo build --release --features llama
 # Full CUDA build (candle + llama.cpp + flash/paged attention)
 cargo build --release --features cuda
 
-# Apple Silicon (Metal)
-cargo build --release --features metal
+# Apple Silicon (CPU — Metal GPU acceleration planned)
+cargo build --release
 ```
 
 ## CLI
@@ -370,11 +371,10 @@ swarmllm <COMMAND>
 Commands:
   run         Start the SwarmLLM daemon (default if omitted)
   status      Show node status (queries running daemon)
-  chat        Interactive terminal chat with a running node
   bench       Run inference benchmarks (tokens/sec, latency)
-  peers       List connected peers with latency and trust
   test-split  Test split inference locally (single-node diagnostic)
   version     Print version information
+  update      Check for and download updates
 
 Options:
   -c, --config <PATH>       Config file path
@@ -415,7 +415,7 @@ The `.env` file is loaded at startup and does not override existing environment 
 
 | Section | Key Settings |
 |---------|-------------|
-| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum), `data_dir` |
+| `[node]` | `listen_port`, `contribution` (minimal/moderate/maximum — not yet enforced), `data_dir` |
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
 | `[resources.schedule]` | `enabled`, `reduced_hours_start/end`, `prune_aggressiveness` |
 | `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
@@ -476,9 +476,9 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 
 | Platform | GPU Support | Status |
 |----------|------------|--------|
-| Linux x86_64 | CUDA + ROCm | Primary target |
-| macOS aarch64 | Metal | Supported |
-| Windows x86_64 | CUDA | Supported |
+| Linux x86_64 | CUDA | Primary target, release binaries available |
+| Windows x86_64 | CUDA | Release binaries available |
+| macOS aarch64 | CPU only (Metal planned) | Build available, GPU acceleration planned |
 | macOS x86_64 | CPU only | Best-effort |
 | Linux aarch64 | CPU only | Best-effort |
 
