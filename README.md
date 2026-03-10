@@ -189,7 +189,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement ≤10ms), with ring-allreduce for 4+ ranks. Complements pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), distributed mmproj encoding, and per-request LoRA adapter loading
-- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput
+- **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput (requires `llama` feature flag)
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation, filling pipeline bubbles in distributed inference
 - **Multi-turn KV-cache** — Session-aware cache reuse, cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool), VRAM-aware LRU eviction
 - **On-Demand Loading** — Models with shards on disk auto-load into VRAM on first inference request, with LRU eviction to make room
@@ -199,12 +199,12 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing infrastructure for prompt/response confidentiality, and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. During distributed inference, participating pipeline nodes process activation tensors — see [Security Limitations](docs/book/src/architecture/security.md#known-limitations) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
-- **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations (currently returns placeholder data; full integration planned)
+- **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations with real forward pass capture
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
 
 ### Economy & Identity
-- **Credit System** — Earn credits by serving inference, forwarding activations, and hosting shards (hourly). Seeding credits are defined but not yet wired. Anti-gaming protection, transaction replay prevention. Credit escrow is implemented but not yet active in the daemon
+- **Credit System** — Earn credits by serving inference, forwarding activations, and hosting shards (hourly). Anti-gaming protection, transaction replay prevention, credit escrow with automatic refund on failure
 - **Identity & Pools** — Cryptographic nicknames, leaderboard, multi-device credit pooling with dual-signature invitation protocol
 - **Model Trust** — Demand-driven trust system (Discovered→Pinned→DemandVerified→NetworkPopular) gates auto-manage to prevent trash model propagation
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
