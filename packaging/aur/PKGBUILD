@@ -1,0 +1,37 @@
+# Maintainer: SwarmLLM <security@enapt.dev>
+pkgname=swarmllm
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Decentralized peer-to-peer LLM inference network"
+arch=('x86_64')
+url="https://github.com/enapt/SwarmLLM"
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'openssl')
+makedepends=('rust' 'cargo' 'pkg-config')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/enapt/SwarmLLM/archive/v$pkgver.tar.gz")
+# sha256sums=('UPDATE_WITH_ACTUAL_SHA256')
+sha256sums=('SKIP')
+
+build() {
+    cd "SwarmLLM-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release
+}
+
+package() {
+    cd "SwarmLLM-$pkgver"
+
+    # Binary
+    install -Dm755 "target/release/swarmllm" "$pkgdir/usr/bin/swarmllm"
+
+    # Default config
+    install -Dm644 "config/default.toml" "$pkgdir/etc/swarmllm/default.toml"
+
+    # Systemd service
+    install -Dm644 "$srcdir/../swarmllm.service" "$pkgdir/usr/lib/systemd/system/swarmllm.service"
+
+    # License
+    install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

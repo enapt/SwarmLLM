@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# Create swarmllm user if it doesn't exist
+if ! id -u swarmllm >/dev/null 2>&1; then
+    useradd --system --no-create-home --shell /usr/sbin/nologin swarmllm
+fi
+
+# Create data directory
+mkdir -p /var/lib/swarmllm
+chown swarmllm:swarmllm /var/lib/swarmllm
+
+# Reload systemd and enable service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    echo "SwarmLLM installed. Enable and start with:"
+    echo "  sudo systemctl enable --now swarmllm"
+fi

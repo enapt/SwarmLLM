@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+
+# Stop service before removal
+if [ -d /run/systemd/system ]; then
+    systemctl stop swarmllm 2>/dev/null || true
+    systemctl disable swarmllm 2>/dev/null || true
+fi

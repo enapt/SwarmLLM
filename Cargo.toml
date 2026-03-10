@@ -177,3 +177,32 @@ incremental = true
 
 [profile.test.package."*"]
 opt-level = 2
+
+# ---- Package Distribution ----
+
+[package.metadata.deb]
+maintainer = "SwarmLLM <security@enapt.dev>"
+depends = "$auto, openssl (>= 3.0)"
+section = "net"
+priority = "optional"
+extended-description = """SwarmLLM is a single binary that functions as a peer-to-peer node \
+in a decentralized LLM inference network. Each node participates in a P2P network, \
+runs an HTTP server (OpenAI-compatible API + admin dashboard), and manages local \
+resources (GPU/CPU compute, storage, bandwidth)."""
+assets = [
+    ["target/release/swarmllm", "usr/bin/", "755"],
+    ["config/default.toml", "etc/swarmllm/default.toml", "644"],
+    ["packaging/swarmllm.service", "usr/lib/systemd/system/swarmllm.service", "644"],
+]
+conf-files = ["/etc/swarmllm/default.toml"]
+maintainer-scripts = "packaging/deb/"
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/swarmllm", dest = "/usr/bin/swarmllm", mode = "755" },
+    { source = "config/default.toml", dest = "/etc/swarmllm/default.toml", mode = "644", config = true },
+    { source = "packaging/swarmllm.service", dest = "/usr/lib/systemd/system/swarmllm.service", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+openssl = ">= 3.0"

@@ -1,0 +1,32 @@
+[Unit]
+Description=SwarmLLM — Decentralized P2P LLM Inference Node
+Documentation=https://github.com/enapt/SwarmLLM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=swarmllm
+Group=swarmllm
+ExecStart=/usr/bin/swarmllm run
+Restart=on-failure
+RestartSec=5
+
+# Data directory
+StateDirectory=swarmllm
+Environment=SWARMLLM_NODE_DATA_DIR=/var/lib/swarmllm
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/swarmllm
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=swarmllm
+
+[Install]
+WantedBy=multi-user.target

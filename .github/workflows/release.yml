@@ -105,6 +105,36 @@ jobs:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
 
+      # Build .deb package (Linux CPU only — CUDA users build from source)
+      - name: Build .deb package
+        if: matrix.name == 'Linux x86_64'
+        run: |
+          cargo install cargo-deb --locked 2>/dev/null || true
+          cargo deb --no-build
+          cp target/debian/*.deb swarmllm_${{ github.ref_name }}_amd64.deb
+
+      - name: Upload .deb
+        if: matrix.name == 'Linux x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarmllm_${{ github.ref_name }}_amd64.deb
+          path: swarmllm_${{ github.ref_name }}_amd64.deb
+
+      # Build .rpm package (Linux CPU only)
+      - name: Build .rpm package
+        if: matrix.name == 'Linux x86_64'
+        run: |
+          cargo install cargo-generate-rpm --locked 2>/dev/null || true
+          cargo generate-rpm
+          cp target/generate-rpm/*.rpm swarmllm_${{ github.ref_name }}.x86_64.rpm
+
+      - name: Upload .rpm
+        if: matrix.name == 'Linux x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarmllm_${{ github.ref_name }}.x86_64.rpm
+          path: swarmllm_${{ github.ref_name }}.x86_64.rpm
+
   release:
     name: Publish Release
     needs: build
