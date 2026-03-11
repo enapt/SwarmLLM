@@ -54,7 +54,13 @@ pub struct NetworkManager {
     /// When a LayerForward arrives, we store the channel here instead of ACK-ing immediately.
     /// When the computed LayerResult comes back via NetworkCommand::SendTensorResult,
     /// we send the result as the response on the original channel — single substream per token.
-    pending_tensor_channels: HashMap<uuid::Uuid, request_response::ResponseChannel<SwarmResponse>>,
+    pending_tensor_channels: HashMap<
+        uuid::Uuid,
+        (
+            std::time::Instant,
+            request_response::ResponseChannel<SwarmResponse>,
+        ),
+    >,
     /// Maps ConnectionId → remote Multiaddr for each established connection.
     /// Used by the Identify handler to add only the *connected* address to Kademlia,
     /// not all listen_addrs (which causes redundant connections to the same peer on
@@ -345,6 +351,11 @@ impl NetworkManager {
                 // timeout (futures_timer::Delay) fails to fire. When detected, we disconnect
                 // the stale peer to force a fresh TCP+yamux session on the next exchange.
                 _ = stale_tensor_interval.tick() => {
+                    // Sweep stale pending_tensor_channels independently of outbound state.
+                    // On serving nodes, pending_tensor_outbound is empty but channels can still leak.
+                    self.pending_tensor_channels.retain(|_uuid, (inserted, _chan)| {
+                        inserted.elapsed().as_secs() < 600
+                    });
                     if !self.pending_tensor_outbound.is_empty() {
                         let now = std::time::Instant::now();
                         let mut stale: Vec<(OutboundRequestId, uuid::Uuid, libp2p::PeerId)> = Vec::new();
@@ -1375,7 +1386,8 @@ impl NetworkManager {
                         tracing::warn!(%peer, "pending_tensor_channels full — dropping");
                         // Drop channel (sends implicit error to requester)
                     } else {
-                        self.pending_tensor_channels.insert(request_id, channel);
+                        self.pending_tensor_channels
+                            .insert(request_id, (std::time::Instant::now(), channel));
                         tracing::info!(
                             %peer,
                             %request_id,
@@ -1871,7 +1883,7 @@ impl NetworkManager {
             .send_request(&peer_id, req);
         // Track OutboundRequestId → (UUID, time, peer, layers, activation_size)
         // so we can notify pipeline on OutboundFailure and compute adaptive stale timeouts.
-        let num_layers = forward.layer_range.1 - forward.layer_range.0;
+        let num_layers = forward.layer_range.1.saturating_sub(forward.layer_range.0);
         let activation_bytes = forward.activations.len();
         self.pending_tensor_outbound.insert(
             outbound_id,
@@ -1950,7 +1962,8 @@ impl NetworkManager {
         }
 
         // Try to send as response on the original forward's channel
-        if let Some(channel) = self.pending_tensor_channels.remove(&result.request_id) {
+        if let Some((_inserted, channel)) = self.pending_tensor_channels.remove(&result.request_id)
+        {
             match protocol::encode_layer_result(&result) {
                 Ok(payload) => {
                     let payload_len = payload.len();

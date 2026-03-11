@@ -369,6 +369,13 @@ pub const TENSOR_TAG_ENCRYPTED: u8 = 0x10;
 pub fn encode_layer_forward(forward: &LayerForward) -> Result<Vec<u8>, SwarmError> {
     let data_len = forward.activations.len();
     let model_id_bytes = forward.model_id.0.as_bytes();
+    if model_id_bytes.len() > u16::MAX as usize {
+        return Err(SwarmError::Network(format!(
+            "Model ID too long: {} bytes (max {})",
+            model_id_bytes.len(),
+            u16::MAX
+        )));
+    }
     // Header: tag(1) + uuid(16) + seq(4) + index_pos(4) + fmt(1) + data_len(4) = 30
     // Trailer: marker(1) + layer_start(4) + layer_end(4) + model_id_len(2) + model_id(N)
     let trailer_len = 1 + 4 + 4 + 2 + model_id_bytes.len();
@@ -633,7 +640,11 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
             pos += 1;
             // Error: read message length + message
             if pos + 4 <= data.len() {
-                let msg_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                let msg_len = u32::from_le_bytes(
+                    data[pos..pos + 4]
+                        .try_into()
+                        .expect("slice is exactly 4 bytes after bounds check"),
+                ) as usize;
                 pos += 4;
                 let msg = String::from_utf8_lossy(&data[pos..pos + msg_len.min(data.len() - pos)])
                     .to_string();
@@ -652,7 +663,11 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
 
     // Read activations if present (capped at 128MB to prevent abuse)
     let activations = if pos + 4 <= data.len() {
-        let act_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let act_len = u32::from_le_bytes(
+            data[pos..pos + 4]
+                .try_into()
+                .expect("slice is exactly 4 bytes after bounds check"),
+        ) as usize;
         pos += 4;
         if act_len > MAX_ACTIVATION_SIZE {
             return Err(SwarmError::Network(format!(
@@ -707,6 +722,13 @@ pub fn encode_layer_forward_encrypted(
 ) -> Result<Vec<u8>, SwarmError> {
     let sealed_len = sealed_activations.len();
     let model_id_bytes = forward.model_id.0.as_bytes();
+    if model_id_bytes.len() > u16::MAX as usize {
+        return Err(SwarmError::Network(format!(
+            "Model ID too long: {} bytes (max {})",
+            model_id_bytes.len(),
+            u16::MAX
+        )));
+    }
     let total = 1 + 25 + 8 + 2 + model_id_bytes.len() + 4 + sealed_len;
     let mut buf = Vec::with_capacity(total);
 

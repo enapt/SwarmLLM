@@ -553,6 +553,18 @@ impl PipelineExecutor {
         let request_id = self.request.id;
         let max_tokens = self.request.sampling_params.max_tokens;
 
+        if max_tokens == 0 {
+            return Ok(InferenceOutput {
+                request_id,
+                content: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                finish_reason: "length".to_string(),
+                session_id: self.request.session_id.clone(),
+                token_logprobs: vec![],
+            });
+        }
+
         // Build the initial prompt representation
         let prompt = self.build_prompt().await;
         let prompt_bytes = prompt.as_bytes().to_vec();
@@ -2658,15 +2670,17 @@ impl PipelineExecutor {
                 // We are in the TP group — compute our partial result
                 let partial = {
                     let mut model = model_arc.lock().await;
-                    model.forward_tp_layer(
-                        &current_activations,
-                        abs_layer,
-                        index_pos,
-                        tp_rank,
-                        tp_size,
-                        kv_cache_store,
-                        &req_id_str,
-                    )?
+                    tokio::task::block_in_place(|| {
+                        model.forward_tp_layer(
+                            &current_activations,
+                            abs_layer,
+                            index_pos,
+                            tp_rank,
+                            tp_size,
+                            kv_cache_store,
+                            &req_id_str,
+                        )
+                    })?
                 };
 
                 // Compress partial tensor for AllReduce

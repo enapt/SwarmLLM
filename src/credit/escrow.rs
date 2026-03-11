@@ -271,6 +271,12 @@ impl EscrowManager {
                     let mut bal = balance.write().await;
                     bal.balance = bal.balance.saturating_add(amount);
                     bal.last_updated = chrono::Utc::now();
+                    // Persist balance after refund
+                    let _ = self.db.put_json(
+                        crate::credit::ledger::TREE_CREDITS,
+                        crate::credit::ledger::KEY_BALANCE,
+                        &*bal,
+                    );
                 }
 
                 tracing::info!(

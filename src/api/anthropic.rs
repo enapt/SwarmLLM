@@ -1316,8 +1316,14 @@ async fn anthropic_to_openai_proxy(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let scrubbed = crate::crypto::scrub_api_keys(&body);
+        // Truncate to prevent large error bodies from leaking to API callers
+        let truncated = if scrubbed.len() > 512 {
+            format!("{}…[truncated]", &scrubbed[..512])
+        } else {
+            scrubbed
+        };
         return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Cloud provider returned {status}: {scrubbed}"
+            "Cloud provider returned {status}: {truncated}"
         ))));
     }
 

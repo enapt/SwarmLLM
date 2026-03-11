@@ -280,6 +280,10 @@ pub fn sample_token_with_logprobs(
 ) -> (u32, Option<SampledTokenLogProb>) {
     let need_logprobs = params.logprobs && params.top_logprobs > 0;
 
+    // Clear probs buffer before sampling to prevent stale data from previous tokens
+    // (especially important for greedy/temperature=0 which skips softmax)
+    ctx.probs.clear();
+
     let token_id = sample_token_with_ctx(logits, params, ctx);
 
     let logprob_info = if need_logprobs {

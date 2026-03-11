@@ -186,9 +186,6 @@ pub fn sample_token_with_params(
         return Err(SwarmError::Internal("Empty logits".into()));
     }
 
-    // Apply top-k filtering before temperature scaling
-    crate::inference::sampling::apply_top_k(&mut logits_vec, params.top_k);
-
     let temperature = params.temperature;
     let top_p = params.top_p;
 
@@ -202,13 +199,13 @@ pub fn sample_token_with_params(
         return Ok(idx as u32);
     }
 
-    // Apply temperature + softmax — O(V)
-    let inv_temp = 1.0 / temperature;
+    // Match sampling.rs order: temperature → top-k → top-p → sample
+    crate::inference::sampling::apply_temperature(&mut logits_vec, temperature);
+    crate::inference::sampling::apply_top_k(&mut logits_vec, params.top_k);
+
+    // Softmax — O(V)
     let max_val = logits_vec.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut probs: Vec<f32> = logits_vec
-        .iter()
-        .map(|&x| ((x - max_val) * inv_temp).exp())
-        .collect();
+    let mut probs: Vec<f32> = logits_vec.iter().map(|&x| (x - max_val).exp()).collect();
     let sum: f32 = probs.iter().sum();
     if sum <= 0.0 || !sum.is_finite() {
         return Ok(0);
