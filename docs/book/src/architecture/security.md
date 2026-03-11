@@ -163,10 +163,11 @@ A malicious node can send garbage activations instead of computing the actual tr
 |---|---|---|---|
 | Default (no privacy flags) | First segment sees plaintext | Final segment sees plaintext | Intermediate nodes see activations |
 | `local_embedding_privacy: true` | No remote node sees raw tokens | Final segment sees plaintext | Reduced — no trivial embedding inversion |
+| `encrypted_pipeline: true` | No remote node sees raw tokens | No remote node sees output | Only intermediate activations visible to remote nodes |
 | + Tier 2 pipeline sealing | No remote node sees raw tokens | Encrypted on the wire | Reduced — no trivial embedding inversion |
-| All protections enabled | Best available | Best available | Final segment always sees output; activation inversion theoretically possible but computationally expensive |
+| All protections enabled | Best available | Best available | Remote nodes only see intermediate activations; inversion theoretically possible but computationally expensive |
 
-> **Bottom line:** In a fully-distributed pipeline, the requesting node's prompt and response are best-effort protected. The final-segment node will always see the generated output. With `local_embedding_privacy`, no remote node sees raw token IDs. Activation inversion from deep layers is an active research area but is not practical against well-mixed hidden states.
+> **Bottom line:** With `encrypted_pipeline`, no remote node sees plaintext input or output — the pipeline "boomerangs" through remote nodes and returns to the requester. This is the strongest privacy mode. Without it, `local_embedding_privacy` still protects raw token IDs but the final-segment node sees generated output.
 
 ## Local Embedding Privacy
 
@@ -183,6 +184,34 @@ When `local_embedding_privacy: true` is set in `[inference]` config, the request
 **Trade-off:** Pre-embedded activations are larger than raw text (e.g., 512 tokens × 4096 hidden × 4 bytes = 8MB vs ~2KB text). This matches the existing inter-segment activation sizes, so it does not change the bandwidth profile of distributed inference.
 
 Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline.rs`, `src/daemon/state.rs` (`local_embedders` DashMap).
+
+## Encrypted Pipeline
+
+When `encrypted_pipeline: true` is enabled (globally or per-model), the pipeline scheduler forces the requesting node to handle both the **first** and **last** segments. This creates a "boomerang" topology:
+
+```
+Requester (shard 0, embed) → Remote A (middle shards) → ... → Requester (final shard, decode)
+```
+
+**No remote node ever sees plaintext** — neither the raw prompt tokens nor the generated output. Remote nodes only process intermediate hidden-state activations.
+
+**Requirements:**
+- The requesting node must hold **shard 0** (embedding table) AND the **final shard** (output head)
+- `local_embedding_privacy` is auto-enabled when encrypted pipeline is active
+- Only useful for models with **3+ shards** (2-shard models = fully local, no distribution)
+
+**Overhead:**
+- Adds ~1 extra network RTT per generated token (activations must return to the requester for final decoding)
+- Latency increase depends on distance to the furthest remote segment
+- No bandwidth overhead vs normal distributed inference (activation sizes are the same)
+
+**Per-model configuration:**
+- API: `GET/PUT /api/admin/models/:id/encrypted-pipeline`
+- Dashboard: gear icon on model card → "Encrypted pipeline" checkbox
+- Global fallback: `encrypted_pipeline = true` in `[inference]` config
+- Per-model overrides are persisted to the database
+
+Relevant code: `src/inference/scheduler.rs` (greedy_assign), `src/inference/pipeline.rs` (auto-enable local embedding), `src/api/admin_models.rs` (API endpoints), `src/daemon/state.rs` (`encrypted_pipeline_models` DashMap).
 
 ## Known Limitations
 

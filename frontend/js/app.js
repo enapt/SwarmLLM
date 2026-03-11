@@ -344,7 +344,9 @@ var SwarmLLM = (function() {
           var d = new Date(s.created);
           timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
-        var modelBadge = s.model ? '<span class="session-model-badge" title="' + escapeHtml(s.model) + '">' + escapeHtml(formatModelDisplayName(s.model)) + '</span>' : '';
+        var modelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
+        var sessionEncIcon = (modelItem && modelItem.encrypted) ? ' &#128274;' : '';
+        var modelBadge = s.model ? '<span class="session-model-badge" title="' + escapeHtml(s.model) + (sessionEncIcon ? ' (encrypted pipeline)' : '') + '">' + escapeHtml(formatModelDisplayName(s.model)) + sessionEncIcon + '</span>' : '';
         var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
@@ -394,10 +396,12 @@ var SwarmLLM = (function() {
       var available = !s.model || allIds.indexOf(s.model) !== -1;
       var badgeClass = 'chat-session-model' + (available ? '' : ' unavailable');
       var badgeTitle = available ? s.model : 'Model no longer available';
+      var headerModelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
+      var headerEncIcon = (headerModelItem && headerModelItem.encrypted) ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '';
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>';
+        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
     },
 
     renderMessages: function() {
@@ -1023,6 +1027,12 @@ var SwarmLLM = (function() {
           if (!basic) probedBadge = '<span class="badge-probed">Probed</span>';
         }
 
+        // Encrypted pipeline badge — shows lock icon when active
+        var encBadge = '';
+        if (m.encrypted_pipeline) {
+          encBadge = '<span class="badge-encrypted" title="Encrypted pipeline: no remote node sees plaintext">&#128274;</span>';
+        }
+
         // Gear icon for per-model auto-manage settings — advanced only
         var gearHtml = basic ? '' : '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
 
@@ -1070,7 +1080,7 @@ var SwarmLLM = (function() {
 
         card.innerHTML =
           '<div class="model-header">' +
-            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + probedBadge + sourceLabel + trustBadge + '</span>' +
+            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + encBadge + probedBadge + sourceLabel + trustBadge + '</span>' +
             '<span>' + metaBtnHtml + gearHtml + statusHtml + (unloadHtml ? ' ' + unloadHtml : '') + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
@@ -2644,7 +2654,7 @@ var SwarmLLM = (function() {
       if (readyModels.length > 0) {
         var items = readyModels.map(function(m) {
           var displayName = formatModelDisplayName(m.name || m.id);
-          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: 'local' };
+          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: 'local', encrypted: !!m.encrypted_pipeline };
         });
         groups.push({ key: 'local', label: 'On this computer', items: items });
         _modelDropdownData = _modelDropdownData.concat(items);
@@ -2813,7 +2823,11 @@ var SwarmLLM = (function() {
 
   function updateModelDropdownLabel(text) {
     var label = document.getElementById('model-dropdown-label');
-    if (label) label.textContent = text;
+    if (!label) return;
+    // Check if current model has encrypted pipeline via the dropdown data
+    var item = _modelDropdownData.find(function(m) { return m.name === text || m.id === text; });
+    var enc = item && item.encrypted;
+    label.innerHTML = escapeHtml(text) + (enc ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '');
   }
 
   function closeModelDropdown() {
@@ -3507,14 +3521,27 @@ var SwarmLLM = (function() {
     var existing = card.querySelector('.auto-manage-panel');
     if (existing) { existing.remove(); return; }
 
-    // Fetch current policy
+    // Fetch current policy + encrypted pipeline status
     var policy = { enabled: true, max_shards: 0, prune_enabled: true };
+    var encStatus = { encrypted_pipeline: false, ready: false, has_first_shard: false, has_last_shard: false, shard_count: 0 };
     try {
-      var resp = await fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage');
-      if (resp.ok) policy = await resp.json();
+      var [amResp, encResp] = await Promise.all([
+        fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage'),
+        fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline'),
+      ]);
+      if (amResp.ok) policy = await amResp.json();
+      if (encResp.ok) encStatus = await encResp.json();
     } catch (e) {
-      ui.showBanner('error', 'Could not load auto-manage policy');
+      ui.showBanner('error', 'Could not load model policy');
     }
+
+    var encReadyClass = encStatus.ready ? 'text-success' : 'text-warning';
+    var encReadyText = encStatus.ready ? 'Ready (has first + last shard)' :
+      'Missing: ' + (!encStatus.has_first_shard ? 'first shard ' : '') + (!encStatus.has_last_shard ? 'last shard' : '');
+    var encDisabled = !encStatus.ready ? ' disabled' : '';
+    var encOverheadNote = encStatus.shard_count <= 2
+      ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + encStatus.shard_count + '-shard model = fully local (no distributed offloading)</span>'
+      : '<span class="text-muted" style="font-size:0.65rem">Adds ~1 extra RTT/token. No remote node sees plaintext.</span>';
 
     var panel = document.createElement('div');
     panel.className = 'auto-manage-panel';
@@ -3530,6 +3557,14 @@ var SwarmLLM = (function() {
         '<input type="number" id="am-max-' + escapeHtml(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
         '<span class="text-muted" style="font-size:0.7rem">0 = unlimited</span>' +
       '</div>' +
+      '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
+      '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
+        '<label><input type="checkbox" id="am-encrypted-' + escapeHtml(modelId) + '"' +
+          (encStatus.encrypted_pipeline ? ' checked' : '') + encDisabled +
+          '> &#128274; Encrypted pipeline</label>' +
+        '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
+        encOverheadNote +
+      '</div>' +
       '<div class="am-row">' +
         '<button class="btn btn-sm btn-primary" data-am-save="' + escapeHtml(modelId) + '">Save</button>' +
       '</div>';
@@ -3541,10 +3576,12 @@ var SwarmLLM = (function() {
     var enabledEl = document.getElementById('am-enabled-' + safeId);
     var maxEl = document.getElementById('am-max-' + safeId);
     var pruneEl = document.getElementById('am-prune-' + safeId);
+    var encryptedEl = document.getElementById('am-encrypted-' + safeId);
     if (!enabledEl || !maxEl) return;
 
     try {
-      var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage', {
+      // Save auto-manage policy
+      var amResp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3553,15 +3590,33 @@ var SwarmLLM = (function() {
           prune_enabled: pruneEl ? pruneEl.checked : true,
         }),
       });
-      if (resp.ok) {
-        ui.showBanner('success', 'Auto-manage policy saved');
-        // Close panel
+
+      // Save encrypted pipeline toggle (if checkbox exists and not disabled)
+      var encErr = null;
+      if (encryptedEl && !encryptedEl.disabled) {
+        var encResp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: encryptedEl.checked }),
+        });
+        if (!encResp.ok) {
+          var encData = await encResp.json().catch(function() { return {}; });
+          encErr = encData.error ? encData.error.message : 'Encrypted pipeline save failed';
+        }
+      }
+
+      if (amResp.ok && !encErr) {
+        ui.showBanner('success', 'Model policy saved');
         var card = document.querySelector('[data-model-id="' + modelId + '"]');
         var panel = card ? card.querySelector('.auto-manage-panel') : null;
         if (panel) panel.remove();
       } else {
-        var errData = await resp.json().catch(function() { return {}; });
-        ui.showBanner('error', errData.error ? errData.error.message : 'Save failed');
+        var errMsg = encErr || '';
+        if (!amResp.ok) {
+          var errData = await amResp.json().catch(function() { return {}; });
+          errMsg = errData.error ? errData.error.message : 'Save failed';
+        }
+        ui.showBanner('error', errMsg);
       }
     } catch (e) {
       ui.showBanner('error', 'Save failed: ' + e.message);

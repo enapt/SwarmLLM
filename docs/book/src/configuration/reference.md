@@ -69,6 +69,7 @@ Every configuration option, organized by section.
 | `chunked_prefill_size` | integer | `512` | Chunk size for long-prompt prefill. `0` = disable |
 | `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups |
 | `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
+| `encrypted_pipeline` | boolean | `false` | Force first+last segment to local node (boomerang topology). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally |
 
 ## `[logging]` — Log Output
 

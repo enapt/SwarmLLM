@@ -31,6 +31,8 @@ gpu_layers = 0                 # 0 = CPU only, set higher for GPU offloading
 max_batch_size = 1             # 1 = no batching (sequential); >1 enables batching for both local and remote forwards (pipeline bubble filling)
 batch_timeout_ms = 50          # Ms to wait for more requests before dispatching a partial batch (0 = immediate)
 privacy_mode = false           # When true, user prompts are NOT written to disk (KV-cache sessions stay in-memory only)
+# local_embedding_privacy = false  # Embed tokens locally before sending to first segment (remote never sees raw tokens)
+# encrypted_pipeline = false   # Force first+last segment local (boomerang). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API.
 
 [logging]
 level = "info"                 # trace, debug, info, warn, error

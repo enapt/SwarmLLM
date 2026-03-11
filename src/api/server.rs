@@ -133,6 +133,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/:id/auto-manage",
             get(admin::get_model_auto_manage).put(admin::set_model_auto_manage),
         )
+        // Per-model encrypted pipeline toggle
+        .route(
+            "/api/admin/models/:id/encrypted-pipeline",
+            get(admin::get_model_encrypted_pipeline).put(admin::set_model_encrypted_pipeline),
+        )
         // Resource schedule
         .route(
             "/api/admin/schedule",

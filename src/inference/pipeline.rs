@@ -646,8 +646,17 @@ impl PipelineExecutor {
         // Local embedding privacy: check if we should embed locally before sending
         // activations to the first pipeline segment. This prevents remote nodes from
         // seeing raw token IDs — they only receive hidden-state activation tensors.
-        let local_embedder = if self.shared_state.config.inference.local_embedding_privacy {
-            let model_id = &self.assignment.segments[0].shard_id.model_id;
+        // Auto-enabled when encrypted_pipeline is active (it requires both ends local).
+        let model_id = &self.assignment.segments[0].shard_id.model_id;
+        let encrypted_for_model = self
+            .shared_state
+            .encrypted_pipeline_models
+            .get(model_id)
+            .map(|r| *r.value())
+            .unwrap_or(self.shared_state.config.inference.encrypted_pipeline);
+        let use_local_embedding =
+            self.shared_state.config.inference.local_embedding_privacy || encrypted_for_model;
+        let local_embedder = if use_local_embedding {
             self.shared_state
                 .local_embedders
                 .get(model_id)

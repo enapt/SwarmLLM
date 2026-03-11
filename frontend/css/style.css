@@ -1673,6 +1673,16 @@ kbd {
   font-weight: 500;
 }
 
+/* ---- Encrypted pipeline badge ---- */
+.badge-encrypted {
+  display: inline-block;
+  font-size: 0.75rem;
+  margin-left: 4px;
+  vertical-align: middle;
+  opacity: 0.9;
+  cursor: help;
+}
+
 /* ---- Auto-manage gear button ---- */
 .model-gear-btn {
   background: none;

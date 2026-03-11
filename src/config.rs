@@ -264,6 +264,15 @@ pub struct InferenceConfig {
     /// Default: false.
     #[serde(default)]
     pub local_embedding_privacy: bool,
+    /// When true, forces the requesting node to hold the final shard and perform
+    /// token sampling locally. Combined with local_embedding_privacy (auto-enabled),
+    /// this ensures no remote node ever sees plaintext — only intermediate activations.
+    /// The pipeline "boomerangs" through remote nodes and returns to the requester.
+    /// Requires the requester to hold both shard 0 (embedding) and the final shard (output head).
+    /// Only useful for models with 3+ shards (2-shard = fully local, no distribution).
+    /// Default: false.
+    #[serde(default)]
+    pub encrypted_pipeline: bool,
     /// Maximum peer RTT (ms) to consider for tensor parallelism AllReduce.
     /// Peers with measured latency above this threshold are excluded from TP groups.
     /// Default: 10ms (LAN-only).
@@ -1089,6 +1098,7 @@ impl Default for InferenceConfig {
             prefix_cache_max_entries: default_prefix_cache_entries(),
             privacy_mode: false,
             local_embedding_privacy: false,
+            encrypted_pipeline: false,
             tp_max_latency_ms: default_tp_max_latency_ms(),
         }
     }

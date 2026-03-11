@@ -108,6 +108,17 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .collect()
     };
 
+    // Helper: check encrypted pipeline status for a model
+    let is_encrypted_pipeline = |model_id: &str| -> bool {
+        let mid = crate::types::ModelId(model_id.to_string());
+        state
+            .shared_state
+            .encrypted_pipeline_models
+            .get(&mid)
+            .map(|r| *r.value())
+            .unwrap_or(state.shared_state.config.inference.encrypted_pipeline)
+    };
+
     // 1. Locally loaded model (full model via --model flag)
     // Even though it's locally loaded, get the real manifest to show shard info
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
@@ -271,6 +282,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "probed": probed,
                 "mmproj": mmproj_info,
                 "trust_level": trust_level,
+                "encrypted_pipeline": is_encrypted_pipeline(&model_id),
             }));
         } // else: stale loaded model, files deleted
     }
@@ -431,6 +443,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "acquisition_progress": acq_progress,
             "mmproj": mmproj_info_reg,
             "trust_level": trust_level,
+            "encrypted_pipeline": is_encrypted_pipeline(&m.id.0),
         }));
     }
 
@@ -460,6 +473,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "peers_hosting": peers.len(),
             "shards": [],
             "trust_level": trust_level,
+            "encrypted_pipeline": is_encrypted_pipeline(model_name),
         }));
     }
 
@@ -984,6 +998,157 @@ pub async fn set_model_auto_manage(
         "prune_enabled": policy.prune_enabled,
     })))
 }
+
+// ---- Encrypted Pipeline API ----
+
+/// GET /api/admin/models/:model_id/encrypted-pipeline — Get encrypted pipeline status.
+pub async fn get_model_encrypted_pipeline(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let global_default = state.shared_state.config.inference.encrypted_pipeline;
+    let per_model = state
+        .shared_state
+        .encrypted_pipeline_models
+        .get(&mid)
+        .map(|r| *r.value());
+    let effective = per_model.unwrap_or(global_default);
+
+    // Check if the local node has the required shards (first + last)
+    let manifest = state.shared_state.model_registry.get_manifest(&mid);
+    let local_node_id = state.shared_state.identity.node_id();
+    let (has_first, has_last, shard_count) = if let Some(m) = &manifest {
+        let has_first = state
+            .shared_state
+            .model_registry
+            .shard_holders(&crate::types::ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            })
+            .contains(local_node_id);
+        let last_idx = m.shard_count.saturating_sub(1);
+        let has_last = state
+            .shared_state
+            .model_registry
+            .shard_holders(&crate::types::ShardId {
+                model_id: mid.clone(),
+                index: last_idx,
+            })
+            .contains(local_node_id);
+        (has_first, has_last, m.shard_count)
+    } else {
+        (false, false, 0)
+    };
+
+    Json(serde_json::json!({
+        "model_id": model_id,
+        "encrypted_pipeline": effective,
+        "per_model_override": per_model,
+        "global_default": global_default,
+        "ready": has_first && has_last,
+        "has_first_shard": has_first,
+        "has_last_shard": has_last,
+        "shard_count": shard_count,
+        "overhead_note": "Encrypted pipeline adds 1 extra network hop per token (activations return to requester for final decoding). Latency increases ~2x RTT to the last remote segment. Only useful for 3+ shard models.",
+    }))
+}
+
+/// PUT /api/admin/models/:model_id/encrypted-pipeline — Toggle encrypted pipeline for a model.
+#[derive(Debug, Deserialize)]
+pub struct EncryptedPipelineUpdate {
+    pub enabled: bool,
+}
+
+pub async fn set_model_encrypted_pipeline(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(body): Json<EncryptedPipelineUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+
+    // Validate: check if the local node has the required shards
+    if body.enabled {
+        let manifest = state.shared_state.model_registry.get_manifest(&mid);
+        if let Some(m) = &manifest {
+            let local_node_id = state.shared_state.identity.node_id();
+            let has_first = state
+                .shared_state
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: mid.clone(),
+                    index: 0,
+                })
+                .contains(local_node_id);
+            let last_idx = m.shard_count.saturating_sub(1);
+            let has_last = state
+                .shared_state
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: mid.clone(),
+                    index: last_idx,
+                })
+                .contains(local_node_id);
+
+            if !has_first || !has_last {
+                let mut missing = Vec::new();
+                if !has_first {
+                    missing.push("first shard (shard 0, embedding table)".to_string());
+                }
+                if !has_last {
+                    missing.push(format!("last shard (shard {last_idx}, output head)"));
+                }
+                return Err(ApiError(crate::error::SwarmError::Config(format!(
+                    "Cannot enable encrypted pipeline: this node is missing {}. \
+                     Download the missing shard(s) first.",
+                    missing.join(" and ")
+                ))));
+            }
+
+            if m.shard_count <= 2 {
+                tracing::warn!(
+                    model = %model_id,
+                    shard_count = m.shard_count,
+                    "Encrypted pipeline on a {}-shard model means fully local inference \
+                     (no distributed offloading). Consider disabling if you want to share work.",
+                    m.shard_count,
+                );
+            }
+        }
+    }
+
+    // Update in-memory
+    state
+        .shared_state
+        .encrypted_pipeline_models
+        .insert(mid.clone(), body.enabled);
+
+    // Persist to database
+    let _ = state
+        .shared_state
+        .db
+        .put_json("encrypted_pipeline_models", &model_id, &body.enabled);
+
+    tracing::info!(
+        model = %model_id,
+        enabled = body.enabled,
+        "Per-model encrypted pipeline updated"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "model_id": model_id,
+        "encrypted_pipeline": body.enabled,
+        "note": if body.enabled {
+            "Encrypted pipeline active. Both embedding (first shard) and sampling (last shard) \
+             run locally. Remote nodes only see intermediate activations. \
+             Adds ~1 extra RTT per token for the return hop."
+        } else {
+            "Encrypted pipeline disabled. Normal pipeline scheduling applies."
+        },
+    })))
+}
+
 // ---- GGUF Metadata Browser API ----
 
 /// GET /api/admin/models/:id/metadata — Return parsed GGUF metadata for a model.

@@ -219,6 +219,12 @@ pub struct SharedState {
     /// Loaded VLM vision modules (mmproj encoders) keyed by model ID.
     /// Populated when an mmproj.gguf is found alongside a model's shards.
     pub vision_modules: DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
+    /// Per-model encrypted pipeline toggle. When enabled for a model, the pipeline
+    /// scheduler forces both first and last segments to be the requesting (local) node,
+    /// ensuring no remote node sees plaintext input or output. The global
+    /// `config.inference.encrypted_pipeline` serves as a fallback when no per-model
+    /// override exists. Persisted to DB under "encrypted_pipeline_models".
+    pub encrypted_pipeline_models: DashMap<crate::types::ModelId, bool>,
     /// Local embedding tables for privacy mode. When available, the requesting node
     /// performs token→embedding locally so remote first-segment nodes never see raw tokens.
     /// Keyed by model ID, loaded from shard_000.bin during startup scan.
@@ -675,6 +681,15 @@ impl SharedState {
             ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
+            encrypted_pipeline_models: {
+                let map = DashMap::new();
+                if let Ok(pairs) = db.get_all_json::<bool>("encrypted_pipeline_models") {
+                    for (key, enabled) in pairs {
+                        map.insert(crate::types::ModelId(key), enabled);
+                    }
+                }
+                map
+            },
             local_embedders: DashMap::new(),
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),

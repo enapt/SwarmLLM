@@ -80,6 +80,20 @@ impl PipelineScheduler {
 
         let start = std::time::Instant::now();
 
+        // Check if encrypted pipeline is enabled for this model (per-model → global fallback)
+        let encrypted = self
+            .shared_state
+            .encrypted_pipeline_models
+            .get(model_id)
+            .map(|r| *r.value())
+            .unwrap_or(self.shared_state.config.inference.encrypted_pipeline);
+        if encrypted {
+            tracing::info!(
+                model = %model_id,
+                "Encrypted pipeline active — forcing first+last segments to local node"
+            );
+        }
+
         // Gather all candidates: nodes that have shards for this model
         let candidates = self.gather_candidates(&manifest, local_node_id);
         if candidates.is_empty() {
@@ -87,7 +101,7 @@ impl PipelineScheduler {
         }
 
         // Greedy layer assignment
-        let raw_segments = self.greedy_assign(num_layers, &candidates)?;
+        let raw_segments = self.greedy_assign(num_layers, &candidates, encrypted)?;
 
         // Merge contiguous segments on the same node into a single segment.
         // This avoids sending multiple LayerForward messages to the same node
@@ -291,10 +305,13 @@ impl PipelineScheduler {
     ///   (has shard 0 for token_embd.weight)
     /// - The last segment (ending at num_layers) must be assigned to a node with
     ///   `can_be_last` (has the final shard for output.weight)
+    /// - When `encrypted_pipeline` is true, both first AND last segments must be
+    ///   the local (requesting) node — ensures no remote node sees plaintext.
     fn greedy_assign(
         &self,
         num_layers: u32,
         candidates: &[NodeCandidate],
+        encrypted_pipeline: bool,
     ) -> Result<Vec<PipelineSegment>, SwarmError> {
         let mut segments = Vec::new();
         let mut current_layer = 0u32;
@@ -314,8 +331,25 @@ impl PipelineScheduler {
                 })
                 .collect();
 
+            // Encrypted pipeline: first segment MUST be the local (requesting) node
+            // so that token embedding happens locally (no remote sees raw tokens).
+            if is_first_segment && encrypted_pipeline {
+                let local_only: Vec<_> = options
+                    .iter()
+                    .filter(|(c, _)| c.node_id == *local_node_id && c.can_be_first)
+                    .cloned()
+                    .collect();
+                if local_only.is_empty() {
+                    return Err(SwarmError::PipelineError(
+                        "Encrypted pipeline requires the requesting node to hold shard 0 \
+                         (embedding table). Download the first shard to enable this mode."
+                            .to_string(),
+                    ));
+                }
+                options = local_only;
+            }
             // First segment must be assigned to a node that can serve as first
-            if is_first_segment {
+            else if is_first_segment {
                 let first_capable: Vec<_> = options
                     .iter()
                     .filter(|(c, _)| c.can_be_first)
@@ -332,26 +366,59 @@ impl PipelineScheduler {
             // should use locally-hosted shards first, forwarding the remainder.
             let any_reaches_end = options.iter().any(|(_, r)| r.1 >= num_layers);
             if any_reaches_end {
-                let last_capable: Vec<_> = options
-                    .iter()
-                    .filter(|(c, r)| {
-                        (r.1 >= num_layers && c.can_be_last) || c.node_id == *local_node_id
-                    })
-                    .cloned()
-                    .collect();
-                if !last_capable.is_empty() {
-                    options = last_capable;
-                }
-                // If no can_be_last candidates reach the end, let others that DON'T
-                // reach the end take over so a can_be_last node can finish later
-                else {
-                    let not_reaching_end: Vec<_> = options
+                // Encrypted pipeline: last segment MUST be the local node
+                // so that token sampling happens locally (no remote sees output).
+                if encrypted_pipeline {
+                    let local_last: Vec<_> = options
                         .iter()
-                        .filter(|(c, r)| r.1 < num_layers || c.node_id == *local_node_id)
+                        .filter(|(c, r)| {
+                            c.node_id == *local_node_id && r.1 >= num_layers && c.can_be_last
+                        })
                         .cloned()
                         .collect();
-                    if !not_reaching_end.is_empty() {
-                        options = not_reaching_end;
+                    if !local_last.is_empty() {
+                        options = local_last;
+                    } else {
+                        // Local node can't finish — let a non-finishing candidate take
+                        // the middle layers so the local node can finish later.
+                        let not_reaching_end: Vec<_> = options
+                            .iter()
+                            .filter(|(_, r)| r.1 < num_layers)
+                            .cloned()
+                            .collect();
+                        if !not_reaching_end.is_empty() {
+                            options = not_reaching_end;
+                        } else {
+                            return Err(SwarmError::PipelineError(
+                                "Encrypted pipeline requires the requesting node to hold \
+                                 the final shard (output head). Download the last shard \
+                                 to enable this mode."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    let last_capable: Vec<_> = options
+                        .iter()
+                        .filter(|(c, r)| {
+                            (r.1 >= num_layers && c.can_be_last) || c.node_id == *local_node_id
+                        })
+                        .cloned()
+                        .collect();
+                    if !last_capable.is_empty() {
+                        options = last_capable;
+                    }
+                    // If no can_be_last candidates reach the end, let others that DON'T
+                    // reach the end take over so a can_be_last node can finish later
+                    else {
+                        let not_reaching_end: Vec<_> = options
+                            .iter()
+                            .filter(|(c, r)| r.1 < num_layers || c.node_id == *local_node_id)
+                            .cloned()
+                            .collect();
+                        if !not_reaching_end.is_empty() {
+                            options = not_reaching_end;
+                        }
                     }
                 }
             }
@@ -806,7 +873,7 @@ mod tests {
             },
         ];
 
-        let segments = scheduler.greedy_assign(14, &candidates).unwrap();
+        let segments = scheduler.greedy_assign(14, &candidates, false).unwrap();
         // Should produce 3 segments: [0,2) on A, [2,10) on B, [10,14) on A
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].layer_range, (0, 2));
@@ -1081,5 +1148,175 @@ mod tests {
         assert_eq!(group.rank_of(&NodeId([3u8; 32])), Some(2));
         assert_eq!(group.rank_of(&NodeId([4u8; 32])), None);
         assert_eq!(group.tp_size(), 3);
+    }
+
+    #[test]
+    fn encrypted_pipeline_forces_local_first_and_last() {
+        // With encrypted_pipeline=true, the local node MUST be assigned
+        // both the first and last segments (boomerang topology).
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_b = NodeId([30u8; 32]);
+
+        // 3 shards: local has shard 0 + shard 2, remote has shard 1
+        let shards = vec![
+            ShardInfo {
+                index: 0,
+                layer_range: (0, 10),
+                size_bytes: 1_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+            ShardInfo {
+                index: 1,
+                layer_range: (10, 20),
+                size_bytes: 1_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+            ShardInfo {
+                index: 2,
+                layer_range: (20, 30),
+                size_bytes: 1_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+        ];
+        let manifest = make_manifest("encrypted-model", 30, shards);
+        state.model_registry.register_manifest(manifest);
+
+        // Local node has first and last shards
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("encrypted-model".into()),
+                index: 0,
+            },
+            local_id.clone(),
+        );
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("encrypted-model".into()),
+                index: 2,
+            },
+            local_id.clone(),
+        );
+        // Remote node has middle shard
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("encrypted-model".into()),
+                index: 1,
+            },
+            node_b.clone(),
+        );
+
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b.clone(),
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+
+        // Enable encrypted pipeline for this model
+        state
+            .encrypted_pipeline_models
+            .insert(ModelId("encrypted-model".into()), true);
+
+        let scheduler = PipelineScheduler::new(state);
+        let assignment = scheduler
+            .assemble_pipeline(&ModelId("encrypted-model".into()), &local_id)
+            .unwrap();
+
+        // Pipeline should be: local [0,10) → remote [10,20) → local [20,30)
+        assert_eq!(assignment.segments.len(), 3);
+        assert_eq!(assignment.segments[0].node_id, local_id);
+        assert_eq!(assignment.segments[0].layer_range, (0, 10));
+        assert_eq!(assignment.segments[1].node_id, node_b);
+        assert_eq!(assignment.segments[1].layer_range, (10, 20));
+        assert_eq!(assignment.segments[2].node_id, local_id);
+        assert_eq!(assignment.segments[2].layer_range, (20, 30));
+    }
+
+    #[test]
+    fn encrypted_pipeline_fails_without_first_shard() {
+        // If the local node doesn't have shard 0, encrypted pipeline should fail.
+        let state = make_shared_state();
+        let local_id = state.identity.node_id().clone();
+        let node_b = NodeId([31u8; 32]);
+
+        let shards = vec![
+            ShardInfo {
+                index: 0,
+                layer_range: (0, 16),
+                size_bytes: 2_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+            ShardInfo {
+                index: 1,
+                layer_range: (16, 32),
+                size_bytes: 2_000_000_000,
+                hash: [0u8; 32],
+                tensors: vec![],
+            },
+        ];
+        let manifest = make_manifest("enc-fail", 32, shards);
+        state.model_registry.register_manifest(manifest);
+
+        // Remote has both shards, local has neither
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("enc-fail".into()),
+                index: 0,
+            },
+            node_b.clone(),
+        );
+        state.model_registry.record_shard_holder(
+            ShardId {
+                model_id: ModelId("enc-fail".into()),
+                index: 1,
+            },
+            node_b.clone(),
+        );
+
+        state.peer_registry.insert(
+            node_b.clone(),
+            PeerInfo {
+                node_id: node_b,
+                addresses: vec![],
+                capability: None,
+                last_seen: chrono::Utc::now(),
+                latency_ms: Some(10),
+                trust_score: 0.8,
+                peer_id_bytes: None,
+                active_request_count: 0,
+                first_seen: 0,
+                verified_transaction_count: 0,
+                is_lan_peer: false,
+            },
+        );
+
+        state
+            .encrypted_pipeline_models
+            .insert(ModelId("enc-fail".into()), true);
+
+        let scheduler = PipelineScheduler::new(state);
+        let result = scheduler.assemble_pipeline(&ModelId("enc-fail".into()), &local_id);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("shard 0"),
+            "Error should mention shard 0: {err_msg}"
+        );
     }
 }
