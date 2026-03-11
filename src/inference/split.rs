@@ -677,7 +677,10 @@ pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Resul
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(SwarmError::Io)?;
     }
-    std::fs::write(output_path, &header_buf).map_err(SwarmError::Io)?;
+    // SEC: Atomic write to prevent corruption on kill/crash
+    let tmp_path = output_path.with_extension("bin.tmp");
+    std::fs::write(&tmp_path, &header_buf).map_err(SwarmError::Io)?;
+    std::fs::rename(&tmp_path, output_path).map_err(SwarmError::Io)?;
 
     tracing::info!(
         header_bytes = header_size,

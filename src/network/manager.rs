@@ -1261,8 +1261,17 @@ impl NetworkManager {
                         return;
                     }
                     SwarmMessage::PeerExchangeResponse(ref pex_resp) => {
-                        tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response (via request)");
-                        self.handle_pex_response(&pex_resp.peers);
+                        // SEC: Only process PEX from registered peers to prevent topology manipulation
+                        let is_registered = self
+                            .peer_to_node
+                            .get(&peer)
+                            .is_some_and(|n| self.shared_state.peer_registry.contains_key(&*n));
+                        if !is_registered {
+                            tracing::debug!(%peer, "Ignoring PEX response from unregistered peer");
+                        } else {
+                            tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response (via request)");
+                            self.handle_pex_response(&pex_resp.peers);
+                        }
                         // ACK and return
                         let _ = self
                             .swarm
@@ -1461,8 +1470,17 @@ impl NetworkManager {
                             }
                         }
                     }
-                    tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response");
-                    self.handle_pex_response(&pex_resp.peers);
+                    // SEC: Only process PEX from registered peers
+                    let is_registered = self
+                        .peer_to_node
+                        .get(&peer)
+                        .is_some_and(|n| self.shared_state.peer_registry.contains_key(&*n));
+                    if is_registered {
+                        tracing::debug!(%peer, count = pex_resp.peers.len(), "Received PEX response");
+                        self.handle_pex_response(&pex_resp.peers);
+                    } else {
+                        tracing::debug!(%peer, "Ignoring PEX response from unregistered peer");
+                    }
                     return;
                 }
                 if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {

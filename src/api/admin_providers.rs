@@ -495,10 +495,12 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
                             ("overloaded".to_string(), "Service overloaded".to_string())
                         } else {
                             let body_text = resp.text().await.unwrap_or_default();
-                            let short = if body_text.len() > 100 {
-                                body_text[..100].to_string()
+                            // SEC: Scrub potential API keys from upstream error responses
+                            let scrubbed = crate::crypto::scrub_api_keys(&body_text);
+                            let short = if scrubbed.len() > 100 {
+                                scrubbed[..100].to_string()
                             } else {
-                                body_text
+                                scrubbed
                             };
                             (format!("error_{}", status_code), short)
                         };

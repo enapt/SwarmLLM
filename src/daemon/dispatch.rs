@@ -13,6 +13,8 @@ use super::state::{SharedState, TpAllReduceCollector};
 
 /// Maximum number of concurrent LayerForward tasks.
 const MAX_CONCURRENT_FORWARDS: usize = 64;
+/// Maximum concurrent forwards per individual peer to prevent single-peer semaphore exhaustion.
+const MAX_FORWARDS_PER_PEER: usize = 8;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 
@@ -56,8 +58,10 @@ fn seal_layer_result(result: &mut crate::types::LayerResult, requester_node_id: 
                     tracing::warn!(
                         request_id = %result.request_id,
                         error = %e,
-                        "Pipeline seal: failed to serialize SealedPrompt"
+                        "Pipeline seal: failed to serialize SealedPrompt — clearing plaintext"
                     );
+                    // SEC: Never send plaintext tokens when sealing was intended
+                    result.token_ids.clear();
                 }
             }
         }
@@ -65,8 +69,10 @@ fn seal_layer_result(result: &mut crate::types::LayerResult, requester_node_id: 
             tracing::warn!(
                 request_id = %result.request_id,
                 error = %e,
-                "Pipeline seal: encryption failed — sending unsealed"
+                "Pipeline seal: encryption failed — clearing plaintext"
             );
+            // SEC: Never send plaintext tokens when sealing was intended
+            result.token_ids.clear();
         }
     }
 }
@@ -124,6 +130,10 @@ pub(crate) async fn dispatch_network_messages(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let forward_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FORWARDS));
+    // SEC: Per-peer concurrent forward counter to prevent single-peer semaphore exhaustion
+    let peer_forward_counts: Arc<
+        dashmap::DashMap<crate::types::NodeId, std::sync::atomic::AtomicUsize>,
+    > = Arc::new(dashmap::DashMap::new());
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -207,18 +217,41 @@ pub(crate) async fn dispatch_network_messages(
                                     has_sender = forward.sender_peer_bytes.is_some(),
                                     "DIAG: dispatcher received LayerForward, spawning handler"
                                 );
+                                // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion
+                                let peer_sender = authenticated_sender.clone().unwrap();
+                                let peer_count = peer_forward_counts
+                                    .entry(peer_sender.clone())
+                                    .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
+                                let current = peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                                if current >= MAX_FORWARDS_PER_PEER {
+                                    tracing::warn!(
+                                        sender = %peer_sender,
+                                        current,
+                                        max = MAX_FORWARDS_PER_PEER,
+                                        "LayerForward rejected — per-peer limit reached"
+                                    );
+                                    continue;
+                                }
+                                peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let permit = match forward_semaphore.clone().try_acquire_owned() {
                                     Ok(p) => p,
                                     Err(_) => {
+                                        peer_forward_counts
+                                            .get(&peer_sender)
+                                            .map(|c| c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
                                         tracing::warn!("LayerForward rejected — forward semaphore full");
                                         continue;
                                     }
                                 };
                                 let ss = shared_state.clone();
                                 let ntx = network_tx.clone();
+                                let pfc = peer_forward_counts.clone();
+                                let ps = peer_sender;
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     handle_layer_forward(ss, ntx, forward).await;
+                                    // Decrement per-peer count when done
+                                    pfc.get(&ps).map(|c| c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
                                 });
                             }
                             // StreamingToken: route to registered streaming channel

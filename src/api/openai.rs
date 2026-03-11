@@ -608,6 +608,26 @@ pub async fn chat_completions(
         )));
     }
 
+    // SEC: Cap individual message content size to prevent memory exhaustion
+    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+    for msg in &req.messages {
+        let content_len = match &msg.content {
+            MessageContent::Text(s) => s.len(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text { text } => text.len(),
+                    ContentPart::ImageUrl { image_url } => image_url.url.len(),
+                })
+                .sum(),
+        };
+        if content_len > MAX_MESSAGE_CONTENT_BYTES {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Message content too large (max 2MB per message)".into(),
+            )));
+        }
+    }
+
     // Limit tools array to prevent system prompt explosion in format_tool_system_prompt
     if let Some(ref tools) = req.tools {
         if tools.len() > 128 {
