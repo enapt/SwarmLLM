@@ -191,9 +191,14 @@ pub fn blind_invite(
 }
 
 /// Step 2: Pool creator signs the blinded token without seeing the real invitation identity.
-/// The signature covers (commitment, pool_id) — expiry is enforced as policy, not signed.
+/// The signature now covers (commitment, pool_id, expires_at) — binding expiry cryptographically
+/// to prevent indefinite replay of blind invitation tokens.
 pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindSignature {
-    let payload = blind_token_payload_no_expiry(&blinded_token.commitment, &blinded_token.pool_id);
+    let payload = blind_token_payload(
+        &blinded_token.commitment,
+        &blinded_token.pool_id,
+        blinded_token.expires_at,
+    );
     let signature = identity.sign(&payload);
 
     BlindSignature {
@@ -208,12 +213,14 @@ pub fn unblind_token(
     invitation_id: uuid::Uuid,
     blinding_factor: BlindingFactor,
     blind_signature: BlindSignature,
+    expires_at: chrono::DateTime<chrono::Utc>,
 ) -> UnblindedToken {
     UnblindedToken {
         invitation_id,
         blinding_factor,
         signature: blind_signature.signature,
         pool_id: blind_signature.pool_id,
+        expires_at,
     }
 }
 
@@ -225,8 +232,14 @@ pub fn verify_membership(
     owner_key: &VerifyingKey,
 ) -> Result<(), SwarmError> {
     let commitment = compute_blind_commitment(&token.invitation_id, &token.blinding_factor);
-    let payload = blind_token_payload_no_expiry(&commitment, &token.pool_id);
-    verify_sig(&token.signature, &payload, owner_key)
+    // Try new expiry-bound payload first, fall back to legacy no-expiry for old tokens
+    let payload = blind_token_payload(&commitment, &token.pool_id, token.expires_at);
+    if verify_sig(&token.signature, &payload, owner_key).is_ok() {
+        return Ok(());
+    }
+    // Fallback for tokens signed before expiry was included
+    let legacy_payload = blind_token_payload_no_expiry(&commitment, &token.pool_id);
+    verify_sig(&token.signature, &legacy_payload, owner_key)
 }
 
 /// Compute the blind commitment: H(PREFIX || invitation_id || blinding_factor)
@@ -246,6 +259,19 @@ fn blind_token_payload_no_expiry(commitment: &[u8; 32], pool_id: &PoolId) -> Vec
     hasher.update(PREFIX_BLIND_INVITE);
     hasher.update(commitment);
     hasher.update(&pool_id.0);
+    hasher.finalize().as_bytes().to_vec()
+}
+
+fn blind_token_payload(
+    commitment: &[u8; 32],
+    pool_id: &PoolId,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PREFIX_BLIND_INVITE);
+    hasher.update(commitment);
+    hasher.update(&pool_id.0);
+    hasher.update(&expires_at.timestamp().to_le_bytes());
     hasher.finalize().as_bytes().to_vec()
 }
 
@@ -408,7 +434,12 @@ mod tests {
         let blind_sig = sign_blinded(&owner, &blinded_token);
 
         // Step 3: Invitee unblinds to get a valid membership token
-        let membership_token = unblind_token(invitation_id, blinding_factor, blind_sig);
+        let membership_token = unblind_token(
+            invitation_id,
+            blinding_factor,
+            blind_sig,
+            blinded_token.expires_at,
+        );
 
         // Step 4: Anyone can verify the token was signed by the pool creator
         assert!(verify_membership(&membership_token, &owner.verifying_key()).is_ok());
@@ -422,7 +453,12 @@ mod tests {
 
         let (invitation_id, blinding_factor, blinded_token) = blind_invite(&pool_id, 24);
         let blind_sig = sign_blinded(&owner, &blinded_token);
-        let membership_token = unblind_token(invitation_id, blinding_factor, blind_sig);
+        let membership_token = unblind_token(
+            invitation_id,
+            blinding_factor,
+            blind_sig,
+            blinded_token.expires_at,
+        );
 
         // Verification with wrong key should fail
         assert!(verify_membership(&membership_token, &imposter.verifying_key()).is_err());
@@ -451,7 +487,12 @@ mod tests {
         // Unblind with a different blinding factor — verification should fail
         // because the recomputed commitment won't match
         let wrong_factor = super::BlindingFactor(rand::random::<[u8; 32]>());
-        let bad_token = unblind_token(invitation_id, wrong_factor, blind_sig);
+        let bad_token = unblind_token(
+            invitation_id,
+            wrong_factor,
+            blind_sig,
+            blinded_token.expires_at,
+        );
 
         assert!(verify_membership(&bad_token, &owner.verifying_key()).is_err());
     }

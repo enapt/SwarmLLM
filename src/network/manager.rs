@@ -904,6 +904,12 @@ impl NetworkManager {
                     verified_transaction_count: vtc,
                     is_lan_peer: is_lan,
                 };
+                // Insert peer_registry BEFORE peer_to_node to prevent TOCTOU race
+                // where dispatch can resolve NodeId from peer_to_node but peer_registry
+                // check fails because insert hasn't happened yet.
+                self.shared_state
+                    .peer_registry
+                    .insert(node_id.clone(), peer_info);
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
                 // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
@@ -914,9 +920,6 @@ impl NetworkManager {
                         .peer_id_map
                         .insert(node_id.clone(), peer_id.to_bytes());
                 }
-                self.shared_state
-                    .peer_registry
-                    .insert(node_id.clone(), peer_info);
 
                 // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
                 for addr in &info.listen_addrs {
@@ -1180,8 +1183,10 @@ impl NetworkManager {
                         }
 
                         if !in_active_pipeline {
-                            self.shared_state.peer_registry.remove(&node_id);
+                            // Remove peer_to_node BEFORE peer_registry to prevent
+                            // dispatch from resolving NodeId for a peer that's being removed
                             self.peer_to_node.remove(&peer_id);
+                            self.shared_state.peer_registry.remove(&node_id);
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
                             tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
@@ -1243,6 +1248,22 @@ impl NetworkManager {
                             .iter()
                             .filter(|entry| entry.key() != local_node_id)
                             .flat_map(|entry| entry.addresses.clone())
+                            .filter(|addr| {
+                                // Filter out private/loopback addresses to prevent leaking
+                                // internal network topology to arbitrary peers
+                                !addr.contains("/ip4/10.")
+                                    && !addr.contains("/ip4/172.16.")
+                                    && !addr.contains("/ip4/172.17.")
+                                    && !addr.contains("/ip4/172.18.")
+                                    && !addr.contains("/ip4/172.19.")
+                                    && !addr.contains("/ip4/172.2")
+                                    && !addr.contains("/ip4/172.3")
+                                    && !addr.contains("/ip4/192.168.")
+                                    && !addr.contains("/ip4/127.")
+                                    && !addr.contains("/ip6/::1/")
+                                    && !addr.contains("/ip4/0.0.0.0")
+                                    && !addr.contains("/ip4/169.254.")
+                            })
                             .take(20)
                             .collect();
                         let pex_resp = SwarmMessage::PeerExchangeResponse(

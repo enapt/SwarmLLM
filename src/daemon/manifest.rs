@@ -427,6 +427,15 @@ pub(super) fn extract_tied_output_weight(
         ));
     }
 
+    // Cap embedding tensor size to prevent OOM from crafted GGUF headers
+    const MAX_EMBEDDING_SIZE: u64 = 512 * 1024 * 1024; // 512 MB
+    if size > MAX_EMBEDDING_SIZE {
+        return Err(format!(
+            "token_embd.weight too large: {} bytes (max {} bytes)",
+            size, MAX_EMBEDDING_SIZE
+        ));
+    }
+
     file.seek(SeekFrom::Start(abs_offset))
         .map_err(|e| format!("Failed to seek in shard_000.bin: {e}"))?;
     let mut tensor_bytes = vec![0u8; size as usize];

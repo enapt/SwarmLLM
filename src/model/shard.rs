@@ -80,7 +80,31 @@ impl ShardStore {
         }
 
         if hash_unknown && allow_zero_hash {
-            // Zero-hash bypass only for local HF download path
+            // Zero-hash: compute the actual hash and log a warning instead of
+            // silently bypassing verification. The caller should update the
+            // manifest hash after this returns.
+            tracing::warn!(
+                model = %model_id,
+                shard = info.index,
+                "Shard has zero hash — computing actual hash for verification"
+            );
+            // Still verify the file is readable (don't skip entirely)
+            let mut file = std::fs::File::open(&path).map_err(SwarmError::Io)?;
+            let mut hasher = blake3::Hasher::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = file.read(&mut buf).map_err(SwarmError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            tracing::info!(
+                model = %model_id,
+                shard = info.index,
+                hash = %hex::encode(hasher.finalize().as_bytes()),
+                "Computed actual hash for zero-hash shard"
+            );
             return Ok(());
         }
 

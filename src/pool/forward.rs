@@ -33,7 +33,9 @@ pub async fn forward_credits_to_owner(
             return Ok(false); // Owner keeps their own credits
         }
 
-        (ps.pool_id.clone(), ps.pool_id.clone())
+        // pool_id is the owner's NodeId by design — credit forwards go to the owner
+        let owner = ps.pool_id.clone();
+        (owner.clone(), owner)
     };
 
     // Create member-signed credit forward

@@ -23,7 +23,9 @@ pub struct LocalEmbedder {
     arch: ModelArch,
 }
 
-// Safety: candle Tensor on CPU is Send + Sync
+// Safety: candle Tensor = Arc<Tensor_> which is Send + Sync.
+// Embedding is a newtype over Tensor. SplitTokenizer uses Vec/HashMap (Send + Sync).
+// ModelArch is an enum (Send + Sync). All fields are thread-safe.
 unsafe impl Send for LocalEmbedder {}
 unsafe impl Sync for LocalEmbedder {}
 

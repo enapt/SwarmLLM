@@ -292,6 +292,23 @@ fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError>
             ));
         }
     }
+    // Resolve DNS hostnames and check resolved IP against private ranges
+    // to prevent DNS-based SSRF (e.g., attacker-controlled DNS resolving to 169.254.169.254)
+    if host.parse::<std::net::IpAddr>().is_err() && !host.is_empty() {
+        // It's a hostname, try to resolve it
+        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
+            for addr in addrs {
+                if is_private_ip(addr.ip()) {
+                    return Err(crate::error::SwarmError::Config(format!(
+                        "Provider base_url hostname '{}' resolves to private IP {}",
+                        host,
+                        addr.ip()
+                    )));
+                }
+            }
+        }
+    }
+
     // Block known cloud metadata endpoints to mitigate DNS rebinding attacks
     let blocked_hosts = [
         "metadata.google.internal",

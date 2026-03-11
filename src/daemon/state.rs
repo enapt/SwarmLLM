@@ -358,13 +358,28 @@ impl TpAllReduceCollector {
         sender_peer: Option<Vec<u8>>,
     ) -> bool {
         let rank = req.tp_rank as usize;
-        if rank < self.partials.len() {
-            if self.partials[rank].is_some() {
-                tracing::warn!(rank, "AllReduce: duplicate partial for rank — overwriting");
-            }
-            self.sender_peers[rank] = sender_peer;
-            self.partials[rank] = Some(req);
+        // Validate tp_rank is within bounds and tp_size matches collector's expected size
+        if rank >= self.partials.len() {
+            tracing::warn!(
+                rank,
+                tp_size = self.tp_size,
+                "AllReduce: tp_rank out of bounds — ignoring"
+            );
+            return false;
         }
+        if req.tp_size != self.tp_size {
+            tracing::warn!(
+                req_tp_size = req.tp_size,
+                collector_tp_size = self.tp_size,
+                "AllReduce: tp_size mismatch — ignoring"
+            );
+            return false;
+        }
+        if self.partials[rank].is_some() {
+            tracing::warn!(rank, "AllReduce: duplicate partial for rank — overwriting");
+        }
+        self.sender_peers[rank] = sender_peer;
+        self.partials[rank] = Some(req);
         self.partials.iter().all(|p| p.is_some())
     }
 

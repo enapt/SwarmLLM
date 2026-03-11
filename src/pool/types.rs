@@ -192,6 +192,13 @@ pub struct UnblindedToken {
     pub signature: Vec<u8>,
     /// The pool this token belongs to
     pub pool_id: PoolId,
+    /// Expiry time bound cryptographically to the signature
+    #[serde(default = "default_expiry")]
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_expiry() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::hours(24)
 }
 
 #[cfg(test)]

@@ -349,8 +349,20 @@ impl PipelineExecutor {
         &self,
         compressed: &[u8],
     ) -> Result<candle_core::Tensor, SwarmError> {
-        let raw_bytes = zstd::decode_all(std::io::Cursor::new(compressed))
-            .map_err(|e| SwarmError::Inference(format!("zstd decompress vision: {e}")))?;
+        // Cap decompressed size to prevent zstd bomb attacks from malicious vision peers
+        const MAX_VISION_DECOMPRESSED: u64 = 64 * 1024 * 1024; // 64 MB
+        let raw_bytes = {
+            let mut decoder = zstd::Decoder::new(std::io::Cursor::new(compressed))
+                .map_err(|e| SwarmError::Inference(format!("zstd init vision: {e}")))?;
+            let mut buf = Vec::new();
+            use std::io::Read;
+            decoder
+                .by_ref()
+                .take(MAX_VISION_DECOMPRESSED)
+                .read_to_end(&mut buf)
+                .map_err(|e| SwarmError::Inference(format!("zstd decompress vision: {e}")))?;
+            buf
+        };
         // Raw bytes are FP16 LE — convert to f16 values
         let num_f16 = raw_bytes.len() / 2;
         // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
@@ -1705,12 +1717,26 @@ impl PipelineExecutor {
                 } else if source_path_file.exists() {
                     let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
                     let path = std::path::PathBuf::from(p.trim());
+                    // Verify source_path is within the data models directory
+                    // to prevent path traversal attacks via crafted source_path files.
+                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                    if !canonical.starts_with(&model_dir) {
+                        return Err(SwarmError::Internal(
+                            "source_path outside data directory".into(),
+                        ));
+                    }
                     tracing::info!(
                         model = %model_id,
                         layers = format!("[{layer_start}..{layer_end})"),
                         "Loading split model from source_path"
                     );
-                    SplitModel::load_from_gguf(&path, layer_start, layer_end, is_first, is_last)
+                    SplitModel::load_from_gguf(
+                        &canonical,
+                        layer_start,
+                        layer_end,
+                        is_first,
+                        is_last,
+                    )
                 } else {
                     let params = crate::daemon::ShardLoadParams {
                         model_dir: &model_dir,

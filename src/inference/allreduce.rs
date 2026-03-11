@@ -228,8 +228,22 @@ pub fn ring_allreduce_sum_compressed(
         .iter()
         .enumerate()
         .map(|(i, data)| {
-            let dec = zstd::decode_all(std::io::Cursor::new(data))
-                .map_err(|e| SwarmError::Internal(format!("Ring allreduce: zstd rank {i}: {e}")))?;
+            let max_decompressed = elem_count * 4 + 1024;
+            let dec = {
+                let mut decoder = zstd::Decoder::new(std::io::Cursor::new(data)).map_err(|e| {
+                    SwarmError::Internal(format!("Ring allreduce: zstd init rank {i}: {e}"))
+                })?;
+                let mut buf = Vec::with_capacity(elem_count * 4);
+                use std::io::Read;
+                decoder
+                    .by_ref()
+                    .take(max_decompressed as u64)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| {
+                        SwarmError::Internal(format!("Ring allreduce: zstd rank {i}: {e}"))
+                    })?;
+                buf
+            };
             if dec.len() != elem_count * 4 {
                 return Err(SwarmError::Internal(format!(
                     "Ring allreduce: rank {i} size mismatch: {} vs expected {}",

@@ -35,6 +35,16 @@ pub fn preprocess_image(
     target_size: u32,
     device: &Device,
 ) -> Result<Tensor, SwarmError> {
+    // Reject images that would exhaust memory when decoded to float tensors
+    const MAX_IMAGE_PIXELS: u64 = 4096 * 4096; // 16M pixels max
+    let pixel_count = image.width as u64 * image.height as u64;
+    if pixel_count > MAX_IMAGE_PIXELS || pixel_count == 0 {
+        return Err(SwarmError::Inference(format!(
+            "Image dimensions {}x{} exceed maximum {} pixels",
+            image.width, image.height, MAX_IMAGE_PIXELS
+        )));
+    }
+
     // Use the image crate to resize
     let img_buf = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
         image.width,

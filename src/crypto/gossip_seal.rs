@@ -23,7 +23,11 @@ impl GossipSealer {
 
     /// Derive the group key for a given epoch.
     fn derive_epoch_key(&self, epoch: u32) -> [u8; 32] {
-        let mut ikm = self.network_id.clone();
+        // Length-prefix the network_id to prevent collisions between
+        // "net1" + epoch_bytes vs "net1\x01" + different_epoch_bytes
+        let mut ikm = Vec::with_capacity(4 + self.network_id.len() + 4);
+        ikm.extend_from_slice(&(self.network_id.len() as u32).to_le_bytes());
+        ikm.extend_from_slice(&self.network_id);
         ikm.extend_from_slice(&epoch.to_le_bytes());
         let hk = Hkdf::<Sha256>::new(None, &ikm);
         let mut okm = [0u8; 32];

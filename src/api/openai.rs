@@ -1264,7 +1264,13 @@ fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
         }
         if let Some(ip_str) = ip {
             if let Ok(parsed) = ip_str.parse::<std::net::Ipv4Addr>() {
-                if parsed.is_loopback() || parsed.is_unspecified() {
+                // Skip loopback, unspecified, and private IP ranges to prevent
+                // SSRF via gossip-controlled peer addresses
+                if parsed.is_loopback()
+                    || parsed.is_unspecified()
+                    || parsed.is_private()
+                    || parsed.is_link_local()
+                {
                     continue;
                 }
             }

@@ -1182,7 +1182,13 @@ impl Config {
             config.node.data_dir = PathBuf::from(val);
         }
         if let Ok(val) = std::env::var("SWARMLLM_LOGGING_LEVEL") {
-            config.logging.level = val;
+            match val.as_str() {
+                "trace" | "debug" | "info" | "warn" | "error" => config.logging.level = val,
+                _ => tracing::warn!(
+                    value = %val,
+                    "Ignoring invalid SWARMLLM_LOGGING_LEVEL (expected: trace/debug/info/warn/error)"
+                ),
+            }
         }
         if let Ok(val) = std::env::var("SWARMLLM_INFERENCE_MODEL_PATH") {
             config.inference.model_path = Some(PathBuf::from(val));

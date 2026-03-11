@@ -134,10 +134,21 @@ impl RateLimiter {
         let now = Instant::now();
         let key = (ip, kind);
 
-        // Cap total tracked buckets to prevent memory exhaustion from IP spoofing
+        // Cap total tracked buckets to prevent memory exhaustion from IP spoofing.
+        // When full, evict the oldest entry (LRU) instead of denying new clients.
         const MAX_RATE_BUCKETS: usize = 50_000;
         if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
-            return false;
+            // Evict the least-recently-refilled bucket
+            if let Some(oldest_key) = self
+                .buckets
+                .iter()
+                .min_by_key(|entry| entry.value().1)
+                .map(|entry| *entry.key())
+            {
+                self.buckets.remove(&oldest_key);
+            } else {
+                return false;
+            }
         }
 
         let mut entry = self.buckets.entry(key).or_insert((limit, now));
@@ -361,7 +372,8 @@ pub async fn auth_middleware(
             }
             // Loopback without valid token: fall through to normal Bearer auth
         } else if is_inference_path {
-            // Non-loopback: verify it's from a known peer IP (inference only)
+            // Non-loopback peer-forwarded requests: require BOTH known peer IP
+            // AND valid internal auth token to prevent auth bypass via P2P membership
             let peer_ip = addr.ip().to_string();
             let is_known_peer = state.shared_state.peer_registry.iter().any(|entry| {
                 entry.value().addresses.iter().any(|a| {
@@ -371,9 +383,21 @@ pub async fn auth_middleware(
                 })
             });
             if is_known_peer {
-                return next.run(req).await;
+                // Also require internal auth token for peer-forwarded requests
+                if let Some(token) = req
+                    .headers()
+                    .get("x-swarm-internal-token")
+                    .and_then(|v| v.to_str().ok())
+                {
+                    if constant_time_eq(
+                        token.as_bytes(),
+                        state.shared_state.internal_auth_token.as_bytes(),
+                    ) {
+                        return next.run(req).await;
+                    }
+                }
             }
-            // Unknown IP with x-swarm-forwarded: fall through to normal auth
+            // Unknown IP or missing internal token: fall through to normal auth
         }
     }
 

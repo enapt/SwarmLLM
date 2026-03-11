@@ -44,8 +44,9 @@ impl ReplayWindow {
     /// Returns true if the nonce should be accepted.
     fn check(&self, nonce: u64) -> bool {
         if self.top == 0 && self.bitmap == [0; REPLAY_BITMAP_WORDS] {
-            // First message: any nonce is acceptable
-            return true;
+            // First message: restrict to reasonable range to prevent
+            // DoS via high initial nonce that blocks all subsequent messages
+            return nonce < REPLAY_WINDOW_SIZE;
         }
         if nonce > self.top {
             return true; // New high — always accept

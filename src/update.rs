@@ -207,10 +207,29 @@ impl UpdateChecker {
             )));
         }
 
+        // Check Content-Length to reject absurdly large downloads before buffering
+        const MAX_UPDATE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+        if let Some(content_length) = resp.content_length() {
+            if content_length > MAX_UPDATE_SIZE {
+                return Err(SwarmError::Internal(format!(
+                    "Update binary too large: {} bytes (max {} bytes)",
+                    content_length, MAX_UPDATE_SIZE
+                )));
+            }
+        }
+
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| SwarmError::Network(format!("Failed to read response body: {e}")))?;
+
+        if bytes.len() as u64 > MAX_UPDATE_SIZE {
+            return Err(SwarmError::Internal(format!(
+                "Update binary too large: {} bytes (max {} bytes)",
+                bytes.len(),
+                MAX_UPDATE_SIZE
+            )));
+        }
 
         // Verify SHA256 checksum — MANDATORY for security.
         // Reject updates without a .sha256 sidecar to prevent accepting unverified binaries.

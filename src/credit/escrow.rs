@@ -266,8 +266,13 @@ impl EscrowManager {
                 entry.status = EscrowStatus::Expired;
                 let amount = entry.amount;
 
-                // Persist
-                let _ = self.db.put_json(TREE_ESCROW, &id.to_string(), &*entry);
+                // Persist — if DB write fails, revert status to prevent double-refund on restart
+                if let Err(e) = self.db.put_json(TREE_ESCROW, &id.to_string(), &*entry) {
+                    tracing::error!(escrow_id = %id, error = %e, "Failed to persist escrow expiry — reverting to Pending");
+                    entry.status = EscrowStatus::Pending;
+                    drop(entry);
+                    continue;
+                }
                 drop(entry);
 
                 // Refund the expired amount (lifetime_spent is monotonic — not decremented)

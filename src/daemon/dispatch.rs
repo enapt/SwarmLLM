@@ -1189,12 +1189,14 @@ async fn handle_layer_forward(
         (ls as usize, le as usize, total)
     };
 
-    if layer_start >= layer_end {
+    if layer_start >= layer_end || layer_end > total_layers {
         send_error_result(
             &network_tx,
             &sender_peer_bytes,
             request_id,
-            "Empty layer range",
+            &format!(
+                "Invalid layer range [{layer_start}..{layer_end}) for model with {total_layers} layers"
+            ),
         )
         .await;
         return;
@@ -1249,15 +1251,16 @@ async fn handle_layer_forward(
                                 "source_path outside data directory".into(),
                             ));
                         }
-                        if p.exists() {
+                        if canonical.exists() {
                             tracing::info!(
                                 model = %model_id,
                                 layers = format!("[{layer_start}..{layer_end})"),
-                                path = %p.display(),
+                                path = %canonical.display(),
                                 "Loading split model from source GGUF"
                             );
+                            // Use canonical path (not original p) to prevent TOCTOU race
                             SplitModel::load_from_gguf(
-                                &p,
+                                &canonical,
                                 layer_start,
                                 layer_end,
                                 is_first,
@@ -1384,7 +1387,11 @@ async fn handle_layer_forward(
     // Clear per-request KV-cache at the start of a new request (prefill)
     let req_id_str = request_id.to_string();
     if forward.sequence_num == 0 {
-        let model_key = format!("{}-{}-{}", layer_start, layer_end, total_layers);
+        // Include model_id to prevent cross-model cache key collisions
+        let model_key = format!(
+            "{}-{}-{}-{}",
+            model_id.0, layer_start, layer_end, total_layers
+        );
         shared_state
             .kv_cache_store
             .clear_request(&model_key, &req_id_str);

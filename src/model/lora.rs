@@ -81,6 +81,15 @@ pub fn load_adapter(
         .map_err(|e| SwarmError::Internal(format!("Cannot read adapter file: {e}")))?
         .len();
 
+    // Reject adapters larger than 2 GB to prevent OOM from crafted files
+    const MAX_ADAPTER_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+    if file_size > MAX_ADAPTER_SIZE {
+        return Err(SwarmError::Internal(format!(
+            "Adapter file too large: {} bytes (max {} bytes)",
+            file_size, MAX_ADAPTER_SIZE
+        )));
+    }
+
     let file_data = std::fs::read(path)
         .map_err(|e| SwarmError::Internal(format!("Failed to read adapter file: {e}")))?;
     let tensors = safetensors::SafeTensors::deserialize(&file_data)

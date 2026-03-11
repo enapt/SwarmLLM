@@ -612,8 +612,20 @@ impl GgufTensorMeta {
 
         let mut tensors = HashMap::new();
         for (name, info) in &ct.tensor_infos {
-            let size = info.ggml_dtype.type_size() * info.shape.elem_count()
-                / info.ggml_dtype.block_size();
+            // Use checked arithmetic to prevent integer overflow on crafted GGUF headers
+            let size = info
+                .ggml_dtype
+                .type_size()
+                .checked_mul(info.shape.elem_count())
+                .and_then(|v| {
+                    let bs = info.ggml_dtype.block_size();
+                    if bs == 0 {
+                        None
+                    } else {
+                        Some(v / bs)
+                    }
+                })
+                .unwrap_or(0);
             tensors.insert(
                 name.clone(),
                 TensorLocation {
@@ -708,17 +720,25 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
         return save_gguf_header(&shard0_path, &header_path);
     }
 
-    // Try source_path as a fallback
+    // Try source_path as a fallback (with path containment check)
     let source_path_file = model_dir.join("source_path");
     if source_path_file.exists() {
         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
-            let gguf_path = Path::new(path_str.trim());
-            if gguf_path.exists() {
+            let gguf_path = std::path::PathBuf::from(path_str.trim());
+            let canonical = gguf_path
+                .canonicalize()
+                .unwrap_or_else(|_| gguf_path.clone());
+            if !canonical.starts_with(model_dir) {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    "source_path outside model directory — ignoring"
+                );
+            } else if canonical.exists() {
                 tracing::info!(
-                    gguf = %gguf_path.display(),
+                    gguf = %canonical.display(),
                     "Extracting GGUF header from source path"
                 );
-                return save_gguf_header(gguf_path, &header_path);
+                return save_gguf_header(&canonical, &header_path);
             }
         }
     }
@@ -1001,7 +1021,13 @@ fn precompute_freqs_cis_longrope(
     device: &Device,
 ) -> CandleResult<(Tensor, Tensor)> {
     let half_dim = head_dim / 2;
-    assert_eq!(rope_factors.len(), half_dim);
+    if rope_factors.len() != half_dim {
+        return Err(candle_core::Error::Msg(format!(
+            "LongRoPE factors length {} != expected half_dim {}",
+            rope_factors.len(),
+            half_dim
+        )));
+    }
     let theta: Vec<_> = (0..half_dim)
         .map(|i| 1f32 / (rope_factors[i] * freq_base.powf(2.0 * i as f32 / head_dim as f32)))
         .collect();

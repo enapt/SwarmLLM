@@ -160,7 +160,11 @@ impl TrustManager {
                 };
                 let node_id = NodeId(node_id_bytes);
                 if let Some(mut peer) = peer_registry.get_mut(&node_id) {
-                    peer.trust_score = trust;
+                    // Clamp and reject non-finite values from DB to prevent
+                    // NaN/Infinity injection via crafted database entries
+                    if trust.is_finite() {
+                        peer.trust_score = trust.clamp(0.0, 1.0);
+                    }
                 }
             }
         }

@@ -105,6 +105,11 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
             return Err(SwarmError::Internal("Tensor data truncated".into()));
         }
         let val = f32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
+        if !val.is_finite() {
+            return Err(SwarmError::Internal(
+                "Tensor contains non-finite values (NaN/Inf)".into(),
+            ));
+        }
         data.push(val);
         pos += 4;
     }
@@ -208,11 +213,9 @@ pub fn sample_token_with_params(
     let mut probs: Vec<f32> = logits_vec.iter().map(|&x| (x - max_val).exp()).collect();
     let sum: f32 = probs.iter().sum();
     if sum <= 0.0 || !sum.is_finite() {
-        tracing::warn!(
-            sum,
-            "Degenerate softmax distribution, falling back to token 0"
-        );
-        return Ok(0);
+        return Err(SwarmError::Inference(
+            "Degenerate softmax distribution — logits are non-finite or zero".into(),
+        ));
     }
     let inv_sum = 1.0 / sum;
     for p in probs.iter_mut() {
