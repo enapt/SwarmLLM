@@ -325,9 +325,9 @@ impl UpdateChecker {
                         "Update available"
                     );
 
-                    // Auto-download if configured
+                    // Auto-download if auto_update is enabled (Stable or All)
                     let mut info = info;
-                    if self.config.auto_restart {
+                    if self.config.auto_update != crate::config::AutoUpdateMode::Disabled {
                         match self.download_update(&info).await {
                             Ok(_path) => {
                                 info.downloaded = true;

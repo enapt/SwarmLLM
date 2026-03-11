@@ -78,6 +78,13 @@ impl GossipSealer {
                 .try_into()
                 .map_err(|_| SwarmError::DecryptionFailed)?,
         );
+
+        // Reject epoch tags too far from current — prevents indefinite replay of old messages
+        let current_epoch = Self::current_epoch();
+        if epoch_tag > current_epoch || current_epoch.wrapping_sub(epoch_tag) > 2 {
+            return Err(SwarmError::DecryptionFailed);
+        }
+
         let nonce = Nonce::from_slice(&sealed[4..16]);
         let ciphertext = &sealed[16..];
 

@@ -320,7 +320,11 @@ pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
                     return Ok(addr_str);
                 }
                 Err(_) => {
-                    // Decryption failed — try legacy plain base64 below
+                    // Encrypted payload but decryption failed — do not fall through
+                    // to legacy plain path (would accept raw crypto bytes as multiaddr)
+                    return Err(SwarmError::Network(
+                        "Invite code decryption failed — invalid or expired code".into(),
+                    ));
                 }
             }
         }

@@ -238,6 +238,14 @@ impl PipelineExecutor {
             "DIAG: precompute_vision_embeddings remote"
         );
 
+        // Remote vision encoding only supports single images — multi-image requires local mmproj
+        if images.len() > 1 {
+            return Err(SwarmError::Internal(
+                "Multi-image VLM requires local mmproj — remote encoding only supports single images"
+                    .into(),
+            ));
+        }
+
         // Compress image as JPEG for wire transfer
         let first_image = &images[0];
         let jpeg_bytes = self.compress_image_jpeg(first_image)?;
