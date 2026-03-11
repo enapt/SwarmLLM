@@ -452,9 +452,7 @@ impl PoolManager {
 
         // Clear our pool state
         *self.shared_state.pool_state.write().await = None;
-        self.shared_state
-            .db
-            .put_json(TREE_POOL_STATE, KEY_MY_POOL, &Option::<PoolState>::None)?;
+        self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL)?;
         self.shared_state.pool_registry.remove(&pool_id);
 
         // Broadcast signed member-left notice
@@ -857,11 +855,7 @@ impl PoolManager {
             }
 
             *self.shared_state.pool_state.write().await = None;
-            let _ = self.shared_state.db.put_json(
-                TREE_POOL_STATE,
-                KEY_MY_POOL,
-                &Option::<PoolState>::None,
-            );
+            let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);
             self.shared_state.pool_registry.remove(&removal.pool_id);
             tracing::info!(pool_id = %removal.pool_id, "Removed from pool by owner");
         }

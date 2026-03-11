@@ -97,9 +97,9 @@ impl GossipSealer {
             return Ok(plaintext);
         }
 
-        // Try previous epoch for backward clock skew tolerance
-        // (only past, never future — accepting future epochs would let attackers pre-compute messages)
-        {
+        // Try previous epoch only when tagged epoch is current (handles boundary case
+        // where sender sealed at end of previous epoch, receiver just rotated)
+        if epoch_tag == current_epoch {
             let prev_epoch = epoch_tag.wrapping_sub(1);
             let alt_key = self.derive_epoch_key(prev_epoch);
             let alt_cipher = ChaCha20Poly1305::new_from_slice(&alt_key)

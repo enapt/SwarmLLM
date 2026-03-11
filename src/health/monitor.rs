@@ -251,7 +251,10 @@ impl HealthMonitor {
 
         for entry in self.shared_state.peer_registry.iter() {
             let peer = entry.value();
-            if now.signed_duration_since(peer.last_seen) > timeout {
+            let age = now
+                .signed_duration_since(peer.last_seen)
+                .max(chrono::Duration::zero());
+            if age > timeout {
                 if active_nodes.contains(entry.key()) {
                     tracing::debug!(
                         peer = %entry.key(),

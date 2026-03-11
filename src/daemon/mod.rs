@@ -1228,16 +1228,6 @@ impl Daemon {
                             *count += 1;
 
                             if criticality == SubsystemCriticality::Critical {
-                                if *count > MAX_RESTART_ATTEMPTS {
-                                    tracing::error!(
-                                        subsystem = name,
-                                        attempts = *count,
-                                        "Critical subsystem permanently failed — shutting down"
-                                    );
-                                    break;
-                                }
-                                // Critical subsystem failed but we can't restart channel-bound
-                                // tasks, so trigger shutdown immediately.
                                 tracing::error!(
                                     subsystem = name,
                                     "Critical subsystem failed — triggering graceful shutdown"

@@ -281,11 +281,15 @@ pub(super) fn regenerate_manifest_from_header(
         let max_end = meta
             .tensors
             .values()
-            .map(|loc| meta.tensor_data_offset + loc.offset + loc.size)
+            .map(|loc| {
+                meta.tensor_data_offset
+                    .saturating_add(loc.offset)
+                    .saturating_add(loc.size)
+            })
             .max()
             .unwrap_or(meta.tensor_data_offset);
         // Round up to alignment (GGUF tensors are 32-byte aligned)
-        (max_end + 31) & !31
+        (max_end.saturating_add(31)) & !31
     };
 
     // Check if this is actually a single full GGUF file stored as shard_000.bin
