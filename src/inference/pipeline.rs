@@ -857,7 +857,7 @@ impl PipelineExecutor {
         }
 
         // If we ran out of tokens without a stop signal
-        if generated_tokens.len() as u32 >= max_tokens {
+        if generated_tokens.len() as u32 >= max_tokens && finish_reason.is_empty() {
             finish_reason = "length".to_string();
             if let Some(ref tx) = token_tx {
                 let _ = tx
@@ -1525,6 +1525,8 @@ impl PipelineExecutor {
                                 error = %err_msg,
                                 "Remote segment returned error, attempting failover"
                             );
+                            // Remove stale pending entry before failover inserts a new one
+                            self.shared_state.pending_layer_results.remove(&request_id);
                             let failover_result = self
                                 .failover_segment(
                                     idx,

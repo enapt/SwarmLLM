@@ -455,6 +455,7 @@ impl PoolManager {
         self.shared_state
             .db
             .put_json(TREE_POOL_STATE, KEY_MY_POOL, &Option::<PoolState>::None)?;
+        self.shared_state.pool_registry.remove(&pool_id);
 
         // Broadcast signed member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
@@ -861,6 +862,7 @@ impl PoolManager {
                 KEY_MY_POOL,
                 &Option::<PoolState>::None,
             );
+            self.shared_state.pool_registry.remove(&removal.pool_id);
             tracing::info!(pool_id = %removal.pool_id, "Removed from pool by owner");
         }
     }

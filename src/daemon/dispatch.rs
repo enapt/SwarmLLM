@@ -951,8 +951,8 @@ pub(crate) async fn dispatch_network_messages(
                                 } else {
                                     continue;
                                 }
-                                if req.tp_size as usize > 32 {
-                                    tracing::warn!(tp_size = req.tp_size, "TpAllReduceRequest tp_size exceeds maximum — dropping");
+                                if req.tp_size < 2 || req.tp_size as usize > 32 {
+                                    tracing::warn!(tp_size = req.tp_size, "TpAllReduceRequest tp_size out of range [2,32] — dropping");
                                     continue;
                                 }
                                 let key = (req.request_id, req.layer_idx);

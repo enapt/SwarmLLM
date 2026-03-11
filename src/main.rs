@@ -230,6 +230,9 @@ async fn run_daemon(cli: Cli, no_update_check: bool) -> anyhow::Result<()> {
     if let Some(ref shard_str) = cli.shards {
         if let Some((start, end)) = shard_str.split_once('-') {
             if let (Ok(s), Ok(e)) = (start.parse::<u32>(), end.parse::<u32>()) {
+                if s > e {
+                    anyhow::bail!("Invalid --shards range: start ({s}) must be <= end ({e})");
+                }
                 config.inference.shard_range = Some((s, e));
                 tracing::info!(shard_start = s, shard_end = e, "Node claiming shard range");
             } else {

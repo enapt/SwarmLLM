@@ -253,12 +253,13 @@ impl EscrowManager {
             }
         }
 
-        let count = expired_ids.len();
+        let mut count = 0;
         for id in expired_ids {
             if let Some(mut entry) = self.entries.get_mut(&id) {
                 if entry.status != EscrowStatus::Pending {
                     continue; // Already released/refunded by another path
                 }
+                count += 1;
                 entry.status = EscrowStatus::Expired;
                 let amount = entry.amount;
 

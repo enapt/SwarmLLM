@@ -157,8 +157,11 @@ pub fn cosign_credit_forward(
     );
     verify_sig(&forward.member_signature, &payload, member_key)?;
 
-    // Owner co-signs
-    forward.owner_signature = identity.sign(&payload);
+    // Owner co-signs — commits to the member's signature for cryptographic separation
+    let mut cosign_payload = Vec::with_capacity(payload.len() + forward.member_signature.len());
+    cosign_payload.extend_from_slice(&payload);
+    cosign_payload.extend_from_slice(&forward.member_signature);
+    forward.owner_signature = identity.sign(&cosign_payload);
     Ok(())
 }
 

@@ -407,20 +407,30 @@ pub(super) fn extract_tied_output_weight(
     let abs_offset = meta.tensor_data_offset + embd_loc.offset;
     let size = embd_loc.size;
 
-    let shard_data =
-        std::fs::read(shard0_path).map_err(|e| format!("Failed to read shard_000.bin: {e}"))?;
+    use std::io::{Read, Seek, SeekFrom};
 
-    let end = (abs_offset + size) as usize;
-    if end > shard_data.len() {
+    let mut file = std::fs::File::open(shard0_path)
+        .map_err(|e| format!("Failed to open shard_000.bin: {e}"))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| format!("Failed to stat shard_000.bin: {e}"))?
+        .len();
+
+    let end = abs_offset + size;
+    if end > file_len {
         return Err(format!(
-            "token_embd.weight extends beyond shard_000.bin (need {end} bytes, have {})",
-            shard_data.len()
+            "token_embd.weight extends beyond shard_000.bin (need {end} bytes, have {file_len})"
         ));
     }
 
-    let tensor_bytes = &shard_data[abs_offset as usize..end];
+    file.seek(SeekFrom::Start(abs_offset))
+        .map_err(|e| format!("Failed to seek in shard_000.bin: {e}"))?;
+    let mut tensor_bytes = vec![0u8; size as usize];
+    file.read_exact(&mut tensor_bytes)
+        .map_err(|e| format!("Failed to read tensor from shard_000.bin: {e}"))?;
+
     let dest_path = model_dir.join("tied_output_weight.bin");
-    std::fs::write(&dest_path, tensor_bytes)
+    std::fs::write(&dest_path, &tensor_bytes)
         .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
 
     tracing::info!(

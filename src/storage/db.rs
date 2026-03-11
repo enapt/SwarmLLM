@@ -86,11 +86,16 @@ impl Database {
         let inner = match redb::Database::create(&db_path) {
             Ok(db) => db,
             Err(redb::DatabaseError::UpgradeRequired(version)) => {
+                let backup_path = db_path.with_extension("redb.bak");
                 tracing::warn!(
                     old_version = version,
-                    "Old redb v{version} database found; deleting and recreating"
+                    backup = %backup_path.display(),
+                    "Old redb v{version} database found; backing up and recreating"
                 );
-                let _ = std::fs::remove_file(&db_path);
+                if let Err(e) = std::fs::rename(&db_path, &backup_path) {
+                    tracing::error!(error = %e, "Failed to backup old database — deleting");
+                    let _ = std::fs::remove_file(&db_path);
+                }
                 redb::Database::create(&db_path).map_err(|e| {
                     SwarmError::Database(format!("Failed to create {}: {e}", db_path.display()))
                 })?

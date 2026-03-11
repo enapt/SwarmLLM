@@ -129,19 +129,34 @@ impl KvCacheManager {
 
         // Evict oldest multi-turn session if at capacity to prevent unbounded growth
         if self.multi_turn_sessions.len() >= MAX_MULTI_TURN_SESSIONS {
-            if let Some(oldest_user_key) = self
+            // First, clean up any orphaned entries (multi_turn_sessions pointing to
+            // evicted sessions) — these sort as newest with Instant::now() fallback
+            let orphaned: Vec<String> = self
                 .multi_turn_sessions
                 .iter()
-                .min_by_key(|(_, id)| {
-                    self.sessions
-                        .get(id)
-                        .map(|s| s.last_accessed)
-                        .unwrap_or_else(Instant::now)
-                })
+                .filter(|(_, id)| !self.sessions.contains_key(id))
                 .map(|(k, _)| k.clone())
-            {
-                if let Some(internal_id) = self.multi_turn_sessions.remove(&oldest_user_key) {
-                    self.sessions.remove(&internal_id);
+                .collect();
+            for key in orphaned {
+                self.multi_turn_sessions.remove(&key);
+            }
+
+            // If still at capacity, evict the oldest valid session
+            if self.multi_turn_sessions.len() >= MAX_MULTI_TURN_SESSIONS {
+                if let Some(oldest_user_key) = self
+                    .multi_turn_sessions
+                    .iter()
+                    .min_by_key(|(_, id)| {
+                        self.sessions
+                            .get(id)
+                            .map(|s| s.last_accessed)
+                            .unwrap_or_else(Instant::now)
+                    })
+                    .map(|(k, _)| k.clone())
+                {
+                    if let Some(internal_id) = self.multi_turn_sessions.remove(&oldest_user_key) {
+                        self.sessions.remove(&internal_id);
+                    }
                 }
             }
         }

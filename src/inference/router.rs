@@ -594,20 +594,25 @@ impl InferenceRouter {
         // Register multi-turn KV-cache session so subsequent turns can
         // find this session via check_multi_turn_reuse. Use chatml_fallback
         // consistently (same template used for the prefix check above).
-        if let Some(ref session_id) = queued.request.session_id {
-            let prompt = crate::inference::chat_template::chatml_fallback(&queued.request.messages);
-            self.kv_cache.register_multi_turn(
-                session_id,
-                queued.request.id,
-                crate::types::PipelineAssignment {
-                    request_id: queued.request.id,
-                    segments: vec![],
-                    standbys: vec![],
-                    tp_groups: vec![],
-                },
-                cache_start_pos.unwrap_or(0),
-                prompt,
-            );
+        // Skip if session already exists (cache_start_pos.is_some()) — don't overwrite
+        // existing session's pipeline/cache_holders with empty data.
+        if cache_start_pos.is_none() {
+            if let Some(ref session_id) = queued.request.session_id {
+                let prompt =
+                    crate::inference::chat_template::chatml_fallback(&queued.request.messages);
+                self.kv_cache.register_multi_turn(
+                    session_id,
+                    queued.request.id,
+                    crate::types::PipelineAssignment {
+                        request_id: queued.request.id,
+                        segments: vec![],
+                        standbys: vec![],
+                        tp_groups: vec![],
+                    },
+                    0,
+                    prompt,
+                );
+            }
         }
 
         self.active_count.fetch_add(1, Ordering::Relaxed);

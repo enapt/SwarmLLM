@@ -1217,7 +1217,7 @@ pub(crate) fn decode_split_tokens(
 
 fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
     for addr in &peer.addresses {
-        // Parse multiaddr: /ip4/<ip>/udp/<port>/quic-v1
+        // Parse multiaddr: /ip4/<ip>/udp/<port>/quic-v1 or /ip4/<ip>/tcp/<port>
         let parts: Vec<&str> = addr.split('/').collect();
         let mut ip = None;
         let mut port = None;
@@ -1225,46 +1225,23 @@ fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
             if parts[i] == "ip4" && i + 1 < parts.len() {
                 ip = Some(parts[i + 1]);
             }
-            if parts[i] == "udp" && i + 1 < parts.len() {
+            // Accept both UDP (QUIC) and TCP port — HTTP API is on TCP:port
+            if (parts[i] == "udp" || parts[i] == "tcp") && i + 1 < parts.len() && port.is_none() {
                 port = Some(parts[i + 1]);
             }
         }
         if let (Some(ip_str), Some(port_str)) = (ip, port) {
-            // SECURITY: Block RFC-1918 private ranges, loopback, and link-local
-            // to prevent SSRF. Only allow routable peer addresses.
-            if is_private_ip(ip_str) {
-                continue;
+            // Peer addresses come from authenticated peer registry (libp2p identity-verified),
+            // so private/LAN addresses are expected and safe. Only block loopback/unspecified.
+            if let Ok(addr) = ip_str.parse::<std::net::Ipv4Addr>() {
+                if addr.is_loopback() || addr.is_unspecified() {
+                    continue;
+                }
             }
             return Some(format!("http://{}:{}", ip_str, port_str));
         }
     }
     None
-}
-
-/// Check if an IP address string is in a private/reserved range (SSRF protection).
-fn is_private_ip(ip: &str) -> bool {
-    if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
-        let octets = addr.octets();
-        return octets[0] == 10                                              // 10.0.0.0/8
-            || (octets[0] == 172 && (16..=31).contains(&octets[1]))         // 172.16.0.0/12
-            || (octets[0] == 192 && octets[1] == 168)                       // 192.168.0.0/16
-            || octets[0] == 127                                             // 127.0.0.0/8
-            || (octets[0] == 169 && octets[1] == 254)                       // 169.254.0.0/16
-            || octets[0] == 0                                               // 0.0.0.0/8
-            || (octets[0] == 100 && (64..=127).contains(&octets[1]))        // 100.64.0.0/10 (CGNAT)
-            || (octets[0] == 198 && (18..=19).contains(&octets[1]))         // 198.18.0.0/15 (benchmark)
-            || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)      // 192.0.0.0/24 (IETF)
-            || (octets[0] & 0xf0) == 224; // 224.0.0.0/4 (multicast)
-    }
-    if let Ok(addr) = ip.parse::<std::net::Ipv6Addr>() {
-        let segs = addr.segments();
-        return addr.is_loopback()                                           // ::1
-            || (segs[0] & 0xfe00) == 0xfc00                                 // fc00::/7 (ULA)
-            || (segs[0] & 0xffc0) == 0xfe80                                 // fe80::/10 (link-local)
-            || (segs[0] == 0 && segs[1] == 0 && segs[2] == 0
-                && segs[3] == 0 && segs[4] == 0 && segs[5] == 0xffff); // ::ffff:0:0/96 (IPv4-mapped)
-    }
-    true // block unparseable addresses
 }
 
 /// Forward a chat completion request to a peer's HTTP API.
