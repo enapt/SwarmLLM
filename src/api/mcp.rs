@@ -671,9 +671,15 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
+                    let scrubbed = crate::crypto::scrub_api_keys(&body);
+                    let truncated = if scrubbed.len() > 512 {
+                        format!("{}…[truncated]", &scrubbed[..512])
+                    } else {
+                        scrubbed
+                    };
                     json!({
                         "model": model_id,
-                        "error": format!("HTTP {status}: {body}"),
+                        "error": format!("HTTP {status}: {truncated}"),
                         "latency_ms": elapsed_ms,
                         "status": "error",
                     })
@@ -853,9 +859,15 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
+                    let scrubbed = crate::crypto::scrub_api_keys(&body);
+                    let truncated = if scrubbed.len() > 512 {
+                        format!("{}…[truncated]", &scrubbed[..512])
+                    } else {
+                        scrubbed
+                    };
                     json!({
                         "model": model_id,
-                        "error": format!("HTTP {status}: {body}"),
+                        "error": format!("HTTP {status}: {truncated}"),
                         "latency_ms": elapsed_ms,
                         "status": "error",
                     })

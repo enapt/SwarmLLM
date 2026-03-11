@@ -26,8 +26,15 @@ impl Keystore {
         match passphrase {
             Some(pass) => Self::save_encrypted(key, pass, path),
             None => {
-                // Store raw 32-byte key
-                std::fs::write(path, key.to_bytes()).map_err(SwarmError::Io)
+                // Store raw 32-byte key with restricted permissions
+                std::fs::write(path, key.to_bytes()).map_err(SwarmError::Io)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o600);
+                    std::fs::set_permissions(path, perms).map_err(SwarmError::Io)?;
+                }
+                Ok(())
             }
         }
     }
@@ -89,7 +96,14 @@ impl Keystore {
         output.extend_from_slice(&nonce_bytes);
         output.extend_from_slice(&ciphertext);
 
-        std::fs::write(path, &output).map_err(SwarmError::Io)
+        std::fs::write(path, &output).map_err(SwarmError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(path, perms).map_err(SwarmError::Io)?;
+        }
+        Ok(())
     }
 
     fn load_encrypted(data: &[u8], passphrase: &str) -> Result<SigningKey, SwarmError> {

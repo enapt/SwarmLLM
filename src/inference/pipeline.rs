@@ -929,7 +929,7 @@ impl PipelineExecutor {
             request_id,
             content: generated_text,
             prompt_tokens: prompt_token_count.unwrap_or_else(|| prompt.chars().count() / 4) as u32,
-            completion_tokens: clean_tokens.len() as u32,
+            completion_tokens: generated_tokens.len() as u32,
             finish_reason: if finish_reason.is_empty() {
                 "stop".to_string()
             } else {

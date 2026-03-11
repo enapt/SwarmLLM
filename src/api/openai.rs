@@ -1132,6 +1132,10 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     }
 
     let result = all_shards_available_inner(state, model_name);
+    // Cap cache size to prevent unbounded growth from arbitrary model names
+    if CACHE.len() > 1000 {
+        CACHE.clear();
+    }
     CACHE.insert(model_name.to_string(), (std::time::Instant::now(), result));
     result
 }

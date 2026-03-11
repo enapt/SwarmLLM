@@ -141,7 +141,6 @@ impl CreditLedger {
             .saturating_mul(layers as i64)
             .saturating_mul(tokens as i64);
         self.apply_credit(amount, true).await?;
-        self.persist_balance().await?;
 
         tracing::info!(
             amount,
@@ -153,13 +152,13 @@ impl CreditLedger {
 
         // Forward credits to pool owner if we're a member (not owner).
         // Deduct the forwarded amount from the member's balance to prevent double-spend.
+        // Apply both earn + deduct before persisting to avoid crash-window credit inflation.
         if let Some(ref ss) = self.shared_state {
             match crate::pool::forward::forward_credits_to_owner(ss, amount).await {
                 Ok(true) => {
                     // Credits were forwarded — deduct from member's local balance
                     // Use balance-only adjustment to avoid inflating lifetime_spent
                     self.adjust_balance(-amount).await?;
-                    self.persist_balance().await?;
                     tracing::info!(amount, "Forwarded earned credits to pool owner");
                 }
                 Ok(false) => {} // Not in a pool or is the owner — keep credits
@@ -168,6 +167,9 @@ impl CreditLedger {
                 }
             }
         }
+
+        // Single persist after both earn and optional forwarding deduction
+        self.persist_balance().await?;
 
         Ok(amount)
     }

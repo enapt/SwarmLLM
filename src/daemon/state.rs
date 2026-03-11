@@ -353,6 +353,9 @@ impl TpAllReduceCollector {
     ) -> bool {
         let rank = req.tp_rank as usize;
         if rank < self.partials.len() {
+            if self.partials[rank].is_some() {
+                tracing::warn!(rank, "AllReduce: duplicate partial for rank — overwriting");
+            }
             self.sender_peers[rank] = sender_peer;
             self.partials[rank] = Some(req);
         }

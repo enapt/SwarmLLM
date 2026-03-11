@@ -1069,7 +1069,8 @@ impl LayerWeights {
         let heads_per_rank = self.n_head / tp_size;
         let kv_heads_per_rank = self.n_kv_head.max(1) / tp_size.min(self.n_kv_head).max(1);
         let q_start = tp_rank * heads_per_rank;
-        let kv_start = tp_rank * kv_heads_per_rank;
+        // Wrap kv_start to handle GQA where tp_size > n_kv_head (ranks share KV heads)
+        let kv_start = (tp_rank * kv_heads_per_rank) % self.n_kv_head.max(1);
 
         // Narrow along head dimension (dim=2)
         let q = q.narrow(2, q_start, heads_per_rank)?;

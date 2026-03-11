@@ -45,6 +45,16 @@ pub async fn handler(
     ws.on_upgrade(move |socket| handle_socket(socket, shared))
 }
 
+/// RAII guard to ensure ws_connection_count is decremented even on panic.
+struct WsCountGuard(Arc<SharedState>);
+impl Drop for WsCountGuard {
+    fn drop(&mut self) {
+        self.0
+            .ws_connection_count
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     // Enforce a global WebSocket connection limit to prevent resource exhaustion.
     // Incrementing inside handle_socket (not before on_upgrade) prevents counter
@@ -64,6 +74,8 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
         );
         return;
     }
+    // RAII guard ensures decrement on panic or any exit path
+    let _ws_guard = WsCountGuard(shared_state.clone());
     tracing::debug!("DIAG: websocket client connected");
     let (mut sender, mut receiver) = socket.split();
 
@@ -212,9 +224,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
             tracing::debug!("DIAG: websocket receiver loop exited first");
         }
     }
-    shared_state
-        .ws_connection_count
-        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    // _ws_guard drop handles decrement
     tracing::debug!("DIAG: websocket client disconnected");
 }
 
