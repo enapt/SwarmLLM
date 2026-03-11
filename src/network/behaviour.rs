@@ -112,6 +112,9 @@ pub fn build_behaviour(
         .heartbeat_interval(Duration::from_secs(10))
         .validation_mode(gossipsub::ValidationMode::Strict)
         .message_id_fn(message_id_fn)
+        // SEC: Cap gossip message size to prevent oversized gossip flooding.
+        // Matches MAX_JSON_MSG_SIZE (4 MB) in the request_response codec.
+        .max_transmit_size(4 * 1024 * 1024)
         .mesh_n(mesh_n)
         .mesh_n_low(mesh_n_low)
         .mesh_n_high(mesh_n_high)

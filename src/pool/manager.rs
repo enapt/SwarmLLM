@@ -867,6 +867,30 @@ impl PoolManager {
 
         // If we're the one being removed
         if removal.removed_node_id == *my_id {
+            // SEC: Freshness check — reject removals older than 5 minutes
+            let age = chrono::Utc::now().signed_duration_since(removal.removed_at);
+            if age.num_seconds().abs() > 300 {
+                tracing::warn!(
+                    age_secs = age.num_seconds(),
+                    "Pool removal rejected: timestamp too old or too far in future"
+                );
+                return;
+            }
+
+            // SEC: Replay protection — check if we've already processed this removal_id
+            let removal_key = removal.removal_id.to_string();
+            if self
+                .shared_state
+                .db
+                .get_json::<bool>(TREE_POOL_STATE, &removal_key)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                tracing::warn!(removal_id = %removal.removal_id, "Pool removal replay detected — ignoring");
+                return;
+            }
+
             // Verify the removal was signed by the pool owner
             let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&removal.pool_id.0) {
                 Ok(k) => k,
@@ -876,6 +900,12 @@ impl PoolManager {
                 tracing::warn!("Invalid removal signature");
                 return;
             }
+
+            // Record the removal_id to prevent replay
+            let _ = self
+                .shared_state
+                .db
+                .put_json(TREE_POOL_STATE, &removal_key, &true);
 
             *self.shared_state.pool_state.write().await = None;
             let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);

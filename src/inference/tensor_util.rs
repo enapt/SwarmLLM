@@ -88,7 +88,7 @@ pub fn bytes_to_tensor(bytes: &[u8]) -> Result<Tensor, SwarmError> {
         .try_fold(1usize, |acc, &d| acc.checked_mul(d))
         .ok_or_else(|| SwarmError::Internal("Tensor shape overflow".into()))?;
 
-    const MAX_TENSOR_ELEMENTS: usize = 64 * 1024 * 1024; // 64M elements = 256MB of f32
+    const MAX_TENSOR_ELEMENTS: usize = 32 * 1024 * 1024; // 32M elements = 128MB of f32
     if num_elements > MAX_TENSOR_ELEMENTS {
         return Err(SwarmError::Internal(format!(
             "Tensor too large: {} elements (max {})",

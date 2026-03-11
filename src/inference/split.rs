@@ -662,6 +662,14 @@ pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Resul
         .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
 
     let header_size = ct.tensor_data_offset as usize;
+    // SEC: Cap header allocation to prevent OOM from malicious GGUF files
+    const MAX_GGUF_HEADER_SIZE: usize = 64 * 1024 * 1024; // 64 MB
+    if header_size > MAX_GGUF_HEADER_SIZE {
+        return Err(SwarmError::Internal(format!(
+            "GGUF header too large: {} bytes (max {})",
+            header_size, MAX_GGUF_HEADER_SIZE
+        )));
+    }
     let mut header_buf = vec![0u8; header_size];
     file.seek(SeekFrom::Start(0)).map_err(SwarmError::Io)?;
     file.read_exact(&mut header_buf).map_err(SwarmError::Io)?;
@@ -774,7 +782,15 @@ impl ShardReader {
         tensor_data_offset: u64,
     ) -> Result<Self, SwarmError> {
         let header = std::fs::read(header_path).map_err(SwarmError::Io)?;
+        // SEC: Cap padding to prevent OOM from malicious tensor_data_offset
+        const MAX_GGUF_HEADER_SIZE: usize = 64 * 1024 * 1024; // 64 MB
         let header = if (header.len() as u64) < tensor_data_offset {
+            if (tensor_data_offset as usize) > MAX_GGUF_HEADER_SIZE {
+                return Err(SwarmError::Internal(format!(
+                    "GGUF header offset too large: {} bytes (max {})",
+                    tensor_data_offset, MAX_GGUF_HEADER_SIZE
+                )));
+            }
             let mut padded = header;
             padded.resize(tensor_data_offset as usize, 0);
             padded

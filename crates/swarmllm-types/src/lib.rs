@@ -123,6 +123,9 @@ pub struct PoolRemoval {
     pub removed_node_id: NodeId,
     pub owner_signature: Vec<u8>,
     pub removed_at: chrono::DateTime<chrono::Utc>,
+    /// Unique ID to prevent replay attacks (new field, defaults to nil for old messages)
+    #[serde(default = "uuid::Uuid::nil")]
+    pub removal_id: uuid::Uuid,
 }
 
 // ---- Identity ----

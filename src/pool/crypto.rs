@@ -94,7 +94,8 @@ pub fn verify_acceptance(
 /// Create a removal notice signed by the pool owner.
 pub fn create_removal(identity: &Identity, pool_id: &PoolId, removed_node: &NodeId) -> PoolRemoval {
     let now = chrono::Utc::now();
-    let payload = removal_payload(pool_id, removed_node, &now);
+    let removal_id = uuid::Uuid::new_v4();
+    let payload = removal_payload(pool_id, removed_node, &now, &removal_id);
     let signature = identity.sign(&payload);
 
     PoolRemoval {
@@ -102,6 +103,7 @@ pub fn create_removal(identity: &Identity, pool_id: &PoolId, removed_node: &Node
         removed_node_id: removed_node.clone(),
         owner_signature: signature,
         removed_at: now,
+        removal_id,
     }
 }
 
@@ -111,6 +113,7 @@ pub fn verify_removal(removal: &PoolRemoval, owner_key: &VerifyingKey) -> Result
         &removal.pool_id,
         &removal.removed_node_id,
         &removal.removed_at,
+        &removal.removal_id,
     );
     verify_sig(&removal.owner_signature, &payload, owner_key)
 }
@@ -276,12 +279,14 @@ fn removal_payload(
     pool_id: &PoolId,
     removed_node: &NodeId,
     removed_at: &chrono::DateTime<chrono::Utc>,
+    removal_id: &uuid::Uuid,
 ) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_REMOVAL);
     hasher.update(&pool_id.0);
     hasher.update(&removed_node.0);
     hasher.update(removed_at.to_rfc3339().as_bytes());
+    hasher.update(removal_id.as_bytes());
     hasher.finalize().as_bytes().to_vec()
 }
 

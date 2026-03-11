@@ -508,6 +508,17 @@ pub(crate) async fn dispatch_network_messages(
                                     tracing::debug!("Dropping unauthenticated ShardAnnounce");
                                     continue;
                                 }
+                                // SEC: Cap shards per announce to prevent shard_holders memory exhaustion
+                                const MAX_SHARDS_PER_ANNOUNCE: usize = 512;
+                                if announce.shards.len() > MAX_SHARDS_PER_ANNOUNCE {
+                                    tracing::warn!(
+                                        node_id = %announce.node_id,
+                                        shards = announce.shards.len(),
+                                        max = MAX_SHARDS_PER_ANNOUNCE,
+                                        "ShardAnnounce exceeds shard limit — dropping"
+                                    );
+                                    continue;
+                                }
                                 tracing::info!(
                                     node_id = %announce.node_id,
                                     shards = announce.shards.len(),

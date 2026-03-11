@@ -465,6 +465,13 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
             .map_err(|_| SwarmError::Network("Invalid data_len".into()))?,
     ) as usize;
 
+    // SEC: Cap activation size to prevent memory exhaustion from malicious peers
+    if data_len > MAX_ACTIVATION_SIZE {
+        return Err(SwarmError::Network(format!(
+            "LayerForward activation too large: {} bytes (max {})",
+            data_len, MAX_ACTIVATION_SIZE
+        )));
+    }
     if data.len() < 29 + data_len {
         return Err(SwarmError::Network(format!(
             "Tensor data truncated: expected {} bytes, got {}",
