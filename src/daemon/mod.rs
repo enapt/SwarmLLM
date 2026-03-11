@@ -300,9 +300,18 @@ impl Daemon {
                         let model_dir = shard_store_tmp.models_dir().join(&model_id.0);
                         let source_path_file = model_dir.join("source_path");
                         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
-                            let path = std::path::Path::new(path_str.trim());
-                            if let Ok(meta) =
-                                crate::inference::split::GgufTensorMeta::from_gguf_file(path)
+                            let path = std::path::PathBuf::from(path_str.trim());
+                            // SEC: Containment check — source_path must be within data directory
+                            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                            let data_models = shard_store_tmp.models_dir();
+                            if !canonical.starts_with(&data_models) {
+                                tracing::warn!(
+                                    model = %model_id,
+                                    path = %path.display(),
+                                    "source_path outside data directory — ignoring"
+                                );
+                            } else if let Ok(meta) =
+                                crate::inference::split::GgufTensorMeta::from_gguf_file(&path)
                             {
                                 tracing::info!(
                                     model = %model_id,

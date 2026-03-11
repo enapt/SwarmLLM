@@ -120,7 +120,10 @@ impl RateLimiter {
     /// Returns `true` if allowed, `false` if rate-limited.
     fn try_acquire(&self, ip: IpAddr, path: &str) -> bool {
         // Sensitive key-management endpoints get a much stricter limit (5/min)
-        let (kind, limit) = if path == "/api/admin/providers" || path == "/api/admin/api-key" {
+        let (kind, limit) = if path == "/api/admin/providers"
+            || path == "/api/admin/api-key"
+            || path == "/api/admin/provider-model-status"
+        {
             (BucketKind::SensitiveAdmin, 5)
         } else if path.starts_with("/api/admin/") {
             (BucketKind::Admin, self.admin_rpm)

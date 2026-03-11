@@ -475,9 +475,28 @@ pub async fn proxy_to_anthropic(
         let body = resp.text().await.unwrap_or_default();
         let scrubbed_body = crate::crypto::scrub_api_keys(&body);
         tracing::warn!(status = %status, body = %scrubbed_body, "Anthropic returned error");
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Anthropic returned error status {status}: {scrubbed_body}"
-        ))));
+        // SEC: Extract friendly message and truncate, same as proxy_openai_compatible,
+        // to prevent leaking large upstream error bodies with internal details.
+        let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed_body)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("message"))
+                    .or_else(|| v.get("message"))
+                    .or_else(|| v.get("detail"))
+                    .and_then(|m| m.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or(scrubbed_body);
+        let friendly = if friendly.len() > 500 {
+            let truncated: String = friendly.chars().take(500).collect();
+            format!("{truncated}...")
+        } else {
+            friendly
+        };
+        return Err(ApiError(crate::error::SwarmError::ProviderError {
+            status: status.as_u16(),
+            body: friendly,
+        }));
     }
 
     if stream {

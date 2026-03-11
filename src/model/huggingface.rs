@@ -429,13 +429,23 @@ fn build_tensor_meta_from_content(
 
     let mut tensors = HashMap::new();
     for (name, info) in &ct.tensor_infos {
-        let size =
-            info.ggml_dtype.type_size() * info.shape.elem_count() / info.ggml_dtype.block_size();
+        // SEC: Use checked arithmetic to prevent integer overflow from crafted GGUF headers.
+        // A malicious GGUF with huge elem_count can wrap around in release mode.
+        let block_size = info.ggml_dtype.block_size();
+        let size = if block_size == 0 {
+            0u64
+        } else {
+            info.ggml_dtype
+                .type_size()
+                .checked_mul(info.shape.elem_count())
+                .map(|v| (v / block_size) as u64)
+                .unwrap_or(0)
+        };
         tensors.insert(
             name.clone(),
             crate::inference::split::TensorLocation {
                 offset: info.offset,
-                size: size as u64,
+                size,
             },
         );
     }

@@ -863,8 +863,14 @@ pub fn load_dotenv(data_dir: &std::path::Path) {
                         ];
                         let key_upper = key.to_uppercase();
                         let is_blocked = BLOCKED_ENV_PREFIXES.iter().any(|prefix| {
-                            key_upper == prefix.to_uppercase()
-                                || key_upper.starts_with(&format!("{}_", prefix.to_uppercase()))
+                            let p_upper = prefix.to_uppercase();
+                            // For prefixes that already end in '_' (e.g. "LD_", "DYLD_"),
+                            // check starts_with directly. For exact names, also check
+                            // with trailing underscore to block sub-variants.
+                            key_upper == p_upper
+                                || key_upper.starts_with(&p_upper)
+                                || key_upper
+                                    .starts_with(&format!("{}_", p_upper.trim_end_matches('_')))
                         });
                         if is_blocked {
                             tracing::warn!(key = key, "Blocked dangerous env var from .env file");

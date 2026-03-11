@@ -366,13 +366,19 @@ impl PipelineExecutor {
         // Raw bytes are FP16 LE — convert to f16 values
         let num_f16 = raw_bytes.len() / 2;
         // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
-        // Infer hidden_dim from common sizes, fall back to sqrt-ish heuristic.
-        // Try common hidden dimensions in order of specificity (larger first to avoid false matches)
+        // Infer hidden_dim from common sizes. Require a plausible token count
+        // (1..2048) to prevent shape confusion from crafted payloads.
         const COMMON_HIDDEN_DIMS: &[usize] = &[5120, 4096, 3584, 3072, 2560, 2048, 1536, 1024];
+        const MAX_VISION_TOKENS: usize = 2048;
         let hidden_dim = COMMON_HIDDEN_DIMS
             .iter()
             .copied()
-            .find(|&d| num_f16 % d == 0 && num_f16 / d > 0)
+            .find(|&d| {
+                num_f16 % d == 0 && {
+                    let tokens = num_f16 / d;
+                    tokens > 0 && tokens <= MAX_VISION_TOKENS
+                }
+            })
             .ok_or_else(|| {
                 SwarmError::Inference(format!(
                     "Cannot infer vision embedding shape from {} values",

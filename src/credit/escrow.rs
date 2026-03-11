@@ -113,12 +113,22 @@ impl EscrowManager {
             )));
         }
 
-        // Deduct from requester balance only after escrow is persisted
+        // Deduct from requester balance only after escrow is persisted.
+        // Persist the updated balance immediately to prevent crash-restart credit duplication.
         {
             let mut bal = balance.write().await;
             bal.balance = bal.balance.saturating_sub(amount);
             bal.lifetime_spent = bal.lifetime_spent.saturating_add(amount as u64);
             bal.last_updated = chrono::Utc::now();
+            // SEC: Persist balance to DB while holding the write lock — prevents
+            // crash window where escrow is persisted but balance deduction is not.
+            if let Err(e) = self.db.put_json(
+                crate::credit::ledger::TREE_CREDITS,
+                crate::credit::ledger::KEY_BALANCE,
+                &*bal,
+            ) {
+                tracing::warn!(error = %e, "Failed to persist balance after escrow deduction");
+            }
         }
 
         let escrow_id = entry.id;

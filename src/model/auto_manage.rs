@@ -2424,7 +2424,27 @@ pub async fn check_and_load_model(
             match std::fs::read_to_string(&source_path_file) {
                 Ok(p) => {
                     let p = std::path::PathBuf::from(p.trim());
-                    if p.exists() {
+                    // SEC: Containment check — source_path must be within the data directory
+                    // to prevent path traversal via attacker-controlled source_path files.
+                    let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                    let data_models = shard_store.models_dir();
+                    if !canonical.starts_with(&data_models) {
+                        tracing::warn!(
+                            model = %model_id,
+                            path = %p.display(),
+                            "source_path outside data directory — ignoring"
+                        );
+                        crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
+                            model_dir: &model_dir,
+                            shard_store: &shard_store,
+                            model_id,
+                            layer_start,
+                            layer_end,
+                            is_first,
+                            is_last,
+                            manifest: &manifest,
+                        })
+                    } else if p.exists() {
                         tracing::info!(
                             model = %model_id,
                             layers = format!("[{layer_start}..{layer_end})"),

@@ -1082,6 +1082,15 @@ impl NetworkManager {
 
                 // Layer 5: Peer Exchange — send PEX request on first connection only
                 if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
+                    // SEC: Cap ping_sent_times to prevent unbounded growth from connection storms.
+                    // Prune stale entries before inserting.
+                    const MAX_PING_ENTRIES: usize = 2048;
+                    if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
+                        let cutoff =
+                            std::time::Instant::now() - std::time::Duration::from_secs(120);
+                        self.ping_sent_times
+                            .retain(|_, (_, sent_at)| *sent_at > cutoff);
+                    }
                     let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
                     let outbound_id = self
                         .swarm
@@ -2287,6 +2296,17 @@ impl NetworkManager {
             offset = request.chunk_offset,
             "Sending shard transfer request to peer"
         );
+
+        // SEC: Cap pending shard requests to prevent memory exhaustion from
+        // malicious peers that send partial chunks in an infinite loop.
+        const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
+        if self.pending_shard_requests.len() >= MAX_PENDING_SHARD_REQUESTS {
+            tracing::warn!(
+                count = self.pending_shard_requests.len(),
+                "Pending shard requests at capacity — dropping new request"
+            );
+            return;
+        }
 
         let shard_id = request.shard_id.clone();
         let req = SwarmRequest::ShardTransfer(request);

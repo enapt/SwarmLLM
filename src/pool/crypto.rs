@@ -226,20 +226,17 @@ pub fn unblind_token(
 
 /// Step 4: Anyone can verify that the unblinded token was signed by the pool creator.
 /// Verifier recomputes the commitment from (invitation_id, blinding_factor), then checks
-/// that the signature over (commitment, pool_id) is valid.
+/// that the signature over (commitment, pool_id, expires_at) is valid.
+///
+/// SEC: Legacy no-expiry fallback removed to prevent permanent blind tokens.
+/// Tokens signed under the old scheme must be re-issued by the pool owner.
 pub fn verify_membership(
     token: &UnblindedToken,
     owner_key: &VerifyingKey,
 ) -> Result<(), SwarmError> {
     let commitment = compute_blind_commitment(&token.invitation_id, &token.blinding_factor);
-    // Try new expiry-bound payload first, fall back to legacy no-expiry for old tokens
     let payload = blind_token_payload(&commitment, &token.pool_id, token.expires_at);
-    if verify_sig(&token.signature, &payload, owner_key).is_ok() {
-        return Ok(());
-    }
-    // Fallback for tokens signed before expiry was included
-    let legacy_payload = blind_token_payload_no_expiry(&commitment, &token.pool_id);
-    verify_sig(&token.signature, &legacy_payload, owner_key)
+    verify_sig(&token.signature, &payload, owner_key)
 }
 
 /// Compute the blind commitment: H(PREFIX || invitation_id || blinding_factor)
@@ -252,14 +249,6 @@ fn compute_blind_commitment(
     hasher.update(invitation_id.as_bytes());
     hasher.update(&blinding_factor.0);
     *hasher.finalize().as_bytes()
-}
-
-fn blind_token_payload_no_expiry(commitment: &[u8; 32], pool_id: &PoolId) -> Vec<u8> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(PREFIX_BLIND_INVITE);
-    hasher.update(commitment);
-    hasher.update(&pool_id.0);
-    hasher.finalize().as_bytes().to_vec()
 }
 
 fn blind_token_payload(
