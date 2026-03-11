@@ -1320,11 +1320,14 @@ impl PipelineExecutor {
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            tracing::error!(
                                 request_id = %result.request_id,
                                 error = %e,
-                                "Pipeline seal: failed to unseal result — using plaintext fallback"
+                                "Pipeline seal: failed to unseal result — rejecting (no plaintext fallback)"
                             );
+                            // Do NOT fall through to plaintext — clear tokens to prevent
+                            // accepting unverified data as legitimate decrypted output
+                            result.token_ids.clear();
                         }
                     }
                 }

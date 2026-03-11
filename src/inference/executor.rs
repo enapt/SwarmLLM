@@ -872,14 +872,6 @@ impl FinishReason {
     }
 }
 
-/// Build the chat prompt from messages using ChatML format (legacy fallback).
-///
-/// Prefer `crate::inference::chat_template::build_prompt()` which applies
-/// the GGUF chat template when available and falls back to ChatML.
-pub fn build_chat_prompt(messages: &[crate::types::ChatMessage]) -> String {
-    crate::inference::chat_template::chatml_fallback(messages)
-}
-
 /// Metadata extracted from a GGUF file for model info caching.
 #[derive(Clone, Debug, Default)]
 pub struct GgufModelMeta {
@@ -984,26 +976,5 @@ mod tests {
         let mut exec = ModelExecutor::new();
         let result = exec.generate("test", &SamplingParams::default());
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn build_chat_prompt_formats_correctly() {
-        use crate::types::{ChatMessage, Role};
-        let messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "You are helpful.".into(),
-                images: vec![],
-            },
-            ChatMessage {
-                role: Role::User,
-                content: "Hi".into(),
-                images: vec![],
-            },
-        ];
-        let prompt = build_chat_prompt(&messages);
-        assert!(prompt.contains("<|im_start|>system\nYou are helpful.<|im_end|>"));
-        assert!(prompt.contains("<|im_start|>user\nHi<|im_end|>"));
-        assert!(prompt.ends_with("<|im_start|>assistant\n"));
     }
 }

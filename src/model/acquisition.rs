@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::daemon::SharedState;
 use crate::error::SwarmError;
-use crate::model::distribution::ShardDistributor;
+use crate::model::distribution;
 use crate::model::manifest::ModelManifestExt;
 use crate::model::shard::ShardStore;
 use crate::types::{ModelId, ModelManifest, NetworkCommand, NodeId, ShardId};
@@ -258,7 +258,7 @@ impl AcquisitionManager {
 
         // Determine which shards we need (rarest-first)
         let needed =
-            ShardDistributor::select_rarest_shards(&manifest, &self.shared_state.model_registry);
+            distribution::select_rarest_shards(&manifest, &self.shared_state.model_registry);
 
         // Filter out shards we already have locally and verified
         let needed: Vec<_> = needed

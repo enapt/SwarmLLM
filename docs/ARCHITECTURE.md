@@ -1092,3 +1092,7 @@ Items identified during the tester-readiness audit but deferred for future imple
 | DiskPressure rebalance event | Enum variant removed (never emitted) | Re-add to `RebalanceEvent` and wire emission from auto_manage disk pressure checks if rebalancer-driven eviction is needed |
 | Legacy single-GGUF compat in monitor.rs | Kept | Represents full model as shard index 0 for Phase 1 `model_path` config — remove when `model_path` config is fully deprecated |
 | Schema version migration | Warns on mismatch, no action | `db.rs:check_schema_version()` logs warning but does not migrate — add migration logic if schema changes |
+| Ring AllReduce network wiring | Local impl complete, not wired to network transport | `choose_allreduce_strategy()` returns Ring for ≥4 ranks but `allreduce_sum_network()` always uses star topology |
+| Model governance enforcement | Votes tallied, verdict logged but not enforced | `process_vote()` computes Accept/Reject but no downstream action blocks/allows models |
+| Starcoder2 / Glm4 layer loading | Arch detection exists, no split.rs loading code | Removed from `supported_list()` — re-add when layer loading is implemented |
+| `SpmTokenizer::vocab` field | Populated but never read | Remove or wire to a decode/detokenize API |

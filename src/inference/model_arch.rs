@@ -94,12 +94,11 @@ impl ModelArch {
             "gemma2",
             "phi3",
             "mistral",
-            "starcoder2",
             "deepseek2",
-            "glm4",
             "llama4",
             "qwen35",
             "qwen35moe",
+            // starcoder2 and glm4 have arch detection but no layer loading code yet
         ]
     }
 

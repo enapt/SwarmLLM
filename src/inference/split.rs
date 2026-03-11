@@ -5117,10 +5117,6 @@ mod tests {
         assert_eq!(token, 2); // index of 5.0
     }
 
-    // V1 byte-range layer tests (layer_range_computation, layer_range_cross_shard_tensor,
-    // layer_range_alphabetical_gguf_order, available_layer_ranges_non_contiguous) removed.
-    // Layer ranges are now computed from manifest ShardInfo.layer_range data.
-
     #[test]
     fn available_layer_ranges_from_manifest_basic() {
         use crate::types::{ModelId, ModelManifest, ShardInfo};
