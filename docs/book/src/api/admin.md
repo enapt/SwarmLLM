@@ -44,6 +44,9 @@ Delete a single shard.
 ### GET/PUT /api/admin/models/:id/auto-manage
 Per-model auto-manage policy (including prune toggle).
 
+### GET/PUT /api/admin/models/:id/encrypted-pipeline
+Per-model encrypted pipeline toggle. GET returns current status, readiness (whether local node holds first + last shard), and overhead note. PUT enables/disables with body `{"enabled": true}`. Requires the local node to hold shard 0 and the final shard. Returns a warning for 2-shard models (fully local, no distribution benefit). Setting is persisted to the database and survives restarts. Falls back to global `encrypted_pipeline` config if no per-model override is set.
+
 ### PUT /api/admin/models/:id/shards/:index/lock
 Lock/unlock a shard to prevent auto-pruning.
 

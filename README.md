@@ -64,7 +64,7 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 
 | | SwarmLLM | Others |
 |---|---|---|
-| **Privacy** | E2E encrypted — relay nodes can't read your prompts | Petals openly warns peers can see your data; Exo has no encryption |
+| **Privacy** | E2E encrypted + optional encrypted pipeline (no remote sees plaintext) | Petals openly warns peers can see your data; Exo has no encryption |
 | **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
 | **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
 | **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
@@ -198,6 +198,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Zero-Config Discovery** — 5-layer stack: mDNS, persistent peer cache, shareable invite codes, peer exchange (PEX), Kademlia DHT
 - **P2P Networking** — libp2p with Kademlia DHT, GossipSub (6 topics), TCP+Yamux (primary) and QUIC transport, NAT traversal (auto-relay + DCUtR hole punching), connection limits, gossip replay protection
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
+- **Encrypted Pipeline** — Optional "boomerang" topology where the requesting node holds both the first shard (embedding) and last shard (token sampling), so **no remote node ever sees plaintext** — only intermediate activation tensors. Per-model toggle via API/dashboard or global config. Auto-enables local embedding privacy. Adds ~1 RTT per token for the return hop. Requires 3+ shard models. See [Encrypted Pipeline](docs/book/src/architecture/security.md#encrypted-pipeline)
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
 - **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations with real forward pass capture
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
@@ -268,7 +269,7 @@ Key source directories:
 - `src/pool/` — device pool management, crypto, credit forwarding
 - `frontend/` — vanilla HTML/CSS/JS dashboard with 20 language translations
 
-674 tests (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+675 tests (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -463,7 +464,7 @@ The `.env` file is loaded at startup and does not override existing environment 
 | `[resources]` | `max_gpu_vram_mb`, `max_ram_mb`, `max_disk_mb`, `max_bandwidth_mbps` |
 | `[resources.schedule]` | `enabled`, `reduced_hours_start/end`, `prune_aggressiveness` |
 | `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
-| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `speculative_decoding`, `tp_max_latency_ms` |
+| `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `speculative_decoding`, `tp_max_latency_ms`, `local_embedding_privacy`, `encrypted_pipeline` |
 | `[api]` | `api_key`, `expose_hidden_states`, `rate_limit_rpm` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
@@ -505,6 +506,7 @@ See the [Configuration Reference](docs/book/src/configuration/reference.md) for 
 | GET | `/api/admin/ws` | WebSocket for live updates |
 | GET | `/api/admin/hf/search` | Search HuggingFace for GGUF models |
 | POST | `/api/admin/hf/download-shards` | Download specific shards |
+| GET/PUT | `/api/admin/models/:id/encrypted-pipeline` | Per-model encrypted pipeline toggle |
 | POST | `/api/admin/shutdown` | Graceful shutdown (localhost only) |
 
 Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, scheduling, and more. See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for the complete list.
@@ -550,7 +552,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
-| **Privacy** | **Encrypted by default** — all traffic encrypted in transit | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
+| **Privacy** | **Encrypted by default** — all traffic encrypted in transit. Optional **encrypted pipeline** ensures no remote node sees plaintext (boomerang topology) | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
 | **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
@@ -565,7 +567,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Auto-Update** | Built-in self-update | No | No | No |
 | **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
 
-**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, and pipeline sealing ensures output tokens are encrypted for the requester. It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
+**Why SwarmLLM?** If privacy matters to you, SwarmLLM is the only option with real E2E encryption — all peer-to-peer traffic is encrypted with forward secrecy, pipeline sealing ensures output tokens are encrypted for the requester, and the optional encrypted pipeline mode guarantees no remote node ever sees plaintext (prompt or response). It's also the only one that works as a drop-in backend for Claude Code, supports 12 cloud providers as fallback, and runs as a single binary with zero dependencies.
 
 ## Documentation
 
@@ -592,7 +594,7 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 674 tests
+cargo test                # 675 tests
 cargo clippy -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```

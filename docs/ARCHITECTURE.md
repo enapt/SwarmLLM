@@ -55,6 +55,7 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ModelId, VisionModule>  — vision modules    │  │
 │  │  DashMap<ModelId, ModelTrustInfo> — model trust      │  │
 │  │  DashMap<ModelId, Notify>       — loading models    │  │
+│  │  DashMap<ModelId, bool>         — encrypted pipeline │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```

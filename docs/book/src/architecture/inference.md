@@ -28,10 +28,11 @@ Client → API Server → InferenceRouter → Pipeline Assembly
 3. Query model_registry.shard_holders for hosting nodes
 4. Fetch node load/latency from peer_registry
 5. Sort candidates by (latency ASC, load ASC, trust DESC)
-6. Greedy assignment: widest contiguous layer range per node
-7. Merge contiguous segments on same node
-8. Identify standby nodes per segment (failover)
-9. Send PipelineAssignment, wait for ACKs, begin forwarding
+6. **Encrypted pipeline check**: if enabled for this model, force first and last segments to the local node (boomerang topology)
+7. Greedy assignment: widest contiguous layer range per node
+8. Merge contiguous segments on same node
+9. Identify standby nodes per segment (failover)
+10. Send PipelineAssignment, wait for ACKs, begin forwarding
 
 Pipeline affinity means that multi-turn conversations (with `session_id`) prefer to route through the same nodes, preserving KV-cache state and avoiding cold restarts on every turn.
 
@@ -69,6 +70,7 @@ The SplitModel loader reads `general.architecture` from GGUF metadata and applie
 - **Logprobs** — Per-token log probabilities via `sample_token_with_params_and_logprobs()`. When `logprobs: true` in the request, the sampling layer collects top-N token probabilities and returns them in the OpenAI-compatible response. Available on split model (candle) inference paths
 - **Pipeline Error Broadcast** — On distributed inference failure, `broadcast_pipeline_error()` notifies all participants so peers can update shard availability and route around failures
 - **Local Embedding Privacy** — When `local_embedding_privacy: true`, the requesting node performs token→embedding locally (~1ms) and sends pre-embedded hidden-state activations instead of raw token IDs to the first pipeline segment. Remote nodes never see the plaintext prompt. See [Security > Local Embedding Privacy](../architecture/security.md#local-embedding-privacy)
+- **Encrypted Pipeline** — When enabled (per-model or global), forces a "boomerang" topology: the requesting node handles both the first segment (embedding) and last segment (token sampling). Remote nodes only process intermediate activations — no remote node ever sees plaintext input or output. See [Security > Encrypted Pipeline](../architecture/security.md#encrypted-pipeline)
 
 ## Vision Language Models (VLM)
 
