@@ -478,6 +478,37 @@ impl Daemon {
                                     }
                                 }
                             }
+
+                            // Local embedding privacy: load embedding table from shard_000
+                            // so the requesting node can embed locally before sending to peers.
+                            if shared_state.config.inference.local_embedding_privacy
+                                && !shared_state.local_embedders.contains_key(model_id)
+                            {
+                                let shard0_path = model_dir.join("shard_000.bin");
+                                if shard0_path.exists() {
+                                    match crate::inference::local_embedder::LocalEmbedder::load(
+                                        &shard0_path,
+                                    ) {
+                                        Ok(embedder) => {
+                                            shared_state.local_embedders.insert(
+                                                model_id.clone(),
+                                                std::sync::Arc::new(embedder),
+                                            );
+                                            tracing::info!(
+                                                model = %model_id,
+                                                "Loaded local embedding table for privacy mode"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                model = %model_id,
+                                                error = %e,
+                                                "Failed to load local embedder from shard_000"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 

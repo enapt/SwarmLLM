@@ -521,6 +521,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         vision_embeddings: None,
         sender_peer_bytes: None,
         requester_node_id: None,
+        pre_embedded: false,
     })
 }
 
@@ -837,6 +838,7 @@ pub fn decode_layer_forward_encrypted(
         vision_embeddings: None,
         sender_peer_bytes: None,
         requester_node_id: None,
+        pre_embedded: false,
     };
 
     Ok((forward, sealed, aad))
@@ -1035,6 +1037,7 @@ mod tests {
             vision_embeddings: None,
             sender_peer_bytes: None,
             requester_node_id: None,
+            pre_embedded: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1067,6 +1070,7 @@ mod tests {
                 vision_embeddings: None,
                 sender_peer_bytes: None,
                 requester_node_id: None,
+                pre_embedded: false,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1095,6 +1099,7 @@ mod tests {
             vision_embeddings: None,
             sender_peer_bytes: None,
             requester_node_id: None,
+            pre_embedded: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1117,6 +1122,7 @@ mod tests {
             vision_embeddings: None,
             sender_peer_bytes: None,
             requester_node_id: None,
+            pre_embedded: false,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1144,6 +1150,7 @@ mod tests {
             vision_embeddings: None,
             sender_peer_bytes: None,
             requester_node_id: None,
+            pre_embedded: false,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1306,6 +1313,7 @@ mod tests {
             vision_embeddings: None,
             sender_peer_bytes: None,
             requester_node_id: None,
+            pre_embedded: false,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 

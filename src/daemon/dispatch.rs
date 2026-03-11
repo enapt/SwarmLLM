@@ -1325,13 +1325,29 @@ async fn handle_layer_forward(
     // Try batch path for decode steps (seq > 0) when batching is enabled.
     // Prefill (seq 0 on is_first) requires tokenization under the model lock,
     // so it always falls through to the sequential path.
-    let use_batch = batch_forwarder.is_some() && forward.sequence_num > 0;
+    // Pre-embedded prefills can also use the batch path since no tokenization is needed.
+    let use_batch = batch_forwarder.is_some() && (forward.sequence_num > 0 || forward.pre_embedded);
 
     if use_batch {
         let forwarder = batch_forwarder.expect("batch_forwarder must exist when use_batch=true");
 
         // Build input tensor without holding the model lock
-        let input_tensor = if is_first {
+        let input_tensor = if forward.pre_embedded {
+            // Pre-embedded: activations are already hidden-state tensors
+            match split::bytes_to_tensor(&forward.activations) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_error_result(
+                        &network_tx,
+                        &sender_peer_bytes,
+                        request_id,
+                        &format!("Pre-embedded decode: {e}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else if is_first {
             // Decode step on first segment: single token ID as i64 LE
             let token_id = if forward.activations.len() >= 8 {
                 let bytes: [u8; 8] = match forward.activations[..8].try_into() {
@@ -1485,8 +1501,33 @@ async fn handle_layer_forward(
     // Sequential path: prefill or batching disabled
     let mut split_model = split_model_ref.lock().await;
 
+    // Local embedding privacy: if pre_embedded, activations are already hidden states
+    let pre_embedded = forward.pre_embedded;
+
     // Convert activation bytes to a candle Tensor
-    let input_tensor = if is_first {
+    let input_tensor = if pre_embedded {
+        // Pre-embedded: activations are serialized hidden-state tensors
+        match split::bytes_to_tensor(&forward.activations) {
+            Ok(t) => {
+                tracing::debug!(
+                    request_id = %request_id,
+                    shape = ?t.shape(),
+                    "Received pre-embedded activations (local embedding privacy)"
+                );
+                t
+            }
+            Err(e) => {
+                send_error_result(
+                    &network_tx,
+                    &sender_peer_bytes,
+                    request_id,
+                    &format!("Pre-embedded decode: {e}"),
+                )
+                .await;
+                return;
+            }
+        }
+    } else if is_first {
         if forward.index_pos == 0 {
             // Prefill: activations are the prompt text → tokenize with BPE if available
             let prompt = String::from_utf8_lossy(&forward.activations);
@@ -1616,7 +1657,17 @@ async fn handle_layer_forward(
     // updates and causing substream stalling on the next request_response exchange.
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            let output = if let Some(ref vis_emb) = vision_tensor {
+            let output = if pre_embedded {
+                // Pre-embedded: skip embedding lookup in forward pass
+                split_model
+                    .forward_pre_embedded(
+                        &input_tensor,
+                        forward.index_pos as usize,
+                        &shared_state.kv_cache_store,
+                        &req_id_str,
+                    )
+                    .map_err(|e| format!("Forward pre-embedded: {e}"))?
+            } else if let Some(ref vis_emb) = vision_tensor {
                 split_model
                     .forward_multimodal(
                         &input_tensor,

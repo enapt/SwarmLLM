@@ -691,6 +691,11 @@ pub struct LayerForward {
     /// the result (token IDs) for the requester's X25519 key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester_node_id: Option<[u8; 32]>,
+    /// Local embedding privacy: when true, `activations` contains pre-embedded
+    /// hidden-state tensors (serialized via tensor_to_bytes) instead of raw token
+    /// IDs or prompt text. The receiving node skips its embedding lookup.
+    #[serde(default)]
+    pub pre_embedded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

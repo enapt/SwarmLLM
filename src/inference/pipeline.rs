@@ -611,16 +611,47 @@ impl PipelineExecutor {
                 None
             };
 
+        // Local embedding privacy: check if we should embed locally before sending
+        // activations to the first pipeline segment. This prevents remote nodes from
+        // seeing raw token IDs — they only receive hidden-state activation tensors.
+        let local_embedder = if self.shared_state.config.inference.local_embedding_privacy {
+            let model_id = &self.assignment.segments[0].shard_id.model_id;
+            self.shared_state
+                .local_embedders
+                .get(model_id)
+                .map(|e| e.value().clone())
+        } else {
+            None
+        };
+
         // Token generation loop
         let mut prompt_bytes_opt = Some(prompt_bytes);
         for seq_num in 0..max_tokens {
-            let activations = if seq_num == 0 {
-                prompt_bytes_opt.take().unwrap()
+            let (activations, pre_embedded) = if let Some(ref embedder) = local_embedder {
+                // Local embedding privacy: embed locally, never send raw tokens
+                if seq_num == 0 {
+                    let prompt =
+                        std::str::from_utf8(prompt_bytes_opt.as_ref().unwrap()).unwrap_or("");
+                    let (bytes, token_count) = embedder.embed_prompt(prompt)?;
+                    // Set prompt_token_count from local tokenization
+                    if prompt_token_count.is_none() {
+                        prompt_token_count = Some(token_count);
+                        index_pos = token_count;
+                    }
+                    prompt_bytes_opt.take();
+                    (bytes, true)
+                } else {
+                    let last_token = generated_tokens.last().copied().unwrap_or(0);
+                    let bytes = embedder.embed_token(last_token)?;
+                    (bytes, true)
+                }
+            } else if seq_num == 0 {
+                (prompt_bytes_opt.take().unwrap(), false)
             } else {
                 // For subsequent tokens, encode the last generated token ID as i64 LE bytes
                 // so the first segment can embed it directly.
                 let last_token = generated_tokens.last().copied().unwrap_or(0) as i64;
-                last_token.to_le_bytes().to_vec()
+                (last_token.to_le_bytes().to_vec(), false)
             };
 
             tracing::info!(
@@ -647,6 +678,7 @@ impl PipelineExecutor {
                     index_pos,
                     activations,
                     vision_for_forward,
+                    pre_embedded,
                 )
                 .await
             {
@@ -1260,6 +1292,7 @@ impl PipelineExecutor {
         index_pos: usize,
         initial_activations: Vec<u8>,
         precomputed_vision: Option<Vec<u8>>,
+        pre_embedded: bool,
     ) -> Result<LayerResult, SwarmError> {
         let mut activations = initial_activations;
         let num_segments = self.assignment.segments.len();
@@ -1351,6 +1384,7 @@ impl PipelineExecutor {
                         } else {
                             None
                         },
+                        pre_embedded && idx == 0,
                     )
                     .await?;
                 tracing::debug!(
@@ -1393,6 +1427,9 @@ impl PipelineExecutor {
                     // Pipeline sealing: attach our node ID so the final segment
                     // can seal the result tokens for our X25519 key.
                     requester_node_id: Some(self.shared_state.identity.node_id().0),
+                    // Local embedding privacy: only the first segment of the first
+                    // forward needs this flag (subsequent segments receive hidden states anyway).
+                    pre_embedded: pre_embedded && idx == 0,
                 };
 
                 // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
@@ -1552,6 +1589,7 @@ impl PipelineExecutor {
         index_pos: usize,
         activation_bytes: &[u8],
         precomputed_vision_bytes: Option<&[u8]>,
+        pre_embedded: bool,
     ) -> Result<LayerResult, SwarmError> {
         use crate::inference::split::{self, SplitModel};
 
@@ -1826,7 +1864,21 @@ impl PipelineExecutor {
         // Convert activation bytes to a candle Tensor, with prefix cache support.
         // For prefill (sequence_num==0, is_first): try to reuse cached KV state
         // for the system prompt prefix, only computing the new (suffix) tokens.
-        let (input_tensor, effective_index_pos) = if is_first {
+        let (input_tensor, effective_index_pos) = if pre_embedded {
+            // Pre-embedded: activations are already hidden-state tensors
+            let tensor = split::bytes_to_tensor(activation_bytes)?;
+            let seq_len = tensor
+                .dim(1)
+                .map_err(|e| SwarmError::Internal(e.to_string()))?;
+            (
+                tensor,
+                if sequence_num == 0 {
+                    seq_len
+                } else {
+                    index_pos
+                },
+            )
+        } else if is_first {
             if sequence_num == 0 {
                 // Prefill: activation_bytes contain the prompt text from execute_distributed.
                 let prompt = String::from_utf8_lossy(activation_bytes);
@@ -2107,7 +2159,14 @@ impl PipelineExecutor {
         // before the CPU-bound forward pass (~700-1000ms). Without this, the blocked
         // thread starves yamux, preventing outbound substream opens for tensor forwards.
         let output = tokio::task::block_in_place(|| {
-            if let Some(ref vis_emb) = vision_embeddings {
+            if pre_embedded {
+                split_model.forward_pre_embedded(
+                    &input_tensor,
+                    effective_index_pos,
+                    &self.shared_state.kv_cache_store,
+                    &request_id_str,
+                )
+            } else if let Some(ref vis_emb) = vision_embeddings {
                 split_model.forward_multimodal(
                     &input_tensor,
                     effective_index_pos,
@@ -2379,6 +2438,7 @@ impl PipelineExecutor {
                     vision_embeddings: None,
                     sender_peer_bytes: None,
                     requester_node_id: Some(self.shared_state.identity.node_id().0),
+                    pre_embedded: false,
                 };
 
                 let target_peer_bytes = match self

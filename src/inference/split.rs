@@ -4002,6 +4002,30 @@ impl SplitModel {
         )
     }
 
+    /// Forward pass with pre-embedded hidden states (local embedding privacy).
+    ///
+    /// The input tensor is already in hidden-state space (shape [1, seq, hidden_dim])
+    /// — the embedding lookup is skipped even if this segment has `tok_embeddings`.
+    /// Used when the requesting node performed embedding locally for privacy.
+    pub fn forward_pre_embedded(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+    ) -> Result<Tensor, SwarmError> {
+        let (output, _) = self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            None,
+            None,
+            true,
+        )?;
+        Ok(output)
+    }
+
     /// Forward pass with optional LoRA adapter applied per-layer.
     ///
     /// When `lora_adapter` is `Some`, the adapter's low-rank deltas are applied
@@ -4036,6 +4060,30 @@ impl SplitModel {
         lora_adapter: Option<&LoraAdapter>,
         capture_layers: Option<&std::collections::HashSet<usize>>,
     ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
+        self.forward_inner_impl(
+            input,
+            index_pos,
+            kv_cache_store,
+            request_id,
+            lora_adapter,
+            capture_layers,
+            false,
+        )
+    }
+
+    /// Core forward pass. When `skip_embedding` is true, the input is treated as
+    /// pre-embedded hidden states even if this segment has `tok_embeddings`.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_inner_impl(
+        &mut self,
+        input: &Tensor,
+        index_pos: usize,
+        kv_cache_store: &KvCacheStore,
+        request_id: &str,
+        lora_adapter: Option<&LoraAdapter>,
+        capture_layers: Option<&std::collections::HashSet<usize>>,
+        skip_embedding: bool,
+    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
         let forward_start = std::time::Instant::now();
         // Use component presence rather than layer indices for shard-aware is_first/is_last
         let is_first = self.tok_embeddings.is_some();
@@ -4047,7 +4095,7 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("Device transfer failed: {e}")))?;
 
         // Determine the hidden state to start from
-        let mut layer_in = if is_first {
+        let mut layer_in = if is_first && !skip_embedding {
             // First segment: input is token IDs → apply embedding
             let mut emb = self
                 .tok_embeddings
@@ -4064,7 +4112,7 @@ impl SplitModel {
             }
             emb
         } else {
-            // Non-first segment: input is already hidden states
+            // Non-first segment or pre-embedded: input is already hidden states
             input
         };
 

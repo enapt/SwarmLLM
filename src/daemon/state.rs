@@ -219,6 +219,11 @@ pub struct SharedState {
     /// Loaded VLM vision modules (mmproj encoders) keyed by model ID.
     /// Populated when an mmproj.gguf is found alongside a model's shards.
     pub vision_modules: DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
+    /// Local embedding tables for privacy mode. When available, the requesting node
+    /// performs token→embedding locally so remote first-segment nodes never see raw tokens.
+    /// Keyed by model ID, loaded from shard_000.bin during startup scan.
+    pub local_embedders:
+        DashMap<crate::types::ModelId, Arc<crate::inference::local_embedder::LocalEmbedder>>,
     /// Pending VisionEncodeResponse channels for distributed vision encoding.
     /// Keyed by request_id. Pipeline registers a (expected_responder, oneshot sender) before
     /// sending VisionEncodeRequest to a remote mmproj holder; the network dispatcher fires it
@@ -637,6 +642,7 @@ impl SharedState {
             ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
+            local_embedders: DashMap::new(),
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
