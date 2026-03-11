@@ -736,7 +736,8 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │  Tier 2: Pipeline Sealing (inference prompts)               │
 │    Per-request ephemeral key → sealed prompt/response       │
 │    Wire tag: TENSOR_TAG_ENCRYPTED = 0x10                    │
-│    Active: final segment seals output tokens for requester  │
+│    Final segment seals output tokens for requester's X25519 │
+│    ⚠ Final-segment node sees tokens before sealing (must)   │
 │    Intermediate nodes see activations, not plaintext output │
 │                                                             │
 │  Tier 3: Sealed Gossip (broadcasts)                         │
@@ -748,6 +749,39 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 │  Modules: src/crypto/{session, pipeline_seal, gossip_seal,  │
 │           key_rotation}.rs                                   │
 └─────────────────────────────────────────────────────────────┘
+```
+
+## Pipeline Privacy Model
+
+What each node sees in a distributed pipeline (Requester → A → B → C):
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Data exposure by pipeline position                               │
+│                                                                  │
+│                    Requester  Node A     Node B     Node C       │
+│                    (author)   (first)    (middle)   (last)       │
+│  ────────────────────────────────────────────────────────────    │
+│  Plaintext prompt    ✓        *          ✗          ✗            │
+│  Raw token IDs       ✓        *          ✗          ✗            │
+│  Activations in      —        ✓          ✓          ✓            │
+│  Activations out     —        ✓          ✓          —            │
+│  Generated tokens    ✓(dec)   ✗          ✗          ✓(samples)  │
+│  Final response      ✓(dec)   ✗          ✗          ✓(seals)    │
+│                                                                  │
+│  * Without local_embedding_privacy: Node A sees raw tokens       │
+│    With local_embedding_privacy: Node A sees FP32 activations    │
+│                                                                  │
+│  ⚠ The final-segment node ALWAYS sees generated output.          │
+│    This is inherent — sampling happens on the last node.         │
+│    Pipeline sealing encrypts tokens on the wire, but the         │
+│    node that samples them must see them.                          │
+│                                                                  │
+│  ⚠ Activation inversion: early-layer activations (especially    │
+│    layer 0) can theoretically be reversed to recover tokens.     │
+│    local_embedding_privacy eliminates the trivial case.          │
+│    Deep-layer inversion is an open research problem.             │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Local Embedding Privacy

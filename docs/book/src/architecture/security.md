@@ -19,7 +19,7 @@ For inference prompts and responses:
 - Sealed prompt/response
 - Wire tag: `TENSOR_TAG_ENCRYPTED = 0x10`
 
-> Pipeline sealing is active: the final segment encrypts output token IDs for the requester's X25519 public key. Intermediate nodes process activation tensors (protected by Tier 1 in transit) but never see the final plaintext output. See [Known Limitations](#known-limitations) for activation inference risks.
+> Pipeline sealing is active: the final segment encrypts output token IDs with the requester's X25519 public key. The final-segment node can see the sampled tokens before encryption — this is inherent to the architecture since sampling happens on that node. Intermediate nodes process activation tensors (protected by Tier 1 in transit) but never see the final plaintext output. See [Pipeline Privacy Model](#pipeline-privacy-model) for a full breakdown of what each node can see.
 
 ### Tier 3: Sealed Gossip (Broadcasts)
 
@@ -109,6 +109,65 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 - HTTP timeout: 5 minutes (Slowloris protection via tower-http TimeoutLayer)
 - Credit transaction signature verification before ledger apply
 
+## Pipeline Privacy Model
+
+Distributed inference splits a model across multiple nodes. This creates inherent privacy trade-offs — each node in the pipeline must process data to do its job. This section documents exactly what each node can see.
+
+### What each node sees during inference
+
+Consider a 3-node pipeline: **Requester** → **Node A** (layers 0-10) → **Node B** (layers 11-21) → **Node C** (layers 22-27, final):
+
+| Data | Requester | Node A (first) | Node B (middle) | Node C (last) |
+|---|---|---|---|---|
+| **Plaintext prompt** | Yes (author) | See below* | No | No |
+| **Raw token IDs** | Yes | See below* | No | No |
+| **Input activations** | — | Yes | Yes | Yes |
+| **Output activations** | — | Yes | Yes | — |
+| **Generated token IDs** | Yes (decrypted) | No | No | Yes (samples them) |
+| **Final plaintext response** | Yes (decrypted) | No | No | Yes (before sealing) |
+
+*\*Node A's visibility depends on the `local_embedding_privacy` setting — see below.*
+
+### Risk: First-segment node sees raw tokens (default)
+
+**Without `local_embedding_privacy`** (default): The first-segment node (Node A) receives the raw prompt text or token IDs to perform the embedding lookup. This means Node A can read the user's prompt in plaintext.
+
+**With `local_embedding_privacy: true`**: The requesting node performs the embedding lookup locally and sends pre-embedded activation tensors. Node A receives floating-point vectors instead of token IDs. This is a significant privacy improvement, but not absolute — see [Activation Inversion Risk](#activation-inversion-risk) below.
+
+### Risk: Final-segment node sees generated output
+
+The final-segment node (Node C) **must** sample tokens from the logit distribution. This is fundamental — sampling is the act of choosing the next word, and it can only happen where the final layer's output logits exist. Node C therefore sees every generated token before encrypting them via Tier 2 pipeline sealing.
+
+**This cannot be mitigated architecturally.** The node that runs the last transformer layer and samples tokens will always know what tokens were sampled. Pipeline sealing ensures the tokens are encrypted before being sent back over the network, so intermediate nodes and eavesdroppers cannot read the response — but the final-segment node itself can.
+
+### Risk: Activation inversion attacks
+
+All intermediate nodes see hidden-state activation tensors (floating-point matrices). Research has shown that activations from early transformer layers can sometimes be partially inverted to recover input tokens, especially:
+
+- **Embedding-layer activations** (layer 0 output) — most vulnerable, essentially a lookup table that can be reversed
+- **Early layers (1-4)** — progressively harder to invert as information mixes across token positions
+- **Deep layers (5+)** — extremely difficult to invert in practice; activations encode abstract features, not token identity
+
+**Mitigations in SwarmLLM:**
+1. `local_embedding_privacy: true` — the requesting node performs embedding locally, so the first segment never receives the trivially-invertible embedding output. It receives post-layer-0 activations at earliest.
+2. Tier 1 encryption — all inter-node tensor transfers are encrypted with ChaCha20-Poly1305, preventing network-level eavesdropping
+3. Pipeline scheduling preference — the scheduler prefers local segments for the first layers when possible
+
+### Risk: Byzantine tensor manipulation
+
+A malicious node can send garbage activations instead of computing the actual transformer layers. This produces incorrect output without detection unless spot-checked. Mitigations: probabilistic spot-check validation (5% rate, 25% for subnet-clustered peers) with trust score reduction on failure.
+
+### Summary of privacy guarantees
+
+| Configuration | Prompt privacy | Response privacy | Activation risk |
+|---|---|---|---|
+| Default (no privacy flags) | First segment sees plaintext | Final segment sees plaintext | Intermediate nodes see activations |
+| `local_embedding_privacy: true` | No remote node sees raw tokens | Final segment sees plaintext | Reduced — no trivial embedding inversion |
+| + Tier 2 pipeline sealing | No remote node sees raw tokens | Encrypted on the wire | Reduced — no trivial embedding inversion |
+| All protections enabled | Best available | Best available | Final segment always sees output; activation inversion theoretically possible but computationally expensive |
+
+> **Bottom line:** In a fully-distributed pipeline, the requesting node's prompt and response are best-effort protected. The final-segment node will always see the generated output. With `local_embedding_privacy`, no remote node sees raw token IDs. Activation inversion from deep layers is an active research area but is not practical against well-mixed hidden states.
+
 ## Local Embedding Privacy
 
 When `local_embedding_privacy: true` is set in `[inference]` config, the requesting node performs token→embedding lookup locally before sending activations to the first pipeline segment. Remote nodes never see raw token IDs — only hidden-state activation tensors.
@@ -123,8 +182,6 @@ When `local_embedding_privacy: true` is set in `[inference]` config, the request
 
 **Trade-off:** Pre-embedded activations are larger than raw text (e.g., 512 tokens × 4096 hidden × 4 bytes = 8MB vs ~2KB text). This matches the existing inter-segment activation sizes, so it does not change the bandwidth profile of distributed inference.
 
-**Privacy model:** With this feature enabled, only the requesting node sees the plaintext prompt. First-segment nodes receive floating-point activation tensors which are computationally expensive to invert back to tokens. Combined with Tier 2 pipeline sealing (output encryption), this provides end-to-end prompt privacy.
-
 Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline.rs`, `src/daemon/state.rs` (`local_embedders` DashMap).
 
 ## Known Limitations
@@ -132,7 +189,8 @@ Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline.rs`, `
 These are architectural properties that cannot be fully mitigated with code changes:
 
 - **Gossip epoch key is publicly derivable** — derived from "swarmllm-mainnet-v1". Gossip encryption is defense-in-depth; Ed25519 signing is the primary security mechanism.
-- **Prompt inference via intermediate activations** — peers hosting pipeline segments can theoretically reconstruct input from embeddings. Mitigation: `local_embedding_privacy` mode (see above) prevents raw token exposure; pipeline sealing encrypts output tokens for the requester's X25519 key. Note: activation inversion attacks remain theoretically possible but are computationally expensive.
+- **Final-segment output visibility** — the node running the last transformer layers sees all generated tokens before pipeline sealing encrypts them. This is inherent to the architecture (see [Pipeline Privacy Model](#pipeline-privacy-model)).
+- **Activation inversion** — hidden-state tensors passed between nodes can theoretically be inverted to recover input, especially from early layers. `local_embedding_privacy` eliminates the trivial case (embedding lookup reversal). Deep-layer inversion remains an open research problem.
 - **Byzantine tensor manipulation** — malicious peers can send garbage activations. Mitigation: probabilistic spot-check validation (5% rate, 25% for subnet-clustered peers) with trust score reduction on failure.
 - **Sybil credit farming** — Ed25519 keys are free. Anti-gaming heuristics help but are not bulletproof.
 - **GGUF parser vulnerabilities** — llama.cpp CVEs. BLAKE3 content hash gates shard loading but parser bugs remain upstream.
