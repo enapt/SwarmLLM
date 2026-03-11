@@ -4,6 +4,16 @@ All notable changes to SwarmLLM are documented here.
 
 ## [Unreleased]
 
+### Local Embedding Privacy
+- **Config**: `local_embedding_privacy: true` in `[inference]` — requesting node embeds tokens locally, sends hidden-state activations (not raw token IDs) to remote first-segment nodes
+- **LocalEmbedder**: Loaded from shard_000.bin at startup, uses candle for token→embedding conversion
+- **Pipeline integration**: Pre-embedded activations skip remote embedding, reducing token exposure to relay nodes
+
+### Deep Code Sweep — 25 fixes across 2 passes (8 parallel review agents)
+- **Pass 1 (15 fixes)**: gossip_seal future-epoch removal, manager.rs unwrap safety + shard download cap, AllReduce zstd zip-bomb cap, shard atomic truncate, KV-cache eviction map fix, pipeline pending_vision cleanup + VLM hidden_dim expansion, escrow persist-before-balance, ledger bucket_balance div_euclid, error body truncation, manifest streaming BLAKE3, huggingface u64 range + progress retry, acquisition duplicate guard, protocol pre_embedded defaults
+- **Pass 2 (10 fixes)**: sampling order consistency (temperature→top-k→softmax), TP block_in_place wrapper, stale logprobs clear, pending_tensor_channels leak fix (Instant timestamps + periodic sweep), num_layers saturating_sub, protocol unwrap→expect, anthropic proxy error truncation, escrow cleanup balance persist, model_id u16 length guard, max_tokens=0 early return
+- **Model/storage (6 fixes)**: huggingface total_size==0 guard, retry HTTP status check, atomic tmp+rename for mmproj/header, LoRA rank==0 guard, auto_manage path traversal sanitization
+
 ### Feature Wiring — 8 previously unwired features now fully integrated
 - **Priority tier enforcement**: `calculate_tier()` with real network percentile from peer credit gossip; `max_concurrent_for_tier()` enforces per-tier concurrent request limits in `drain_queue()`
 - **Apply penalty on failure**: Credit penalty (configurable `penalty_serve_failure`, default -50) applied on distributed inference failure; penalty uses `apply_credit_direct` for immediate balance update
@@ -38,7 +48,7 @@ All notable changes to SwarmLLM are documented here.
 - **Package distribution**: Homebrew formula, AUR PKGBUILD, deb/rpm packages, systemd service file
 - **macOS CI**: Re-enabled on macos-15 runner
 - **Docker**: Fixed Dockerfiles for workspace build
-- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 675 tests passing (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### UX & Internationalization
 - **i18n** — 20 languages (Arabic, Chinese, Czech, Dutch, English, French, German, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian, Vietnamese)
@@ -53,7 +63,7 @@ All notable changes to SwarmLLM are documented here.
 ### Codebase Quality
 - **Refactored**: `daemon.rs` (4015 lines → module directory), `admin.rs` (4225 lines → 4 modules), `split.rs` (10K lines → 6 modules)
 - **Extracted**: `swarmllm-frontend` crate with dev mode for instant UI changes without full rebuild
-- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 675 tests passing (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### Model Trust & On-Demand Loading (Phase 14)
 - **Model Trust System** — demand-driven trust prevents trash models from auto-propagating
