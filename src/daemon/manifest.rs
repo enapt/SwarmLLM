@@ -303,8 +303,20 @@ pub(super) fn regenerate_manifest_from_header(
         // Single full GGUF — 1 shard containing all layers
         let file_size = shard0_path.metadata().map(|m| m.len()).unwrap_or(0);
         let hash: crate::types::Blake3Hash = {
-            let data = std::fs::read(&shard0_path).unwrap_or_default();
-            blake3::hash(&data).into()
+            // Stream-hash to avoid loading full shard into memory
+            let mut hasher = blake3::Hasher::new();
+            if let Ok(mut f) = std::fs::File::open(&shard0_path) {
+                let mut buf = [0u8; 65536];
+                loop {
+                    use std::io::Read;
+                    match f.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => hasher.update(&buf[..n]),
+                        Err(_) => break,
+                    };
+                }
+            }
+            hasher.finalize().into()
         };
         let shard_info = crate::types::ShardInfo {
             index: 0,

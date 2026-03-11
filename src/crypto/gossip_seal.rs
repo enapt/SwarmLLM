@@ -90,11 +90,11 @@ impl GossipSealer {
             return Ok(plaintext);
         }
 
-        // Try adjacent epochs for clock skew tolerance
-        for delta in [1u32, u32::MAX] {
-            // u32::MAX wraps to epoch_tag - 1
-            let alt_epoch = epoch_tag.wrapping_add(delta);
-            let alt_key = self.derive_epoch_key(alt_epoch);
+        // Try previous epoch for backward clock skew tolerance
+        // (only past, never future — accepting future epochs would let attackers pre-compute messages)
+        {
+            let prev_epoch = epoch_tag.wrapping_sub(1);
+            let alt_key = self.derive_epoch_key(prev_epoch);
             let alt_cipher = ChaCha20Poly1305::new_from_slice(&alt_key)
                 .map_err(|e| SwarmError::Encryption(format!("Gossip cipher init: {e}")))?;
             if let Ok(plaintext) = alt_cipher.decrypt(nonce, ciphertext) {

@@ -796,8 +796,8 @@ pub async fn download_shard_v2(
         }
 
         // Verify we received the expected number of bytes for this range
-        let expected_range_bytes = (*range_end - *range_start) as usize;
-        if range_buf.len() != expected_range_bytes {
+        let expected_range_bytes = *range_end - *range_start;
+        if range_buf.len() as u64 != expected_range_bytes {
             tracing::warn!(
                 shard = shard_index,
                 expected = expected_range_bytes,
@@ -806,7 +806,8 @@ pub async fn download_shard_v2(
                 range_end = range_end,
                 "Coalesced range received incomplete data, retrying"
             );
-            // Retry this range once
+            // Retry this range once — adjust progress counter for the failed bytes
+            downloaded = downloaded.saturating_sub(range_buf.len() as u64);
             range_buf.clear();
             let retry_resp = hf_headers(client.get(&url))
                 .header("Range", format!("bytes={}-{}", range_start, range_end - 1))
@@ -817,8 +818,9 @@ pub async fn download_shard_v2(
             while let Some(chunk) = stream.next().await {
                 let data = chunk.map_err(|e| format!("Stream error on retry: {e}"))?;
                 range_buf.extend_from_slice(&data);
+                downloaded += data.len() as u64;
             }
-            if range_buf.len() != expected_range_bytes {
+            if range_buf.len() as u64 != expected_range_bytes {
                 return Err(format!(
                     "Shard {} range {}-{}: expected {} bytes but got {} after retry",
                     shard_index,

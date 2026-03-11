@@ -378,9 +378,20 @@ impl TpAllReduceCollector {
             ));
         }
 
-        // Decompress first partial
-        let decompressed = zstd::decode_all(std::io::Cursor::new(&first.partial_data))
-            .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+        // Decompress first partial (cap decompressed size to prevent zip-bomb)
+        let max_decompressed = elem_count * 4 + 1024; // expected size + small margin
+        let decompressed = {
+            let mut decoder = zstd::Decoder::new(std::io::Cursor::new(&first.partial_data))
+                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd init: {e}")))?;
+            let mut buf = Vec::with_capacity(elem_count * 4);
+            use std::io::Read;
+            decoder
+                .by_ref()
+                .take(max_decompressed as u64)
+                .read_to_end(&mut buf)
+                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+            buf
+        };
         let mut sum = vec![0.0f32; elem_count];
         if decompressed.len() == elem_count * 4 {
             for (i, chunk) in decompressed.chunks_exact(4).enumerate() {
@@ -396,8 +407,20 @@ impl TpAllReduceCollector {
                     i + 1
                 ))
             })?;
-            let dec = zstd::decode_all(std::io::Cursor::new(&req.partial_data))
-                .map_err(|e| crate::error::SwarmError::Internal(format!("zstd decompress: {e}")))?;
+            let dec = {
+                let mut decoder = zstd::Decoder::new(std::io::Cursor::new(&req.partial_data))
+                    .map_err(|e| crate::error::SwarmError::Internal(format!("zstd init: {e}")))?;
+                let mut buf = Vec::with_capacity(elem_count * 4);
+                use std::io::Read;
+                decoder
+                    .by_ref()
+                    .take(max_decompressed as u64)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| {
+                        crate::error::SwarmError::Internal(format!("zstd decompress: {e}"))
+                    })?;
+                buf
+            };
             if dec.len() == elem_count * 4 {
                 for (i, chunk) in dec.chunks_exact(4).enumerate() {
                     sum[i] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);

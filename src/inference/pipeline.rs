@@ -267,16 +267,23 @@ impl PipelineExecutor {
                     .and_then(|p| p.peer_id_bytes.clone())
             })
             .ok_or_else(|| {
+                self.shared_state
+                    .pending_vision_results
+                    .remove(&self.request.id);
                 SwarmError::Network(format!("No peer_id_bytes for vision node {}", remote_node))
             })?;
         let msg = NetworkCommand::SendDirectMessage {
             target_peer_bytes,
             message: SwarmMessage::VisionEncodeRequest(req),
         };
-        self.network_tx
-            .send(msg)
-            .await
-            .map_err(|e| SwarmError::Network(format!("Failed to send VisionEncodeRequest: {e}")))?;
+        if let Err(e) = self.network_tx.send(msg).await {
+            self.shared_state
+                .pending_vision_results
+                .remove(&self.request.id);
+            return Err(SwarmError::Network(format!(
+                "Failed to send VisionEncodeRequest: {e}"
+            )));
+        }
 
         // Wait for response with timeout
         let timeout = std::time::Duration::from_secs(120);
@@ -335,18 +342,18 @@ impl PipelineExecutor {
         let num_f16 = raw_bytes.len() / 2;
         // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
         // Infer hidden_dim from common sizes, fall back to sqrt-ish heuristic.
-        let hidden_dim = if num_f16 % 4096 == 0 {
-            4096
-        } else if num_f16 % 2048 == 0 {
-            2048
-        } else if num_f16 % 1024 == 0 {
-            1024
-        } else {
-            return Err(SwarmError::Inference(format!(
-                "Cannot infer vision embedding shape from {} values",
-                num_f16
-            )));
-        };
+        // Try common hidden dimensions in order of specificity (larger first to avoid false matches)
+        const COMMON_HIDDEN_DIMS: &[usize] = &[5120, 4096, 3584, 3072, 2560, 2048, 1536, 1024];
+        let hidden_dim = COMMON_HIDDEN_DIMS
+            .iter()
+            .copied()
+            .find(|&d| num_f16 % d == 0 && num_f16 / d > 0)
+            .ok_or_else(|| {
+                SwarmError::Inference(format!(
+                    "Cannot infer vision embedding shape from {} values",
+                    num_f16
+                ))
+            })?;
         let num_tokens = num_f16 / hidden_dim;
         // Convert FP16 LE bytes → f32 in a single pass (avoids intermediate Vec<f16>)
         let f32_values: Vec<f32> = raw_bytes

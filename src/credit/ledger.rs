@@ -698,9 +698,10 @@ pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossi
 }
 
 /// Bucket a balance value for privacy-preserving gossip.
-/// Rounds to the nearest 100.
+/// Rounds toward negative infinity (floor division) to nearest 100.
+/// This ensures negative balances near zero are not confused with positive.
 fn bucket_balance(balance: i64) -> i64 {
-    (balance / 100) * 100
+    balance.div_euclid(100) * 100
 }
 
 #[cfg(test)]
@@ -714,8 +715,8 @@ mod tests {
         assert_eq!(bucket_balance(100), 100);
         assert_eq!(bucket_balance(150), 100);
         assert_eq!(bucket_balance(250), 200);
-        assert_eq!(bucket_balance(-150), -100);
-        assert_eq!(bucket_balance(-50), 0);
+        assert_eq!(bucket_balance(-150), -200);
+        assert_eq!(bucket_balance(-50), -100);
     }
 
     #[tokio::test]

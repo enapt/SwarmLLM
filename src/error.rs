@@ -160,9 +160,11 @@ impl IntoResponse for ApiError {
             ),
             SwarmError::ProviderError { status, ref body } => {
                 let http_status = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+                // Truncate provider body to avoid leaking upstream internals
+                let safe_body: String = body.chars().take(512).collect();
                 (
                     http_status,
-                    format!("Provider error: {body}"),
+                    format!("Provider error: {safe_body}"),
                     "server_error",
                 )
             }

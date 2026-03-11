@@ -200,13 +200,14 @@ impl EscrowManager {
         entry.status = EscrowStatus::Refunded;
         let amount = entry.amount;
 
-        // Persist updated status
-        if let Err(e) = self
-            .db
+        // Persist updated status BEFORE modifying balance to prevent double-refund on crash
+        self.db
             .put_json(TREE_ESCROW, &escrow_id.to_string(), &*entry)
-        {
-            tracing::warn!(error = %e, "Failed to persist escrow refund");
-        }
+            .map_err(|e| {
+                // Revert in-memory status since DB failed
+                entry.status = EscrowStatus::Pending;
+                SwarmError::Internal(format!("Failed to persist escrow refund: {e}"))
+            })?;
 
         drop(entry);
 

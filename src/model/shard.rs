@@ -287,15 +287,11 @@ impl ShardStore {
             std::fs::create_dir_all(parent).map_err(SwarmError::Io)?;
         }
 
-        // Truncate on first write (offset == 0) to clean up partial downloads
-        if offset == 0 {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-
+        // Atomic truncate on first write (offset == 0) to clean up partial downloads
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
-            .truncate(false)
+            .truncate(offset == 0)
             .open(&tmp_path)
             .map_err(SwarmError::Io)?;
 

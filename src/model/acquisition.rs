@@ -558,8 +558,14 @@ impl AcquisitionManager {
         // Publish progress
         progress_map.insert(model_id.clone(), job.status.clone());
 
-        // Check if this shard is complete
-        if *received >= total_size {
+        // Check if this shard is complete (guard against duplicate completion)
+        let already_done = job
+            .status
+            .shard_progress
+            .get(&shard_index)
+            .map(|sp| matches!(sp.state, ShardState::Complete | ShardState::Failed))
+            .unwrap_or(false);
+        if *received >= total_size && !already_done {
             // Atomically finalize the shard file (.tmp → .bin)
             if let Err(e) = self.shard_store.finalize_shard(&model_id, shard_index) {
                 tracing::error!(

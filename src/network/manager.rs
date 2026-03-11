@@ -1467,6 +1467,19 @@ impl NetworkManager {
                 // Route to AcquisitionManager — always clean up tracking state
                 // NET-C1: Look up by OutboundRequestId for correct correlation
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(&request_id) {
+                    // Cap total_size to prevent unbounded download loops from malicious peers
+                    let max_shard_bytes =
+                        self.shared_state.config.model.shard_size_mb * 1024 * 1024 * 2;
+                    if data.total_size > max_shard_bytes {
+                        tracing::warn!(
+                            %peer,
+                            total_size = data.total_size,
+                            max = max_shard_bytes,
+                            "Rejecting shard download — total_size exceeds limit"
+                        );
+                        self.shard_download_progress.remove(&shard_id);
+                        return;
+                    }
                     let offset = self
                         .shard_download_progress
                         .get(&shard_id)
@@ -1727,7 +1740,13 @@ impl NetworkManager {
             self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
 
         let payload = if use_encryption {
-            let node_id = peer_node_id.unwrap();
+            let node_id = match peer_node_id {
+                Some(n) => n,
+                None => {
+                    tracing::warn!(%peer_id, "Encryption enabled but no NodeId for peer");
+                    return;
+                }
+            };
             // Build the AAD from the cleartext header fields — must match
             // decode_layer_forward_encrypted's AAD (uuid + seq + idx_pos + fmt + layer_range + model_id)
             let model_id_bytes = forward.model_id.0.as_bytes();
