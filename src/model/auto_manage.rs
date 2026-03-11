@@ -848,13 +848,9 @@ impl AutoShardManager {
             "AutoShardManager: requesting shard download"
         );
 
-        let model_dir = self
-            .shared_state
-            .config
-            .node
-            .data_dir
-            .join("models")
-            .join(&candidate.model_id.0);
+        let model_dir = self.shared_state.config.node.data_dir.join("models").join(
+            crate::model::shard::sanitize_path_component(&candidate.model_id.0),
+        );
 
         // ── T8: mmproj full-file download (not byte-range) ──
         if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
@@ -1727,7 +1723,9 @@ impl AutoShardManager {
                     .node
                     .data_dir
                     .join("models")
-                    .join(&candidate.model_id.0)
+                    .join(crate::model::shard::sanitize_path_component(
+                        &candidate.model_id.0,
+                    ))
                     .join("mmproj.gguf")
             } else {
                 shard_store.shard_path(&candidate.model_id, candidate.shard_index)

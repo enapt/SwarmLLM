@@ -166,6 +166,9 @@ pub fn apply_lora(
     alpha: f32,
     rank: usize,
 ) -> Result<Tensor, SwarmError> {
+    if rank == 0 {
+        return Err(SwarmError::Internal("LoRA rank must be > 0".into()));
+    }
     let scale = alpha / rank as f32;
 
     // A^T: (in_dim, rank) — unsqueeze to (1, in_dim, rank) for batch matmul

@@ -208,9 +208,10 @@ pub async fn download_model(
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("model.gguf"));
     let dest_path = dest_dir.join(safe_filename);
-    let mut file = tokio::fs::File::create(&dest_path)
+    let tmp_path = dest_path.with_extension("gguf.tmp");
+    let mut file = tokio::fs::File::create(&tmp_path)
         .await
-        .map_err(|e| format!("Failed to create file: {e}"))?;
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     use tokio::io::AsyncWriteExt;
 
@@ -237,6 +238,12 @@ pub async fn download_model(
     file.flush()
         .await
         .map_err(|e| format!("Flush error: {e}"))?;
+    drop(file);
+
+    // Atomic rename: tmp → final (prevents partial downloads from blocking re-downloads)
+    tokio::fs::rename(&tmp_path, &dest_path)
+        .await
+        .map_err(|e| format!("Failed to rename temp file: {e}"))?;
 
     tracing::info!(
         repo = %repo_id,
@@ -308,6 +315,9 @@ pub async fn probe_gguf_file(
         .and_then(|v| v.parse::<u64>().ok())
         .ok_or("Server did not return Content-Length")?;
 
+    if total_size == 0 {
+        return Err("Server returned Content-Length: 0 (empty file)".to_string());
+    }
     let probe_size: u64 = GGUF_HEADER_PROBE_SIZE;
     let range_end = (probe_size - 1).min(total_size - 1);
 
@@ -491,8 +501,11 @@ pub async fn download_gguf_header(
 
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
     let dest_path = dest_dir.join("gguf_header.bin");
-    std::fs::write(&dest_path, &header_bytes)
-        .map_err(|e| format!("Failed to write gguf_header.bin: {e}"))?;
+    let tmp_path = dest_dir.join("gguf_header.bin.tmp");
+    std::fs::write(&tmp_path, &header_bytes)
+        .map_err(|e| format!("Failed to write gguf_header.bin.tmp: {e}"))?;
+    std::fs::rename(&tmp_path, &dest_path)
+        .map_err(|e| format!("Failed to rename gguf_header.bin: {e}"))?;
 
     tracing::info!(
         size = header_bytes.len(),
@@ -814,6 +827,13 @@ pub async fn download_shard_v2(
                 .send()
                 .await
                 .map_err(|e| format!("Range retry failed: {e}"))?;
+            if !retry_resp.status().is_success() {
+                return Err(format!(
+                    "Range retry returned HTTP {} for shard {}",
+                    retry_resp.status(),
+                    shard_index
+                ));
+            }
             let mut stream = retry_resp.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let data = chunk.map_err(|e| format!("Stream error on retry: {e}"))?;
