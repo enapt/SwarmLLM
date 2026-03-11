@@ -64,7 +64,7 @@ Running a smart AI model (like Llama 3 70B) normally requires a $10,000+ GPU. Wi
 
 | | SwarmLLM | Others |
 |---|---|---|
-| **Privacy** | E2E encrypted + optional encrypted pipeline (no remote sees plaintext) | Petals openly warns peers can see your data; Exo has no encryption |
+| **Privacy** | E2E encrypted + optional encrypted pipeline (no remote sees plaintext) | Unencrypted — peers can read your prompts and outputs (Petals); no encryption (Exo) |
 | **Install** | Single binary, zero dependencies | Python environments, pip, Docker, blockchain setup |
 | **Cloud + Local** | 12 cloud providers as fallback through one API | Local only, no cloud integration |
 | **Claude Code** | Full Anthropic Messages API — native Claude Code backend | No Anthropic API support (Exo added basic support recently) |
@@ -552,7 +552,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
-| **Privacy** | **Encrypted by default** — all traffic encrypted in transit. Optional **encrypted pipeline** ensures no remote node sees plaintext (boomerang topology) | Explicitly warns: "peers can recover input data" | No encryption between nodes | Subnet-dependent |
+| **Privacy** | **Encrypted by default** — all traffic encrypted in transit. Optional **encrypted pipeline** ensures no remote node sees plaintext (boomerang topology) | Unencrypted — Petals' own wiki states peers can read your prompts and outputs | No encryption between nodes | Subnet-dependent |
 | **Security Audit** | **~90-fix, 5-round hardening** (auth, SSRF, replay, caps) | None documented | None documented | PoA consensus (centralized) |
 | **Incentives** | Credit tiers (no token, no blockchain) | Name on monitor page | None | TAO token (real money) |
 | **Parallelism** | Pipeline + tensor (auto-detected LAN) | Pipeline | Tensor + pipeline | Subnet routing |
