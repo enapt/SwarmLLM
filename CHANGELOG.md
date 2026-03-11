@@ -9,9 +9,10 @@ All notable changes to SwarmLLM are documented here.
 - **LocalEmbedder**: Loaded from shard_000.bin at startup, uses candle for token→embedding conversion
 - **Pipeline integration**: Pre-embedded activations skip remote embedding, reducing token exposure to relay nodes
 
-### Deep Code Sweep — 25 fixes across 2 passes (8 parallel review agents)
+### Deep Code Sweep — 37 fixes across 3 passes (12 parallel review agents)
 - **Pass 1 (15 fixes)**: gossip_seal future-epoch removal, manager.rs unwrap safety + shard download cap, AllReduce zstd zip-bomb cap, shard atomic truncate, KV-cache eviction map fix, pipeline pending_vision cleanup + VLM hidden_dim expansion, escrow persist-before-balance, ledger bucket_balance div_euclid, error body truncation, manifest streaming BLAKE3, huggingface u64 range + progress retry, acquisition duplicate guard, protocol pre_embedded defaults
 - **Pass 2 (10 fixes)**: sampling order consistency (temperature→top-k→softmax), TP block_in_place wrapper, stale logprobs clear, pending_tensor_channels leak fix (Instant timestamps + periodic sweep), num_layers saturating_sub, protocol unwrap→expect, anthropic proxy error truncation, escrow cleanup balance persist, model_id u16 length guard, max_tokens=0 early return
+- **Pass 3 (12 fixes)**: duplicate streaming finish event guard, pending_layer_results failover leak, KV-cache orphan eviction, multi-turn session overwrite prevention, TP tp_size minimum guard (≥2), peer_http_url LAN/Tailscale fix (trust peer registry addresses), DB backup-on-upgrade (rename not delete), inverted --shards range validation, tied_output_weight streaming read (no OOM), pool cosign cryptographic separation, pool_registry cleanup on leave/removal, escrow cleanup count accuracy
 - **Model/storage (6 fixes)**: huggingface total_size==0 guard, retry HTTP status check, atomic tmp+rename for mmproj/header, LoRA rank==0 guard, auto_manage path traversal sanitization
 
 ### Feature Wiring — 8 previously unwired features now fully integrated
