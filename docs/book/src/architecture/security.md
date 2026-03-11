@@ -109,12 +109,30 @@ Scores decay toward 0.5 over time (1% per health cycle, default 30 seconds). Tru
 - HTTP timeout: 5 minutes (Slowloris protection via tower-http TimeoutLayer)
 - Credit transaction signature verification before ledger apply
 
+## Local Embedding Privacy
+
+When `local_embedding_privacy: true` is set in `[inference]` config, the requesting node performs token→embedding lookup locally before sending activations to the first pipeline segment. Remote nodes never see raw token IDs — only hidden-state activation tensors.
+
+**How it works:**
+1. On startup, `LocalEmbedder` loads `token_embd.weight` from `shard_000.bin` (~64MB for a 7B Q4 model)
+2. The requesting node tokenizes the prompt and performs the embedding lookup locally (~1ms)
+3. The resulting hidden-state tensor (`[1, seq_len, hidden_dim]`, FP32) is sent as `LayerForward.activations` with `pre_embedded: true`
+4. The receiving first-segment node skips its embedding lookup and processes the pre-embedded activations directly
+
+**Wire format:** The `pre_embedded` flag on `LayerForward` is `#[serde(default)]`, so old nodes receiving new-format messages default to `false` (backward compatible).
+
+**Trade-off:** Pre-embedded activations are larger than raw text (e.g., 512 tokens × 4096 hidden × 4 bytes = 8MB vs ~2KB text). This matches the existing inter-segment activation sizes, so it does not change the bandwidth profile of distributed inference.
+
+**Privacy model:** With this feature enabled, only the requesting node sees the plaintext prompt. First-segment nodes receive floating-point activation tensors which are computationally expensive to invert back to tokens. Combined with Tier 2 pipeline sealing (output encryption), this provides end-to-end prompt privacy.
+
+Relevant code: `src/inference/local_embedder.rs`, `src/inference/pipeline.rs`, `src/daemon/state.rs` (`local_embedders` DashMap).
+
 ## Known Limitations
 
 These are architectural properties that cannot be fully mitigated with code changes:
 
 - **Gossip epoch key is publicly derivable** — derived from "swarmllm-mainnet-v1". Gossip encryption is defense-in-depth; Ed25519 signing is the primary security mechanism.
-- **Prompt inference via intermediate activations** — peers hosting pipeline segments can theoretically reconstruct input from embeddings. Mitigation: first-segment-local scheduling preference, pipeline sealing encrypts output tokens for the requester's X25519 key.
+- **Prompt inference via intermediate activations** — peers hosting pipeline segments can theoretically reconstruct input from embeddings. Mitigation: `local_embedding_privacy` mode (see above) prevents raw token exposure; pipeline sealing encrypts output tokens for the requester's X25519 key. Note: activation inversion attacks remain theoretically possible but are computationally expensive.
 - **Byzantine tensor manipulation** — malicious peers can send garbage activations. Mitigation: probabilistic spot-check validation (5% rate, 25% for subnet-clustered peers) with trust score reduction on failure.
 - **Sybil credit farming** — Ed25519 keys are free. Anti-gaming heuristics help but are not bulletproof.
 - **GGUF parser vulnerabilities** — llama.cpp CVEs. BLAKE3 content hash gates shard loading but parser bugs remain upstream.

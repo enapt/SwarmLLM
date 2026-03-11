@@ -68,6 +68,7 @@ Every configuration option, organized by section.
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
 | `chunked_prefill_size` | integer | `512` | Chunk size for long-prompt prefill. `0` = disable |
 | `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups |
+| `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
 
 ## `[logging]` — Log Output
 

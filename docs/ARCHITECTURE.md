@@ -750,6 +750,24 @@ Models are loaded into VRAM only when needed, not eagerly at startup.
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Local Embedding Privacy
+
+Optional privacy enhancement (`local_embedding_privacy: true` in `[inference]` config):
+
+```
+Without privacy:     Prompt text → [tokenize on first segment] → raw token IDs visible
+With privacy:        Prompt text → [tokenize + embed locally] → FP32 activations sent
+                     Remote nodes see activation tensors, not token IDs
+```
+
+- `LocalEmbedder` loads `token_embd.weight` from `shard_000.bin` at startup (~64MB for 7B Q4)
+- Embedding lookup is a simple matmul (~1ms), negligible overhead
+- Wire protocol: `LayerForward.pre_embedded: bool` (`#[serde(default)]` for backward compat)
+- `SplitModel::forward_pre_embedded()` skips embedding lookup when `pre_embedded = true`
+- Supports Gemma embedding scaling (`sqrt(hidden_dim)`)
+- Trade-off: larger wire payloads (e.g., 512 tokens × 4096 dim × 4B = 8MB vs ~2KB text)
+- Modules: `src/inference/local_embedder.rs`, `src/daemon/state.rs` (`local_embedders` DashMap)
+
 ## Transport-Authenticated Dispatch
 
 All inbound network messages are wrapped in `AuthenticatedMessage` with the transport-verified sender `NodeId` (from libp2p Noise protocol). The MessageDispatcher validates sender identity against message claims for all security-sensitive message types (ShardAnnounce, CreditTransaction, CreditGossip, NicknameGossip, HealthPing/Pong, EphemeralKeyExchange). Mismatched messages are logged and dropped.
