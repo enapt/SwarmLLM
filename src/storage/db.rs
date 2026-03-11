@@ -373,12 +373,6 @@ impl Database {
         Ok(())
     }
 
-    /// Flush all pending writes to disk.
-    /// With redb, writes are durable on commit, so this is a no-op.
-    pub fn flush(&self) -> Result<(), SwarmError> {
-        Ok(())
-    }
-
     /// Clear all entries from a named tree.
     pub fn clear_tree(&self, tree_name: &str) -> Result<(), SwarmError> {
         let start = tree_range_start(tree_name);

@@ -273,11 +273,8 @@ pub fn encode_network_code(addr: &Multiaddr) -> String {
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&packed);
             format!("{INVITE_PREFIX}{encoded}")
         }
-        Err(_) => {
-            // Fallback to plain base64 if encryption fails (shouldn't happen)
-            let encoded =
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(plaintext.as_bytes());
-            format!("{INVITE_PREFIX}{encoded}")
+        Err(e) => {
+            unreachable!("ChaCha20Poly1305 encryption cannot fail on valid key: {e}");
         }
     }
 }
@@ -286,7 +283,6 @@ pub fn encode_network_code(addr: &Multiaddr) -> String {
 ///
 /// Accepts either:
 /// - `swarm://<encrypted_base64url>` (invite code format, encrypted)
-/// - `swarm://<plain_base64url>` (legacy plain format, auto-detected)
 /// - A raw multiaddr string (passthrough for advanced users)
 pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
     let trimmed = code.trim();
@@ -329,21 +325,10 @@ pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
             }
         }
 
-        // Reject payloads in the ambiguous range (44-59 bytes) — too long for legacy,
-        // too short for valid encrypted format. Prevents unintended plaintext fallthrough.
-        if packed.len() >= 44 {
-            return Err(SwarmError::Network(
-                "Invite code appears malformed (too short for encrypted format)".into(),
-            ));
-        }
-
-        // Legacy plain base64 format (short codes only)
-        let addr_str = String::from_utf8(packed)
-            .map_err(|e| SwarmError::Network(format!("Invalid invite code: {e}")))?;
-        addr_str
-            .parse::<Multiaddr>()
-            .map_err(|e| SwarmError::Network(format!("Invalid multiaddr in invite code: {e}")))?;
-        Ok(addr_str)
+        // Payload too short for valid encrypted format — reject
+        Err(SwarmError::Network(
+            "Invite code too short — all invite codes must be encrypted".into(),
+        ))
     } else if trimmed.starts_with('/') {
         // Raw multiaddr — validate and pass through
         trimmed

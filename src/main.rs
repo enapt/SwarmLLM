@@ -813,7 +813,6 @@ async fn run_bench(
         };
 
         let r = BenchResult {
-            iteration: i,
             prompt_tokens,
             completion_tokens,
             total_ms,
@@ -842,7 +841,7 @@ async fn run_bench(
         let batch_start = std::time::Instant::now();
         let mut handles = Vec::new();
 
-        for i in 0..concurrency {
+        for _i in 0..concurrency {
             let client = client.clone();
             let url = format!("{base}/v1/chat/completions");
             let key = api_key.clone();
@@ -868,7 +867,6 @@ async fn run_bench(
                 let pt = resp["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                 let ms = elapsed.as_millis() as f64;
                 Ok::<_, reqwest::Error>(BenchResult {
-                    iteration: i,
                     prompt_tokens: pt,
                     completion_tokens: ct,
                     total_ms: ms,
@@ -964,8 +962,6 @@ async fn run_bench(
 }
 
 struct BenchResult {
-    #[allow(dead_code)]
-    iteration: u32,
     prompt_tokens: u32,
     completion_tokens: u32,
     total_ms: f64,

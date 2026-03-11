@@ -57,15 +57,18 @@ fn encrypt_key(plaintext: &str, signing_key_bytes: &[u8; 32]) -> Result<String, 
     Ok(format!("{ENC_PREFIX}{encoded}"))
 }
 
-/// Decrypt an API key string. If it doesn't have the encryption prefix, returns as-is
-/// (migration from plaintext).
+/// Decrypt an API key string. All stored keys must be encrypted.
 fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, SwarmError> {
     if stored.is_empty() {
         return Ok(String::new());
     }
     let encoded = match stored.strip_prefix(ENC_PREFIX) {
         Some(e) => e,
-        None => return Ok(stored.to_string()), // plaintext (pre-encryption migration)
+        None => {
+            return Err(SwarmError::Internal(
+                "Stored API key is not encrypted — re-enter the key to encrypt it".into(),
+            ));
+        }
     };
 
     use base64::Engine;
@@ -206,7 +209,7 @@ pub fn scrub_api_keys(input: &str) -> String {
 
     // Named prefixes — redact everything after the prefix
     let prefixes = [
-        "sk-ant-", "sk-", "nvapi-", "gsk_", "csk-", "key-", "tok-", "xai-",
+        "sk-ant-", "sk-", "nvapi-", "gsk_", "csk-", "key-", "tok-", "xai-", "fw_", "di_", "sn-",
     ];
     for prefix in prefixes {
         let mut search_start = 0usize;
@@ -251,11 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_plaintext_passthrough() {
+    fn decrypt_plaintext_rejected() {
         let signing_key = [42u8; 32];
         let plaintext = "sk-ant-legacy-key";
-        let decrypted = decrypt_key(plaintext, &signing_key).unwrap();
-        assert_eq!(decrypted, plaintext);
+        // Unencrypted keys must be rejected — no plaintext migration fallback
+        assert!(decrypt_key(plaintext, &signing_key).is_err());
     }
 
     #[test]

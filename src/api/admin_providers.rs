@@ -519,11 +519,17 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
                         } else {
                             "error"
                         };
+                        // Don't leak internal error details — use only the categorized status
+                        let detail = match status {
+                            "timeout" => "Connection timed out".to_string(),
+                            "unreachable" => "Could not connect to provider".to_string(),
+                            _ => "Provider health check failed".to_string(),
+                        };
                         serde_json::json!({
                             "provider": name,
                             "status": status,
                             "latency_ms": latency_ms,
-                            "detail": e.to_string(),
+                            "detail": detail,
                         })
                     }
                 }

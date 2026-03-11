@@ -1080,3 +1080,15 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 - Phi-3.5 benefits most from GPU due to its fused QKV/FFN architecture.
 - With 8GB VRAM, only one 7B model can be loaded at a time. Multiple smaller models (1-3B) can coexist.
 - On-demand model loading with LRU eviction loads models into VRAM only when requested.
+
+## Deferred Items
+
+Items identified during the tester-readiness audit but deferred for future implementation:
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Qwen 3.5 inference forward pass | Weight loading complete, forward returns error | `LayerVariant::Qwen35Attn/Qwen35Ssm` + `DeltaNetWeights` structs ready, `forward_deltanet()` implemented but not wired into split.rs forward loop |
+| Paged attention pool wiring | `paged_kv_pool`/`paged_kv_store` in SharedState always None | Feature-gated behind `paged-attn`, fields exist but never populated in daemon startup |
+| DiskPressure rebalance event | Enum variant removed (never emitted) | Re-add to `RebalanceEvent` and wire emission from auto_manage disk pressure checks if rebalancer-driven eviction is needed |
+| Legacy single-GGUF compat in monitor.rs | Kept | Represents full model as shard index 0 for Phase 1 `model_path` config — remove when `model_path` config is fully deprecated |
+| Schema version migration | Warns on mismatch, no action | `db.rs:check_schema_version()` logs warning but does not migrate — add migration logic if schema changes |

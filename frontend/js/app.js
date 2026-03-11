@@ -645,7 +645,23 @@ var SwarmLLM = (function() {
 
     saveSessions: function() {
       try {
-        localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+        // Strip image data URLs before persisting — they bloat localStorage and
+        // persist potentially personal images indefinitely
+        var stripped = {};
+        Object.keys(sessions).forEach(function(id) {
+          var s = sessions[id];
+          stripped[id] = Object.assign({}, s, {
+            messages: (s.messages || []).map(function(m) {
+              if (m.images && m.images.length > 0) {
+                var copy = Object.assign({}, m);
+                delete copy.images;
+                return copy;
+              }
+              return m;
+            })
+          });
+        });
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(stripped));
         if (currentSessionId) localStorage.setItem(ACTIVE_SESSION_KEY, currentSessionId);
       } catch (e) {}
     },
@@ -2017,6 +2033,7 @@ var SwarmLLM = (function() {
           var err = await testResp.text();
           var friendlyErr = err;
           try { var ej = JSON.parse(err); friendlyErr = (ej.error && ej.error.message) || err; } catch(pe) {}
+          if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '…';
           badge.textContent = '\u2717 Failed';
           badge.className = 'badge badge-error';
           ui.showBanner('error', name + ' test failed: ' + friendlyErr);
@@ -2920,8 +2937,6 @@ var SwarmLLM = (function() {
   async function cancelDownload(modelId) {
     if (!confirm('Cancel download for ' + modelId + '?')) return;
     try {
-      // NOTE: Backend endpoint POST /api/admin/downloads/{model_id}/cancel
-      // does not exist yet — backend work needed to implement cancellation.
       var resp = await authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
       if (resp.ok) {
         ui.showBanner('success', 'Download cancelled');
@@ -3626,8 +3641,6 @@ var SwarmLLM = (function() {
   async function removeModel(modelId) {
     if (!confirm('Remove all local shards for ' + modelId + '? This cannot be undone.')) return;
     try {
-      // NOTE: Backend endpoint DELETE /api/admin/models/{model_id}
-      // does not exist yet — backend work needed to implement model removal.
       var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
       if (resp.ok) {
         ui.showBanner('success', 'Model removed: ' + modelId);
@@ -5439,7 +5452,6 @@ var SwarmLLM = (function() {
     chat: chat,
     dashboard: dashboard,
     hf: hf,
-    settings: settings,
     setup: setup,
     identity: identity,
     networkMap: networkMap,

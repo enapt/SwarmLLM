@@ -22,7 +22,7 @@ pub mod manifest;
 pub mod shard_loader;
 pub mod state;
 
-// Re-export public types for backward compatibility (crate::daemon::SharedState etc.)
+// Re-export public types so callers use crate::daemon::SharedState etc.
 pub use manifest::generate_and_register_local_manifest;
 pub use shard_loader::{try_load_from_shards, ShardLoadParams};
 pub use state::*;
@@ -1303,10 +1303,7 @@ impl Daemon {
             }
         }
 
-        // Flush database after subsystems have had a chance to write final state
-        if let Err(e) = shared_state.db.flush() {
-            tracing::error!(error = %e, "Failed to flush database during shutdown");
-        }
+        // redb writes are durable on commit — no flush needed
 
         tracing::info!("Daemon shutdown complete");
 

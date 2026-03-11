@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use crate::storage::db::Database;
 use crate::types::NodeId;
 
-/// Sled tree name for persisted trust scores.
+/// redb tree key for persisted trust scores.
 const TREE_TRUST_SCORES: &str = "trust_scores";
 
 /// Default trust score for newly discovered peers.

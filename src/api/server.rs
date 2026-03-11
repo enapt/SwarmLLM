@@ -255,48 +255,6 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
 }
 
-/// Start the Axum HTTP server on the configured port (standalone mode).
-pub async fn run_server(
-    config: Config,
-    db: Database,
-    executor: SharedExecutor,
-) -> anyhow::Result<()> {
-    let port = config.node.listen_port;
-
-    // Create a minimal SharedState for standalone mode
-    let identity = crate::identity::Identity::generate();
-    let (shared_state, _shutdown_rx) =
-        SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
-
-    let state = AppState {
-        rate_limiter: middleware::RateLimiter::new(
-            config.api.rate_limit_rpm.unwrap_or(60),
-            config.api.rate_limit_admin_rpm.unwrap_or(200),
-        ),
-        config,
-        db,
-        executor,
-        router_tx: None,
-        acquisition_tx: None,
-        network_tx: None,
-        shared_state,
-    };
-
-    let app = build_router(state);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-
-    tracing::debug!(%addr, "DIAG: server startup");
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
-
-    Ok(())
-}
-
 /// Start the Axum HTTP server using SharedState from the daemon.
 pub async fn run_server_with_state(
     shared_state: Arc<SharedState>,

@@ -8,7 +8,7 @@ use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{CreditBalance, NodeId};
 
-/// Sled tree name for persisted escrow entries.
+/// redb tree key for persisted escrow entries.
 const TREE_ESCROW: &str = "escrow";
 
 /// Default escrow threshold — requests costing more than this get escrowed.

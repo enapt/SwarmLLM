@@ -97,12 +97,6 @@ impl ShardRebalancer {
                 );
                 self.handle_peer_joined().await;
             }
-            RebalanceEvent::DiskPressure { available_mb } => {
-                tracing::warn!(
-                    available_mb,
-                    "Disk pressure detected, may need to evict shards"
-                );
-            }
             RebalanceEvent::ManualTrigger => {
                 tracing::info!("Manual rebalance triggered");
                 self.check_all_shards().await;

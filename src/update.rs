@@ -492,8 +492,6 @@ mod tests {
         let config = UpdateConfig::default();
         assert_eq!(config.auto_update, crate::config::AutoUpdateMode::Stable);
         assert_eq!(config.check_interval_hours, 6);
-        assert!(config.auto_restart);
-        assert_eq!(config.keep_versions, 3);
     }
 
     #[test]

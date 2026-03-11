@@ -317,10 +317,6 @@ pub struct UpdateConfig {
     pub auto_update: AutoUpdateMode,
     #[serde(default = "default_check_interval_hours")]
     pub check_interval_hours: u32,
-    #[serde(default = "default_true")]
-    pub auto_restart: bool,
-    #[serde(default = "default_keep_versions")]
-    pub keep_versions: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,8 +332,6 @@ impl Default for UpdateConfig {
         Self {
             auto_update: AutoUpdateMode::Stable,
             check_interval_hours: default_check_interval_hours(),
-            auto_restart: true,
-            keep_versions: default_keep_versions(),
         }
     }
 }
@@ -348,10 +342,6 @@ fn default_auto_update() -> AutoUpdateMode {
 
 fn default_check_interval_hours() -> u32 {
     6
-}
-
-fn default_keep_versions() -> u32 {
-    3
 }
 
 /// Configurable credit earn/spend rates per pool or globally.
@@ -676,11 +666,20 @@ pub struct ProvidersConfig {
     pub env_sourced: std::collections::HashSet<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderEntry {
     pub api_key: String,
     #[serde(default)]
     pub default_model: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEntry")
+            .field("api_key", &"[REDACTED]")
+            .field("default_model", &self.default_model)
+            .finish()
+    }
 }
 
 impl Drop for ProviderEntry {
@@ -689,13 +688,24 @@ impl Drop for ProviderEntry {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CustomProvider {
     pub name: String,
     pub base_url: String,
     pub api_key: String,
     #[serde(default)]
     pub default_model: Option<String>,
+}
+
+impl std::fmt::Debug for CustomProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomProvider")
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("default_model", &self.default_model)
+            .finish()
+    }
 }
 
 impl Drop for CustomProvider {

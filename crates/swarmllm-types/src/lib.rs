@@ -892,7 +892,7 @@ pub struct CreditGossip {
     pub balance_bucket: i64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Ed25519 signature over (node_id || balance_bucket || timestamp_secs).
-    /// Empty for legacy unsigned gossip from older nodes.
+    /// Required — unsigned gossip is rejected.
     #[serde(default)]
     pub signature: Vec<u8>,
 }
@@ -1084,7 +1084,6 @@ pub enum NetworkCommand {
 pub enum RebalanceEvent {
     PeerJoined(NodeId),
     PeerLeft(NodeId),
-    DiskPressure { available_mb: u64 },
     ManualTrigger,
 }
 

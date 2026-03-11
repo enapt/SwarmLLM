@@ -1109,12 +1109,9 @@ pub async fn chat_completions(
         )
         .await
     } else {
-        // Fallback: direct executor path
-        Ok(
-            non_stream_response(state, request_id, created, model_name, prompt, params)
-                .await?
-                .into_response(),
-        )
+        Err(crate::error::ApiError(crate::error::SwarmError::Internal(
+            "Inference router not available".to_string(),
+        )))
     }
 }
 
@@ -1206,9 +1203,6 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
     true
 }
 
-/// Extract an HTTP base URL from a peer's known addresses.
-/// Multiaddrs look like `/ip4/127.0.0.1/udp/8800/quic-v1` — the peer runs
-/// HTTP on the same port as QUIC.
 /// Decode token IDs to text using the split model's tokenizer.
 ///
 /// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
@@ -1749,45 +1743,6 @@ async fn router_inference_stream(
         .into_response())
 }
 
-async fn non_stream_response(
-    state: AppState,
-    request_id: String,
-    created: i64,
-    model_name: String,
-    prompt: String,
-    params: SamplingParams,
-) -> Result<Json<ChatCompletionResponse>, ApiError> {
-    let mut executor = state.executor.lock().await;
-    let (content, result) = executor.generate(&prompt, &params).map_err(ApiError)?;
-
-    let response = ChatCompletionResponse {
-        id: request_id,
-        object: "chat.completion",
-        created,
-        model: model_name,
-        choices: vec![ChatChoice {
-            index: 0,
-            message: ChatMessageResponse {
-                role: "assistant".into(),
-                content: Some(content),
-                tool_calls: None,
-            },
-            finish_reason: result.finish_reason.as_str().into(),
-            logprobs: None,
-        }],
-        usage: Usage {
-            prompt_tokens: result.prompt_tokens,
-            completion_tokens: result.completion_tokens,
-            total_tokens: result.prompt_tokens + result.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-        },
-        session_id: None, // Direct executor path doesn't use multi-turn sessions
-    };
-
-    Ok(Json(response))
-}
-
 /// Direct split-model generation (non-streaming).
 ///
 /// Bypasses the distributed pipeline executor and generates directly from
@@ -1829,7 +1784,6 @@ async fn split_non_stream_response(
     tracing::debug!(
         request_id = %request_id,
         prompt_len = prompt.len(),
-        prompt_preview = &prompt[..prompt.len().min(200)],
         "DIAG: non-stream built prompt"
     );
 

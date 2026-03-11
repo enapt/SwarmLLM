@@ -930,8 +930,6 @@ pub(crate) async fn dispatch_network_messages(
                                         network_tx.send(NetworkCommand::Broadcast(pong)).await;
                                 }
                             }
-                            // Ignore health pings without node_id (pre-alpha format)
-                            SwarmMessage::HealthPing { node_id: None, .. } => {}
                             // Health pongs: update the sender's load in peer_registry
                             SwarmMessage::HealthPong { node_id: Some(sender_id), active_request_count, .. } => {
                                 // SEC: Verify sender matches the health pong's node_id
@@ -948,8 +946,6 @@ pub(crate) async fn dispatch_network_messages(
                                     peer.last_seen = chrono::Utc::now();
                                 }
                             }
-                            // Ignore health pongs without node_id (pre-alpha format)
-                            SwarmMessage::HealthPong { node_id: None, .. } => {}
                             // Ephemeral key exchange for forward secrecy
                             SwarmMessage::EphemeralKeyExchange(exchange) => {
                                 // SEC: Verify transport-authenticated sender matches exchange.node_id.
@@ -1063,9 +1059,13 @@ pub(crate) async fn dispatch_network_messages(
                                                     };
                                                     // Deliver to local registry (coordinator is also a TP rank)
                                                     ss.allreduce_registry.deliver(resp.clone());
-                                                    // Broadcast response to remote TP participants
-                                                    let msg = SwarmMessage::TpAllReduceResponse(resp);
-                                                    let _ = ntx.send(NetworkCommand::Broadcast(msg)).await;
+                                                    // Unicast response to each remote TP participant (not broadcast)
+                                                    for peer_bytes in collector.sender_peers.iter().flatten() {
+                                                        let _ = ntx.send(NetworkCommand::SendAllReduceResponse {
+                                                            target_peer_bytes: peer_bytes.clone(),
+                                                            response: resp.clone(),
+                                                        }).await;
+                                                    }
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!(
@@ -1965,8 +1965,8 @@ async fn handle_vision_encode_request(
                     message: SwarmMessage::VisionEncodeResponse(response),
                 }
             } else {
-                // Fallback to broadcast if sender unknown (backward compat)
-                NetworkCommand::Broadcast(SwarmMessage::VisionEncodeResponse(response))
+                tracing::warn!(request_id = %req.request_id, "VisionEncodeResponse has no sender — dropping");
+                return;
             };
             if let Err(e) = network_tx.send(msg).await {
                 tracing::warn!(error = %e, "Failed to send VisionEncodeResponse");
@@ -1990,10 +1990,20 @@ async fn send_error_result(
     error: &str,
 ) {
     tracing::warn!(request_id = %request_id, error, "LayerForward processing failed");
+    // Sanitize error for network — don't leak internal paths, layer counts, or model topology
+    let sanitized = if error.contains("layer range") || error.contains("layer_start") {
+        "Layer configuration error".to_string()
+    } else if error.contains("No local shards") || error.contains("shard") {
+        "Required shards not available".to_string()
+    } else {
+        // Truncate and strip paths
+        let msg = error.chars().take(100).collect::<String>();
+        msg.replace(['/', '\\'], "")
+    };
     let result = crate::types::LayerResult {
         request_id,
         token_ids: vec![],
-        finish_reason: Some(crate::types::NetworkFinishReason::Error(error.to_string())),
+        finish_reason: Some(crate::types::NetworkFinishReason::Error(sanitized)),
         activations: vec![],
         sealed_token_ids: None,
     };

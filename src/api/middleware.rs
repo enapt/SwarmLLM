@@ -218,7 +218,7 @@ pub async fn rate_limit_middleware(
 /// Request logging middleware using tracing.
 pub async fn request_logger(req: Request, next: Next) -> Response {
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    let path = req.uri().path().to_string();
     let start = std::time::Instant::now();
 
     let response = next.run(req).await;
@@ -226,7 +226,7 @@ pub async fn request_logger(req: Request, next: Next) -> Response {
     let elapsed = start.elapsed();
     tracing::info!(
         method = %method,
-        uri = %uri,
+        path = %path,
         status = %response.status(),
         latency_ms = elapsed.as_millis(),
         "Request handled"

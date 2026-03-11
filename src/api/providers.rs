@@ -311,19 +311,18 @@ fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError>
 
     // Block known cloud metadata endpoints to mitigate DNS rebinding attacks
     let blocked_hosts = [
+        // GCP
         "metadata.google.internal",
         "metadata.gcp.internal",
         "instance-data",
+        // Cloud metadata IP (AWS, Azure, Oracle, etc.)
         "169.254.169.254",
         // Azure IMDS
         "metadata.azure.com",
-        "169.254.169.254",
         // AWS IMDSv1/v2
         "instance-data.ec2.internal",
         // DigitalOcean
         "metadata.digitalocean.com",
-        // Oracle Cloud
-        "169.254.169.254",
         // Alibaba Cloud
         "100.100.100.200",
     ];

@@ -1258,8 +1258,8 @@ impl NetworkManager {
                             .filter(|entry| entry.key() != local_node_id)
                             .flat_map(|entry| entry.addresses.clone())
                             .filter(|addr| {
-                                // Filter out private/loopback addresses to prevent leaking
-                                // internal network topology to arbitrary peers
+                                // Filter out private/loopback/link-local addresses to prevent
+                                // leaking internal network topology to arbitrary peers
                                 !addr.contains("/ip4/10.")
                                     && !addr.contains("/ip4/172.16.")
                                     && !addr.contains("/ip4/172.17.")
@@ -1272,6 +1272,23 @@ impl NetworkManager {
                                     && !addr.contains("/ip6/::1/")
                                     && !addr.contains("/ip4/0.0.0.0")
                                     && !addr.contains("/ip4/169.254.")
+                                    // RFC 6598 CGN / Tailscale range
+                                    && !addr.contains("/ip4/100.64.")
+                                    && !addr.contains("/ip4/100.65.")
+                                    && !addr.contains("/ip4/100.66.")
+                                    && !addr.contains("/ip4/100.67.")
+                                    && !addr.contains("/ip4/100.68.")
+                                    && !addr.contains("/ip4/100.69.")
+                                    && !addr.contains("/ip4/100.7")
+                                    && !addr.contains("/ip4/100.8")
+                                    && !addr.contains("/ip4/100.9")
+                                    && !addr.contains("/ip4/100.10")
+                                    && !addr.contains("/ip4/100.11")
+                                    && !addr.contains("/ip4/100.12")
+                                    // IPv6 ULA and link-local
+                                    && !addr.contains("/ip6/fd")
+                                    && !addr.contains("/ip6/fc")
+                                    && !addr.contains("/ip6/fe80")
                             })
                             .take(20)
                             .collect();
@@ -2069,7 +2086,8 @@ impl NetworkManager {
         }
     }
 
-    /// Fallback: send tensor result as a new outbound request.
+    /// Timeout recovery: send tensor result as a new outbound request when the
+    /// original response channel was closed (peer disconnect or timeout).
     fn send_tensor_result_as_request(
         &mut self,
         peer_id: &libp2p::PeerId,

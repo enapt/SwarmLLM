@@ -439,7 +439,6 @@ impl PipelineExecutor {
             tracing::info!(
                 model = %model_id,
                 prompt_len = prompt.len(),
-                prompt_preview = %&prompt[..prompt.len().min(200)],
                 "DIAG: build_prompt from header"
             );
             return prompt;
