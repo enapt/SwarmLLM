@@ -906,21 +906,27 @@ impl AutoShardManager {
                         shard_store
                             .verify_shard(&candidate.model_id, shard_info)
                             .is_ok()
-                    } else {
+                    } else if candidate.shard_size_bytes > 0 {
                         // Zero-hash placeholder — fall back to size check
                         std::fs::metadata(&shard_path)
                             .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
                             .unwrap_or(false)
+                    } else {
+                        false // unknown expected size — needs re-download
                     }
-                } else {
+                } else if candidate.shard_size_bytes > 0 {
                     std::fs::metadata(&shard_path)
                         .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
                         .unwrap_or(false)
+                } else {
+                    false
                 }
-            } else {
+            } else if candidate.shard_size_bytes > 0 {
                 std::fs::metadata(&shard_path)
                     .map(|m| m.len() >= candidate.shard_size_bytes * 9 / 10)
                     .unwrap_or(false)
+            } else {
+                false
             };
 
             if file_ok {

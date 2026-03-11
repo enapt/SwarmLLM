@@ -161,8 +161,20 @@ pub fn build_shard_infos_from_layouts(
         .map(|layout| {
             let shard_path = model_dir.join(format!("shard_{:03}.bin", layout.index));
             let hash = if shard_path.exists() {
-                match std::fs::read(&shard_path) {
-                    Ok(data) => *blake3::hash(&data).as_bytes(),
+                match std::fs::File::open(&shard_path) {
+                    Ok(mut file) => {
+                        use std::io::Read;
+                        let mut hasher = blake3::Hasher::new();
+                        let mut buf = [0u8; 64 * 1024];
+                        loop {
+                            match file.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => hasher.update(&buf[..n]),
+                                Err(_) => break,
+                            };
+                        }
+                        *hasher.finalize().as_bytes()
+                    }
                     Err(_) => [0u8; 32],
                 }
             } else {

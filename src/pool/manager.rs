@@ -378,8 +378,12 @@ impl PoolManager {
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::Acceptance(acceptance));
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
-        // Remove from pending
+        // Remove from pending (memory + DB to prevent replay after restart)
         self.pending_invitations.remove(&invitation.id);
+        let _ = self
+            .shared_state
+            .db
+            .remove(TREE_POOL_INVITATIONS, &invitation.id.to_string());
 
         tracing::info!(
             pool_id = %invitation.pool_id,
@@ -632,6 +636,21 @@ impl PoolManager {
             return;
         }
 
+        // Reject duplicate node_ids in gossiped pool state (prevents inflated stats)
+        {
+            let mut seen_nodes = std::collections::HashSet::new();
+            for member in &state.members {
+                if !seen_nodes.insert(member.node_id.clone()) {
+                    tracing::warn!(
+                        pool_id = %state.pool_id,
+                        dup_node = %member.node_id,
+                        "Duplicate node_id in gossiped pool state — rejecting"
+                    );
+                    return;
+                }
+            }
+        }
+
         // SEC-C7: Verify acceptance_signature of each member
         for member in &state.members {
             // The pool owner's own membership uses the pool creation signature, skip it
@@ -834,8 +853,12 @@ impl PoolManager {
                 "Pool member joined"
             );
 
-            // Remove used invitation
+            // Remove used invitation (memory + DB to prevent replay after restart)
             self.pending_invitations.remove(&acceptance.invitation_id);
+            let _ = self
+                .shared_state
+                .db
+                .remove(TREE_POOL_INVITATIONS, &acceptance.invitation_id.to_string());
         }
     }
 

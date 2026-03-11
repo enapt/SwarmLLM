@@ -743,7 +743,7 @@ impl ModelExecutor {
             // We need to keep only prompt + all accepted tokens (old + new) so we rewind
             // to that position. But the draft tokenization may differ from target, so we
             // track draft_pos separately.
-            let draft_keep = draft_pos - (num_drafted - num_accepted);
+            let draft_keep = draft_pos.saturating_sub(num_drafted.saturating_sub(num_accepted));
             // If we rejected some tokens, the bonus token replaced them.
             // We need to trim draft KV to the accepted prefix.
             if num_accepted < num_drafted {

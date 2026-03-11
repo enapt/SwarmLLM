@@ -50,7 +50,17 @@ pub async fn forward_credits_to_owner(
 
     // Send to pool manager for processing + broadcasting
     if let Some(ref tx) = *shared_state.pool_tx.read().await {
-        let _ = tx.send(PoolCommand::ProcessCreditForward { forward }).await;
+        if tx
+            .send(PoolCommand::ProcessCreditForward { forward })
+            .await
+            .is_err()
+        {
+            tracing::warn!("Pool forward channel unavailable — keeping credits locally");
+            return Ok(false);
+        }
+    } else {
+        tracing::warn!("Pool manager not running — keeping credits locally");
+        return Ok(false);
     }
 
     Ok(true)

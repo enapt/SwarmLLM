@@ -85,17 +85,25 @@ fn track_forward_participation(
     }
     let layers_processed = (layer_end.saturating_sub(layer_start)).min(max_layers) as i64;
     let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-    if let Ok(mut bal) = shared_state.credit_balance.try_write() {
-        // SEC-I1: saturating arithmetic to prevent overflow (matches apply_credit_direct)
-        bal.balance = bal.balance.saturating_add(earned);
-        bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned.unsigned_abs());
-        bal.last_updated = chrono::Utc::now();
-        // Persist updated balance to redb so credits survive daemon restart
-        let _ = shared_state.db.put_json(
-            crate::credit::ledger::TREE_CREDITS,
-            crate::credit::ledger::KEY_BALANCE,
-            &*bal,
-        );
+    match shared_state.credit_balance.try_write() {
+        Ok(mut bal) => {
+            // SEC-I1: saturating arithmetic to prevent overflow (matches apply_credit_direct)
+            bal.balance = bal.balance.saturating_add(earned);
+            bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned.unsigned_abs());
+            bal.last_updated = chrono::Utc::now();
+            // Persist updated balance to redb so credits survive daemon restart
+            let _ = shared_state.db.put_json(
+                crate::credit::ledger::TREE_CREDITS,
+                crate::credit::ledger::KEY_BALANCE,
+                &*bal,
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                earned,
+                "Credit balance lock contended — credits deferred to next persist cycle"
+            );
+        }
     }
 }
 
@@ -860,7 +868,23 @@ pub(crate) async fn dispatch_network_messages(
                                     node_id: our_id,
                                     active_request_count: our_load,
                                 };
-                                let _ = network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                                // Unicast pong to the pinger instead of broadcasting O(N²)
+                                if let Some(peer_bytes) = shared_state
+                                    .peer_id_map
+                                    .get(&sender_id)
+                                    .map(|r| r.clone())
+                                {
+                                    let _ = network_tx
+                                        .send(NetworkCommand::SendDirectMessage {
+                                            target_peer_bytes: peer_bytes,
+                                            message: pong,
+                                        })
+                                        .await;
+                                } else {
+                                    // Fallback to broadcast if peer_id unknown
+                                    let _ =
+                                        network_tx.send(NetworkCommand::Broadcast(pong)).await;
+                                }
                             }
                             // Ignore health pings without node_id (pre-alpha format)
                             SwarmMessage::HealthPing { node_id: None, .. } => {}

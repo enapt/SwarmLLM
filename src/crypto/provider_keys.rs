@@ -209,21 +209,25 @@ pub fn scrub_api_keys(input: &str) -> String {
         "sk-ant-", "sk-", "nvapi-", "gsk_", "csk-", "key-", "tok-", "xai-",
     ];
     for prefix in prefixes {
-        while let Some(start) = output.find(prefix) {
-            // Find the end of the token (non-alphanumeric/dash/underscore)
-            let token_start = start;
+        let mut search_start = 0usize;
+        while search_start < output.len() {
+            let Some(rel) = output[search_start..].find(prefix) else {
+                break;
+            };
+            let start = search_start + rel;
             let rest = &output[start + prefix.len()..];
-            let token_len = prefix.len()
-                + rest
-                    .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-                    .unwrap_or(rest.len());
-            let token_end = token_start + token_len;
+            let suffix_len = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                .unwrap_or(rest.len());
+            let token_len = prefix.len() + suffix_len;
+            let token_end = start + token_len;
             if token_len > prefix.len() + 4 {
-                // Only scrub if there's substance after the prefix
                 let redacted = format!("{}***REDACTED***", prefix);
-                output.replace_range(token_start..token_end, &redacted);
+                let redacted_len = redacted.len();
+                output.replace_range(start..token_end, &redacted);
+                search_start = start + redacted_len;
             } else {
-                break; // avoid infinite loop on short matches
+                search_start = start + prefix.len();
             }
         }
     }

@@ -325,9 +325,16 @@ impl UpdateChecker {
                         "Update available"
                     );
 
-                    // Auto-download if auto_update is enabled (Stable or All)
+                    // Auto-download if auto_update is enabled
+                    // Stable mode skips pre-release versions (tags containing '-')
                     let mut info = info;
-                    if self.config.auto_update != crate::config::AutoUpdateMode::Disabled {
+                    let is_prerelease = info.latest_version.contains('-');
+                    let should_download = match self.config.auto_update {
+                        crate::config::AutoUpdateMode::Disabled => false,
+                        crate::config::AutoUpdateMode::Stable => !is_prerelease,
+                        crate::config::AutoUpdateMode::All => true,
+                    };
+                    if should_download {
                         match self.download_update(&info).await {
                             Ok(_path) => {
                                 info.downloaded = true;

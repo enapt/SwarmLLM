@@ -576,8 +576,11 @@ pub async fn download_tied_output_weight(
 
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
     let dest_path = dest_dir.join("tied_output_weight.bin");
-    std::fs::write(&dest_path, &data)
-        .map_err(|e| format!("Failed to write tied_output_weight.bin: {e}"))?;
+    let tmp_path = dest_dir.join("tied_output_weight.bin.tmp");
+    std::fs::write(&tmp_path, &data)
+        .map_err(|e| format!("Failed to write tied_output_weight.bin.tmp: {e}"))?;
+    std::fs::rename(&tmp_path, &dest_path)
+        .map_err(|e| format!("Failed to rename tied_output_weight.bin: {e}"))?;
 
     tracing::info!(
         size = data.len(),

@@ -85,7 +85,12 @@ impl TrustManager {
         } else {
             // Peer not in registry — compute from DB or default
             let current = self.get_trust(node_id);
-            (current + delta).clamp(0.0, 1.0)
+            let score = (current + delta).clamp(0.0, 1.0);
+            // Apply to registry if peer reconnects before next restart
+            if let Some(mut peer) = peer_registry.get_mut(node_id) {
+                peer.trust_score = score;
+            }
+            score
         };
 
         // Persist to DB

@@ -14,7 +14,7 @@
 //!
 //! **Feature gate**: `paged-attn` — requires `candle-cuda`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
@@ -125,8 +125,10 @@ impl PagedKvPool {
     /// Return blocks to the free list.
     pub fn free(&self, blocks: &[i32]) {
         let mut free = self.free_blocks.lock().unwrap_or_else(|e| e.into_inner());
+        // O(n) dedup: build a temporary set of currently-free blocks
+        let free_set: HashSet<i32> = free.iter().copied().collect();
         for &b in blocks {
-            if !free.contains(&b) {
+            if !free_set.contains(&b) {
                 free.push_back(b);
             }
         }

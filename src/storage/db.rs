@@ -34,11 +34,17 @@ pub struct IntegrityReport {
 }
 
 /// Build a composite key: "{tree}\0{key}".
+/// Panics if tree or key contain NUL bytes (would cause cross-tree collisions).
 fn make_key(tree: &str, key: &str) -> Vec<u8> {
+    debug_assert!(
+        !tree.contains('\0') && !key.contains('\0'),
+        "DB tree/key must not contain NUL bytes"
+    );
     let mut k = Vec::with_capacity(tree.len() + 1 + key.len());
     k.extend_from_slice(tree.as_bytes());
     k.push(0);
-    k.extend_from_slice(key.as_bytes());
+    // Strip NUL bytes from key defensively (gossip-sourced model IDs)
+    k.extend(key.as_bytes().iter().filter(|&&b| b != 0));
     k
 }
 

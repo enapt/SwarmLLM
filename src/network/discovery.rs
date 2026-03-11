@@ -329,7 +329,15 @@ pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
             }
         }
 
-        // Legacy plain base64 format (or decryption failed — try plain)
+        // Reject payloads in the ambiguous range (44-59 bytes) — too long for legacy,
+        // too short for valid encrypted format. Prevents unintended plaintext fallthrough.
+        if packed.len() >= 44 {
+            return Err(SwarmError::Network(
+                "Invite code appears malformed (too short for encrypted format)".into(),
+            ));
+        }
+
+        // Legacy plain base64 format (short codes only)
         let addr_str = String::from_utf8(packed)
             .map_err(|e| SwarmError::Network(format!("Invalid invite code: {e}")))?;
         addr_str

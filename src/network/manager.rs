@@ -881,18 +881,28 @@ impl NetworkManager {
                     .get(&node_id)
                     .map(|p| p.first_seen)
                     .unwrap_or(now_ts);
+                // Preserve trust, capability, and verified count from existing entry
+                let existing = self.shared_state.peer_registry.get(&node_id);
+                let trust_score = existing.as_ref().map(|p| p.trust_score).unwrap_or(0.5);
+                let capability = existing.as_ref().and_then(|p| p.capability.clone());
+                let vtc = existing
+                    .as_ref()
+                    .map(|p| p.verified_transaction_count)
+                    .unwrap_or(0);
+                let is_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
+                drop(existing);
                 let peer_info = PeerInfo {
                     node_id: node_id.clone(),
                     addresses: info.listen_addrs.iter().map(|a| a.to_string()).collect(),
-                    capability: None,
+                    capability,
                     last_seen: chrono::Utc::now(),
                     latency_ms: None,
-                    trust_score: 0.5,
+                    trust_score,
                     peer_id_bytes: Some(peer_id.to_bytes()),
                     active_request_count: 0,
                     first_seen,
-                    verified_transaction_count: 0,
-                    is_lan_peer: false,
+                    verified_transaction_count: vtc,
+                    is_lan_peer: is_lan,
                 };
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());

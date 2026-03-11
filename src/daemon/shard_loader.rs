@@ -47,17 +47,12 @@ pub fn try_load_from_shards(
     }
 
     // Collect available shard files for this model
+    // Scan all possible shard indices — don't stop on gaps (sparse sets are valid)
     let mut shard_files: Vec<(u32, std::path::PathBuf)> = Vec::new();
     for i in 0u32..256 {
         let path = shard_store.shard_path(model_id, i);
         if path.exists() {
             shard_files.push((i, path));
-        } else if i > 0 && shard_files.is_empty() {
-            // Keep looking — shards might not start at 0
-            continue;
-        } else if !shard_files.is_empty() {
-            // Found a gap after some shards — stop
-            break;
         }
     }
 

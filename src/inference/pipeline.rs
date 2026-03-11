@@ -309,9 +309,14 @@ impl PipelineExecutor {
                 );
                 Ok(Some(resp.embeddings))
             }
-            Ok(Err(_)) => Err(SwarmError::Inference(
-                "Vision encode channel dropped".into(),
-            )),
+            Ok(Err(_)) => {
+                self.shared_state
+                    .pending_vision_results
+                    .remove(&self.request.id);
+                Err(SwarmError::Inference(
+                    "Vision encode channel dropped".into(),
+                ))
+            }
             Err(_) => {
                 self.shared_state
                     .pending_vision_results

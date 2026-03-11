@@ -376,39 +376,50 @@ pub async fn pool_rates_set(
             .unwrap_or(current.penalty_serve_failure),
     };
 
-    // Validate: all rates must be positive
-    let all_rates = [
+    // Validate: reward rates must be positive, penalty must be negative
+    let positive_rates = [
         ("inference_serve", new_rates.inference_serve),
         ("inference_consume", new_rates.inference_consume),
         ("shard_hosting", new_rates.shard_hosting),
         ("shard_seeding", new_rates.shard_seeding),
         ("relay_service", new_rates.relay_service),
-        ("penalty_serve_failure", new_rates.penalty_serve_failure),
     ];
-    for (name, value) in &all_rates {
+    for (name, value) in &positive_rates {
         if *value <= 0 {
             return Err(ApiError(crate::error::SwarmError::Config(format!(
                 "{name} must be positive (got {value})"
             ))));
         }
     }
+    if new_rates.penalty_serve_failure >= 0 {
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "penalty_serve_failure must be negative (got {})",
+            new_rates.penalty_serve_failure
+        ))));
+    }
 
-    // Validate: no rate exceeds 10x the default to prevent abuse
-    let default_rates = [
+    // Validate: no reward rate exceeds 10x the default, penalty within 10x magnitude
+    let default_positive = [
         ("inference_serve", defaults.inference_serve),
         ("inference_consume", defaults.inference_consume),
         ("shard_hosting", defaults.shard_hosting),
         ("shard_seeding", defaults.shard_seeding),
         ("relay_service", defaults.relay_service),
-        ("penalty_serve_failure", defaults.penalty_serve_failure),
     ];
-    for ((name, value), (_, default_val)) in all_rates.iter().zip(default_rates.iter()) {
+    for ((name, value), (_, default_val)) in positive_rates.iter().zip(default_positive.iter()) {
         if *value > default_val * 10 {
             return Err(ApiError(crate::error::SwarmError::Config(format!(
                 "{name} cannot exceed 10x the default ({}) — got {value}",
                 default_val * 10
             ))));
         }
+    }
+    if new_rates.penalty_serve_failure < defaults.penalty_serve_failure * 10 {
+        return Err(ApiError(crate::error::SwarmError::Config(format!(
+            "penalty_serve_failure cannot exceed 10x the default ({}) — got {}",
+            defaults.penalty_serve_failure * 10,
+            new_rates.penalty_serve_failure
+        ))));
     }
 
     state

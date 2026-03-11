@@ -87,14 +87,6 @@ impl EscrowManager {
                 "Escrow amount must be positive, got {amount}"
             )));
         }
-        // Deduct from requester balance
-        {
-            let mut bal = balance.write().await;
-            bal.balance = bal.balance.saturating_sub(amount);
-            bal.lifetime_spent = bal.lifetime_spent.saturating_add(amount as u64);
-            bal.last_updated = chrono::Utc::now();
-        }
-
         let escrow_id = uuid::Uuid::new_v4();
         tracing::info!(
             escrow_id = %escrow_id,
@@ -113,9 +105,20 @@ impl EscrowManager {
             status: EscrowStatus::Pending,
         };
 
-        // Persist to DB
+        // Persist escrow to DB BEFORE deducting balance — crash-safe ordering
         if let Err(e) = self.db.put_json(TREE_ESCROW, &entry.id.to_string(), &entry) {
             tracing::warn!(error = %e, "Failed to persist escrow entry");
+            return Err(SwarmError::CreditError(format!(
+                "Failed to persist escrow: {e}"
+            )));
+        }
+
+        // Deduct from requester balance only after escrow is persisted
+        {
+            let mut bal = balance.write().await;
+            bal.balance = bal.balance.saturating_sub(amount);
+            bal.lifetime_spent = bal.lifetime_spent.saturating_add(amount as u64);
+            bal.last_updated = chrono::Utc::now();
         }
 
         let escrow_id = entry.id;

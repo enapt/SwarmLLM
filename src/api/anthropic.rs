@@ -309,12 +309,39 @@ pub async fn messages(
         }
     }
 
-    // Limit tools array
+    // Limit tools array — count and per-tool field sizes
     if let Some(ref tools) = req.tools {
         if tools.len() > 128 {
             return Err(ApiError(crate::error::SwarmError::Validation(
                 "Too many tools (max 128)".into(),
             )));
+        }
+        for tool in tools {
+            if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+                if name.len() > 256 {
+                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                        "Tool name too long: {} (max 256)",
+                        name.len()
+                    ))));
+                }
+            }
+            if let Some(desc) = tool.get("description").and_then(|v| v.as_str()) {
+                if desc.len() > 4096 {
+                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                        "Tool description too long: {} (max 4096)",
+                        desc.len()
+                    ))));
+                }
+            }
+            if let Some(schema) = tool.get("input_schema") {
+                let schema_size = schema.to_string().len();
+                if schema_size > 65536 {
+                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                        "Tool input_schema too large: {} bytes (max 64KB)",
+                        schema_size
+                    ))));
+                }
+            }
         }
     }
 

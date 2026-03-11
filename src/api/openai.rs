@@ -1132,9 +1132,9 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
     }
 
     let result = all_shards_available_inner(state, model_name);
-    // Cap cache size to prevent unbounded growth from arbitrary model names
+    // Evict stale entries instead of clearing entire cache (prevents thundering herd)
     if CACHE.len() > 1000 {
-        CACHE.clear();
+        CACHE.retain(|_, (ts, _)| ts.elapsed() < std::time::Duration::from_millis(100));
     }
     CACHE.insert(model_name.to_string(), (std::time::Instant::now(), result));
     result
@@ -1220,32 +1220,57 @@ pub(crate) fn decode_split_tokens(
 }
 
 fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
+    // Prefer UDP port (QUIC port == HTTP API port per convention),
+    // fall back to TCP port - 10 (P2P TCP = HTTP + 10).
+    let mut best_ip = None;
+    let mut best_port = None;
+    let mut have_udp = false;
+
     for addr in &peer.addresses {
-        // Parse multiaddr: /ip4/<ip>/udp/<port>/quic-v1 or /ip4/<ip>/tcp/<port>
         let parts: Vec<&str> = addr.split('/').collect();
         let mut ip = None;
-        let mut port = None;
+        let mut udp_port = None;
+        let mut tcp_port = None;
         for i in 0..parts.len() {
             if parts[i] == "ip4" && i + 1 < parts.len() {
                 ip = Some(parts[i + 1]);
             }
-            // Accept both UDP (QUIC) and TCP port — HTTP API is on TCP:port
-            if (parts[i] == "udp" || parts[i] == "tcp") && i + 1 < parts.len() && port.is_none() {
-                port = Some(parts[i + 1]);
+            if parts[i] == "udp" && i + 1 < parts.len() {
+                udp_port = Some(parts[i + 1]);
+            }
+            if parts[i] == "tcp" && i + 1 < parts.len() {
+                tcp_port = Some(parts[i + 1]);
             }
         }
-        if let (Some(ip_str), Some(port_str)) = (ip, port) {
-            // Peer addresses come from authenticated peer registry (libp2p identity-verified),
-            // so private/LAN addresses are expected and safe. Only block loopback/unspecified.
-            if let Ok(addr) = ip_str.parse::<std::net::Ipv4Addr>() {
-                if addr.is_loopback() || addr.is_unspecified() {
+        if let Some(ip_str) = ip {
+            if let Ok(parsed) = ip_str.parse::<std::net::Ipv4Addr>() {
+                if parsed.is_loopback() || parsed.is_unspecified() {
                     continue;
                 }
             }
-            return Some(format!("http://{}:{}", ip_str, port_str));
+            // UDP port == HTTP API port (preferred)
+            if let Some(port_str) = udp_port {
+                if !have_udp {
+                    best_ip = Some(ip_str.to_string());
+                    best_port = Some(port_str.to_string());
+                    have_udp = true;
+                }
+            }
+            // TCP port = HTTP + 10, so HTTP = TCP - 10
+            if let Some(port_str) = tcp_port {
+                if !have_udp {
+                    if let Ok(p) = port_str.parse::<u16>() {
+                        best_ip = Some(ip_str.to_string());
+                        best_port = Some(p.saturating_sub(10).to_string());
+                    }
+                }
+            }
         }
     }
-    None
+    match (best_ip, best_port) {
+        (Some(ip), Some(port)) => Some(format!("http://{}:{}", ip, port)),
+        _ => None,
+    }
 }
 
 /// Forward a chat completion request to a peer's HTTP API.
@@ -1292,7 +1317,8 @@ async fn forward_to_peer(
         let body = crate::crypto::scrub_api_keys(&body);
         // Truncate to prevent large peer error bodies from being forwarded
         let body = if body.len() > 500 {
-            format!("{}...", &body[..500])
+            let truncated: String = body.chars().take(500).collect();
+            format!("{truncated}...")
         } else {
             body
         };

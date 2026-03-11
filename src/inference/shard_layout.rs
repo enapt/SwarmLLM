@@ -175,7 +175,7 @@ pub fn compute_layer_shard_layouts(
 
     layouts.push(LayerShardLayout {
         index: layouts.len() as u32,
-        layer_start: current_layer_start.unwrap_or(0),
+        layer_start: current_layer_start.unwrap_or(current_layer_end),
         layer_end: current_layer_end,
         tensors: current_tensors,
         size_bytes: current_size,

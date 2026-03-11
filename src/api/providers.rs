@@ -391,7 +391,8 @@ pub async fn proxy_openai_compatible(
             .unwrap_or(scrubbed_body);
         // Truncate to prevent leaking large error bodies from upstream providers
         let friendly = if friendly.len() > 500 {
-            format!("{}...", &friendly[..500])
+            let truncated: String = friendly.chars().take(500).collect();
+            format!("{truncated}...")
         } else {
             friendly
         };

@@ -208,6 +208,10 @@ pub fn sample_token_with_params(
     let mut probs: Vec<f32> = logits_vec.iter().map(|&x| (x - max_val).exp()).collect();
     let sum: f32 = probs.iter().sum();
     if sum <= 0.0 || !sum.is_finite() {
+        tracing::warn!(
+            sum,
+            "Degenerate softmax distribution, falling back to token 0"
+        );
         return Ok(0);
     }
     let inv_sum = 1.0 / sum;

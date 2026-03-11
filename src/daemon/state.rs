@@ -425,9 +425,16 @@ impl TpAllReduceCollector {
                 buf
             };
             if dec.len() == elem_count * 4 {
-                for (i, chunk) in dec.chunks_exact(4).enumerate() {
-                    sum[i] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                for (j, chunk) in dec.chunks_exact(4).enumerate() {
+                    sum[j] += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                 }
+            } else {
+                return Err(crate::error::SwarmError::Internal(format!(
+                    "AllReduce: rank {} partial size mismatch ({} != {})",
+                    i + 1,
+                    dec.len(),
+                    elem_count * 4
+                )));
             }
         }
 
