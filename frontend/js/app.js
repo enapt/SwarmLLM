@@ -765,7 +765,7 @@ var SwarmLLM = (function() {
         var models = await resp.json();
         var cloudModels = [];
         try {
-          var pmResp = await fetch('/api/admin/provider-models');
+          var pmResp = await authFetch('/api/admin/provider-models');
           if (pmResp.ok) {
             var pmData = await pmResp.json();
             cloudModels = pmData.models || [];
@@ -1978,7 +1978,7 @@ var SwarmLLM = (function() {
 
     loadProviders: async function() {
       try {
-        var resp = await fetch('/api/admin/providers');
+        var resp = await authFetch('/api/admin/providers');
         var data = await resp.json();
         if (data.providers) {
           var anyConfigured = false;
@@ -2711,7 +2711,7 @@ var SwarmLLM = (function() {
 
       var providerModels = [];
       try {
-        var pmResp = await fetch('/api/admin/provider-models');
+        var pmResp = await authFetch('/api/admin/provider-models');
         if (pmResp.ok) {
           var pmData = await pmResp.json();
           providerModels = pmData.models || [];
@@ -5102,7 +5102,7 @@ var SwarmLLM = (function() {
       if (resp.ok) statsData = await resp.json();
     } catch (e) {}
     try {
-      var resp2 = await fetch('/api/admin/providers');
+      var resp2 = await authFetch('/api/admin/providers');
       if (resp2.ok) providerData = await resp2.json();
       _cachedProviderData = providerData;
     } catch (e) {}
