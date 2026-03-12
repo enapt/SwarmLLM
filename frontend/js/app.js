@@ -139,9 +139,8 @@ var SwarmLLM = (function() {
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
       var compareView = document.getElementById('view-compare');
       if (compareView) compareView.style.display = tab === 'compare' ? '' : 'none';
-      // Show sidebar only on chat tab
-      var sidebar = document.getElementById('sidebar');
-      if (sidebar) sidebar.style.display = tab === 'chat' ? '' : 'none';
+      // Close sidebar when switching away from chat
+      if (tab !== 'chat') ui.closeSidebar();
       if (tab === 'chat') {
         chat.scrollToBottom();
         document.getElementById('chat-input').focus();
@@ -158,17 +157,31 @@ var SwarmLLM = (function() {
       }
     },
 
-    toggleSidebar: function() {
+    openSidebar: function() {
       var sidebar = document.getElementById('sidebar');
-      sidebar.classList.toggle('collapsed');
-      var btn = sidebar.querySelector('.sidebar-toggle');
-      btn.innerHTML = sidebar.classList.contains('collapsed') ? '&#9654;' : '&#9664;';
+      var overlay = document.getElementById('sidebar-overlay');
+      if (sidebar) sidebar.classList.add('open');
+      if (overlay) overlay.classList.add('visible');
+      var btn = document.getElementById('hamburger-btn');
+      if (btn) btn.setAttribute('aria-expanded', 'true');
     },
 
-    toggleMobileSidebar: function() {
-      document.body.classList.toggle('sidebar-open');
+    closeSidebar: function() {
+      var sidebar = document.getElementById('sidebar');
+      var overlay = document.getElementById('sidebar-overlay');
+      if (sidebar) sidebar.classList.remove('open');
+      if (overlay) overlay.classList.remove('visible');
       var btn = document.getElementById('hamburger-btn');
-      if (btn) btn.setAttribute('aria-expanded', document.body.classList.contains('sidebar-open'));
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    },
+
+    toggleSidebar: function() {
+      var sidebar = document.getElementById('sidebar');
+      if (sidebar && sidebar.classList.contains('open')) {
+        ui.closeSidebar();
+      } else {
+        ui.openSidebar();
+      }
     },
 
     openSettings: function(scrollToProviders) {
@@ -323,6 +336,9 @@ var SwarmLLM = (function() {
       chat.renderSessionList();
       chat.renderMessages();
       chat.updateChatHeader();
+
+      // Close sidebar after selecting a chat (mobile-friendly)
+      if (window.innerWidth < 1024) ui.closeSidebar();
     },
 
     deleteSession: function(id, e) {
@@ -4451,13 +4467,13 @@ var SwarmLLM = (function() {
     on('link-browse-hf', 'click', function(e) { e.preventDefault(); ui.openModelBrowser(); });
 
     // Header
-    on('hamburger-btn', 'click', function() { ui.toggleMobileSidebar(); });
+    on('hamburger-btn', 'click', function() { ui.toggleSidebar(); });
     on('btn-shutdown', 'click', function() { shutdown(); });
 
     // Sidebar
-    on('sidebar-overlay', 'click', function() { ui.toggleMobileSidebar(); });
+    on('sidebar-overlay', 'click', function() { ui.closeSidebar(); });
     on('btn-new-session', 'click', function() { chat.newSession(); });
-    on('btn-toggle-sidebar', 'click', function() { ui.toggleSidebar(); });
+    on('btn-close-sidebar', 'click', function() { ui.closeSidebar(); });
 
     // Chat
     on('send-btn', 'click', function() { chat.send(); });
@@ -4535,9 +4551,11 @@ var SwarmLLM = (function() {
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
         shardMenu.hide();
+        var sidebar = document.getElementById('sidebar');
         var settingsModal = document.getElementById('settings-modal');
         var modelModal = document.getElementById('model-browser-modal');
-        if (settingsModal && !settingsModal.classList.contains('hidden')) { ui.closeSettings(); }
+        if (sidebar && sidebar.classList.contains('open')) { ui.closeSidebar(); }
+        else if (settingsModal && !settingsModal.classList.contains('hidden')) { ui.closeSettings(); }
         else if (modelModal && !modelModal.classList.contains('hidden')) { ui.closeModelBrowser(); }
       }
       // Focus trap for open modals
