@@ -108,15 +108,46 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .collect()
     };
 
-    // Helper: check encrypted pipeline status for a model
+    // Helper: check encrypted pipeline status for a model.
+    // Returns true only if the flag is enabled AND the local node holds both
+    // first (shard 0) and last shard — otherwise the boomerang topology can't work.
     let is_encrypted_pipeline = |model_id: &str| -> bool {
         let mid = crate::types::ModelId(model_id.to_string());
-        state
+        let flag = state
             .shared_state
             .encrypted_pipeline_models
             .get(&mid)
             .map(|r| *r.value())
-            .unwrap_or(state.shared_state.config.inference.encrypted_pipeline)
+            .unwrap_or(state.shared_state.config.inference.encrypted_pipeline);
+        if !flag {
+            return false;
+        }
+        // Verify local node actually has both first and last shards
+        let local_node_id = state.shared_state.identity.node_id();
+        let has_first = state
+            .shared_state
+            .model_registry
+            .shard_holders(&crate::types::ShardId {
+                model_id: mid.clone(),
+                index: 0,
+            })
+            .contains(local_node_id);
+        if !has_first {
+            return false;
+        }
+        if let Some(manifest) = state.shared_state.model_registry.get_manifest(&mid) {
+            let last_idx = manifest.shard_count.saturating_sub(1);
+            state
+                .shared_state
+                .model_registry
+                .shard_holders(&crate::types::ShardId {
+                    model_id: mid,
+                    index: last_idx,
+                })
+                .contains(local_node_id)
+        } else {
+            false
+        }
     };
 
     // 1. Locally loaded model (full model via --model flag)
