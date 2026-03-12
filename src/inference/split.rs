@@ -4166,6 +4166,17 @@ impl SplitModel {
             .dim(1)
             .map_err(|e| SwarmError::Internal(e.to_string()))?;
 
+        // Pre-flight check: reject sequences that exceed the model's context window
+        // to avoid cryptic tensor dimension errors in attention.
+        let total_seq = index_pos + seq_len;
+        if total_seq > self.max_seq_len {
+            return Err(SwarmError::Validation(format!(
+                "Sequence length ({total_seq}) exceeds model context window ({}). \
+                 Reduce your prompt or max_tokens.",
+                self.max_seq_len
+            )));
+        }
+
         let num_layers = self.layers.len();
         // Build the cache key once — reused for both take and writeback (zero alloc on hot path).
         let cache_key = KvCacheStore::cache_key(&self.kv_model_key, request_id);

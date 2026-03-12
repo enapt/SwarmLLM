@@ -601,6 +601,13 @@ pub async fn chat_completions(
         )));
     }
 
+    // Validate messages array is not empty
+    if req.messages.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "messages array must not be empty".into(),
+        )));
+    }
+
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
@@ -608,8 +615,10 @@ pub async fn chat_completions(
         )));
     }
 
-    // SEC: Cap individual message content size to prevent memory exhaustion
+    // SEC: Cap individual message content size and total prompt size
     const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+    const MAX_TOTAL_PROMPT_BYTES: usize = 64 * 1024; // 64 KB total (~16K tokens max)
+    let mut total_content_bytes: usize = 0;
     for msg in &req.messages {
         let content_len = match &msg.content {
             MessageContent::Text(s) => s.len(),
@@ -626,6 +635,13 @@ pub async fn chat_completions(
                 "Message content too large (max 2MB per message)".into(),
             )));
         }
+        total_content_bytes = total_content_bytes.saturating_add(content_len);
+    }
+    if total_content_bytes > MAX_TOTAL_PROMPT_BYTES {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Total prompt content too large ({} bytes, max {}). Reduce your messages.",
+            total_content_bytes, MAX_TOTAL_PROMPT_BYTES
+        ))));
     }
 
     // Limit tools array to prevent system prompt explosion in format_tool_system_prompt

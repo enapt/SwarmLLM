@@ -288,6 +288,13 @@ pub async fn messages(
         )));
     }
 
+    // Validate messages array is not empty
+    if req.messages.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "messages array must not be empty".into(),
+        )));
+    }
+
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
@@ -385,8 +392,9 @@ pub async fn messages(
         info.as_ref().map(|i| i.name.clone())
     };
 
-    // Resolve model to local registry ID when the Anthropic model name (e.g. "claude-3-opus")
-    // doesn't match any known registry model but we have a local model loaded.
+    // Resolve model to local registry ID when the requested model matches the loaded
+    // model by slug. Only resolve if the names actually match — never silently substitute
+    // a completely different model than what was requested.
     let model = if model_name.is_some() && !crate::api::openai::all_shards_available(&state, &model)
     {
         let info = state.shared_state.loaded_model_info.read().await;
@@ -396,6 +404,7 @@ pub async fn messages(
                 .to_lowercase()
                 .replace(' ', "-")
                 .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            // Only resolve if the requested model matches the loaded model by slug or registry ID
             let registry_id = state
                 .shared_state
                 .model_registry
@@ -410,7 +419,14 @@ pub async fn messages(
                         .find(|m| m.name == i.name)
                         .map(|m| m.id.0.clone())
                 });
-            registry_id.unwrap_or(slug)
+            let resolved = registry_id.unwrap_or(slug);
+            // Only use the resolved ID if the requested model is "auto" or matches
+            // the resolved model. Never silently substitute a different model.
+            if model == "auto" || model == resolved || model == i.name {
+                resolved
+            } else {
+                model // Keep the original requested model name
+            }
         } else {
             model
         }
@@ -459,7 +475,28 @@ pub async fn messages(
         }
     }
 
-    if model_name.is_some() || network_available {
+    // Check if the requested model is actually available (locally or on network)
+    let model_locally_available = {
+        let info = state.shared_state.loaded_model_info.read().await;
+        info.as_ref()
+            .map(|i| {
+                let slug = i
+                    .name
+                    .to_lowercase()
+                    .replace(' ', "-")
+                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+                model == slug
+                    || model == i.name
+                    || state
+                        .shared_state
+                        .model_registry
+                        .get_manifest(&crate::types::ModelId(model.clone()))
+                        .is_some()
+            })
+            .unwrap_or(false)
+    };
+
+    if model_locally_available || network_available {
         // Distributed inference available
         if let Some(router_tx) = &state.router_tx {
             if req.stream {
@@ -487,7 +524,7 @@ pub async fn messages(
         }
 
         // Direct executor fallback (single-node, no router)
-        if model_name.is_some() {
+        if model_locally_available {
             let (tmpl, bos, eos) = {
                 let info = state.shared_state.loaded_model_info.read().await;
                 match info.as_ref() {
