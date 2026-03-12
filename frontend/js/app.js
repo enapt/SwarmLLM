@@ -139,8 +139,18 @@ var SwarmLLM = (function() {
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
       var compareView = document.getElementById('view-compare');
       if (compareView) compareView.style.display = tab === 'compare' ? '' : 'none';
-      // Close sidebar when switching away from chat
-      if (tab !== 'chat') ui.closeSidebar();
+      // Show/hide sidebar based on tab
+      var sidebar = document.getElementById('sidebar');
+      if (sidebar) {
+        if (tab === 'chat') {
+          sidebar.style.display = '';
+          // Auto-open on desktop, keep collapsed on mobile (user uses hamburger)
+          if (window.innerWidth >= 768) sidebar.classList.remove('collapsed');
+        } else {
+          ui.closeSidebar();
+          sidebar.style.display = 'none';
+        }
+      }
       if (tab === 'chat') {
         chat.scrollToBottom();
         document.getElementById('chat-input').focus();
@@ -160,8 +170,9 @@ var SwarmLLM = (function() {
     openSidebar: function() {
       var sidebar = document.getElementById('sidebar');
       var overlay = document.getElementById('sidebar-overlay');
-      if (sidebar) sidebar.classList.add('open');
-      if (overlay) overlay.classList.add('visible');
+      if (sidebar) sidebar.classList.remove('collapsed');
+      // Show overlay only on mobile
+      if (overlay && window.innerWidth < 768) overlay.style.display = 'block';
       var btn = document.getElementById('hamburger-btn');
       if (btn) btn.setAttribute('aria-expanded', 'true');
     },
@@ -169,15 +180,15 @@ var SwarmLLM = (function() {
     closeSidebar: function() {
       var sidebar = document.getElementById('sidebar');
       var overlay = document.getElementById('sidebar-overlay');
-      if (sidebar) sidebar.classList.remove('open');
-      if (overlay) overlay.classList.remove('visible');
+      if (sidebar) sidebar.classList.add('collapsed');
+      if (overlay) overlay.style.display = 'none';
       var btn = document.getElementById('hamburger-btn');
       if (btn) btn.setAttribute('aria-expanded', 'false');
     },
 
     toggleSidebar: function() {
       var sidebar = document.getElementById('sidebar');
-      if (sidebar && sidebar.classList.contains('open')) {
+      if (sidebar && !sidebar.classList.contains('collapsed')) {
         ui.closeSidebar();
       } else {
         ui.openSidebar();
@@ -337,8 +348,8 @@ var SwarmLLM = (function() {
       chat.renderMessages();
       chat.updateChatHeader();
 
-      // Close sidebar after selecting a chat (mobile-friendly)
-      if (window.innerWidth < 1024) ui.closeSidebar();
+      // Close sidebar after selecting a chat on mobile (overlay mode)
+      if (window.innerWidth < 768) ui.closeSidebar();
     },
 
     deleteSession: function(id, e) {
@@ -4559,7 +4570,7 @@ var SwarmLLM = (function() {
         var sidebar = document.getElementById('sidebar');
         var settingsModal = document.getElementById('settings-modal');
         var modelModal = document.getElementById('model-browser-modal');
-        if (sidebar && sidebar.classList.contains('open')) { ui.closeSidebar(); }
+        if (sidebar && !sidebar.classList.contains('collapsed') && window.innerWidth < 768) { ui.closeSidebar(); }
         else if (settingsModal && !settingsModal.classList.contains('hidden')) { ui.closeSettings(); }
         else if (modelModal && !modelModal.classList.contains('hidden')) { ui.closeModelBrowser(); }
       }
