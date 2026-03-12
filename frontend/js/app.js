@@ -356,8 +356,16 @@ var SwarmLLM = (function() {
           timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
         var modelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
-        var sessionEncIcon = (modelItem && modelItem.encrypted) ? ' &#128274;' : '';
-        var modelBadge = s.model ? '<span class="session-model-badge" title="' + escapeHtml(s.model) + (sessionEncIcon ? ' (encrypted pipeline)' : '') + '">' + escapeHtml(formatModelDisplayName(s.model)) + sessionEncIcon + '</span>' : '';
+        var source = getModelSource(s.model || '');
+        var sourceIcon = source === 'local' ? '&#128187;' : source === 'cloud' ? '&#9729;' : '&#11042;';
+        var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
+        var isEncrypted = modelItem && modelItem.encrypted;
+        var encIcon = isEncrypted ? ' &#128274;' : '';
+        var badgeClass = 'session-model-badge session-source-' + source;
+        var tooltipParts = [escapeHtml(s.model || '')];
+        if (source !== 'local') tooltipParts.push(sourceLabel);
+        if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
+        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + sourceIcon + ' ' + escapeHtml(formatModelDisplayName(s.model)) + encIcon + '</span>' : '';
         var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
@@ -2683,7 +2691,8 @@ var SwarmLLM = (function() {
       if (readyModels.length > 0) {
         var items = readyModels.map(function(m) {
           var displayName = formatModelDisplayName(m.name || m.id);
-          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: 'local', encrypted: !!m.encrypted_pipeline };
+          var isDistributed = m.shard_count > 0 && (m.hosted_shards || 0) < m.shard_count;
+          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
         });
         groups.push({ key: 'local', label: 'On this computer', items: items });
         _modelDropdownData = _modelDropdownData.concat(items);
@@ -3777,6 +3786,7 @@ var SwarmLLM = (function() {
     var match = _modelDropdownData.find(function(m) { return m.id === modelId; });
     if (!match) return 'local';
     if (match.group === 'local') return 'local';
+    if (match.group === 'swarm') return 'swarm';
     return 'cloud';
   }
 

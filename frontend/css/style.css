@@ -284,15 +284,27 @@ a:hover { color: var(--accent-hover); }
 .session-model-badge {
   font-size: 0.55rem;
   font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-glow);
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   padding: 0 5px;
   border-radius: 8px;
   white-space: nowrap;
-  max-width: 120px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.session-source-local {
+  color: var(--green);
+  background: var(--green-dim);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+.session-source-cloud {
+  color: var(--purple);
+  background: var(--purple-dim);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+}
+.session-source-swarm {
+  color: var(--accent);
+  background: var(--accent-glow);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .session-title {
   font-size: 0.8rem;
