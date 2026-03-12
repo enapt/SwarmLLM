@@ -267,8 +267,15 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
                 })
                 .unwrap_or_default();
 
+            let nickname = state
+                .shared_state
+                .nickname_registry
+                .get(&peer.node_id)
+                .map(|r| r.nickname.clone());
+
             serde_json::json!({
                 "node_id": format!("{}", peer.node_id),
+                "nickname": nickname,
                 "addresses": peer.addresses,
                 "last_seen": peer.last_seen.to_rfc3339(),
                 "latency_ms": peer.latency_ms,

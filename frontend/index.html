@@ -517,8 +517,8 @@
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
-              <div class="token-counter" id="token-counter"></div>
-              <button class="chat-layout-toggle" id="chat-layout-toggle" title="Switch chat layout">
+              <div class="token-counter" id="token-counter" title="Word count for your current message"></div>
+              <button class="chat-layout-toggle" id="chat-layout-toggle" title="Switch between Linear (traditional) and Messenger (bubble) chat layout">
                 <span id="chat-layout-icon">&#9776;</span>
                 <span id="chat-layout-label">Linear</span>
               </button>
@@ -592,8 +592,8 @@
           <!-- Network Discovery — compact share popover (hidden when established) -->
           <div id="invite-code-panel" style="display:none;position:relative" class="mb-2">
             <div style="display:flex;align-items:center;gap:8px">
-              <button class="btn btn-sm" id="btn-share-network" title="Share your network code" style="display:flex;align-items:center;gap:4px">
-                <span style="font-size:1rem">&#128279;</span> Share Network Code
+              <button class="btn btn-sm" id="btn-share-network" title="Invite a friend to connect — together you can run bigger AI models" style="display:flex;align-items:center;gap:4px">
+                <span style="font-size:1rem">&#128279;</span> <span id="btn-share-network-label">Share Network Code</span>
               </button>
               <span class="badge" id="network-phase-badge">Solo node</span>
             </div>

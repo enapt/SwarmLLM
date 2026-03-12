@@ -47,6 +47,17 @@ var SwarmLLM = (function() {
     document.body.classList.toggle('mode-advanced', mode === 'advanced');
     var btn = document.getElementById('btn-mode-toggle');
     if (btn) btn.textContent = mode === 'basic' ? 'Basic' : 'Advanced';
+    // Friendlier labels in basic mode
+    var shareLabel = document.getElementById('btn-share-network-label');
+    if (shareLabel) shareLabel.textContent = mode === 'basic' ? 'Invite a Friend' : 'Share Network Code';
+    // Re-render the active model label to show/hide quant tags
+    if (currentModel) {
+      var item = _modelDropdownData.find(function(m) { return m.id === currentModel; });
+      if (item) {
+        item.name = formatModelDisplayName(item.id);
+        updateModelDropdownLabel(item.name);
+      }
+    }
   }
 
   function toggleMode() {
@@ -1471,7 +1482,8 @@ var SwarmLLM = (function() {
             div.style.cssText = 'margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
             var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
             var lanTag = p.is_lan_peer ? '<span class="lan-badge">LAN</span>' : '';
-            var nodeId = '<span class="mono" style="font-size:0.8rem">' + escapeHtml(p.node_id || 'unknown') + '</span>';
+            var peerLabel = p.nickname ? escapeHtml(p.nickname) + ' <span class="text-muted mono" style="font-size:0.7rem">(' + escapeHtml(p.node_id || '').substring(0, 8) + ')</span>' : escapeHtml(p.node_id || 'unknown');
+            var nodeId = '<span style="font-size:0.8rem">' + peerLabel + '</span>';
             var details = '';
             if (p.gpu) details += '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:3px">GPU: ' + escapeHtml(p.gpu) + '</div>';
             div.innerHTML = statusDot + lanTag + nodeId + details;
@@ -2760,6 +2772,8 @@ var SwarmLLM = (function() {
         // Build display: name + optional meta chips
         var nameSpan = document.createElement('span');
         nameSpan.textContent = item.name;
+        // Show full model ID on hover so users can distinguish quantizations
+        if (item.id !== item.name) el.setAttribute('title', item.id);
         el.appendChild(nameSpan);
         if (item.meta) {
           var metaParts = [];
@@ -2845,6 +2859,9 @@ var SwarmLLM = (function() {
     var item = _modelDropdownData.find(function(m) { return m.name === text || m.id === text; });
     var enc = item && item.encrypted;
     label.innerHTML = escapeHtml(text) + (enc ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '');
+    // Show full model ID on hover so users can see quantization details
+    var trigger = document.getElementById('model-dropdown-trigger');
+    if (trigger && item) trigger.title = item.id;
   }
 
   function closeModelDropdown() {
@@ -4761,7 +4778,7 @@ var SwarmLLM = (function() {
   }
 
   // Format a raw model ID into a friendly display name
-  function formatModelDisplayName(id) {
+  function formatModelDisplayName(id, opts) {
     if (!id) return 'Unknown';
     var name = id;
     // Strip common suffixes
@@ -4777,17 +4794,21 @@ var SwarmLLM = (function() {
     }
     // Preserve decimal numbers (1.1b, v0.3) by replacing dots between digits with placeholder
     name = name.replace(/(\d)\.(\d)/g, '$1\x00$2');
+    // In BASIC mode, strip quantization tags (Q4_K_M etc.) unless caller opts out
+    var hideQuant = (opts && opts.hideQuant) || (!opts && isBasicMode());
     // Split on separators and format each part
     return name.split(/[-_.]/).filter(Boolean).map(function(s) {
       s = s.replace(/\x00/g, '.'); // restore decimal dots
       // Keep quant tags uppercase (Q4_K_M, Q5_K_S, etc.)
-      if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return s.toUpperCase();
+      if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return hideQuant ? null : s.toUpperCase();
       // Keep version strings as-is (v1, v0.3)
       if (/^v\d/i.test(s)) return s;
       // Keep size designators (1b, 7b, 1.1b)
       if (/^\d+\.?\d*[bBmM]$/.test(s)) return s.toUpperCase();
+      // Strip bare 'k', 'm', 's' quant suffixes (from Q4_K_M split)
+      if (hideQuant && /^[kms]$/i.test(s)) return null;
       return s.charAt(0).toUpperCase() + s.slice(1);
-    }).join(' ');
+    }).filter(Boolean).join(' ');
   }
 
   // Enable/disable the chat panel based on model availability
@@ -4813,7 +4834,7 @@ var SwarmLLM = (function() {
         '<div class="chat-empty-hint" style="margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
           '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
-          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
+          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">' + (isBasicMode() ? 'Invite a Friend' : 'Share Network Code') + '</button>' +
         '</div>';
     }
   }
