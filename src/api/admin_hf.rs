@@ -161,9 +161,23 @@ pub async fn hf_search(
                 .and_then(|f| crate::model::huggingface::extract_quant_tag(&f.filename))
                 .unwrap_or_else(|| "unknown".into());
 
-            // fits_vram: check if smallest variant fits
-            let smallest_size = files.iter().map(|f| f.size_bytes).min().unwrap_or(u64::MAX);
-            let fits_vram = available_vram_bytes > 0 && smallest_size < available_vram_bytes;
+            // VRAM fit levels: full model, boomerang (first+last shard), single shard
+            let rec_size = recommended
+                .map(|f| f.size_bytes)
+                .unwrap_or(files.iter().map(|f| f.size_bytes).min().unwrap_or(u64::MAX));
+            // Estimate shard count from model size (heuristic: ~800MB per shard)
+            let est_shards = (rec_size / (800 * 1024 * 1024)).clamp(2, 16);
+            let est_shard_size = rec_size / est_shards;
+            // Boomerang: first shard (embedding + layers) + last shard (output + layers)
+            // First/last shards are ~20% larger than middle due to embedding/output weights
+            let est_boomerang_size = est_shard_size * 12 / 5; // ~2.4x one shard
+
+            let fits_full = available_vram_bytes > 0 && rec_size < available_vram_bytes;
+            let fits_boomerang =
+                available_vram_bytes > 0 && est_boomerang_size < available_vram_bytes;
+            let fits_shard = available_vram_bytes > 0 && est_shard_size < available_vram_bytes;
+            // Legacy field: true if any participation mode fits
+            let fits_vram = fits_full || fits_boomerang || fits_shard;
 
             // Network replication: count unique peers holding shards of any variant of this repo
             let network_replicas = {
@@ -198,6 +212,10 @@ pub async fn hf_search(
                 "variants": variants,
                 "recommended_variant": recommended_variant,
                 "fits_vram": fits_vram,
+                "fits_boomerang": fits_boomerang,
+                "fits_shard": fits_shard,
+                "est_shard_size": est_shard_size,
+                "est_boomerang_size": est_boomerang_size,
                 "network_replicas": network_replicas,
             })
         })

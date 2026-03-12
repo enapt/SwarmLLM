@@ -1669,11 +1669,16 @@ var SwarmLLM = (function() {
             variantOptions += '<option value="' + escapeHtml(v.filename) + '"' + selected + '>' + escapeHtml(label) + '</option>';
           });
 
+          // VRAM fit tags — tiered: shard (any participation), boomerang (request from this node), all shards
           var fitsTag = '';
-          if (repo.fits_vram === true) {
-            fitsTag = '<span style="color:var(--green)" title="Fits in your GPU VRAM">Fits VRAM</span>';
+          var shardSizeStr = repo.est_shard_size ? formatBytes(repo.est_shard_size) : '';
+          var boomerangSizeStr = repo.est_boomerang_size ? formatBytes(repo.est_boomerang_size) : '';
+          if (repo.fits_boomerang) {
+            fitsTag = '<span style="color:var(--green)" title="First+last shard fit VRAM (~' + boomerangSizeStr + ') — can run requests from this node via boomerang routing">&#9989; Run locally</span>';
+          } else if (repo.fits_shard) {
+            fitsTag = '<span style="color:var(--cyan)" title="Individual shards fit VRAM (~' + shardSizeStr + '/shard) — can participate in swarm inference for this model">&#128279; Can host shards</span>';
           } else if (repo.fits_vram === false && variants.length > 0) {
-            fitsTag = '<span style="color:var(--yellow)" title="Smallest variant may exceed your VRAM">Check VRAM</span>';
+            fitsTag = '<span style="color:var(--orange)" title="Even individual shards may exceed your available VRAM">&#9888; Exceeds VRAM</span>';
           }
 
           // Network replication & demand info
