@@ -335,8 +335,13 @@ async fn build_stats_message(
         .lan_peer_count
         .load(std::sync::atomic::Ordering::Relaxed);
 
+    // Use peer_registry.len() as authoritative peer count — DashMap never
+    // has contention issues, unlike node_stats.peers_connected which uses
+    // try_write() and can silently skip updates during connection bursts.
+    let peers_connected = state.peer_registry.len() as u32;
+
     let mut data = serde_json::json!({
-        "peers": stats.peers_connected,
+        "peers": peers_connected,
         "lan_peers": lan_peers,
         "credits": {
             "balance": credit.balance,

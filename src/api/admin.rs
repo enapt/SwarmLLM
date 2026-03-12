@@ -83,7 +83,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": uptime_seconds,
         "tier": tier,
-        "peers": stats.peers_connected,
+        "peers": state.shared_state.peer_registry.len(),
         "requests_served": stats.requests_served,
         "forwards_served": stats.forwards_served,
         "requests_made": stats.requests_made,

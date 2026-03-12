@@ -868,7 +868,7 @@ var SwarmLLM = (function() {
         } else if (isPartial) {
           statusHtml = '<span style="color:var(--orange);font-size:0.8rem">' + hostedShards + '/' + shardCount + ' local, ' + globalAvail + ' on network</span>';
         } else {
-          statusHtml = '<span class="text-muted" style="font-size:0.8rem">Discovered</span>';
+          statusHtml = '<span class="text-muted" style="font-size:0.8rem">Available on network</span>';
         }
 
         // Trust level badge
@@ -1028,7 +1028,7 @@ var SwarmLLM = (function() {
           // Cancel download button
           actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + escapeHtml(m.id) + '" title="Cancel download">&times;</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" data-request-model="' + escapeHtml(m.id) + '">Download Missing</button>';
+          actionHtml = '<button class="btn btn-sm" data-request-model="' + escapeHtml(m.id) + '">Download</button>';
         }
 
         // Remove model button (for models with local shards, not currently downloading)
@@ -2123,7 +2123,7 @@ var SwarmLLM = (function() {
         var data = await resp.json();
         setup.hwData = data.hardware || {};
         document.getElementById('hw-gpu').textContent = setup.hwData.gpu_name || 'No GPU (CPU mode)';
-        document.getElementById('hw-vram').textContent = setup.hwData.gpu_vram_mb ? setup.hwData.gpu_vram_mb + ' MB' : 'N/A';
+        document.getElementById('hw-vram').textContent = setup.hwData.gpu_vram_mb ? formatMB(setup.hwData.gpu_vram_mb) : 'N/A';
         document.getElementById('hw-ram').textContent = formatMB(setup.hwData.total_ram_mb || 0);
         document.getElementById('hw-disk').textContent = formatMB(setup.hwData.available_disk_mb || 0);
       } catch (e) {
