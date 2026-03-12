@@ -846,6 +846,9 @@ var SwarmLLM = (function() {
 
       // Update mode indicator on live stats changes
       updateModeIndicator(data, _cachedProviderData);
+
+      // Feed neural background
+      if (typeof NeuralBg !== 'undefined') NeuralBg.updateState(data);
     },
 
     renderModels: function(models, cloudModels) {
@@ -2336,6 +2339,7 @@ var SwarmLLM = (function() {
 
     ws.onopen = function() {
       wsHealthy = true;
+      if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(1.0);
       // Pause REST polling while WebSocket is delivering live updates
       pollTimers.forEach(function(t) { clearInterval(t); });
       pollTimers = [];
@@ -2391,6 +2395,7 @@ var SwarmLLM = (function() {
 
     ws.onclose = function() {
       wsHealthy = false;
+      if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(0.3);
       if (wsWasConnected) {
         showWsBanner('disconnected', 'Lost connection to SwarmLLM \u2014 reconnecting...');
       }
@@ -5095,6 +5100,9 @@ var SwarmLLM = (function() {
         });
       }
     }
+
+    // Initialize neural network background
+    if (typeof NeuralBg !== 'undefined') NeuralBg.init();
 
     dashboard.loadInitial();
     loadModels().then(function() { syncMobileModelSelect(); });
