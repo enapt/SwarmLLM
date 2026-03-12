@@ -113,6 +113,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/hf/download-shards",
             post(admin::hf_download_shards),
         )
+        // Rescan local shard files (hot-reload without restart)
+        .route("/api/admin/rescan-shards", post(admin::rescan_shards))
         // Network map (heatmap data)
         .route("/api/admin/network-map", get(admin::network_map))
         // Download management

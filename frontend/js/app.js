@@ -879,6 +879,7 @@ var SwarmLLM = (function() {
     },
 
     renderModels: function(models, cloudModels) {
+      window._lastModelsData = models || [];
       var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
 
@@ -1009,7 +1010,10 @@ var SwarmLLM = (function() {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
             var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
-            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
+            var isEndpoint = (s.index === 0 || s.index === shards.length - 1) && shards.length > 1;
+            var endpointClass = isEndpoint ? ' shard-endpoint' : '';
+            if (isEndpoint && m.encrypted_pipeline) endpointClass += ' shard-pinned';
+            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
@@ -1092,10 +1096,20 @@ var SwarmLLM = (function() {
           if (!basic) probedBadge = '<span class="badge-probed">Probed</span>';
         }
 
-        // Encrypted pipeline badge — shows lock icon when active
+        // Encrypted pipeline badge — always visible for distributed models
         var encBadge = '';
-        if (m.encrypted_pipeline) {
-          encBadge = '<span class="badge-encrypted" title="Encrypted pipeline: no remote node sees plaintext">&#128274;</span>';
+        if (!basic && m.shard_count > 1 && m.local) {
+          var encReady = m.has_first_shard && m.has_last_shard;
+          var encActive = m.encrypted_pipeline;
+          var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
+          var encTitle = encActive ? 'Encrypted pipeline active — click to disable' :
+            (encReady ? 'Encrypted pipeline available — click to enable' :
+              'Encrypted pipeline unavailable — need first + last shard');
+          var missingParts = [];
+          if (!m.has_first_shard) missingParts.push('first (shard 0)');
+          if (!m.has_last_shard) missingParts.push('last (shard ' + (m.shard_count - 1) + ')');
+          if (missingParts.length > 0) encTitle += '. Missing: ' + missingParts.join(', ');
+          encBadge = '<span class="' + encClass + '" data-enc-toggle="' + escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + escapeHtml(encTitle) + '">&#128274;</span>';
         }
 
         // Gear icon for per-model auto-manage settings — advanced only
@@ -3604,8 +3618,8 @@ var SwarmLLM = (function() {
     var encStatus = { encrypted_pipeline: false, ready: false, has_first_shard: false, has_last_shard: false, shard_count: 0 };
     try {
       var [amResp, encResp] = await Promise.all([
-        fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage'),
-        fetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline'),
+        authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage'),
+        authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline'),
       ]);
       if (amResp.ok) policy = await amResp.json();
       if (encResp.ok) encStatus = await encResp.json();
@@ -4687,6 +4701,57 @@ var SwarmLLM = (function() {
       if (dlLogToggle) {
         var logEl = document.querySelector('[data-dl-log="' + dlLogToggle + '"]');
         if (logEl) logEl.classList.toggle('open');
+        return;
+      }
+
+      // Encrypted pipeline lock badge click
+      var encToggle = target.getAttribute('data-enc-toggle') || (target.closest('[data-enc-toggle]') || {}).getAttribute && (target.closest('[data-enc-toggle]') || {}).getAttribute('data-enc-toggle');
+      if (encToggle) {
+        var encReady = (target.getAttribute('data-enc-ready') || (target.closest('[data-enc-ready]') || {}).getAttribute && (target.closest('[data-enc-ready]') || {}).getAttribute('data-enc-ready')) === '1';
+        if (encReady) {
+          // Toggle encrypted pipeline
+          var isActive = target.classList.contains('active') || (target.closest('.active') != null);
+          authFetch('/api/admin/models/' + encodeURIComponent(encToggle) + '/encrypted-pipeline', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: !isActive }),
+          }).then(function(r) {
+            if (r.ok) {
+              ui.showBanner('success', (!isActive ? 'Encrypted pipeline enabled' : 'Encrypted pipeline disabled') + ' for ' + encToggle);
+              refreshModels();
+            } else {
+              ui.showBanner('error', 'Failed to toggle encrypted pipeline');
+            }
+          });
+        } else {
+          // Not ready — offer to download missing shards
+          if (confirm('Encrypted pipeline requires first + last shard on this node.\n\nDownload missing shards from HuggingFace?')) {
+            authFetch('/api/admin/hf/source/' + encodeURIComponent(encToggle)).then(function(r) {
+              if (!r.ok) { ui.showBanner('error', 'No HuggingFace source found for ' + encToggle); return; }
+              return r.json();
+            }).then(function(src) {
+              if (!src) return;
+              // Find which endpoint shards are missing
+              var modelData = (window._lastModelsData || []).find(function(mm) { return mm.id === encToggle; });
+              var missing = [];
+              if (modelData) {
+                var first = modelData.shards[0];
+                var last = modelData.shards[modelData.shards.length - 1];
+                if (first && !first.local) missing.push(first.index);
+                if (last && !last.local) missing.push(last.index);
+              }
+              if (missing.length === 0) { ui.showBanner('info', 'No missing endpoint shards detected'); return; }
+              authFetch('/api/admin/hf/download-shards', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: missing }),
+              }).then(function(r) {
+                if (r.ok) ui.showBanner('success', 'Downloading shard(s) ' + missing.join(', ') + ' for encrypted pipeline');
+                else ui.showBanner('error', 'Download failed');
+              });
+            });
+          }
+        }
         return;
       }
 

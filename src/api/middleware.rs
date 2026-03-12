@@ -287,6 +287,7 @@ fn is_exempt_request(path: &str, method: &Method, is_loopback: bool) -> bool {
                 | "/api/admin/schedule"
         ) || path.starts_with("/api/admin/hf/source/")
             || (path.starts_with("/api/admin/models/") && path.ends_with("/auto-manage"))
+            || (path.starts_with("/api/admin/models/") && path.ends_with("/encrypted-pipeline"))
             || path.starts_with("/api/identity/")
             || path.starts_with("/api/pool/");
     }

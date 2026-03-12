@@ -450,6 +450,23 @@ fn query_gpu_vram_used() -> Option<u64> {
 
 /// GET /api/admin/network-map — Aggregated region data for the world heatmap.
 ///
+/// POST /api/admin/rescan-shards — Scan the models directory for new shard files.
+///
+/// Discovers shard files that were added to disk since the last scan (e.g. by
+/// manual copy), registers them in the model registry, reloads affected models,
+/// and re-announces shards to the network. No restart needed.
+pub async fn rescan_shards(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let network_tx = state.network_tx.clone();
+    let changed =
+        crate::model::auto_manage::rescan_local_shards(&state.shared_state, network_tx.as_ref())
+            .await;
+    Json(serde_json::json!({
+        "status": "ok",
+        "models_updated": changed.iter().map(|m| &m.0).collect::<Vec<_>>(),
+        "count": changed.len(),
+    }))
+}
+
 /// Returns `{ regions: { "US": { total: N, models: { "model-id": count } }, ... } }`
 /// based on self-reported region in peer capabilities.
 pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Value> {

@@ -109,9 +109,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     };
 
     // Helper: check encrypted pipeline status for a model.
-    // Returns true only if the flag is enabled AND the local node holds both
-    // first (shard 0) and last shard — otherwise the boomerang topology can't work.
-    let is_encrypted_pipeline = |model_id: &str| -> bool {
+    // Returns (effective_flag, has_first_shard, has_last_shard).
+    // effective_flag is true only when the DB flag is set AND node holds first+last.
+    let encrypted_pipeline_info = |model_id: &str| -> (bool, bool, bool) {
         let mid = crate::types::ModelId(model_id.to_string());
         let flag = state
             .shared_state
@@ -119,10 +119,6 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .get(&mid)
             .map(|r| *r.value())
             .unwrap_or(state.shared_state.config.inference.encrypted_pipeline);
-        if !flag {
-            return false;
-        }
-        // Verify local node actually has both first and last shards
         let local_node_id = state.shared_state.identity.node_id();
         let has_first = state
             .shared_state
@@ -132,10 +128,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 index: 0,
             })
             .contains(local_node_id);
-        if !has_first {
-            return false;
-        }
-        if let Some(manifest) = state.shared_state.model_registry.get_manifest(&mid) {
+        let has_last = if let Some(manifest) = state.shared_state.model_registry.get_manifest(&mid)
+        {
             let last_idx = manifest.shard_count.saturating_sub(1);
             state
                 .shared_state
@@ -147,7 +141,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 .contains(local_node_id)
         } else {
             false
-        }
+        };
+        let effective = flag && has_first && has_last;
+        (effective, has_first, has_last)
     };
 
     // 1. Locally loaded model (full model via --model flag)
@@ -313,7 +309,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "probed": probed,
                 "mmproj": mmproj_info,
                 "trust_level": trust_level,
-                "encrypted_pipeline": is_encrypted_pipeline(&model_id),
+                "encrypted_pipeline": encrypted_pipeline_info(&model_id).0,
+                "has_first_shard": encrypted_pipeline_info(&model_id).1,
+                "has_last_shard": encrypted_pipeline_info(&model_id).2,
             }));
         } // else: stale loaded model, files deleted
     }
@@ -474,7 +472,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "acquisition_progress": acq_progress,
             "mmproj": mmproj_info_reg,
             "trust_level": trust_level,
-            "encrypted_pipeline": is_encrypted_pipeline(&m.id.0),
+            "encrypted_pipeline": encrypted_pipeline_info(&m.id.0).0,
+                "has_first_shard": encrypted_pipeline_info(&m.id.0).1,
+                "has_last_shard": encrypted_pipeline_info(&m.id.0).2,
         }));
     }
 
@@ -504,7 +504,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "peers_hosting": peers.len(),
             "shards": [],
             "trust_level": trust_level,
-            "encrypted_pipeline": is_encrypted_pipeline(model_name),
+            "encrypted_pipeline": encrypted_pipeline_info(model_name).0,
+                "has_first_shard": encrypted_pipeline_info(model_name).1,
+                "has_last_shard": encrypted_pipeline_info(model_name).2,
         }));
     }
 

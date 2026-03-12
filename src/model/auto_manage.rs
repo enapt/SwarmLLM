@@ -187,6 +187,18 @@ impl AutoShardManager {
                     }
                 }
                 _ = interval.tick() => {
+                    // Always rescan for new shard files on disk (even if auto-manage disabled)
+                    let changed = rescan_local_shards(
+                        &self.shared_state,
+                        Some(&self.network_tx),
+                    ).await;
+                    if !changed.is_empty() {
+                        tracing::info!(
+                            models = ?changed.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(),
+                            "Rescan discovered new local shards"
+                        );
+                    }
+
                     // Re-check enabled — admin API can toggle at runtime
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate_and_download().await;
@@ -2199,6 +2211,157 @@ pub fn compute_vram_budget(shared: &crate::daemon::SharedState) -> Option<u64> {
         .map(|g| g.vram_total_mb)
         .unwrap_or(0);
     shared.config.resources.inference_vram_budget_mb(gpu_total)
+}
+
+/// Scan the local models directory for shard files that exist on disk but are
+/// not yet registered in the model registry. For any newly discovered shards,
+/// register the local node as a holder, re-announce to the network, and trigger
+/// model (re)loading so the node can use the new shards without a restart.
+///
+/// Returns the list of model IDs that had new shards discovered.
+pub async fn rescan_local_shards(
+    shared: &Arc<crate::daemon::SharedState>,
+    network_tx: Option<&mpsc::Sender<NetworkCommand>>,
+) -> Vec<ModelId> {
+    let models_dir = shared.config.node.data_dir.join("models");
+    if !models_dir.is_dir() {
+        return vec![];
+    }
+
+    let local_node_id = shared.identity.node_id().clone();
+    let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+    let mut changed_models = Vec::new();
+
+    let entries = match std::fs::read_dir(&models_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let model_id_str = entry.file_name().to_string_lossy().to_string();
+        let model_id = ModelId(model_id_str.clone());
+
+        let manifest = match shared.model_registry.get_manifest(&model_id) {
+            Some(m) => m,
+            None => continue, // No manifest = can't register shards
+        };
+
+        let mut new_shards = 0u32;
+        for shard_info in &manifest.shards {
+            let shard_id = ShardId {
+                model_id: model_id.clone(),
+                index: shard_info.index,
+            };
+
+            // Already registered?
+            if shared
+                .model_registry
+                .shard_holders(&shard_id)
+                .contains(&local_node_id)
+            {
+                continue;
+            }
+
+            // Check if file exists on disk with reasonable size
+            let path = shard_store.shard_path(&model_id, shard_info.index);
+            if !path.exists() {
+                continue;
+            }
+            let size_ok = std::fs::metadata(&path)
+                .map(|m| m.len() >= shard_info.size_bytes * 9 / 10)
+                .unwrap_or(false);
+            if !size_ok {
+                continue;
+            }
+
+            // Verify shard hash
+            if shard_info.hash.len() == 32 {
+                if let Err(e) = shard_store.verify_shard(&model_id, shard_info) {
+                    tracing::warn!(
+                        model = %model_id_str,
+                        shard = shard_info.index,
+                        error = %e,
+                        "Rescan: shard verification failed, skipping"
+                    );
+                    continue;
+                }
+            }
+
+            // Register as holder
+            shared
+                .model_registry
+                .record_shard_holder(shard_id, local_node_id.clone());
+            new_shards += 1;
+
+            tracing::info!(
+                model = %model_id_str,
+                shard = shard_info.index,
+                "Rescan: discovered new local shard"
+            );
+        }
+
+        if new_shards > 0 {
+            changed_models.push(model_id.clone());
+            tracing::info!(
+                model = %model_id_str,
+                new_shards,
+                "Rescan: registered new local shards"
+            );
+        }
+    }
+
+    // For models with new shards: reload the model and re-announce
+    if !changed_models.is_empty() {
+        let vram_budget = compute_vram_budget(shared);
+        for model_id in &changed_models {
+            // Evict old model segments so they reload with updated layer ranges
+            let keys_to_remove: Vec<_> = shared
+                .split_models
+                .iter()
+                .filter(|e| e.key().0 == *model_id)
+                .map(|e| e.key().clone())
+                .collect();
+            for key in keys_to_remove {
+                shared.split_models.remove(&key);
+                tracing::info!(
+                    model = %model_id,
+                    range = format!("[{}..{})", key.1, key.2),
+                    "Rescan: evicted old model segment for reload"
+                );
+            }
+
+            check_and_load_model(shared, model_id, vram_budget).await;
+        }
+
+        // Re-announce shards to the network
+        if let Some(tx) = network_tx {
+            let local_node_id = shared.identity.node_id().clone();
+            let mut hosted_shards = Vec::new();
+            for entry in shared.model_registry.all_shard_entries() {
+                let (shard_id, holders) = entry;
+                if holders.contains(&local_node_id) {
+                    hosted_shards.push(shard_id);
+                }
+            }
+            if !hosted_shards.is_empty() {
+                let announce = crate::types::ShardAnnounce {
+                    node_id: local_node_id,
+                    shards: hosted_shards,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = tx
+                    .send(NetworkCommand::Broadcast(
+                        crate::types::SwarmMessage::ShardAnnounce(announce),
+                    ))
+                    .await;
+            }
+        }
+    }
+
+    changed_models
 }
 
 /// Load whatever local shards are available for inference.

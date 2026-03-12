@@ -1701,8 +1701,51 @@ kbd {
   font-size: 0.75rem;
   margin-left: 4px;
   vertical-align: middle;
-  opacity: 0.9;
-  cursor: help;
+  cursor: pointer;
+  transition: opacity 0.2s, filter 0.2s, transform 0.15s;
+}
+.badge-encrypted.active {
+  opacity: 1;
+  filter: drop-shadow(0 0 4px var(--green));
+}
+.badge-encrypted.ready {
+  opacity: 0.5;
+}
+.badge-encrypted.ready:hover {
+  opacity: 0.8;
+  transform: scale(1.2);
+}
+.badge-encrypted.faded {
+  opacity: 0.25;
+  filter: grayscale(1);
+}
+.badge-encrypted.faded:hover {
+  opacity: 0.5;
+  filter: none;
+  transform: scale(1.2);
+}
+
+/* Endpoint shard highlighting (first + last for encrypted pipeline) */
+.shard-cell.shard-endpoint {
+  box-shadow: 0 0 0 1.5px var(--yellow, #f0c040) inset;
+}
+.shard-cell.shard-endpoint.missing {
+  animation: pulse-endpoint 1.5s ease-in-out infinite;
+}
+.shard-cell.shard-pinned {
+  box-shadow: 0 0 0 1.5px var(--green) inset;
+}
+.shard-cell.shard-pinned::before {
+  content: '\uD83D\uDD12';
+  position: absolute;
+  font-size: 0.45rem;
+  top: -1px;
+  right: 0px;
+  opacity: 0.7;
+}
+@keyframes pulse-endpoint {
+  0%, 100% { box-shadow: 0 0 0 1.5px var(--yellow, #f0c040) inset; }
+  50% { box-shadow: 0 0 6px 1px var(--yellow, #f0c040) inset; }
 }
 
 /* ---- Auto-manage gear button ---- */
