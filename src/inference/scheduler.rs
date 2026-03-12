@@ -112,7 +112,13 @@ impl PipelineScheduler {
         let standbys = self.find_standbys(&segments, &candidates);
 
         // Detect tensor-parallel opportunities: LAN peers sharing the same layer range.
-        let tp_groups = self.detect_tp_groups(&segments, &candidates, &manifest);
+        // Skip TP when encrypted pipeline is active — no remote node should process
+        // tensor data in encrypted mode (defeats the purpose of local-only embedding/sampling).
+        let tp_groups = if encrypted {
+            vec![]
+        } else {
+            self.detect_tp_groups(&segments, &candidates, &manifest)
+        };
 
         tracing::info!(
             request_id = %request_id,
@@ -379,22 +385,64 @@ impl PipelineScheduler {
                     if !local_last.is_empty() {
                         options = local_last;
                     } else {
-                        // Local node can't finish — let a non-finishing candidate take
-                        // the middle layers so the local node can finish later.
-                        let not_reaching_end: Vec<_> = options
-                            .iter()
-                            .filter(|(_, r)| r.1 < num_layers)
-                            .cloned()
-                            .collect();
-                        if !not_reaching_end.is_empty() {
-                            options = not_reaching_end;
+                        // Local node can't finish from this layer, but may have a later
+                        // range that reaches the end (A→B→A bounce-back).
+                        // Check if the local node has ANY range that finishes the model.
+                        let local_can_finish_later = candidates.iter().any(|c| {
+                            c.node_id == *local_node_id
+                                && c.can_be_last
+                                && c.available_ranges.iter().any(|r| r.1 >= num_layers)
+                        });
+                        if local_can_finish_later {
+                            // Find where the local node's finishing range starts, and cap
+                            // remote nodes to stop before that so A can take over.
+                            let local_finish_start = candidates
+                                .iter()
+                                .filter(|c| c.node_id == *local_node_id)
+                                .flat_map(|c| c.available_ranges.iter())
+                                .filter(|r| r.1 >= num_layers)
+                                .map(|r| r.0)
+                                .min()
+                                .unwrap_or(num_layers);
+                            // Cap all remote options to end before the local finishing range
+                            let capped: Vec<_> = options
+                                .iter()
+                                .map(|(c, r)| {
+                                    if c.node_id != *local_node_id && r.1 > local_finish_start {
+                                        (*c, (r.0, local_finish_start))
+                                    } else {
+                                        (*c, *r)
+                                    }
+                                })
+                                .filter(|(_, r)| r.1 > r.0) // drop zero-width ranges
+                                .collect();
+                            if !capped.is_empty() {
+                                options = capped;
+                            } else {
+                                return Err(SwarmError::PipelineError(
+                                    "Encrypted pipeline requires the requesting node to hold \
+                                     the final shard (output head). Download the last shard \
+                                     to enable this mode."
+                                        .to_string(),
+                                ));
+                            }
                         } else {
-                            return Err(SwarmError::PipelineError(
-                                "Encrypted pipeline requires the requesting node to hold \
-                                 the final shard (output head). Download the last shard \
-                                 to enable this mode."
-                                    .to_string(),
-                            ));
+                            // Local node truly can't finish — no range reaches the end
+                            let not_reaching_end: Vec<_> = options
+                                .iter()
+                                .filter(|(_, r)| r.1 < num_layers)
+                                .cloned()
+                                .collect();
+                            if !not_reaching_end.is_empty() {
+                                options = not_reaching_end;
+                            } else {
+                                return Err(SwarmError::PipelineError(
+                                    "Encrypted pipeline requires the requesting node to hold \
+                                     the final shard (output head). Download the last shard \
+                                     to enable this mode."
+                                        .to_string(),
+                                ));
+                            }
                         }
                     }
                 } else {

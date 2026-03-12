@@ -918,7 +918,7 @@ impl PipelineExecutor {
 
         // For streaming: use already-decoded text. For non-streaming: use accumulated_text
         // (which has stop strings already trimmed), falling back to full decode.
-        let generated_text = if let Some(text) = streamed_text {
+        let mut generated_text = if let Some(text) = streamed_text {
             text
         } else if !accumulated_text.is_empty() {
             accumulated_text
@@ -928,6 +928,19 @@ impl PipelineExecutor {
                 None => self.decode_tokens(&clean_tokens).await,
             }
         };
+
+        // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
+        // The token-by-token check above only catches complete matches, so a partial
+        // stop string at the very end of generation can leak into the output.
+        for stop in &stop_strings {
+            for end_len in (1..stop.len()).rev() {
+                let prefix = &stop[..end_len];
+                if generated_text.ends_with(prefix) {
+                    generated_text.truncate(generated_text.len() - end_len);
+                    break;
+                }
+            }
+        }
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
         // The CreditLedger task also persists periodically, so this is durable enough.

@@ -322,6 +322,63 @@ impl InferenceRouter {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // Validate model exists (check registry, split_models, and loaded model)
+        {
+            let has_manifest = self
+                .shared_state
+                .model_registry
+                .get_manifest(&adjusted_request.model_id)
+                .is_some();
+            let has_split = self
+                .shared_state
+                .split_models
+                .iter()
+                .any(|e| e.key().0 == adjusted_request.model_id);
+            let has_loaded = {
+                let model_loaded = self
+                    .shared_state
+                    .model_loaded
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if model_loaded {
+                    // Check if the loaded model matches the requested model
+                    if let Ok(info) = self.shared_state.loaded_model_info.try_read() {
+                        info.as_ref()
+                            .map(|i| i.name == adjusted_request.model_id.0)
+                            .unwrap_or(false)
+                    } else {
+                        true // Can't read, assume ok
+                    }
+                } else {
+                    false
+                }
+            };
+            if !has_manifest && !has_split && !has_loaded {
+                let available: Vec<String> = self
+                    .shared_state
+                    .model_registry
+                    .models()
+                    .iter()
+                    .map(|m| m.id.0.clone())
+                    .collect();
+                let msg = if available.is_empty() {
+                    format!(
+                        "Model '{}' not found. No models are available — download shards first.",
+                        adjusted_request.model_id.0
+                    )
+                } else {
+                    format!(
+                        "Model '{}' not found. Available models: {}",
+                        adjusted_request.model_id.0,
+                        available.join(", ")
+                    )
+                };
+                let _ = result_tx.send(Err(crate::error::SwarmError::ModelNotAvailable(
+                    crate::types::ModelId(msg),
+                )));
+                return;
+            }
+        }
+
         // Reject when queue is full to prevent memory exhaustion from request flooding.
         // max_concurrent gates execution slots; this caps the waiting queue depth.
         const MAX_QUEUE_DEPTH: usize = 512;
@@ -938,16 +995,37 @@ async fn execute_local_batch(
                 "Executing inference locally (batched)"
             );
 
+            // Extract chat-template stop strings (e.g. "<|user|>", "<|im_end|>")
+            let local_stop_strings = {
+                let info = shared_state.loaded_model_info.read().await;
+                let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
+                chat_template::extract_stop_strings(tmpl)
+            };
+
             // Use streaming generation if the request has a token channel
             if let Some(ref tx) = token_tx {
                 let tx_clone = tx.clone();
                 let session_id = request.session_id.clone();
                 let mut accumulated = String::new();
+                let stop_strings_clone = local_stop_strings.clone();
+                let mut hit_stop = false;
                 match executor.generate_stream(
                     &prompt,
                     &request.sampling_params,
                     |token: &str| -> bool {
                         accumulated.push_str(token);
+                        // Check for chat template stop strings
+                        if let Some(stop) = stop_strings_clone
+                            .iter()
+                            .find(|s| accumulated.contains(s.as_str()))
+                        {
+                            // Truncate accumulated text at the stop string
+                            if let Some(pos) = accumulated.find(stop.as_str()) {
+                                accumulated.truncate(pos);
+                            }
+                            hit_stop = true;
+                            return false; // Signal to stop generation
+                        }
                         let event = StreamingTokenEvent {
                             text: token.to_string(),
                             finish_reason: None,
@@ -956,10 +1034,15 @@ async fn execute_local_batch(
                     },
                 ) {
                     Ok(gen_result) => {
+                        let finish = if hit_stop {
+                            "stop".to_string()
+                        } else {
+                            gen_result.finish_reason.as_str().to_string()
+                        };
                         // Send final done event
                         let done_event = StreamingTokenEvent {
                             text: String::new(),
-                            finish_reason: Some(gen_result.finish_reason.as_str().to_string()),
+                            finish_reason: Some(finish.clone()),
                         };
                         let _ = tx.try_send(done_event);
                         Ok(InferenceOutput {
@@ -967,7 +1050,7 @@ async fn execute_local_batch(
                             content: accumulated,
                             prompt_tokens: gen_result.prompt_tokens,
                             completion_tokens: gen_result.completion_tokens,
-                            finish_reason: gen_result.finish_reason.as_str().to_string(),
+                            finish_reason: finish,
                             session_id,
                             token_logprobs: vec![],
                         })
@@ -976,15 +1059,36 @@ async fn execute_local_batch(
                 }
             } else {
                 match executor.generate(&prompt, &request.sampling_params) {
-                    Ok((content, gen_result)) => Ok(InferenceOutput {
-                        request_id: request.id,
-                        content,
-                        prompt_tokens: gen_result.prompt_tokens,
-                        completion_tokens: gen_result.completion_tokens,
-                        finish_reason: gen_result.finish_reason.as_str().to_string(),
-                        session_id: request.session_id.clone(),
-                        token_logprobs: vec![],
-                    }),
+                    Ok((mut content, gen_result)) => {
+                        // Check for chat template stop strings in generated content
+                        let mut finish = gen_result.finish_reason.as_str().to_string();
+                        for stop in &local_stop_strings {
+                            if let Some(pos) = content.find(stop.as_str()) {
+                                content.truncate(pos);
+                                finish = "stop".to_string();
+                                break;
+                            }
+                        }
+                        // Strip trailing partial stop strings
+                        for stop in &local_stop_strings {
+                            for end_len in (1..stop.len()).rev() {
+                                let prefix = &stop[..end_len];
+                                if content.ends_with(prefix) {
+                                    content.truncate(content.len() - end_len);
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(InferenceOutput {
+                            request_id: request.id,
+                            content,
+                            prompt_tokens: gen_result.prompt_tokens,
+                            completion_tokens: gen_result.completion_tokens,
+                            finish_reason: finish,
+                            session_id: request.session_id.clone(),
+                            token_logprobs: vec![],
+                        })
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -1227,6 +1331,29 @@ async fn execute_request(
     }
 
     // Distributed inference path: assemble pipeline across nodes
+    // Check if the requested model exists in the registry before attempting pipeline assembly.
+    // This gives a clearer error than "No model loaded" when the model name is wrong.
+    {
+        let has_manifest = shared_state.model_registry.get_manifest(model_id).is_some();
+        let has_split = shared_state
+            .split_models
+            .iter()
+            .any(|e| e.key().0 == *model_id);
+        if !has_manifest && !has_split {
+            return Err(SwarmError::PipelineError(format!(
+                "Model '{}' not found. Available models: {}",
+                model_id.0,
+                shared_state
+                    .model_registry
+                    .models()
+                    .iter()
+                    .map(|m| m.id.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+
     let schedule_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request.id,

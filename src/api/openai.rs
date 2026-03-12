@@ -608,6 +608,14 @@ pub async fn chat_completions(
         )));
     }
 
+    // Validate temperature range — OpenAI API spec: 0.0..2.0
+    if req.temperature < 0.0 || req.temperature > 2.0 {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "temperature must be between 0 and 2, got {}",
+            req.temperature
+        ))));
+    }
+
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
@@ -877,6 +885,38 @@ pub async fn chat_completions(
                 crate::api::providers::try_proxy_openai(&state, &body, req.stream).await?
             {
                 return Ok(response);
+            }
+        }
+
+        // Fast-reject: if the model has no manifest but other models ARE registered,
+        // the user likely mistyped. Return ModelNotAvailable immediately instead of
+        // wasting 10 seconds on cold-start polling. When NO models are registered,
+        // fall through to the cold-start wait (node may still be starting up).
+        {
+            let model_id = crate::types::ModelId(req.model.clone());
+            let has_manifest = state
+                .shared_state
+                .model_registry
+                .get_manifest(&model_id)
+                .is_some();
+            if !has_manifest {
+                let available: Vec<String> = state
+                    .shared_state
+                    .model_registry
+                    .models()
+                    .iter()
+                    .map(|m| m.id.0.clone())
+                    .collect();
+                if !available.is_empty() {
+                    let msg = format!(
+                        "Model '{}' not found. Available models: {}",
+                        req.model,
+                        available.join(", ")
+                    );
+                    return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(
+                        crate::types::ModelId(msg),
+                    )));
+                }
             }
         }
 
@@ -1813,6 +1853,7 @@ async fn split_non_stream_response(
     let mut next_token = sample_token(&logits, params.temperature, params.top_p)?;
 
     let eos = model.eos_tokens().to_vec();
+    let stop_strings = chat_template::extract_stop_strings(model.chat_template());
     tracing::debug!(
         request_id = %request_id,
         first_token = next_token,
@@ -1823,12 +1864,47 @@ async fn split_non_stream_response(
     );
     let mut generated: Vec<u32> = Vec::new();
     let mut index_pos = prompt_tokens;
+    let mut hit_stop_string = false;
 
     for _ in 0..params.max_tokens {
         if eos.contains(&next_token) {
             break;
         }
         generated.push(next_token);
+
+        // Check for chat template stop strings in decoded text so far
+        if !stop_strings.is_empty() {
+            let text_so_far = decode_split_tokens(&model, &generated);
+            if let Some(stop) = stop_strings
+                .iter()
+                .find(|s| text_so_far.contains(s.as_str()))
+            {
+                // Truncate generated tokens to before the stop string
+                if let Some(pos) = text_so_far.find(stop.as_str()) {
+                    // Re-tokenize the truncated text to find the right token count
+                    // Simpler: just mark and truncate after the loop
+                    let truncated = &text_so_far[..pos];
+                    // Find how many tokens produce text up to `pos`
+                    let mut token_count = 0;
+                    let mut acc = String::new();
+                    for (i, &_tid) in generated.iter().enumerate() {
+                        acc = decode_split_tokens(&model, &generated[..=i]);
+                        if acc.len() >= truncated.len() {
+                            token_count = i + 1;
+                            break;
+                        }
+                    }
+                    if token_count > 0 && acc.len() > truncated.len() {
+                        // Last token pushed past the stop — drop it
+                        generated.truncate(token_count.saturating_sub(1));
+                    } else {
+                        generated.truncate(token_count);
+                    }
+                }
+                hit_stop_string = true;
+                break;
+            }
+        }
 
         // Create single-token tensor — forward() handles embedding
         let input = model.token_tensor(next_token)?;
@@ -1839,14 +1915,27 @@ async fn split_non_stream_response(
         index_pos += 1;
     }
 
-    let finish_reason = if eos.contains(&next_token) {
+    let finish_reason = if hit_stop_string || eos.contains(&next_token) {
         "stop"
     } else {
         "length"
     };
 
     // Decode tokens using BPE tokenizer for proper byte handling
-    let content = decode_split_tokens(&model, &generated);
+    let mut content = decode_split_tokens(&model, &generated);
+    // Final cleanup: strip trailing partial stop strings and full stop strings
+    for stop in &stop_strings {
+        if let Some(pos) = content.find(stop.as_str()) {
+            content.truncate(pos);
+        }
+        for end_len in (1..stop.len()).rev() {
+            let prefix = &stop[..end_len];
+            if content.ends_with(prefix) {
+                content.truncate(content.len() - end_len);
+                break;
+            }
+        }
+    }
 
     let response = ChatCompletionResponse {
         id: request_id,
@@ -1974,9 +2063,11 @@ async fn split_stream_response(
         };
 
         let eos = model.eos_tokens().to_vec();
+        let stop_strings = chat_template::extract_stop_strings(model.chat_template());
         let mut index_pos = prompt_tokens;
         let mut finish = "length".to_string();
         let decode_start = std::time::Instant::now();
+        let mut accumulated_text = String::new();
 
         for _ in 0..params.max_tokens {
             if eos.contains(&next_token) {
@@ -1988,6 +2079,16 @@ async fn split_stream_response(
 
             // Decode and stream token
             let text = decode_split_tokens(&model, &[next_token]);
+            accumulated_text.push_str(&text);
+
+            // Check for chat template stop strings
+            if let Some(_stop) = stop_strings
+                .iter()
+                .find(|s| accumulated_text.contains(s.as_str()))
+            {
+                finish = "stop".to_string();
+                break;
+            }
 
             if tx
                 .send(StreamEvent::Delta {
