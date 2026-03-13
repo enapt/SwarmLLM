@@ -1559,11 +1559,12 @@ kbd {
 }
 .world-svg .map-region {
   cursor: pointer;
-  transition: fill 0.3s, filter 0.3s;
+  transition: fill 0.3s, stroke 0.3s, stroke-width 0.3s;
 }
 .world-svg .map-region:hover {
-  stroke: var(--accent);
-  stroke-width: 1.5;
+  stroke: rgba(100,200,255,0.9);
+  stroke-width: 2;
+  fill: rgba(59,130,246,0.15);
 }
 .world-svg .map-node-dot {
   pointer-events: none;
@@ -2127,9 +2128,8 @@ kbd {
 .provider-key-wrap { position: relative; }
 .provider-key-wrap input { padding-right: 50px; }
 
-/* #19: Network map empty regions */
+/* #19: Network map regions */
 .map-region { stroke-dasharray: none; }
-.map-region[style*="var(--bg-tertiary)"] { stroke: var(--border-light); stroke-width: 0.8; }
 
 /* #30: Collapsed panels — merged into main collapsible panels block above */
 
