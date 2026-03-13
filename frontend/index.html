@@ -248,7 +248,7 @@
         <div class="mt-2" style="font-size:0.8rem">
           <span class="text-muted">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">.env</code> file in your data directory (e.g. <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">OPENAI_API_KEY=sk-...</code>).</span>
         </div>
-        <div class="mt-2 adv-only" style="margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div class="mt-2" style="margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
           <label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px">Key source:
             <select id="provider-key-source" style="font-size:0.78rem;padding:3px 6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
               <option value="auto">Auto (dashboard, then .env)</option>
@@ -369,7 +369,7 @@
           </div>
         </div>
       </details>
-      <details class="settings-advanced adv-only">
+      <details class="settings-advanced">
         <summary>Advanced Settings</summary>
         <div class="mt-2">
           <div class="form-group">
@@ -464,7 +464,6 @@
         <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
-      <button class="btn btn-ghost btn-sm mode-toggle" id="btn-mode-toggle" title="Switch between Basic and Advanced view">Basic</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" title="Node ID">...</span>
@@ -491,6 +490,7 @@
 
     <!-- Content area -->
     <main class="content">
+      <canvas id="neural-bg"></canvas>
       <!-- Chat view -->
       <div class="view" id="view-chat" style="display:none">
         <div class="mobile-model-bar">
@@ -527,16 +527,17 @@
 
       <!-- Dashboard view -->
       <div class="view" id="view-dashboard">
-        <canvas id="neural-bg"></canvas>
         <div class="container">
           <!-- Status banner -->
           <div id="status-banner"></div>
 
           <!-- Operation mode indicator -->
           <div class="mode-indicator mb-2" id="mode-indicator">
-            <div class="mode-dot offline" id="mode-dot"></div>
-            <span class="mode-label" id="mode-label">Initializing...</span>
-            <span class="text-muted" id="mode-detail"></span>
+            <div class="mode-left">
+              <div class="mode-dot offline" id="mode-dot"></div>
+              <span class="mode-label" id="mode-label">INITIALIZING</span>
+            </div>
+            <div class="mode-detail" id="mode-detail"></div>
           </div>
 
           <!-- Stat strip — compact single row -->
@@ -545,7 +546,7 @@
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-peers">0</div>
-                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge adv-only" id="lan-peer-badge" style="display:none">0 LAN</span></div>
+                <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
               </div>
             </div>
             <div class="stat-card" title="Credits earned by helping others run AI">
@@ -569,7 +570,7 @@
                 <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for others (earns credits)">?</span></div>
               </div>
             </div>
-            <div class="stat-card adv-only" title="Layer forward passes processed — earns credits">
+            <div class="stat-card" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-forwards">0</div>
@@ -634,7 +635,7 @@
               </div>
               <div class="vram-bar-container" style="margin:6px 0 4px">
                 <div class="progress-bar" style="height:10px"><div class="fill cyan" id="vram-bar" style="width:0%"></div></div>
-                <div id="vram-breakdown" class="vram-breakdown adv-only"></div>
+                <div id="vram-breakdown" class="vram-breakdown"></div>
               </div>
               <div class="node-hw-row">
                 <span class="node-hw-label">RAM</span>
@@ -646,7 +647,7 @@
                 <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
                 <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
               </div>
-              <div class="node-hw-row adv-only" style="margin-top:2px">
+              <div class="node-hw-row" style="margin-top:2px">
                 <span class="node-hw-label">Shards</span>
                 <span class="mono node-hw-value" id="hosted-shards">0</span>
               </div>
@@ -669,7 +670,7 @@
                   <div class="mono text-red" style="font-size:1rem;font-weight:600" id="credit-spent">-0</div>
                 </div>
               </div>
-              <div class="mt-1 adv-only">
+              <div class="mt-1">
                 <div class="sparkline" id="credit-sparkline"></div>
               </div>
             </div>
@@ -682,8 +683,12 @@
               <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
             </div>
             <div id="models-container">
+              <div id="models-loading">
+                <div class="skeleton-card"><div class="skeleton-line skeleton-line-title"></div><div class="skeleton-line skeleton-line-meta"></div><div class="skeleton-line skeleton-line-short"></div></div>
+                <div class="skeleton-card"><div class="skeleton-line skeleton-line-title"></div><div class="skeleton-line skeleton-line-meta"></div><div class="skeleton-line skeleton-line-short"></div></div>
+              </div>
               <div id="models-list"></div>
-              <div class="empty-state" id="models-empty">
+              <div class="empty-state" id="models-empty" style="display:none">
                 <div class="empty-icon">&#128229;</div>
                 <p>No models yet. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download one, or add a cloud provider in Settings.</p>
               </div>
@@ -706,19 +711,22 @@
           <div class="panel mt-2">
             <div class="panel-header" data-collapse="network-body">
               <h2>Network</h2>
+              <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
             </div>
             <div class="panel-body" id="network-body">
-              <div class="form-group">
-                <label>Connected Peers</label>
-                <div id="peers-list">
-                  <div class="text-muted" style="font-size:0.85rem">No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.</div>
+              <div id="peers-list">
+                <div id="peers-loading">
+                  <div class="skeleton-peer"><div class="skeleton-dot"></div><div class="skeleton-line" style="height:10px;width:60%"></div></div>
                 </div>
+              </div>
+              <div id="peers-overflow" style="display:none">
+                <button class="btn btn-sm btn-outline" id="btn-show-all-peers" style="width:100%;margin-top:6px;font-size:0.75rem"></button>
               </div>
             </div>
           </div>
 
           <!-- Shard Pruning & Schedule -->
-          <div class="grid grid-2 mt-2 adv-only">
+          <div class="grid grid-2 mt-2">
             <div class="panel">
               <div class="panel-header collapsed" data-collapse="prune-body">
                 <h2>Prune History</h2>
@@ -814,7 +822,12 @@
                     </div>
                   </div>
                   <div class="compare-model-list" id="compare-model-list">
-                    <span class="text-muted" style="font-size:0.8rem">Loading models...</span>
+                    <span class="skeleton-chip" style="width:120px"></span>
+                    <span class="skeleton-chip" style="width:95px"></span>
+                    <span class="skeleton-chip" style="width:140px"></span>
+                    <span class="skeleton-chip" style="width:110px"></span>
+                    <span class="skeleton-chip" style="width:130px"></span>
+                    <span class="skeleton-chip" style="width:100px"></span>
                   </div>
                 </div>
                 <div style="display:flex;align-items:flex-end">

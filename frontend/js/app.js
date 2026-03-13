@@ -30,7 +30,6 @@ var SwarmLLM = (function() {
   var SETUP_DONE_KEY = 'swarmllm_setup_done';
   var CHAT_LAYOUT_KEY = 'swarmllm_chat_layout';
   var HEALTH_INTERVAL_KEY = 'swarmllm_health_interval';
-  var MODE_KEY = 'swarmllm_ui_mode'; // 'basic' | 'advanced'
 
   // Provider health state: { provider: { status, latency_ms, detail, last_checked } }
   var providerHealth = {};
@@ -38,36 +37,12 @@ var SwarmLLM = (function() {
 
   // Per-model availability cache: { model_id: { status, latency_ms, ts } }
   var modelStatus = {};
+  try {
+    var _cached = sessionStorage.getItem('swarmllm_model_status');
+    if (_cached) modelStatus = JSON.parse(_cached);
+  } catch (e) {}
   var _modelStatusPending = {}; // track in-flight probes
 
-  // --- BASIC / ADVANCED MODE ---
-  function isBasicMode() { return (localStorage.getItem(MODE_KEY) || 'basic') === 'basic'; }
-
-  function applyMode(mode) {
-    document.body.classList.toggle('mode-advanced', mode === 'advanced');
-    var btn = document.getElementById('btn-mode-toggle');
-    if (btn) btn.textContent = mode === 'basic' ? 'Basic' : 'Advanced';
-    // Friendlier labels in basic mode
-    var shareLabel = document.getElementById('btn-share-network-label');
-    if (shareLabel) shareLabel.textContent = mode === 'basic' ? 'Invite a Friend' : 'Share Network Code';
-    // Re-render the active model label to show/hide quant tags
-    if (currentModel) {
-      var item = _modelDropdownData.find(function(m) { return m.id === currentModel; });
-      if (item) {
-        item.name = formatModelDisplayName(item.id);
-        updateModelDropdownLabel(item.name);
-      }
-    }
-  }
-
-  function toggleMode() {
-    var cur = localStorage.getItem(MODE_KEY) || 'basic';
-    var next = cur === 'basic' ? 'advanced' : 'basic';
-    localStorage.setItem(MODE_KEY, next);
-    applyMode(next);
-    // Re-render model cards to show/hide shard grids etc.
-    if (dashboard && dashboard.loadInitial) dashboard.loadInitial();
-  }
 
   // --- THEME (light / dark / system) ---
   var THEME_KEY = 'swarmllm_theme';
@@ -318,6 +293,14 @@ var SwarmLLM = (function() {
         chat.updateChatHeader();
         return;
       }
+      // Clean up any stale empty sessions before creating a new one
+      var emptied = [];
+      Object.keys(sessions).forEach(function(sid) {
+        if (sessions[sid].messages.length === 0 && sid !== currentSessionId) {
+          emptied.push(sid);
+          delete sessions[sid];
+        }
+      });
       var id = 'session_' + Date.now();
       sessions[id] = { id: id, title: 'New Chat', messages: [], created: Date.now(), model: currentModel || '' };
       currentSessionId = id;
@@ -325,6 +308,9 @@ var SwarmLLM = (function() {
       chat.renderSessionList();
       chat.renderMessages();
       chat.updateChatHeader();
+      if (emptied.length > 0) {
+        showToast('Cleaned up ' + emptied.length + ' empty session' + (emptied.length > 1 ? 's' : ''), 'info', 3000);
+      }
       ui.switchTab('chat');
     },
 
@@ -761,6 +747,9 @@ var SwarmLLM = (function() {
       } catch (e) { /* config is non-critical on initial load */ }
 
       try {
+        // Ensure API key is loaded before fetching authenticated endpoints
+        if (settings._apiKeyPromise) await settings._apiKeyPromise;
+
         var resp = await fetch('/api/admin/models');
         var models = await resp.json();
         var cloudModels = [];
@@ -882,9 +871,26 @@ var SwarmLLM = (function() {
       window._lastModelsData = models || [];
       var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
+      var loading = document.getElementById('models-loading');
+      if (loading) loading.remove();
 
       var hasCloud = cloudModels && cloudModels.length > 0;
       if ((!models || models.length === 0) && !hasCloud) {
+        list.innerHTML = '';
+        empty.style.display = '';
+        return;
+      }
+
+      // Filter out ghost models: no local shards, no peer holders, not downloading
+      models = models.filter(function(m) {
+        if (m.local || m.hosted_shards > 0) return true;
+        if (m.peers_hosting > 0) return true;
+        if (m.acquisition === 'downloading') return true;
+        var anyHolder = (m.shards || []).some(function(s) { return s.holders > 0; });
+        return anyHolder;
+      });
+
+      if (models.length === 0 && !hasCloud) {
         list.innerHTML = '';
         empty.style.display = '';
         return;
@@ -922,7 +928,6 @@ var SwarmLLM = (function() {
         }
 
         // Trust level badge
-        var basic = isBasicMode();
         var trustBadge = '';
         if (m.trust_level === 'network_popular') {
           trustBadge = '<span class="badge-trust badge-trust-popular" title="Widely hosted across the network">Popular</span>';
@@ -932,20 +937,19 @@ var SwarmLLM = (function() {
           trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
         } else if (m.source === 'network' && hostedShards === 0) {
           trustBadge = '<span class="badge-trust badge-trust-discovered" title="Discovered via gossip — not yet verified. Auto-manage will not download unless pinned or used.">Unverified</span>';
-        if (basic) trustBadge = '';
         }
 
         // Meta info
         var metaParts = [];
         metaParts.push(formatBytes(m.total_size_bytes || 0));
-        if (!basic && shardCount > 1) metaParts.push(shardCount + ' shards');
-        if (!basic && m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
+        if (shardCount > 1) metaParts.push(shardCount + ' shards');
+        if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
         if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) metaParts.push('<span style="color:var(--orange)">Local only</span>');
 
-        // Local file indicators (manifest + header needed to run shards) — advanced only
+        // Local file indicators (manifest + header needed to run shards)
         var fileIndicators = '';
-        if (!basic && (hostedShards > 0 || isDownloading)) {
+        if (hostedShards > 0 || isDownloading) {
           var hasManifest = m.has_manifest !== false;
           var hasHeader = m.has_header !== false;
           if (!hasManifest || !hasHeader) {
@@ -956,9 +960,9 @@ var SwarmLLM = (function() {
           }
         }
 
-        // Shard grid — advanced only
+        // Shard grid
         var shardHtml = '';
-        if (!basic && shards.length > 0) {
+        if (shards.length > 0) {
           shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shards.forEach(function(s) {
@@ -1010,9 +1014,10 @@ var SwarmLLM = (function() {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
             var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
-            var isEndpoint = (s.index === 0 || s.index === shards.length - 1) && shards.length > 1;
-            var endpointClass = isEndpoint ? ' shard-endpoint' : '';
-            if (isEndpoint && m.encrypted_pipeline) endpointClass += ' shard-pinned';
+            var isEndpoint = (s.index === 0 || s.index === shards.length - 1) && shards.length > 1 && m.encrypted_pipeline;
+            var endpointClass = '';
+            if (isEndpoint && !s.local) endpointClass = ' shard-endpoint';
+            if (isEndpoint && s.local) endpointClass = ' shard-pinned';
             shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
@@ -1093,12 +1098,12 @@ var SwarmLLM = (function() {
         // Probed badge — show when HF metadata fetched but no shards downloaded yet
         var probedBadge = '';
         if (m.probed && hostedShards === 0 && !isDownloading) {
-          if (!basic) probedBadge = '<span class="badge-probed">Probed</span>';
+          probedBadge = '<span class="badge-probed">Probed</span>';
         }
 
-        // Encrypted pipeline badge — always visible for distributed models
+        // Encrypted pipeline badge
         var encBadge = '';
-        if (!basic && m.shard_count > 1 && m.local) {
+        if (m.shard_count > 1 && m.local) {
           var encReady = m.has_first_shard && m.has_last_shard;
           var encActive = m.encrypted_pipeline;
           var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
@@ -1112,12 +1117,12 @@ var SwarmLLM = (function() {
           encBadge = '<span class="' + encClass + '" data-enc-toggle="' + escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + escapeHtml(encTitle) + '">&#128274;</span>';
         }
 
-        // Gear icon for per-model auto-manage settings — advanced only
-        var gearHtml = basic ? '' : '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
+        // Gear icon for per-model auto-manage settings
+        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
 
-        // GGUF metadata info button (only if header file exists) — advanced only
+        // GGUF metadata info button (only if header file exists)
         var metaBtnHtml = '';
-        if (!basic && m.has_header) {
+        if (m.has_header) {
           metaBtnHtml = '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>';
         }
 
@@ -1196,6 +1201,9 @@ var SwarmLLM = (function() {
           return cm.meta.context_length || cm.meta.context_window || cm.meta.max_model_len || 0;
         }
 
+        // Non-chat model patterns — these get deprioritized in default sort
+        var _nonChatPattern = /dall-e|tts|whisper|embed|moderation|davinci-\d|babbage-\d|text-embedding|audio/i;
+
         // Helper: sort models by criteria
         function sortCloudModels(models, sortBy) {
           var sorted = models.slice();
@@ -1211,9 +1219,20 @@ var SwarmLLM = (function() {
               var ra = sa ? (rank[sa.status] !== undefined ? rank[sa.status] : 2) : 2;
               var rb = sb ? (rank[sb.status] !== undefined ? rank[sb.status] : 2) : 2;
               if (ra !== rb) return ra - rb;
-              // Same rank: sort by latency (lower first), unknowns last
               var la = sa ? sa.latency_ms : 99999, lb = sb ? sb.latency_ms : 99999;
               return la - lb;
+            });
+          } else if (sortBy === 'popular') {
+            // Newest first (by created timestamp), non-chat models pushed to end
+            sorted.sort(function(a, b) {
+              var aNon = _nonChatPattern.test(a.id) ? 1 : 0;
+              var bNon = _nonChatPattern.test(b.id) ? 1 : 0;
+              if (aNon !== bNon) return aNon - bNon;
+              var ca = (a.meta && a.meta.created) || 0;
+              var cb = (b.meta && b.meta.created) || 0;
+              if (ca !== cb) return cb - ca; // newest first
+              var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+              return na < nb ? -1 : na > nb ? 1 : 0;
             });
           } else {
             // A-Z by name
@@ -1258,8 +1277,8 @@ var SwarmLLM = (function() {
         Object.keys(byProvider).forEach(function(p) {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
-          // Default sort: A-Z
-          var sorted = sortCloudModels(pModels, 'az');
+          // Default sort: popular models first
+          var sorted = sortCloudModels(pModels, 'popular');
           var tagId = 'cloud-tags-' + p;
           var filterId = 'cloud-filter-' + p;
           var sortId = 'cloud-sort-' + p;
@@ -1280,6 +1299,7 @@ var SwarmLLM = (function() {
             '<div class="cloud-model-controls">' +
               '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="Filter models\u2026" autocomplete="off">' +
               '<select class="cloud-model-sort" id="' + sortId + '">' +
+                '<option value="popular">Newest</option>' +
                 '<option value="az">A\u2013Z</option>' +
                 '<option value="ctx-desc">Context \u2193</option>' +
                 '<option value="ctx-asc">Context \u2191</option>' +
@@ -1327,6 +1347,8 @@ var SwarmLLM = (function() {
             });
           }
         });
+        // Apply cached probe results to newly rendered tags
+        if (Object.keys(modelStatus).length > 0) updateModelStatusBadges();
       }
     },
 
@@ -1522,31 +1544,66 @@ var SwarmLLM = (function() {
     },
 
 
+    _peersExpanded: false,
+
+    renderPeerItem: function(p) {
+      var div = document.createElement('div');
+      div.style.cssText = 'padding:6px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:4px;display:flex;align-items:center;gap:8px;font-size:0.8rem';
+      var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
+      var lanTag = p.is_lan_peer ? '<span class="lan-badge">LAN</span>' : '';
+      var peerLabel = p.nickname ? escapeHtml(p.nickname) + ' <span class="text-muted mono" style="font-size:0.65rem">(' + escapeHtml(p.node_id || '').substring(0, 8) + ')</span>' : '<span class="mono">' + escapeHtml(p.node_id || 'unknown').substring(0, 16) + '</span>';
+      var gpu = p.gpu ? '<span class="text-muted" style="font-size:0.7rem;margin-left:auto">' + escapeHtml(p.gpu) + '</span>' : '';
+      div.innerHTML = statusDot + lanTag + peerLabel + gpu;
+      return div;
+    },
+
     loadNetworkData: async function() {
+      var PEER_LIMIT = 5;
       try {
         var resp = await fetch('/api/admin/peers');
         var peers = await resp.json();
         var list = document.getElementById('peers-list');
+        var summary = document.getElementById('peers-summary');
+        var overflow = document.getElementById('peers-overflow');
+        var pLoading = document.getElementById('peers-loading');
+        if (pLoading) pLoading.remove();
+
         if (peers && peers.length > 0) {
+          var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
+          var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
+          if (summary) {
+            summary.textContent = peers.length + ' peer' + (peers.length !== 1 ? 's' : '') +
+              (lanCount > 0 ? ' \u00B7 ' + lanCount + ' LAN' : '') +
+              ' \u00B7 ' + healthyCount + ' healthy';
+          }
+
           list.innerHTML = '';
-          peers.forEach(function(p) {
-            var div = document.createElement('div');
-            div.style.cssText = 'margin-bottom:10px;padding:8px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
-            var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
-            var lanTag = p.is_lan_peer ? '<span class="lan-badge">LAN</span>' : '';
-            var peerLabel = p.nickname ? escapeHtml(p.nickname) + ' <span class="text-muted mono" style="font-size:0.7rem">(' + escapeHtml(p.node_id || '').substring(0, 8) + ')</span>' : escapeHtml(p.node_id || 'unknown');
-            var nodeId = '<span style="font-size:0.8rem">' + peerLabel + '</span>';
-            var details = '';
-            if (p.gpu) details += '<div style="font-size:0.75rem;color:var(--text-secondary);margin-top:3px">GPU: ' + escapeHtml(p.gpu) + '</div>';
-            div.innerHTML = statusDot + lanTag + nodeId + details;
-            list.appendChild(div);
+          var showAll = dashboard._peersExpanded;
+          var visible = showAll ? peers : peers.slice(0, PEER_LIMIT);
+          visible.forEach(function(p) {
+            list.appendChild(dashboard.renderPeerItem(p));
           });
+
+          if (overflow) {
+            if (peers.length > PEER_LIMIT && !showAll) {
+              overflow.style.display = '';
+              var btn = document.getElementById('btn-show-all-peers');
+              if (btn) btn.textContent = 'Show all ' + peers.length + ' peers';
+            } else {
+              overflow.style.display = 'none';
+            }
+          }
+        } else {
+          if (summary) summary.textContent = '';
+          list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
+          if (overflow) overflow.style.display = 'none';
         }
       } catch (e) {
         var list = document.getElementById('peers-list');
-        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet', 'No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.') + '</div>';
+        var pLoading2 = document.getElementById('peers-loading');
+        if (pLoading2) pLoading2.remove();
+        if (list) list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
       }
-
     },
 
     updateAcquisitionProgress: function(acquisitions) {
@@ -1590,6 +1647,8 @@ var SwarmLLM = (function() {
       // Progress is now shown inline in model cards only — no separate banner panels.
       // This method updates the model card's progress bar and status badge in-place.
       if (!status) return;
+      // Don't re-add progress for cancelled downloads
+      if (!activeAcquisitions[modelId]) return;
       var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
       var card = document.querySelector('[data-model-id="' + modelId + '"]');
       if (!card) {
@@ -1633,7 +1692,10 @@ var SwarmLLM = (function() {
       progressEl.innerHTML =
         '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
         '<span class="text-muted">Downloading model data</span>' +
-        '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
+        '<span style="display:flex;align-items:center;gap:8px">' +
+          '<span class="mono dl-progress-text">' + formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
+          '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + escapeHtml(modelId) + '" title="Cancel download">&times; Cancel</button>' +
+        '</span>' +
         '</div>' +
         '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>';
 
@@ -2478,6 +2540,7 @@ var SwarmLLM = (function() {
         };
       });
       updateProviderHealthBadges();
+      loadModeIndicator();
     } catch (e) { /* health probe is non-critical */ }
   }
 
@@ -2657,6 +2720,7 @@ var SwarmLLM = (function() {
         modelStatus[m.model] = { status: m.status, latency_ms: m.latency_ms, ts: ts };
         delete _modelStatusPending[m.model];
       });
+      try { sessionStorage.setItem('swarmllm_model_status', JSON.stringify(modelStatus)); } catch (e) {}
       updateModelStatusBadges();
     }).catch(function() {
       toProbe.forEach(function(id) { delete _modelStatusPending[id]; });
@@ -2740,13 +2804,22 @@ var SwarmLLM = (function() {
       _modelDropdownData = [];
 
       if (readyModels.length > 0) {
-        var items = readyModels.map(function(m) {
+        var localItems = [];
+        var swarmItems = [];
+        readyModels.forEach(function(m) {
           var displayName = formatModelDisplayName(m.name || m.id);
           var isDistributed = m.shard_count > 0 && (m.hosted_shards || 0) < m.shard_count;
-          return { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
+          var item = { id: m.id, name: displayName.length > 40 ? displayName.substring(0, 40) + '...' : displayName, group: isDistributed ? 'swarm' : 'local', encrypted: !!m.encrypted_pipeline };
+          if (isDistributed) { swarmItems.push(item); } else { localItems.push(item); }
         });
-        groups.push({ key: 'local', label: 'On this computer', items: items });
-        _modelDropdownData = _modelDropdownData.concat(items);
+        if (localItems.length > 0) {
+          groups.push({ key: 'local', label: 'On this computer', items: localItems });
+          _modelDropdownData = _modelDropdownData.concat(localItems);
+        }
+        if (swarmItems.length > 0) {
+          groups.push({ key: 'swarm', label: 'Swarm network', items: swarmItems });
+          _modelDropdownData = _modelDropdownData.concat(swarmItems);
+        }
       }
 
       if (providerModels.length > 0) {
@@ -2903,9 +2976,10 @@ var SwarmLLM = (function() {
         chat.newSession();
         showToast('New session started for ' + formatModelDisplayName(modelId), 'info');
       } else {
-        // Empty session — just update its model
+        // Empty session — just update its model and refresh empty state
         s.model = modelId;
         chat.saveSessions();
+        chat.renderMessages();
         chat.updateChatHeader();
         chat.renderSessionList();
       }
@@ -3024,6 +3098,13 @@ var SwarmLLM = (function() {
           var progress = card.querySelector('.dl-progress');
           if (progress) progress.remove();
           card.classList.remove('downloading');
+          // Reset any shard cells stuck in downloading state
+          card.querySelectorAll('.shard-cell.downloading, .shard-cell.verifying').forEach(function(cell) {
+            var idx = cell.getAttribute('data-shard-index') || cell.textContent;
+            cell.className = 'shard-cell missing';
+            cell.textContent = idx;
+            cell.style.removeProperty('--dl-pct');
+          });
         }
         delete activeAcquisitions[modelId];
         setTimeout(function() { dashboard.loadInitial(); }, 1000);
@@ -3887,10 +3968,49 @@ var SwarmLLM = (function() {
     var div = document.createElement('div');
     div.className = 'chat-empty';
     div.id = 'chat-empty';
-    div.innerHTML = '<div class="chat-empty-icon">&#11088;</div>' +
-      '<div class="chat-empty-title">Chat with AI</div>' +
+
+    // Resolve current model name and status
+    var modelName = '';
+    var modelData = null;
+    if (currentModel) {
+      var item = _modelDropdownData.find(function(m) { return m.id === currentModel; });
+      modelName = item ? item.name : currentModel;
+      modelData = (window._lastModelsData || []).find(function(m) { return m.id === currentModel; });
+    }
+
+    var title = modelName ? 'Chat with ' + escapeHtml(modelName) : 'Chat with AI';
+    var icon = '&#11088;';
+
+    // Encryption / routing info
+    var encHint = '';
+    if (modelData && modelData.encrypted_pipeline && modelData.shard_count > 1) {
+      var isFullLocal = modelData.hosted_shards === modelData.shard_count;
+      if (isFullLocal) {
+        icon = '&#128274;';
+        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--green)">' +
+          '&#128274; Encrypted pipeline active \u2014 all shards local, full privacy' +
+          '</div>';
+      } else {
+        icon = '&#128274;';
+        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--orange)">' +
+          '&#128274; Boomerang routing \u2014 first + last shard local, middle shards on peers' +
+          '<br><span style="font-size:0.75rem;color:var(--text-muted)">Prompts are encrypted end-to-end. Expect ~2\u20135s extra latency for distributed pipeline setup.</span>' +
+          '</div>';
+      }
+    } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
+      encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--text-muted)">' +
+        '&#127760; Distributed inference \u2014 shards split across peers' +
+        '<br><span style="font-size:0.75rem">Enable encrypted pipeline in the model card for end-to-end privacy.</span>' +
+        '</div>';
+    }
+
+    div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
+      '<div class="chat-empty-title">' + title + '</div>' +
+      encHint +
       '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
-      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">Pick a model from the dropdown above \u2022 <kbd>Shift+Enter</kbd> for new line</div>';
+      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
+        (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
+        '<kbd>Shift+Enter</kbd> for new line</div>';
     return div;
   }
 
@@ -4372,7 +4492,7 @@ var SwarmLLM = (function() {
     on('btn-copy-api-key', 'click', function() { settings.copyApiKey(); });
     on('btn-save-settings', 'click', function() { settings.save(); });
     on('btn-open-settings', 'click', function() { ui.openSettings(); });
-    on('btn-mode-toggle', 'click', function() { toggleMode(); });
+    // Basic/Advanced toggle removed — always advanced
 
     // Theme toggle (light / dark / system)
     on('btn-theme-toggle', 'click', function() {
@@ -4451,6 +4571,11 @@ var SwarmLLM = (function() {
       setup.updateUI();
       document.getElementById('setup-modal').classList.remove('hidden');
       setup.detectHardware();
+    });
+
+    on('btn-show-all-peers', 'click', function() {
+      dashboard._peersExpanded = !dashboard._peersExpanded;
+      dashboard.loadNetworkData();
     });
 
     // Provider test buttons (CSP-safe — data attribute binding)
@@ -4763,6 +4888,25 @@ var SwarmLLM = (function() {
       var amSave = target.getAttribute('data-am-save');
       if (amSave) { saveAutoManagePolicy(amSave); return; }
 
+      // Model card click → select model and switch to chat
+      var modelCard = target.closest('.model-card');
+      if (modelCard && !target.closest('button, a, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select')) {
+        var cardModelId = modelCard.getAttribute('data-model-id');
+        if (cardModelId) {
+          var cardModel = (window._lastModelsData || []).find(function(mm) { return mm.id === cardModelId; });
+          var cardReady = cardModel && (cardModel.status === 'loaded' || cardModel.status === 'ready' ||
+            (cardModel.global_available === cardModel.shard_count && cardModel.shard_count > 0));
+          if (cardReady) {
+            selectModelDropdown(cardModelId);
+            chat.newSession();
+            ui.switchTab('chat');
+          } else {
+            ui.showBanner('warning', 'Model not ready — download all shards first');
+          }
+          return;
+        }
+      }
+
       // Compare card copy button
       var copyCompare = target.getAttribute('data-copy-compare');
       if (copyCompare) {
@@ -4908,8 +5052,7 @@ var SwarmLLM = (function() {
     }
     // Preserve decimal numbers (1.1b, v0.3) by replacing dots between digits with placeholder
     name = name.replace(/(\d)\.(\d)/g, '$1\x00$2');
-    // In BASIC mode, strip quantization tags (Q4_K_M etc.) unless caller opts out
-    var hideQuant = (opts && opts.hideQuant) || (!opts && isBasicMode());
+    var hideQuant = (opts && opts.hideQuant) || false;
     // Split on separators and format each part
     return name.split(/[-_.]/).filter(Boolean).map(function(s) {
       s = s.replace(/\x00/g, '.'); // restore decimal dots
@@ -4948,7 +5091,7 @@ var SwarmLLM = (function() {
         '<div class="chat-empty-hint" style="margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
         '<div style="display:flex;gap:8px;margin-top:12px">' +
           '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
-          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">' + (isBasicMode() ? 'Invite a Friend' : 'Share Network Code') + '</button>' +
+          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">' + 'Share Network Code' + '</button>' +
         '</div>';
     }
   }
@@ -5014,81 +5157,98 @@ var SwarmLLM = (function() {
     }
     var hasLocalModel = hostedShards > 0;
 
-    var cloudProviders = [];
+    var cloudCount = 0;
+    var cloudDown = 0;
+    // Count from provider list if available
+    var seen = {};
     if (providerData && providerData.providers) {
       providerData.providers.forEach(function(p) {
         if (!p.configured) return;
-        // Only count providers that are healthy (not auth errors or down)
-        var h = providerHealth[p.name];
+        seen[p.name] = true;
+        var h = providerHealth[p.name] || providerHealth[p.provider];
         var isHealthy = !h || h.status === 'up' || h.status === 'rate_limited' || h.status === 'overloaded';
-        if (isHealthy) cloudProviders.push(p.name);
+        if (isHealthy) cloudCount++;
+        else cloudDown++;
       });
     }
-
-    // Build detail chips
-    var chips = [];
-    if (hasLocalModel) chips.push('<span class="mode-chip chip-local">' + hostedShards + ' shard' + (hostedShards !== 1 ? 's' : '') + ' local</span>');
-    if (peers > 0) chips.push('<span class="mode-chip chip-peer">' + peers + ' peer' + (peers !== 1 ? 's' : '') + '</span>');
-    var _providerNames = {
-      openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-      mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
-      cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks',
-      together: 'Together', deepinfra: 'DeepInfra', moonshot: 'Kimi'
-    };
-    cloudProviders.forEach(function(p) {
-      chips.push('<span class="mode-chip chip-cloud">' + escapeHtml(_providerNames[p] || capitalize(p)) + '</span>');
+    // Also count from providerHealth directly (covers case where provider list fetch failed/pending)
+    Object.keys(providerHealth).forEach(function(key) {
+      if (seen[key]) return;
+      var h = providerHealth[key];
+      var isHealthy = h.status === 'up' || h.status === 'rate_limited' || h.status === 'overloaded';
+      if (isHealthy) cloudCount++;
+      else cloudDown++;
     });
 
     // Remove old mode classes
     if (indicator) indicator.className = 'mode-indicator mb-2';
 
-    var modeHelp = '';
-    if (peers > 0 && hasLocalModel && cloudProviders.length > 0) {
-      dot.className = 'mode-dot swarm';
-      label.textContent = 'Swarm + Cloud';
+    // Determine mode
+    var modeName, dotClass, modeClass, modeHelp;
+
+    if (peers > 0 && hasLocalModel && cloudCount > 0) {
+      modeName = 'SWARM \u00b7 CLOUD';
+      dotClass = 'swarm';
+      modeClass = 'mode-hybrid';
       modeHelp = 'Full power — swarm inference with cloud fallback';
-      if (indicator) indicator.classList.add('mode-hybrid');
     } else if (peers > 0 && hasLocalModel) {
-      dot.className = 'mode-dot swarm';
-      label.textContent = 'Swarm Mode';
+      modeName = 'SWARM';
+      dotClass = 'swarm';
+      modeClass = 'mode-swarm';
       modeHelp = 'Running inference locally and with peers';
-      if (indicator) indicator.classList.add('mode-swarm');
-    } else if (peers > 0 && !hasLocalModel) {
-      dot.className = 'mode-dot swarm';
-      label.textContent = 'Swarm (remote)';
+    } else if (peers > 0) {
+      modeName = 'SWARM \u00b7 REMOTE';
+      dotClass = 'swarm';
+      modeClass = 'mode-swarm';
       modeHelp = 'Using peer nodes for inference (no local model)';
-      if (indicator) indicator.classList.add('mode-swarm');
-    } else if (hasLocalModel && cloudProviders.length > 0) {
-      dot.className = 'mode-dot swarm';
-      label.textContent = 'Local + Cloud';
-      modeHelp = 'Local inference with cloud fallback — connect peers to go full swarm';
-      if (indicator) indicator.classList.add('mode-hybrid');
+    } else if (hasLocalModel && cloudCount > 0) {
+      modeName = 'LOCAL \u00b7 CLOUD';
+      dotClass = 'hybrid';
+      modeClass = 'mode-hybrid';
+      modeHelp = 'Local inference with cloud fallback';
     } else if (hasLocalModel) {
-      dot.className = 'mode-dot offline';
-      label.textContent = 'Solo Node';
+      modeName = 'SOLO';
+      dotClass = 'offline';
+      modeClass = 'mode-offline';
       modeHelp = 'Local inference only — connect peers to unlock bigger models';
-      if (indicator) indicator.classList.add('mode-offline');
-      if (chips.length === 0) chips.push('<span class="mode-chip chip-none">Running locally \u2014 connect with others to run bigger models</span>');
-    } else if (cloudProviders.length > 0) {
-      dot.className = 'mode-dot cloud';
-      label.textContent = 'Cloud Only';
-      modeHelp = 'Using cloud AI services \u2014 download models to run AI on your own computer for free';
-      if (indicator) indicator.classList.add('mode-cloud');
+    } else if (cloudCount > 0) {
+      modeName = 'CLOUD';
+      dotClass = 'cloud';
+      modeClass = 'mode-cloud';
+      modeHelp = 'Using cloud providers — download models for free local AI';
     } else {
-      dot.className = 'mode-dot offline';
-      label.textContent = 'Ready to Join';
+      modeName = 'OFFLINE';
+      dotClass = 'offline';
+      modeClass = 'mode-offline';
       modeHelp = 'Download a model or add a cloud provider to get started';
-      if (indicator) indicator.classList.add('mode-offline');
-      chips = ['<span class="mode-chip chip-none" style="cursor:pointer" data-goto-hf="1">No models yet \u2014 <u>download one</u> or add a cloud provider</span>'];
-    }
-    if (modeHelp) label.title = modeHelp;
-
-    // Add quick-action button
-    if (cloudProviders.length > 0 && !hasLocalModel && peers === 0) {
-      chips.push('<button class="btn btn-sm" data-goto-hf="1" style="margin-left:8px;font-size:0.7rem;padding:2px 10px">Download Model</button>');
     }
 
-    detail.innerHTML = chips.join(' ');
+    dot.className = 'mode-dot ' + dotClass;
+    label.textContent = modeName;
+    label.title = modeHelp;
+    if (indicator) indicator.classList.add(modeClass);
+
+    // Right side: live stats
+    var requests = statsData ? (statsData.requests_made || 0) : 0;
+    var served = statsData ? (statsData.served || 0) : 0;
+    var active = statsData ? (statsData.active_requests || 0) : 0;
+
+    var parts = [];
+    if (peers > 0) parts.push('<span class="mode-stat"><strong>' + peers + '</strong> peer' + (peers !== 1 ? 's' : '') + '</span>');
+    if (hostedShards > 0) parts.push('<span class="mode-stat"><strong>' + hostedShards + '</strong> shard' + (hostedShards !== 1 ? 's' : '') + '</span>');
+    if (cloudCount > 0) parts.push('<span class="mode-stat"><strong>' + cloudCount + '</strong> provider' + (cloudCount !== 1 ? 's' : '') + '</span>');
+    if (active > 0) parts.push('<span class="mode-stat" style="color:var(--orange)"><strong>' + active + '</strong> active</span>');
+    if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> req</span>');
+    if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> served</span>');
+
+    var detailHtml;
+    if (parts.length > 0) {
+      detailHtml = parts.join('<span class="mode-separator">\u00b7</span>');
+    } else {
+      detailHtml = '<span class="mode-action" data-goto-hf="1">Get started \u2014 download a model or add a provider</span>';
+    }
+
+    detail.innerHTML = detailHtml;
   }
 
   // Cache provider data so we can update mode indicator on stats updates
@@ -5178,7 +5338,6 @@ var SwarmLLM = (function() {
     chat.renderSessionList();
     chat.renderMessages();
 
-    applyMode(localStorage.getItem(MODE_KEY) || 'basic');
     applyTheme(localStorage.getItem(THEME_KEY) || 'dark');
 
     // Sync setup language dropdown with detected language
@@ -5275,9 +5434,10 @@ var SwarmLLM = (function() {
         }
 
         container.innerHTML = '';
-        compare.models.forEach(function(m) {
+        compare.models.forEach(function(m, idx) {
           var chip = document.createElement('label');
           chip.className = 'compare-model-chip type-' + m.type;
+          chip.style.animationDelay = (idx * 30) + 'ms';
           var displayName = m.id.length > 35 ? m.id.substring(0, 35) + '...' : m.id;
           var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + Math.round(m.context / 1000) + 'k ctx' : '';
           chip.innerHTML = '<input type="checkbox" value="' + escapeHtml(m.id) + '">' +

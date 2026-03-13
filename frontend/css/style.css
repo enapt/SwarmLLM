@@ -1253,6 +1253,18 @@ kbd {
   flex-shrink: 0;
 }
 .skeleton-peer .skeleton-line { flex: 1; }
+.skeleton-chip {
+  display: inline-block;
+  height: 28px;
+  border-radius: 16px;
+  background: var(--text-muted);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chip-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.compare-model-chip { animation: chip-fade-in 0.25s ease-out both; }
 
 /* ---- Source badges ---- */
 .source-badge {
