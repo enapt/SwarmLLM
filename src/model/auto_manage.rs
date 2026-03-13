@@ -1183,6 +1183,7 @@ impl AutoShardManager {
                     &dest,
                     layout,
                     Some(ptx),
+                    None,
                 )
                 .await
                 {

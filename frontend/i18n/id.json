@@ -90,11 +90,11 @@
   "errors.connection_lost": "Koneksi ke SwarmLLM terputus — menghubungkan kembali...",
   "errors.model_download_unavailable": "Unduhan model tidak tersedia",
 
-  "mode.basic": "Dasar",
-  "mode.advanced": "Lanjutan",
 
   "leaderboard.empty": "Belum ada aktivitas. Kredit didapat dengan membantu orang lain menjalankan model AI.",
 
   "actions.copy": "Salin",
-  "actions.try_other_models": "Coba model lain"
+  "actions.try_other_models": "Coba model lain",
+
+  "network.no_peers_yet": "Belum ada peer yang terhubung. Bagikan Kode Jaringan Anda untuk menggabungkan sumber daya — semakin banyak peer, semakin besar model yang bisa Anda jalankan bersama."
 }

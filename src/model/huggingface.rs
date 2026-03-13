@@ -704,6 +704,7 @@ pub async fn download_shard_v2(
     dest_dir: &std::path::Path,
     layout: &crate::inference::split::LayerShardLayout,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
+    cancel_flag: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600))
@@ -809,6 +810,15 @@ pub async fn download_shard_v2(
         let mut range_buf: Vec<u8> = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
+            // Check cancel flag every chunk
+            if let Some(flag) = cancel_flag {
+                if flag.load(std::sync::atomic::Ordering::Acquire) {
+                    // Clean up tmp file
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return Err("Download cancelled".to_string());
+                }
+            }
             let data = chunk.map_err(|e| format!("Stream error: {e}"))?;
             range_buf.extend_from_slice(&data);
             downloaded += data.len() as u64;
@@ -992,7 +1002,7 @@ pub async fn download_shards_v2(
             }
         });
 
-        download_shard_v2(repo_id, filename, dest_dir, layout, Some(shard_tx)).await?;
+        download_shard_v2(repo_id, filename, dest_dir, layout, Some(shard_tx), None).await?;
         let _ = progress_task.await;
 
         cumulative_downloaded += layout.size_bytes;

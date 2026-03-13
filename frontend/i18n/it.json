@@ -90,11 +90,11 @@
   "errors.connection_lost": "Connessione a SwarmLLM persa — riconnessione...",
   "errors.model_download_unavailable": "Download modello non disponibile",
 
-  "mode.basic": "Base",
-  "mode.advanced": "Avanzato",
 
   "leaderboard.empty": "Nessuna attività ancora. I crediti si guadagnano aiutando altri a eseguire modelli IA.",
 
   "actions.copy": "Copia",
-  "actions.try_other_models": "Prova altri modelli"
+  "actions.try_other_models": "Prova altri modelli",
+
+  "network.no_peers_yet": "Nessun peer connesso ancora. Condividi il tuo Codice di Rete per combinare le risorse — più peer ci sono, più grandi saranno i modelli che potrete eseguire insieme."
 }

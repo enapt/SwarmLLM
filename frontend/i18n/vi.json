@@ -90,11 +90,11 @@
   "errors.connection_lost": "Mất kết nối với SwarmLLM — đang kết nối lại...",
   "errors.model_download_unavailable": "Không thể tải mô hình",
 
-  "mode.basic": "Cơ bản",
-  "mode.advanced": "Nâng cao",
 
   "leaderboard.empty": "Chưa có hoạt động. Tín dụng kiếm được bằng cách giúp người khác chạy mô hình AI.",
 
   "actions.copy": "Sao chép",
-  "actions.try_other_models": "Thử mô hình khác"
+  "actions.try_other_models": "Thử mô hình khác",
+
+  "network.no_peers_yet": "Chưa có peer nào kết nối. Chia sẻ Mã Mạng của bạn để kết hợp tài nguyên — càng nhiều peer, bạn càng có thể chạy các mô hình lớn hơn cùng nhau."
 }

@@ -90,11 +90,11 @@
   "errors.connection_lost": "Verbindung zu SwarmLLM verloren — verbinde neu...",
   "errors.model_download_unavailable": "Modell-Download nicht verfügbar",
 
-  "mode.basic": "Einfach",
-  "mode.advanced": "Erweitert",
 
   "leaderboard.empty": "Noch keine Aktivität. Credits werden verdient, indem du anderen hilfst, KI-Modelle auszuführen.",
 
   "actions.copy": "Kopieren",
-  "actions.try_other_models": "Andere Modelle testen"
+  "actions.try_other_models": "Andere Modelle testen",
+
+  "network.no_peers_yet": "Noch keine Peers verbunden. Teilen Sie Ihren Netzwerk-Code, um Ressourcen zu bündeln — je mehr Peers, desto größere Modelle können Sie gemeinsam ausführen."
 }

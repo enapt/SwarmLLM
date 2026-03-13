@@ -761,6 +761,20 @@ var SwarmLLM = (function() {
           }
         } catch (e) {}
         dashboard.renderModels(models, cloudModels);
+        // If cloud models came back empty, retry once after 3s (provider APIs may be slow on cold start)
+        if (cloudModels.length === 0) {
+          setTimeout(async function() {
+            try {
+              var retry = await authFetch('/api/admin/provider-models');
+              if (retry.ok) {
+                var rd = await retry.json();
+                if (rd.models && rd.models.length > 0) {
+                  dashboard.renderModels(models, rd.models);
+                }
+              }
+            } catch(e) {}
+          }, 3000);
+        }
       } catch (e) {
         ui.showBanner('error', 'Failed to load model list');
       }

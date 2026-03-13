@@ -90,11 +90,11 @@
   "errors.connection_lost": "Anslutningen till SwarmLLM förlorades — återansluter...",
   "errors.model_download_unavailable": "Modellnedladdning inte tillgänglig",
 
-  "mode.basic": "Enkel",
-  "mode.advanced": "Avancerad",
 
   "leaderboard.empty": "Ingen aktivitet ännu. Krediter tjänas genom att hjälpa andra köra AI-modeller.",
 
   "actions.copy": "Kopiera",
-  "actions.try_other_models": "Testa andra modeller"
+  "actions.try_other_models": "Testa andra modeller",
+
+  "network.no_peers_yet": "Inga peers anslutna ännu. Dela din Nätverkskod för att kombinera resurser — ju fler peers, desto större modeller kan ni köra tillsammans."
 }

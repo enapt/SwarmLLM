@@ -90,11 +90,11 @@
   "errors.connection_lost": "Spojení se SwarmLLM ztraceno — opětovné připojování...",
   "errors.model_download_unavailable": "Stahování modelu není dostupné",
 
-  "mode.basic": "Základní",
-  "mode.advanced": "Pokročilý",
 
   "leaderboard.empty": "Zatím žádná aktivita. Kredity se získávají pomocí ostatním se spouštěním modelů AI.",
 
   "actions.copy": "Kopírovat",
-  "actions.try_other_models": "Zkusit jiné modely"
+  "actions.try_other_models": "Zkusit jiné modely",
+
+  "network.no_peers_yet": "Zatím nejsou připojeni žádní peers. Sdílejte svůj Síťový kód pro spojení zdrojů — čím více peers, tím větší modely můžete společně spouštět."
 }

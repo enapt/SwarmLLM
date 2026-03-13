@@ -1121,6 +1121,7 @@ pub async fn hf_download_shards(
                 &dest_dir,
                 layout,
                 Some(shard_tx),
+                Some(cancel_flag.as_ref()),
             )
             .await
             {

@@ -90,11 +90,11 @@
   "errors.connection_lost": "SwarmLLM bağlantısı kesildi — yeniden bağlanılıyor...",
   "errors.model_download_unavailable": "Model indirme kullanılamıyor",
 
-  "mode.basic": "Temel",
-  "mode.advanced": "Gelişmiş",
 
   "leaderboard.empty": "Henüz etkinlik yok. Başkalarının yapay zeka modellerini çalıştırmasına yardım ederek kredi kazanın.",
 
   "actions.copy": "Kopyala",
-  "actions.try_other_models": "Diğer modelleri dene"
+  "actions.try_other_models": "Diğer modelleri dene",
+
+  "network.no_peers_yet": "Henüz bağlı eş yok. Kaynakları birleştirmek için Ağ Kodunuzu paylaşın — ne kadar çok eş olursa, birlikte o kadar büyük modeller çalıştırabilirsiniz."
 }

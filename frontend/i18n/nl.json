@@ -90,11 +90,11 @@
   "errors.connection_lost": "Verbinding met SwarmLLM verloren — opnieuw verbinden...",
   "errors.model_download_unavailable": "Model downloaden niet beschikbaar",
 
-  "mode.basic": "Basis",
-  "mode.advanced": "Geavanceerd",
 
   "leaderboard.empty": "Nog geen activiteit. Credits worden verdiend door anderen te helpen AI-modellen te draaien.",
 
   "actions.copy": "Kopiëren",
-  "actions.try_other_models": "Andere modellen proberen"
+  "actions.try_other_models": "Andere modellen proberen",
+
+  "network.no_peers_yet": "Nog geen peers verbonden. Deel uw Netwerkcode om bronnen te combineren — hoe meer peers, hoe grotere modellen u samen kunt draaien."
 }

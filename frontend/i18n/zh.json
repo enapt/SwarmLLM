@@ -90,11 +90,11 @@
   "errors.connection_lost": "与 SwarmLLM 的连接已断开 — 正在重连...",
   "errors.model_download_unavailable": "模型下载不可用",
 
-  "mode.basic": "简洁",
-  "mode.advanced": "高级",
 
   "leaderboard.empty": "暂无活动。通过帮助他人运行 AI 模型来赚取积分。",
 
   "actions.copy": "复制",
-  "actions.try_other_models": "尝试其他模型"
+  "actions.try_other_models": "尝试其他模型",
+
+  "network.no_peers_yet": "尚无节点连接。分享您的网络代码以整合资源——节点越多，您可以一起运行的模型就越大。"
 }

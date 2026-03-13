@@ -90,11 +90,11 @@
   "errors.connection_lost": "فُقد الاتصال بـ SwarmLLM — جارٍ إعادة الاتصال...",
   "errors.model_download_unavailable": "تنزيل النموذج غير متاح",
 
-  "mode.basic": "أساسي",
-  "mode.advanced": "متقدم",
 
   "leaderboard.empty": "لا يوجد نشاط بعد. تُكتسب الأرصدة بمساعدة الآخرين في تشغيل نماذج الذكاء الاصطناعي.",
 
   "actions.copy": "نسخ",
-  "actions.try_other_models": "جرّب نماذج أخرى"
+  "actions.try_other_models": "جرّب نماذج أخرى",
+
+  "network.no_peers_yet": "لا يوجد أقران متصلون بعد. شارك رمز الشبكة لدمج الموارد — كلما زاد عدد الأقران، زادت النماذج التي يمكنك تشغيلها معًا."
 }

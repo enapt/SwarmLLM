@@ -172,6 +172,12 @@ pub async fn update_providers(
 
     tracing::info!("Cloud provider configuration updated");
 
+    // Invalidate provider models cache so next fetch picks up new keys
+    {
+        let mut cache = state.shared_state.provider_models_cache.write().await;
+        cache.0.clear();
+    }
+
     // Notify WebSocket clients so model list and mode indicator refresh immediately
     let _ = state.shared_state.models_changed_tx.send(());
 
@@ -194,10 +200,45 @@ pub async fn update_providers(
 
 /// GET /api/admin/provider-models — Fetch available models from configured providers.
 ///
-/// Queries each configured provider's `/models` endpoint in parallel and returns
-/// a flat list. Anthropic has no /models endpoint, so uses a static list.
-/// Falls back to static lists if the provider's API is unreachable.
+/// Returns cached results instantly if available (< 60s old), and refreshes
+/// in the background. On first call (empty cache), blocks until fetch completes.
+/// This prevents slow/flaky provider APIs from making the dashboard feel broken.
 pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+    // Check cache — return immediately if fresh
+    {
+        let cache = state.shared_state.provider_models_cache.read().await;
+        let (ref cached_models, ref ts) = *cache;
+        if !cached_models.is_empty() {
+            if ts.elapsed() < CACHE_TTL {
+                return Json(serde_json::json!({ "models": cached_models }));
+            }
+            // Stale but non-empty: return stale data and refresh in background
+            let stale = cached_models.clone();
+            let bg_state = state.clone();
+            tokio::spawn(async move {
+                let models = fetch_provider_models_inner(&bg_state).await;
+                if !models.is_empty() {
+                    let mut cache = bg_state.shared_state.provider_models_cache.write().await;
+                    *cache = (models, std::time::Instant::now());
+                }
+            });
+            return Json(serde_json::json!({ "models": stale }));
+        }
+    }
+
+    // Empty cache (first call) — block and fetch
+    let models = fetch_provider_models_inner(&state).await;
+    {
+        let mut cache = state.shared_state.provider_models_cache.write().await;
+        *cache = (models.clone(), std::time::Instant::now());
+    }
+    Json(serde_json::json!({ "models": models }))
+}
+
+/// Inner function that actually fetches models from all configured providers.
+async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value> {
     let config = state.shared_state.providers_config.read().await;
     let mut models = Vec::new();
 
@@ -362,7 +403,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
         models.extend(provider_models);
     }
 
-    Json(serde_json::json!({ "models": models }))
+    models
 }
 
 /// GET /api/admin/provider-health — Lightweight health probe for configured providers.

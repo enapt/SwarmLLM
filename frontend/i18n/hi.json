@@ -90,11 +90,11 @@
   "errors.connection_lost": "SwarmLLM से कनेक्शन टूट गया — फिर से जुड़ रहे हैं...",
   "errors.model_download_unavailable": "मॉडल डाउनलोड उपलब्ध नहीं",
 
-  "mode.basic": "सरल",
-  "mode.advanced": "विस्तृत",
 
   "leaderboard.empty": "अभी कोई गतिविधि नहीं। दूसरों को AI मॉडल चलाने में मदद करके क्रेडिट कमाएँ।",
 
   "actions.copy": "कॉपी",
-  "actions.try_other_models": "अन्य मॉडल आज़माएँ"
+  "actions.try_other_models": "अन्य मॉडल आज़माएँ",
+
+  "network.no_peers_yet": "अभी तक कोई पीयर कनेक्ट नहीं है। संसाधनों को संयोजित करने के लिए अपना नेटवर्क कोड साझा करें — जितने अधिक पीयर, उतने बड़े मॉडल आप एक साथ चला सकते हैं।"
 }

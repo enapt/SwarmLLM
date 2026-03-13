@@ -90,11 +90,11 @@
   "errors.connection_lost": "Utracono połączenie z SwarmLLM — ponowne łączenie...",
   "errors.model_download_unavailable": "Pobieranie modelu niedostępne",
 
-  "mode.basic": "Podstawowy",
-  "mode.advanced": "Zaawansowany",
 
   "leaderboard.empty": "Brak aktywności. Kredyty zdobywa się pomagając innym uruchamiać modele AI.",
 
   "actions.copy": "Kopiuj",
-  "actions.try_other_models": "Wypróbuj inne modele"
+  "actions.try_other_models": "Wypróbuj inne modele",
+
+  "network.no_peers_yet": "Brak połączonych peerów. Udostępnij swój Kod Sieci, aby połączyć zasoby — im więcej peerów, tym większe modele możecie wspólnie uruchamiać."
 }

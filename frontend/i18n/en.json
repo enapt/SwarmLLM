@@ -90,11 +90,11 @@
   "errors.connection_lost": "Lost connection to SwarmLLM — reconnecting...",
   "errors.model_download_unavailable": "Model download unavailable",
 
-  "mode.basic": "Basic",
-  "mode.advanced": "Advanced",
 
   "leaderboard.empty": "No activity yet. Credits are earned by helping others run AI models.",
 
   "actions.copy": "Copy",
-  "actions.try_other_models": "Try other models"
+  "actions.try_other_models": "Try other models",
+
+  "network.no_peers_yet": "No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together."
 }

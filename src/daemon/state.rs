@@ -209,6 +209,9 @@ pub struct SharedState {
     /// Populated by `list_provider_models` so that `try_proxy_openai` can route
     /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
     pub provider_model_map: DashMap<String, String>,
+    /// Cached provider model list — avoids hitting every provider API on each page load.
+    /// Tuple: (models JSON array, timestamp of last successful fetch).
+    pub provider_models_cache: RwLock<(Vec<serde_json::Value>, std::time::Instant)>,
     /// Active WebSocket connection count — capped to prevent resource exhaustion.
     pub ws_connection_count: std::sync::atomic::AtomicUsize,
     /// Persistent NodeId → PeerId bytes mapping. Populated by the identify handler
@@ -693,6 +696,7 @@ impl SharedState {
             models_changed_tx: broadcast::channel(16).0,
             system_notify_tx: broadcast::channel(32).0,
             provider_model_map: DashMap::new(),
+            provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
             ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
             peer_id_map: DashMap::new(),
             vision_modules: DashMap::new(),
