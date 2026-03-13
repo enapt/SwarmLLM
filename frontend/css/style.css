@@ -620,8 +620,11 @@ a:hover { color: var(--accent-hover); }
 /* ---- Grid ---- */
 .grid { display: grid; gap: 14px; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); align-items: stretch; }
-.grid-2 > .panel { display: flex; flex-direction: column; }
-.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); align-items: stretch; }
+/* Panels inside grids stretch to equal height and distribute content */
+.grid > .panel { display: flex; flex-direction: column; }
+.grid > .panel > .panel-body { flex: 1; }
+.grid > .panel > :last-child:not(.panel-header) { margin-top: auto; }
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
 
 @media (max-width: 1024px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }
@@ -2364,8 +2367,9 @@ kbd {
 .data-table tr:hover td {
   background: var(--bg-hover) !important;
 }
-/* Section dividers between view sections */
-.view .panel + .panel { margin-top: 20px; }
+/* Section dividers between stacked view sections (not inside grids) */
+.view > .container > .panel + .panel,
+.view > .container > :not(.grid) > .panel + .panel { margin-top: 20px; }
 /* Nav tabs — stronger active state */
 .nav-tabs .nav-link.active,
 .tab-bar .tab.active {
