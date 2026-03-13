@@ -66,11 +66,12 @@
 }
 .content > .view { position: relative; z-index: 1; }
 #view-dashboard > .container { position: relative; }
-#view-dashboard .panel { background: rgba(18, 23, 31, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
-#view-dashboard .stat-strip .stat-card { background: rgba(18, 23, 31, 0.8); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+/* Uniform glass effect across all views */
+.panel, .compare-card { background: rgba(18, 23, 31, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+.stat-card { background: rgba(18, 23, 31, 0.8); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 [data-theme="light"] #neural-bg { opacity: 0.45; }
-[data-theme="light"] #view-dashboard .panel { background: rgba(255, 255, 255, 0.88); }
-[data-theme="light"] #view-dashboard .stat-strip .stat-card { background: rgba(255, 255, 255, 0.85); }
+[data-theme="light"] .panel, [data-theme="light"] .compare-card { background: rgba(255, 255, 255, 0.88); }
+[data-theme="light"] .stat-card { background: rgba(255, 255, 255, 0.85); }
 
 /* Language dropdown */
 .lang-dropdown {
@@ -546,7 +547,6 @@ a:hover { color: var(--accent-hover); }
 
 /* ---- Cards / Panels ---- */
 .panel {
-  background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 18px 22px;
@@ -576,7 +576,6 @@ a:hover { color: var(--accent-hover); }
   display: flex; gap: 8px; flex-wrap: wrap;
 }
 .stat-card {
-  background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 8px 10px;
@@ -2171,7 +2170,7 @@ kbd {
 .compare-results.cols-many { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 
 .compare-card {
-  background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius);
+  border: 1px solid var(--border); border-radius: var(--radius);
   display: flex; flex-direction: column; overflow: hidden;
 }
 .compare-card-header {
@@ -2282,7 +2281,7 @@ kbd {
 .btn-xs:hover { border-color: var(--accent); color: var(--text-primary); }
 .btn-xs.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .compare-card {
-  background: var(--bg-secondary); border: 1px solid var(--border);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg); display: flex; flex-direction: column;
   overflow: hidden; transition: border-color var(--transition);
 }
