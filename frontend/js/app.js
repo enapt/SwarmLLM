@@ -4141,61 +4141,86 @@ var SwarmLLM = (function() {
     data: null,
     mapRendered: false,
 
-    // Simplified world map: ISO alpha-2 → SVG path (smooth country outlines)
-    // Paths are in equirectangular projection, viewBox 0 0 1000 500
-    paths: {
-      CA:'M58,92Q62,88 80,82Q100,76 130,78Q155,80 175,90Q190,96 200,88Q215,78 240,82Q255,85 265,100L265,110Q260,120 255,130Q250,140 242,148Q235,155 225,160Q218,163 210,164Q195,163 180,162Q165,161 150,160Q130,158 110,160Q95,162 80,163Q68,164 60,162Q55,158 55,148Q54,135 56,120Q58,105 58,92Z',
-      US:'M58,168Q62,164 75,164Q90,165 110,166Q130,168 150,168Q170,168 190,170Q210,172 230,172Q250,170 262,168L265,178Q263,185 258,190Q250,194 240,196Q225,198 210,198Q200,200 195,205Q190,210 180,212Q170,214 160,212Q150,210 140,206Q132,202 125,200Q115,198 105,196Q90,194 78,192Q68,190 62,186Q58,182 58,175Z M155,195Q158,192 165,192Q172,192 180,194Q186,196 188,200Q186,206 180,210Q174,212 168,210Q162,208 158,204Q155,200 155,195Z',
-      MX:'M92,212Q98,210 110,210Q125,212 135,218Q142,224 146,232Q148,240 145,248Q140,252 130,250Q120,248 112,244Q105,240 100,234Q96,228 94,222Q92,216 92,212Z',
-      BR:'M262,278Q270,272 285,270Q300,272 315,278Q328,285 338,296Q345,308 348,322Q350,338 346,354Q340,368 330,378Q318,385 305,382Q290,378 278,370Q268,360 262,348Q258,335 258,320Q260,302 262,278Z',
-      AR:'M272,382Q278,378 288,380Q298,385 305,395Q310,408 312,422Q312,435 308,442Q302,446 295,444Q288,440 282,432Q278,422 275,410Q272,398 272,382Z',
-      CL:'M258,345Q262,340 268,342Q272,350 274,365Q275,382 273,400Q270,418 266,432Q262,442 258,448Q255,445 255,432Q256,415 257,398Q258,380 258,362Q258,352 258,345Z',
-      CO:'M228,258Q235,254 245,256Q255,260 260,268Q262,276 260,284Q255,288 248,286Q240,282 234,276Q230,270 228,264Q228,260 228,258Z',
-      GB:'M442,128Q445,125 450,126Q454,130 454,138Q452,146 450,152Q448,155 444,154Q441,150 441,142Q442,135 442,128Z',
-      FR:'M448,158Q454,155 462,156Q470,158 475,164Q478,170 476,178Q472,184 466,186Q458,185 452,180Q448,174 447,168Q448,162 448,158Z',
-      DE:'M480,142Q486,140 494,142Q500,146 502,154Q502,162 498,168Q494,170 488,168Q482,164 480,158Q479,150 480,142Z',
-      ES:'M432,182Q438,178 448,180Q456,184 460,190Q460,196 456,200Q450,202 442,200Q436,196 433,192Q432,188 432,182Z',
-      IT:'M488,172Q492,170 496,174Q498,180 496,188Q494,196 490,202Q487,205 484,202Q483,196 484,188Q486,180 488,172Z',
-      NL:'M470,136Q474,134 478,136Q480,140 480,146Q478,150 474,150Q470,148 470,142Q470,138 470,136Z',
-      SE:'M492,78Q496,74 500,80Q502,92 502,105Q502,118 500,128Q498,134 494,132Q491,126 491,115Q492,100 492,88Q492,82 492,78Z',
-      NO:'M474,72Q478,68 482,72Q486,82 487,95Q488,110 486,122Q484,130 480,128Q476,122 475,110Q474,96 474,84Q474,76 474,72Z',
-      FI:'M512,72Q516,68 520,72Q524,82 525,95Q526,108 524,118Q522,125 518,122Q514,116 513,105Q512,92 512,82Q512,76 512,72Z',
-      PL:'M508,142Q515,140 524,142Q530,146 533,152Q534,158 530,164Q525,166 518,164Q512,160 509,154Q508,148 508,142Z',
-      UA:'M538,142Q548,140 558,142Q568,146 574,152Q578,158 575,164Q570,168 562,168Q552,166 544,162Q538,156 537,150Q538,145 538,142Z',
-      RU:'M542,62Q560,58 590,62Q620,68 650,72Q680,74 710,70Q730,68 745,72Q750,78 748,90Q744,105 738,118Q730,130 720,138Q710,142 698,140Q680,136 660,132Q640,130 620,128Q600,126 580,128Q565,130 555,135Q548,140 545,138Q542,130 542,115Q542,98 542,82Q542,70 542,62Z',
-      TR:'M542,172Q552,170 565,172Q575,176 582,180Q588,184 586,190Q580,194 572,194Q562,192 554,188Q546,184 542,180Q542,176 542,172Z',
-      IN:'M652,212Q662,208 675,212Q688,220 695,234Q700,250 702,268Q702,285 698,300Q692,310 682,308Q672,302 665,290Q658,275 656,258Q654,240 654,225Q652,218 652,212Z',
-      CN:'M702,132Q720,128 742,132Q762,138 778,148Q790,160 795,178Q798,198 792,215Q785,228 774,225Q760,218 748,208Q735,198 725,186Q718,172 714,158Q710,145 706,138Q702,135 702,132Z',
-      JP:'M832,158Q836,155 840,160Q842,170 842,182Q840,195 836,205Q832,210 828,205Q826,195 828,182Q830,170 832,158Z M840,168Q844,166 846,170Q846,176 844,180Q842,178 840,174Q840,170 840,168Z',
-      KR:'M812,172Q816,170 820,174Q824,180 824,188Q822,196 818,198Q814,196 812,190Q812,182 812,172Z',
-      AU:'M782,332Q800,328 825,332Q848,340 865,354Q878,370 882,390Q880,408 870,416Q855,420 838,418Q818,412 800,404Q788,394 782,380Q780,365 782,350Q782,340 782,332Z',
-      NZ:'M912,392Q916,388 920,392Q924,400 924,410Q922,420 918,426Q914,428 912,424Q910,416 912,406Q912,398 912,392Z',
-      ZA:'M512,372Q522,368 535,372Q545,380 550,392Q552,405 548,415Q542,420 532,418Q522,414 516,405Q512,395 512,385Q512,378 512,372Z',
-      NG:'M472,278Q480,275 490,278Q498,284 500,292Q500,300 496,304Q490,306 482,302Q476,296 474,288Q472,282 472,278Z',
-      EG:'M532,212Q540,210 550,214Q558,222 560,234Q560,244 556,250Q550,252 544,248Q538,240 535,230Q532,220 532,212Z',
-      KE:'M558,288Q564,285 570,288Q575,296 576,306Q575,315 570,318Q565,316 560,308Q558,298 558,288Z',
-      SG:'M736,292Q738,290 740,292Q742,295 740,298Q738,299 736,297Q736,294 736,292Z',
-      ID:'M742,292Q758,288 778,292Q795,298 808,308Q815,318 812,326Q802,330 788,328Q772,322 758,316Q748,310 744,302Q742,296 742,292Z',
-      TH:'M722,242Q726,238 730,242Q734,252 734,264Q732,275 728,280Q724,278 722,270Q722,258 722,248Q722,244 722,242Z',
-      VN:'M742,232Q746,228 750,234Q752,245 752,258Q750,270 746,278Q742,275 742,265Q742,250 742,238Q742,234 742,232Z',
-      PH:'M792,242Q796,240 800,244Q804,252 805,262Q804,272 800,278Q796,276 793,268Q792,258 792,248Q792,244 792,242Z',
-      TW:'M802,218Q806,216 808,220Q810,226 808,232Q806,235 803,232Q801,226 802,218Z',
-      IL:'M547,202Q550,200 552,204Q553,210 552,216Q550,220 548,218Q546,212 547,206Q547,204 547,202Z',
-      AE:'M602,232Q610,230 618,234Q622,240 620,246Q615,250 608,248Q602,244 602,238Q602,234 602,232Z',
-      SA:'M568,218Q578,214 590,218Q600,226 605,238Q608,252 604,262Q596,266 586,262Q576,255 570,244Q566,232 568,218Z',
-      CH:'M472,164Q478,162 484,164Q486,168 484,172Q478,174 472,172Q470,168 472,164Z',
-      AT:'M492,162Q500,160 508,162Q512,166 510,170Q504,172 496,170Q492,166 492,162Z',
-      CZ:'M492,150Q500,148 508,150Q512,154 510,158Q504,160 496,158Q492,154 492,150Z',
-      RO:'M522,162Q530,160 540,162Q546,168 544,175Q538,178 530,176Q524,172 522,166Q522,163 522,162Z',
-      IE:'M428,132Q432,128 436,132Q438,140 436,148Q434,154 430,152Q426,148 427,140Q428,135 428,132Z',
-      PT:'M422,182Q426,180 428,184Q430,192 428,200Q426,205 423,202Q421,196 422,188Q422,184 422,182Z',
-      DK:'M480,122Q486,120 490,124Q492,130 490,136Q486,138 482,136Q480,130 480,124Q480,122 480,122Z',
-      BE:'M460,150Q466,148 470,152Q470,158 466,160Q462,160 460,156Q460,152 460,150Z',
+    // ISO 3166-1 numeric → alpha-2 mapping for countries we track
+    numToAlpha2: {
+      '032':'AR','036':'AU','040':'AT','056':'BE','076':'BR','124':'CA','152':'CL',
+      '156':'CN','170':'CO','196':'CY','203':'CZ','208':'DK','818':'EG','233':'EE',
+      '246':'FI','250':'FR','276':'DE','300':'GR','344':'HK','348':'HU','356':'IN',
+      '360':'ID','372':'IE','376':'IL','380':'IT','392':'JP','404':'KE','410':'KR',
+      '458':'MY','484':'MX','528':'NL','554':'NZ','566':'NG','578':'NO','586':'PK',
+      '604':'PE','608':'PH','616':'PL','620':'PT','642':'RO','643':'RU','682':'SA',
+      '702':'SG','710':'ZA','724':'ES','752':'SE','756':'CH','158':'TW','764':'TH',
+      '792':'TR','784':'AE','804':'UA','826':'GB','840':'US','704':'VN',
     },
 
-    buildSvg: function() {
+    // Equirectangular projection: lon/lat → SVG coords in viewBox 0 0 1000 500
+    projectCoord: function(lon, lat) {
+      var x = (lon + 180) / 360 * 1000;
+      var y = (90 - lat) / 180 * 500;
+      return [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+    },
+
+    // Convert a GeoJSON ring (array of [lon,lat]) to SVG path d string
+    ringToPath: function(ring) {
+      var parts = [];
+      for (var i = 0; i < ring.length; i++) {
+        var p = networkMap.projectCoord(ring[i][0], ring[i][1]);
+        parts.push((i === 0 ? 'M' : 'L') + p[0] + ',' + p[1]);
+      }
+      parts.push('Z');
+      return parts.join('');
+    },
+
+    // Convert a GeoJSON geometry to SVG path d string
+    geomToPath: function(geom) {
+      var d = '';
+      if (geom.type === 'Polygon') {
+        for (var i = 0; i < geom.coordinates.length; i++) {
+          d += networkMap.ringToPath(geom.coordinates[i]);
+        }
+      } else if (geom.type === 'MultiPolygon') {
+        for (var i = 0; i < geom.coordinates.length; i++) {
+          for (var j = 0; j < geom.coordinates[i].length; j++) {
+            d += networkMap.ringToPath(geom.coordinates[i][j]);
+          }
+        }
+      }
+      return d;
+    },
+
+    // Paths populated from TopoJSON at runtime
+    paths: {},
+
+    buildSvg: async function() {
       var container = document.getElementById('world-map');
       if (!container) return;
+
+      // Load TopoJSON data
+      try {
+        var resp = await fetch('/static/data/countries-110m.json');
+        var topo = await resp.json();
+        var geojson = topojson.feature(topo, topo.objects.countries);
+        var features = geojson.features;
+
+        // Build paths from real geographic data
+        networkMap.paths = {};
+        for (var i = 0; i < features.length; i++) {
+          var f = features[i];
+          var numId = String(f.id);
+          var alpha2 = networkMap.numToAlpha2[numId];
+          var d = networkMap.geomToPath(f.geometry);
+          if (alpha2) {
+            networkMap.paths[alpha2] = d;
+          }
+          // Store all paths for rendering (use numeric ID as fallback key)
+          var key = alpha2 || ('n' + numId);
+          networkMap.paths[key] = d;
+        }
+      } catch (e) {
+        // TopoJSON load failed — map will be empty
+        console.warn('[SwarmLLM] Failed to load map data:', e.message);
+      }
+
       var svg = '<svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg" class="world-svg">';
       // Defs — glow filter for active regions
       svg += '<defs>';
@@ -4213,14 +4238,15 @@ var SwarmLLM = (function() {
         var opy = (y % 100 === 0) ? '0.25' : '0.1';
         svg += '<line x1="0" y1="' + y + '" x2="1000" y2="' + y + '" stroke="var(--accent)" stroke-width="0.3" opacity="' + opy + '"/>';
       }
-      // Equator + tropics — faint reference lines
+      // Equator — faint reference line
       svg += '<line x1="0" y1="250" x2="1000" y2="250" stroke="var(--accent)" stroke-width="0.5" opacity="0.15" stroke-dasharray="8,4"/>';
-      // Country paths — outline-focused style
+      // Country paths — outline-focused neon style
       var codes = Object.keys(networkMap.paths);
       for (var i = 0; i < codes.length; i++) {
-        var code = escapeHtml(codes[i]);
-        var d = escapeHtml(networkMap.paths[codes[i]] || '');
-        svg += '<path id="region-' + code + '" d="' + d + '" fill="rgba(59,130,246,0.04)" stroke="rgba(59,130,246,0.35)" stroke-width="0.8" class="map-region" data-code="' + code + '" filter="url(#glow-sm)"/>';
+        var code = codes[i];
+        var d = networkMap.paths[code];
+        if (!d) continue;
+        svg += '<path id="region-' + code + '" d="' + d + '" fill="rgba(59,130,246,0.04)" stroke="rgba(59,130,246,0.3)" stroke-width="0.5" class="map-region" data-code="' + code + '"/>';
       }
       svg += '</svg>';
       container.innerHTML = svg;
@@ -4235,7 +4261,7 @@ var SwarmLLM = (function() {
     },
 
     refresh: async function() {
-      if (!networkMap.mapRendered) networkMap.buildSvg();
+      if (!networkMap.mapRendered) await networkMap.buildSvg();
       try {
         var resp = await fetch('/api/admin/network-map');
         var data = await resp.json();
@@ -4284,8 +4310,9 @@ var SwarmLLM = (function() {
         var n = counts[c] || 0;
         if (n === 0) {
           el.style.fill = 'rgba(59,130,246,0.04)';
-          el.style.stroke = 'rgba(59,130,246,0.35)';
-          el.setAttribute('filter', 'url(#glow-sm)');
+          el.style.stroke = 'rgba(59,130,246,0.3)';
+          el.style.strokeWidth = '0.5';
+          el.removeAttribute('filter');
         } else {
           var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
           var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
@@ -4376,8 +4403,9 @@ var SwarmLLM = (function() {
         var n = regionSummary[c] || 0;
         if (n === 0) {
           el.style.fill = 'rgba(59,130,246,0.04)';
-          el.style.stroke = 'rgba(59,130,246,0.35)';
-          el.setAttribute('filter', 'url(#glow-sm)');
+          el.style.stroke = 'rgba(59,130,246,0.3)';
+          el.style.strokeWidth = '0.5';
+          el.removeAttribute('filter');
         } else {
           var intensity = Math.max(0.25, n / Math.max(maxCount, 1));
           var fillAlpha = (0.06 + intensity * 0.14).toFixed(2);
