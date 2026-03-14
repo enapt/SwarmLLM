@@ -50,6 +50,12 @@ var NeuralBg = (function() {
   var SCATTER_BURST = 5.0;
   var SCATTER_DECAY = 0.94;
 
+  // Spontaneous startles — random boids spook their neighbors
+  var STARTLE_CHANCE = 0.0012;  // per boid per frame (~1 startle every ~12s for 90 boids)
+  var STARTLE_RADIUS = 120;     // how far the panic spreads
+  var STARTLE_BURST = 3.0;      // impulse strength
+  var STARTLE_CONTAGION = 0.5;  // scattered boids can spook calm neighbors
+
   // Visual
   var TRAIL_ALPHA = 0.07;
   var PULSE_SPEED = 0.002;
@@ -374,6 +380,35 @@ var NeuralBg = (function() {
 
       // Scatter decay — gradually calm down and reform
       b.scattered *= SCATTER_DECAY;
+
+      // Spontaneous startle — random boid gets spooked and startles neighbors
+      if (b.scattered < 0.1 && Math.random() < STARTLE_CHANCE) {
+        b.scattered = 0.8;
+        b.energy = 0.6;
+        var burstAngle = Math.random() * Math.PI * 2;
+        b.vx += Math.cos(burstAngle) * STARTLE_BURST;
+        b.vy += Math.sin(burstAngle) * STARTLE_BURST;
+        // Ripple: spook nearby calm boids
+        for (var si = 0; si < neighbors.length; si++) {
+          var sj = neighbors[si];
+          if (sj === i) continue;
+          var sOther = boids[sj];
+          var sdx = sOther.x - b.x;
+          var sdy = sOther.y - b.y;
+          var sd2 = sdx * sdx + sdy * sdy;
+          if (sd2 < STARTLE_RADIUS * STARTLE_RADIUS && sd2 > 0) {
+            var sd = Math.sqrt(sd2);
+            var intensity = 1 - sd / STARTLE_RADIUS;
+            // Contagion: already-scattered boids spread panic further
+            var spread = intensity * STARTLE_CONTAGION;
+            sOther.scattered = Math.min(1, sOther.scattered + spread);
+            sOther.energy = Math.min(1, sOther.energy + spread * 0.3);
+            var fleeAngle = Math.atan2(sdy, sdx) + (Math.random() - 0.5) * 1.2;
+            sOther.vx += Math.cos(fleeAngle) * STARTLE_BURST * intensity * 0.6;
+            sOther.vy += Math.sin(fleeAngle) * STARTLE_BURST * intensity * 0.6;
+          }
+        }
+      }
 
       // Soft boundaries
       var margin = 50;
