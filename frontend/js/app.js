@@ -4252,7 +4252,7 @@ var SwarmLLM = (function() {
       svg += '<filter id="glow-md"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>';
       svg += '</defs>';
       // Background
-      svg += '<rect width="1000" height="500" fill="var(--bg-primary)" rx="4"/>';
+      svg += '<rect width="1000" height="500" fill="transparent" rx="4"/>';
       // Grid lines — subtle crosshatch
       for (var x = 0; x <= 1000; x += 50) {
         var op = (x % 100 === 0) ? '0.25' : '0.1';

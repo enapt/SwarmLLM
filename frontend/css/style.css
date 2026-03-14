@@ -1549,8 +1549,11 @@ kbd {
   position: relative;
   border-radius: var(--radius);
   overflow: hidden;
-  background: var(--bg-primary);
+  background: rgba(10, 14, 20, 0.6);
   border: 1px solid var(--border);
+}
+[data-theme="light"] .world-map-container {
+  background: rgba(240, 243, 248, 0.6);
 }
 .world-svg {
   width: 100%;
