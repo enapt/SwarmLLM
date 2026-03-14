@@ -16,39 +16,39 @@ var NeuralBg = (function() {
   var state = { peers: 0, active: 0, health: 1.0 };
 
   // --- Tuning ---
-  var BOID_COUNT = 90;
-  var MAX_SPEED = 1.6;
-  var MAX_FORCE = 0.04;
+  var BOID_COUNT = 100;
+  var MAX_SPEED = 0.8;
+  var MAX_FORCE = 0.018;
 
-  // Flocking radii
-  var SEPARATION_DIST = 20;
-  var NEIGHBOR_DIST = 100;
+  // Flocking radii — wide spread
+  var SEPARATION_DIST = 35;
+  var NEIGHBOR_DIST = 160;
 
   // Link distance — links form/break at this threshold
-  var LINK_DIST = 130;
-  var LINK_STRONG = 50;
-  var LINK_OPACITY = 0.18;
+  var LINK_DIST = 200;
+  var LINK_STRONG = 70;
+  var LINK_OPACITY = 0.15;
 
-  // Force weights
-  var SEPARATION_W = 2.2;     // push apart more = wider spread
-  var ALIGNMENT_W = 0.5;
-  var COHESION_W = 0.7;       // softer cohesion = looser clusters
-  var WANDER_W = 0.6;
-  var LINK_PULL_W = 0.2;
+  // Force weights — smooth swarm behavior
+  var SEPARATION_W = 1.8;     // push apart for spread
+  var ALIGNMENT_W = 1.0;      // strong alignment = coordinated movement
+  var COHESION_W = 0.35;      // loose cohesion = wider formations
+  var WANDER_W = 0.3;         // gentle drift, less jittery
+  var LINK_PULL_W = 0.12;
 
   // Feelers — long-range probing tendrils
-  var FEELER_DIST = 320;      // max reach
-  var FEELER_CHANCE = 0.008;  // probability per boid per frame of sending a feeler
-  var FEELER_DURATION = 80;   // frames a feeler lives
-  var FEELER_OPACITY = 0.12;
-  var MAX_FEELERS = 12;       // max simultaneous feelers on screen
+  var FEELER_DIST = 400;      // max reach
+  var FEELER_CHANCE = 0.006;  // probability per boid per frame of sending a feeler
+  var FEELER_DURATION = 120;  // frames a feeler lives (slower = longer)
+  var FEELER_OPACITY = 0.10;
+  var MAX_FEELERS = 14;       // max simultaneous feelers on screen
 
   // Mouse
-  var MOUSE_ATTRACT_RADIUS = 250;
-  var MOUSE_SCATTER_RADIUS = 180;
+  var MOUSE_ATTRACT_RADIUS = 300;
+  var MOUSE_SCATTER_RADIUS = 200;
   var MOUSE_SPEED_THRESH = 6;
-  var SCATTER_BURST = 5.0;
-  var SCATTER_DECAY = 0.94;
+  var SCATTER_BURST = 3.5;
+  var SCATTER_DECAY = 0.97;
 
   // Visual
   var TRAIL_ALPHA = 0.07;
@@ -60,7 +60,7 @@ var NeuralBg = (function() {
 
   // Spatial grid
   var grid = {};
-  var CELL_SIZE = 110;
+  var CELL_SIZE = 160;
 
   function init() {
     canvas = document.getElementById('neural-bg');
@@ -112,21 +112,21 @@ var NeuralBg = (function() {
     var count = Math.min(BOID_COUNT, Math.max(30, Math.round(area / 12000)));
 
     // Spawn in loose clusters spread wide across the canvas
-    var clusterCount = Math.floor(count / 6) + 1;
+    var clusterCount = Math.floor(count / 5) + 1;
     var perCluster = Math.ceil(count / clusterCount);
 
     for (var c = 0; c < clusterCount; c++) {
-      var cx = Math.random() * W * 0.9 + W * 0.05;
-      var cy = Math.random() * H * 0.9 + H * 0.05;
+      var cx = Math.random() * W * 0.94 + W * 0.03;
+      var cy = Math.random() * H * 0.94 + H * 0.03;
       var clusterAngle = Math.random() * Math.PI * 2;
       var num = Math.min(perCluster, count - boids.length);
 
       for (var i = 0; i < num; i++) {
-        var a = clusterAngle + (Math.random() - 0.5) * 1.5;
-        var spd = 0.3 + Math.random() * 0.6;
+        var a = clusterAngle + (Math.random() - 0.5) * 1.2;
+        var spd = 0.15 + Math.random() * 0.35;
         boids.push({
-          x: cx + (Math.random() - 0.5) * 120,
-          y: cy + (Math.random() - 0.5) * 120,
+          x: cx + (Math.random() - 0.5) * 200,
+          y: cy + (Math.random() - 0.5) * 200,
           vx: Math.cos(a) * spd,
           vy: Math.sin(a) * spd,
           phase: Math.random() * Math.PI * 2,
@@ -339,11 +339,11 @@ var NeuralBg = (function() {
         fy += pv[1] * LINK_PULL_W * calm;
       }
 
-      // Wander — organic randomness, amplified during scatter
+      // Wander — slow organic drift, amplified during scatter
       var wanderMul = 1 + b.scattered * 3;
-      b.wanderAngle += (Math.random() - 0.5) * (0.8 + b.scattered * 2.5);
-      if (Math.random() < 0.008 + b.scattered * 0.06) {
-        b.wanderAngle += (Math.random() - 0.5) * Math.PI;
+      b.wanderAngle += (Math.random() - 0.5) * (0.3 + b.scattered * 2.0);
+      if (Math.random() < 0.004 + b.scattered * 0.04) {
+        b.wanderAngle += (Math.random() - 0.5) * Math.PI * 0.6;
       }
       fx += Math.cos(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
       fy += Math.sin(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
@@ -392,15 +392,15 @@ var NeuralBg = (function() {
       b.vx = lim[0];
       b.vy = lim[1];
 
-      // Damping
-      b.vx *= 0.985;
-      b.vy *= 0.985;
+      // Damping — gentle for smooth gliding
+      b.vx *= 0.992;
+      b.vy *= 0.992;
 
-      // Minimum drift
+      // Minimum drift — very gentle nudge
       var spd2 = b.vx * b.vx + b.vy * b.vy;
-      if (spd2 < 0.03) {
-        b.vx += (Math.random() - 0.5) * 0.12;
-        b.vy += (Math.random() - 0.5) * 0.12;
+      if (spd2 < 0.01) {
+        b.vx += (Math.random() - 0.5) * 0.06;
+        b.vy += (Math.random() - 0.5) * 0.06;
       }
 
       b.x += b.vx;
