@@ -4275,9 +4275,10 @@ var SwarmLLM = (function() {
       svg += '</svg>';
       container.innerHTML = svg;
 
-      // Add hover tooltip handlers
+      // Add hover tooltip handlers — track mouse position for cursor-following tooltip
       container.querySelectorAll('.map-region').forEach(function(el) {
         el.addEventListener('mouseenter', function(e) { networkMap.showTooltip(e, el.dataset.code); });
+        el.addEventListener('mousemove', function(e) { networkMap.moveTooltip(e); });
         el.addEventListener('mouseleave', function() { networkMap.hideTooltip(); });
       });
 
@@ -4475,11 +4476,25 @@ var SwarmLLM = (function() {
         html += '<span class="text-muted" style="margin-left:8px">No nodes</span>';
       }
       tip.innerHTML = html;
-      document.getElementById('world-map-container').appendChild(tip);
-      var rect = event.target.getBoundingClientRect();
-      var containerRect = document.getElementById('world-map-container').getBoundingClientRect();
-      tip.style.left = Math.min(rect.left - containerRect.left + rect.width / 2, containerRect.width - 200) + 'px';
-      tip.style.top = (rect.top - containerRect.top - tip.offsetHeight - 8) + 'px';
+      var mapContainer = document.getElementById('world-map-container');
+      mapContainer.appendChild(tip);
+      networkMap.moveTooltip(event);
+      // Fade in
+      requestAnimationFrame(function() { tip.classList.add('visible'); });
+    },
+
+    moveTooltip: function(event) {
+      var tip = document.getElementById('map-tooltip');
+      if (!tip) return;
+      var mapContainer = document.getElementById('world-map-container');
+      var containerRect = mapContainer.getBoundingClientRect();
+      var x = event.clientX - containerRect.left + 14;
+      var y = event.clientY - containerRect.top - tip.offsetHeight - 10;
+      // Keep tooltip within container bounds
+      if (x + tip.offsetWidth > containerRect.width - 8) x = event.clientX - containerRect.left - tip.offsetWidth - 14;
+      if (y < 4) y = event.clientY - containerRect.top + 18;
+      tip.style.left = x + 'px';
+      tip.style.top = y + 'px';
     },
 
     hideTooltip: function() {

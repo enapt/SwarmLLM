@@ -1559,12 +1559,13 @@ kbd {
 }
 .world-svg .map-region {
   cursor: pointer;
-  transition: fill 0.3s, stroke 0.3s, stroke-width 0.3s;
+  transition: fill 0.3s, stroke 0.3s, stroke-width 0.3s, filter 0.3s;
 }
 .world-svg .map-region:hover {
-  stroke: rgba(100,200,255,0.9);
-  stroke-width: 2;
-  fill: rgba(59,130,246,0.15);
+  stroke: rgba(100,210,255,0.95) !important;
+  stroke-width: 1.8 !important;
+  fill: rgba(59,130,246,0.18) !important;
+  filter: drop-shadow(0 0 6px rgba(80,180,255,0.5)) drop-shadow(0 0 12px rgba(59,130,246,0.25)) !important;
 }
 .world-svg .map-node-dot {
   pointer-events: none;
@@ -1576,17 +1577,29 @@ kbd {
 }
 .map-tooltip {
   position: absolute;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-light);
+  background: rgba(18, 23, 31, 0.92);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(80, 180, 255, 0.25);
   border-radius: var(--radius);
   padding: 8px 12px;
   font-size: 0.8rem;
   color: var(--text-primary);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
   box-shadow: var(--shadow-lg);
   z-index: 10;
   pointer-events: none;
   min-width: 140px;
   max-width: 260px;
+}
+.map-tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+[data-theme="light"] .map-tooltip {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(59, 130, 246, 0.2);
 }
 .map-legend {
   display: flex;
