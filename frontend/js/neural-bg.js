@@ -300,12 +300,13 @@ var NeuralBg = (function() {
             links.push(i, j, linkAlpha);
           }
 
-          // Linked boids pull toward each other (the bond)
-          // Stronger pull when further apart (spring-like, up to link dist)
-          if (dist > LINK_STRONG * 0.8) {
-            var pullStr = (dist - LINK_STRONG * 0.8) / (LINK_DIST - LINK_STRONG * 0.8);
-            pullX -= (dx / dist) * pullStr;
-            pullY -= (dy / dist) * pullStr;
+          // Linked boids: soft spring — only pull when far, push when too close
+          // This lets them orbit and drift within the link rather than clumping
+          if (dist > LINK_DIST * 0.6) {
+            // Pull gently when drifting apart
+            var pullStr = (dist - LINK_DIST * 0.6) / (LINK_DIST * 0.4);
+            pullX -= (dx / dist) * pullStr * 0.5;
+            pullY -= (dy / dist) * pullStr * 0.5;
             pullCount++;
           }
         }
