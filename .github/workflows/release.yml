@@ -25,25 +25,42 @@ jobs:
             binary: swarmllm
             archive: swarmllm-linux-x86_64.tar.gz
             features: ""
+
           - name: Linux x86_64 CUDA
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary: swarmllm
             archive: swarmllm-linux-x86_64-cuda.tar.gz
-            features: "--features candle-cuda"
+            features: "--features cuda"
             cuda: true
+
           - name: macOS aarch64
             runner: macos-15
             target: aarch64-apple-darwin
             binary: swarmllm
             archive: swarmllm-macos-aarch64.tar.gz
             features: ""
-          - name: Windows x86_64
+
+          # Windows CPU-only: works on any Windows PC, no GPU drivers required.
+          - name: Windows x86_64 CPU
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: swarmllm.exe
-            archive: swarmllm-windows-x86_64.zip
+            archive: swarmllm-windows-x86_64-cpu.zip
             features: ""
+            windows: true
+
+          # Windows GPU: llama.cpp via Vulkan (NVIDIA/AMD/Intel — no CUDA Toolkit needed),
+          #              candle via CUDA with static runtime (NVIDIA distributed inference,
+          #              needs only standard GeForce drivers, not CUDA Toolkit).
+          - name: Windows x86_64 GPU
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: swarmllm-windows-x86_64-gpu.zip
+            features: "--features windows-gpu"
+            windows: true
+            windows_gpu: true
+            cuda: true
+            vulkan: true
 
     steps:
       - uses: actions/checkout@v4
@@ -62,8 +79,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Install CUDA toolkit
-        if: matrix.cuda
+      - name: Install CUDA toolkit (Linux)
+        if: matrix.cuda && runner.os == 'Linux'
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -72,10 +89,40 @@ jobs:
           echo "/usr/local/cuda-12.4/bin" >> "$GITHUB_PATH"
           echo "CUDA_PATH=/usr/local/cuda-12.4" >> "$GITHUB_ENV"
 
+      - name: Install CUDA toolkit (Windows)
+        if: matrix.cuda && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Install CUDA 12.4 via winget (available on windows-latest runners)
+          $url = "https://developer.download.nvidia.com/compute/cuda/12.4.0/local_installers/cuda_12.4.0_551.61_windows.exe"
+          $installer = "$env:TEMP\cuda_installer.exe"
+          Write-Host "Downloading CUDA 12.4 installer..."
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          Write-Host "Installing CUDA 12.4 (nvcc, cudart_static, cublas_static)..."
+          & $installer -s nvcc_12.4 cudart_12.4 cublas_12.4 visual_studio_integration_12.4
+          $cudaPath = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4"
+          echo "CUDA_PATH=$cudaPath" >> $env:GITHUB_ENV
+          echo "$cudaPath\bin" >> $env:GITHUB_PATH
+
+      - name: Install Vulkan SDK (Windows GPU build)
+        if: matrix.vulkan
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+
       - name: Build release binary
         run: cargo build --release ${{ matrix.features }}
         env:
-          CUDA_COMPUTE_CAP: ${{ matrix.cuda && '80' || '' }}
+          CUDA_COMPUTE_CAP: ${{ (matrix.cuda && runner.os == 'Linux') && '80' || '' }}
+          # Ensure CUDA static libs are found on Windows
+          RUSTFLAGS: ${{ (matrix.windows_gpu) && '-C target-feature=+crt-static' || '' }}
+
+      - name: Build launcher (Windows only)
+        if: matrix.windows
+        shell: pwsh
+        run: cargo build --release --bin swarmllm-launcher
 
       - name: Package archive (Linux/macOS)
         if: runner.os != 'Windows'
@@ -92,8 +139,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $gpuBinary = "swarmllm-gpu.exe"
+          $cpuBinary = "swarmllm-cpu.exe"
+
+          # Rename binary to gpu or cpu variant
+          if ("${{ matrix.windows_gpu }}" -eq "true") {
+            $binaryName = $gpuBinary
+          } else {
+            $binaryName = $cpuBinary
+          }
+
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target/release/${{ matrix.binary }}" staging/
+          Copy-Item "target/release/swarmllm.exe" "staging/$binaryName"
           Copy-Item "config/default.toml" staging/
           Copy-Item "INSTALL.txt" staging/
           Copy-Item LICENSE-* staging/
@@ -104,6 +161,14 @@ jobs:
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
+
+      # Upload launcher separately so the installer job can bundle both EXEs + launcher
+      - name: Upload launcher artifact (Windows)
+        if: matrix.name == 'Windows x86_64 CPU'
+        uses: actions/upload-artifact@v4
+        with:
+          name: swarmllm-launcher.exe
+          path: target/release/swarmllm-launcher.exe
 
       # Build .deb package (Linux CPU only — CUDA users build from source)
       - name: Build .deb package
@@ -135,9 +200,63 @@ jobs:
           name: swarmllm_${{ github.ref_name }}.x86_64.rpm
           path: swarmllm_${{ github.ref_name }}.x86_64.rpm
 
+  # Build the Windows installer after both Windows binaries are ready
+  windows-installer:
+    name: Build Windows Installer
+    needs: build
+    runs-on: windows-latest
+    if: always() && !cancelled()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download GPU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: swarmllm-windows-x86_64-gpu.zip
+          path: installer-staging
+
+      - name: Download CPU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: swarmllm-windows-x86_64-cpu.zip
+          path: installer-staging
+
+      - name: Download launcher
+        uses: actions/download-artifact@v4
+        with:
+          name: swarmllm-launcher.exe
+          path: installer-staging
+
+      - name: Extract binaries from archives
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installer-bin
+          Expand-Archive -Path "installer-staging/swarmllm-windows-x86_64-gpu.zip" -DestinationPath installer-bin-gpu
+          Expand-Archive -Path "installer-staging/swarmllm-windows-x86_64-cpu.zip" -DestinationPath installer-bin-cpu
+          Copy-Item "installer-bin-gpu/swarmllm-gpu.exe" installer-bin/
+          Copy-Item "installer-bin-cpu/swarmllm-cpu.exe" installer-bin/
+          Copy-Item "installer-staging/swarmllm-launcher.exe" "installer-bin/swarmllm.exe"
+          Copy-Item "config/default.toml" installer-bin/
+          Copy-Item "INSTALL.txt" installer-bin/
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=$version `
+            /DBinDir="${{ github.workspace }}\installer-bin" `
+            installer/windows.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwarmLLM-Setup.exe
+          path: installer/Output/SwarmLLM-Setup.exe
+
   release:
     name: Publish Release
-    needs: build
+    needs: [build, windows-installer]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:

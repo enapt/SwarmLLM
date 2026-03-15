@@ -1025,11 +1025,29 @@ When a requested model isn't available locally or on the swarm, requests can opt
 
 | Platform | Priority | GPU Support |
 |---|---|---|
-| Linux x86_64 | P0 | CUDA + ROCm |
+| Linux x86_64 | P0 | CUDA (llama.cpp + candle) + ROCm (llama.cpp) |
 | macOS aarch64 | P1 | Metal (via llama.cpp) |
-| Windows x86_64 | P1 | CUDA |
+| Windows x86_64 | P1 | Vulkan (llama.cpp, all vendors) + CUDA static (candle, NVIDIA) |
 | macOS x86_64 | P2 | CPU only |
 | Linux aarch64 | P3 | CPU only |
+
+### Windows GPU Distribution Strategy
+
+Windows uses a three-binary installer (`SwarmLLM-Setup.exe`) to support all GPU vendors without requiring users to install CUDA Toolkit or Vulkan SDK:
+
+- **`swarmllm-gpu.exe`** — built with `--features windows-gpu`:
+  - llama.cpp local inference via Vulkan (NVIDIA, AMD, Intel — `vulkan-1.dll` bundled with all GPU drivers)
+  - candle distributed/split inference via CUDA with static runtime (`cudart_static` linked in — needs only GeForce drivers, not CUDA Toolkit)
+- **`swarmllm-cpu.exe`** — CPU-only, works on any Windows PC
+- **`swarmllm.exe`** (launcher) — detects `nvcuda.dll` in System32 at startup, transparently execs the appropriate binary
+
+**AMD/Intel on Windows**: Local inference is GPU-accelerated via Vulkan. Split/distributed inference falls back to CPU — acceptable since serious multi-GPU distributed setups are predominantly NVIDIA.
+
+### Future: wgpu/WebGPU Backend for Split Inference
+
+The current candle-based split/distributed inference path supports CUDA (NVIDIA) only. A wgpu backend would enable cross-platform GPU acceleration (NVIDIA, AMD, Intel) for distributed inference using Vulkan, DX12, or Metal under the hood — eliminating the NVIDIA-only limitation for the distributed path.
+
+Tracked upstream in [huggingface/candle](https://github.com/huggingface/candle). No stable wgpu backend exists as of 2026-03. When available, enable via a new `candle-wgpu` feature that activates `candle-core/wgpu`. The `windows-gpu` feature would then include it alongside llama-vulkan, giving full cross-vendor GPU support for both local and distributed inference.
 
 ## Networking Notes
 

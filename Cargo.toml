@@ -20,6 +20,12 @@ rust-version = "1.80"
 name = "swarmllm"
 path = "src/main.rs"
 
+# Windows launcher: detects GPU at runtime and execs swarmllm-gpu.exe or swarmllm-cpu.exe.
+# Built separately and renamed to swarmllm.exe in the Windows installer.
+[[bin]]
+name = "swarmllm-launcher"
+path = "src/bin/launcher.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -69,6 +75,9 @@ rand = "0.8"
 
 # LLM inference
 llama-cpp-2 = { version = "0.1", optional = true }
+
+# CUDA runtime static linking (Windows GPU distribution — users need only GeForce drivers, not CUDA Toolkit)
+cudarc = { version = "0.19", features = ["static-linking"], optional = true }
 
 # Split inference (candle-based, layer-range execution)
 candle-core = { version = "0.9", default-features = false }
@@ -124,11 +133,37 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 [features]
 default = ["swarmllm-frontend/embedded"]
 dev = ["swarmllm-frontend/dev"]
+
+# --- Core inference backends ---
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
 paged-attn = ["candle-cuda", "dep:candle-paged-attention"]
+
+# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash/paged attention)
 cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn", "paged-attn"]
+
+# llama.cpp with Vulkan backend — works on NVIDIA, AMD, and Intel GPUs without CUDA install.
+# Runtime requirement: vulkan-1.dll (bundled with standard GPU drivers — no user action needed).
+# Build requirement: VULKAN_SDK env var pointing to installed Vulkan SDK.
+llama-vulkan = ["llama", "llama-cpp-2/vulkan"]
+
+# candle CUDA with static runtime — links cudart_static into the binary.
+# Users need only standard GeForce/Radeon drivers; CUDA Toolkit not required at runtime.
+# Enables dep:cudarc with static-linking feature to force static cudart linkage.
+candle-cuda-static = ["candle-cuda", "dep:cudarc"]
+
+# Windows GPU: llama.cpp via Vulkan (all GPU vendors, local inference) +
+#              candle via CUDA with static runtime (NVIDIA split/distributed inference).
+# Single binary covers all Windows GPU users. CPU fallback automatic when no CUDA GPU detected.
+windows-gpu = ["llama-vulkan", "candle-cuda-static"]
+
+# Future — wgpu/WebGPU backend for candle (cross-platform GPU for split/distributed inference).
+# Would enable NVIDIA, AMD, and Intel GPU acceleration for distributed inference on all platforms
+# using Vulkan, DX12, or Metal under the hood. Tracked upstream in huggingface/candle.
+# Uncomment when candle gains a stable wgpu backend:
+# candle-wgpu = ["candle-core/wgpu", "candle-nn/wgpu", "candle-transformers/wgpu"]
+# windows-gpu-full = ["llama-vulkan", "candle-wgpu"]
 
 [dev-dependencies]
 tempfile = "3"
