@@ -101,12 +101,16 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 Your browser opens to `localhost:8800`. The setup wizard auto-detects your hardware. Pick a model, download it, start chatting.
 
 Available binaries:
-| Platform | File |
-|----------|------|
-| Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` |
-| Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` |
-| Windows x86_64 | `swarmllm-windows-x86_64.zip` |
-| macOS (Apple Silicon / Intel) | Coming soon |
+| Platform | File | Notes |
+|----------|------|-------|
+| Linux x86_64 | `swarmllm-linux-x86_64.tar.gz` | CPU inference |
+| Linux x86_64 + CUDA | `swarmllm-linux-x86_64-cuda.tar.gz` | NVIDIA GPU acceleration |
+| **Windows x86_64** | **`SwarmLLM-Setup.exe`** | **Recommended — installer, auto-detects GPU** |
+| Windows x86_64 (GPU) | `swarmllm-windows-x86_64-gpu.zip` | Raw binary: Vulkan + CUDA static |
+| Windows x86_64 (CPU) | `swarmllm-windows-x86_64-cpu.zip` | Raw binary: CPU-only fallback |
+| macOS Apple Silicon | `swarmllm-macos-aarch64.tar.gz` | CPU inference (Metal planned) |
+
+**Windows users**: just download `SwarmLLM-Setup.exe` and run it. The installer automatically detects your GPU (NVIDIA, AMD, or Intel) and picks the right binary — no CUDA Toolkit or special drivers needed beyond your normal graphics drivers.
 
 See the full [Getting Started Guide](docs/book/src/getting-started.md) for platform-specific instructions.
 
@@ -269,7 +273,7 @@ Key source directories:
 - `src/pool/` — device pool management, crypto, credit forwarding
 - `frontend/` — vanilla HTML/CSS/JS dashboard with 20 language translations
 
-675 tests (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+677 tests (608 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E + 1 new), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -404,7 +408,14 @@ cargo build --release --features llama
 # Full CUDA build (candle + llama.cpp + flash/paged attention)
 cargo build --release --features cuda
 
-# Apple Silicon (CPU — Metal GPU acceleration planned)
+# Windows GPU build: llama.cpp via Vulkan (all vendors) + candle CUDA static runtime
+# Users need only standard GPU drivers — no CUDA Toolkit installation required
+cargo build --release --features windows-gpu
+
+# llama.cpp with Vulkan only (cross-platform local inference on NVIDIA/AMD/Intel)
+cargo build --release --features llama-vulkan
+
+# Apple Silicon (CPU — Metal via llama.cpp planned)
 cargo build --release
 ```
 
@@ -522,11 +533,16 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 
 | Platform | GPU Support | Status |
 |----------|------------|--------|
-| Linux x86_64 | CUDA | Primary target, release binaries available |
-| Windows x86_64 | CUDA | Release binaries available |
-| macOS aarch64 | CPU only (Metal planned) | Build available, GPU acceleration planned |
+| Linux x86_64 | CUDA (candle + llama.cpp) | Primary target, release binaries available |
+| Windows x86_64 | **Vulkan** (NVIDIA/AMD/Intel local) + **CUDA static** (NVIDIA distributed) | Installer — no CUDA Toolkit needed |
+| macOS aarch64 | CPU only (Metal via llama.cpp planned) | Binary available (beta) |
 | macOS x86_64 | CPU only | Best-effort |
 | Linux aarch64 | CPU only | Best-effort |
+
+**Windows GPU detection** is automatic — the installer bundles GPU and CPU binaries and a launcher that picks the right one at startup:
+- **NVIDIA GPU**: GPU-accelerated local inference (Vulkan) + GPU-accelerated distributed inference (CUDA, static runtime)
+- **AMD / Intel GPU**: GPU-accelerated local inference (Vulkan), CPU distributed inference
+- **No GPU**: CPU for everything (still participates fully in the network)
 
 ## Tech Stack
 
