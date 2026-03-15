@@ -716,6 +716,7 @@ a:hover { color: var(--accent-hover); }
 
   /* Model cards: single column, larger touch targets */
   .model-card .shard-cell { width: 32px; height: 26px; font-size: 0.65rem; }
+  .shard-grid-compact .shard-cell { width: 20px; height: 16px; }
   .model-card .model-header { flex-wrap: wrap; gap: 8px; }
 
   /* HF model card: stack on mobile */
@@ -1355,6 +1356,42 @@ kbd {
 .model-card .shard-legend .leg-queued::before { background: var(--bg-tertiary); border: 1px dashed var(--cyan); }
 .model-card .shard-legend .leg-verifying::before { background: var(--yellow); }
 .model-card .shard-legend .leg-missing::before { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
+/* Shard bar — large model visualization (>20 shards) */
+.shard-bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; gap: 1px; margin-bottom: 4px; background: var(--bg-tertiary); }
+.shard-bar .shard-cell { flex: 1; min-width: 2px; width: auto; height: 100%; border-radius: 0; font-size: 0; cursor: help; transition: opacity 0.15s; }
+.shard-bar .shard-cell:hover { transform: none !important; box-shadow: none; opacity: 0.7; }
+.shard-bar .shard-cell::after { content: none !important; }
+.shard-bar .shard-cell.downloading { border: none; border-top: 1px solid var(--cyan); }
+.shard-bar .shard-cell.peer-downloading { border: none; border-top: 1px solid var(--orange); }
+.shard-bar .shard-cell.queued { border: none; border-top: 1px dashed var(--cyan); }
+.shard-bar .shard-cell.missing { border: none; }
+
+/* Shard compact cells — small/medium models (≤20 shards) */
+.shard-grid-compact { display: flex; gap: 2px; flex-wrap: wrap; margin-bottom: 4px; }
+.shard-grid-compact .shard-cell { width: 16px; height: 12px; border-radius: 2px; font-size: 0; cursor: help; transition: transform 0.15s, opacity 0.15s; }
+.shard-grid-compact .shard-cell:hover { transform: scale(1.4) !important; box-shadow: 0 0 5px rgba(0,0,0,0.3); z-index: 1; }
+.shard-grid-compact .shard-cell::after { content: none !important; }
+
+/* Shard summary counts (replaces verbose legend) */
+.shard-summary { display: flex; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 6px; }
+.shard-sum-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; white-space: nowrap; }
+.shard-sum-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.shard-sum-local .shard-sum-dot { background: var(--green); }
+.shard-sum-peer .shard-sum-dot { background: var(--accent); }
+.shard-sum-dl .shard-sum-dot { background: var(--cyan); }
+.shard-sum-peer-dl .shard-sum-dot { background: var(--orange); }
+.shard-sum-queued .shard-sum-dot { background: transparent; border: 1px dashed var(--cyan); }
+.shard-sum-verifying .shard-sum-dot { background: var(--yellow, #eab308); }
+.shard-sum-missing .shard-sum-dot { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
+
+/* Model status pills */
+.model-status-pill { font-size: 0.8rem; font-weight: 600; }
+.model-status-pill.active { color: var(--green); }
+.model-status-pill.ready { color: var(--green); font-weight: 400; }
+.model-status-pill.downloading { color: var(--accent); }
+.model-status-pill.partial { color: var(--orange); }
+.model-status-pill.network { color: var(--text-muted); font-weight: 400; }
+
 .model-card .dl-progress { margin-top: 8px; }
 .model-card .dl-progress .dl-bar { width: 100%; height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; display: flex; gap: 1px; }
 .model-card .dl-progress .dl-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--accent)); border-radius: 4px; transition: width 0.5s ease-out; min-width: 0; }
@@ -1400,10 +1437,10 @@ kbd {
 .cloud-divider-line { flex: 1; height: 1px; background: var(--border); }
 .cloud-divider-label { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; }
 .cloud-model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.cloud-model-tag { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; padding: 2px 10px; font-size: 0.78rem; color: var(--text-primary); cursor: pointer; transition: all 0.15s; }
+.cloud-model-tag { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px 3px 10px; font-size: 0.8rem; color: var(--text-primary); cursor: pointer; transition: all 0.15s; display: inline-flex; flex-direction: column; line-height: 1.3; }
 .cloud-model-tag:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
-.cloud-tag-meta { opacity: 0.5; font-size: 0.65rem; }
-.cloud-model-tag:hover .cloud-tag-meta { opacity: 0.8; }
+.cloud-tag-meta { opacity: 0.6; font-size: 0.67rem; }
+.cloud-model-tag:hover .cloud-tag-meta { opacity: 0.85; }
 .cloud-model-controls { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .cloud-model-filter { flex: 1 1 auto; min-width: 120px; max-width: 260px; padding: 4px 8px; font-size: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); outline: none; }
 .cloud-model-filter:focus { border-color: var(--accent); }

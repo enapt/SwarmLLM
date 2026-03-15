@@ -930,15 +930,15 @@ var SwarmLLM = (function() {
         // Status badge
         var statusHtml = '';
         if (m.status === 'loaded') {
-          statusHtml = '<span style="color:var(--green);font-weight:600;font-size:0.8rem">Active</span>';
+          statusHtml = '<span class="model-status-pill active">● Active</span>';
         } else if (isReady) {
-          statusHtml = '<span style="color:var(--green);font-size:0.8rem">Ready (' + hostedShards + ' local, ' + globalAvail + '/' + shardCount + ' network)</span>';
+          statusHtml = '<span class="model-status-pill ready">Ready</span>';
         } else if (isDownloading) {
-          statusHtml = '<span style="color:var(--accent);font-size:0.8rem"><span class="spinner" style="width:12px;height:12px;border-width:1.5px;margin-right:4px;vertical-align:middle"></span>Downloading</span>';
+          statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>Downloading</span>';
         } else if (isPartial) {
-          statusHtml = '<span style="color:var(--orange);font-size:0.8rem">' + hostedShards + '/' + shardCount + ' local, ' + globalAvail + ' on network</span>';
+          statusHtml = '<span class="model-status-pill partial">' + hostedShards + '/' + shardCount + ' local</span>';
         } else {
-          statusHtml = '<span class="text-muted" style="font-size:0.8rem">Available on network</span>';
+          statusHtml = '<span class="model-status-pill network">On network</span>';
         }
 
         // Trust level badge
@@ -954,7 +954,7 @@ var SwarmLLM = (function() {
         // Meta info
         var metaParts = [];
         metaParts.push(formatBytes(m.total_size_bytes || 0));
-        if (shardCount > 1) metaParts.push(shardCount + ' shards');
+        if (shardCount > 0) metaParts.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
         if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
         if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) metaParts.push('<span style="color:var(--orange)">Local only</span>');
@@ -972,52 +972,46 @@ var SwarmLLM = (function() {
           }
         }
 
-        // Shard grid
+        // Shard visualization — compact cells (≤20 shards) or proportional bar (>20 shards)
         var shardHtml = '';
         if (shards.length > 0) {
-          shardHtml = '<div class="shard-grid" data-model-grid="' + safeId + '">';
+          var useBar = shardCount > 20;
+          var containerClass = useBar ? 'shard-bar' : 'shard-grid-compact';
+          shardHtml = '<div class="' + containerClass + '" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
           shards.forEach(function(s) {
             var cls = 'missing';
-            var label = '' + s.index;
             var dlPct = 0;
 
             if (s.local) { cls = 'local'; localCount++; }
             else if (s.holders > 0) { cls = 'peer'; peerCount++; }
             else { missingCount++; }
 
-            // Check per-shard download state (only marks THIS specific shard)
             if (s.download && s.download.state === 'Downloading') {
               dlPct = s.download.progress_pct || 0;
               cls = 'downloading'; dlCount++;
               if (missingCount > 0) missingCount--;
               if (peerCount > 0 && !s.local) peerCount--;
-              label = dlPct + '%';
-            }
-            // Check if a peer is downloading this shard
-            if (s.peer_downloads && s.peer_downloads.length > 0) {
-              if (cls !== 'local' && cls !== 'downloading') {
-                dlPct = s.peer_downloads[0].progress_pct || 0;
-                cls = 'peer-downloading'; peerDlCount++;
-                if (missingCount > 0) missingCount--;
-                if (peerCount > 0) peerCount--;
-                label = dlPct + '%';
-              }
-            }
-
-            // WI-12: Check verifying state
-            if (s.download && s.download.state === 'Verifying') {
+            } else if (s.download && s.download.state === 'Verifying') {
               cls = 'verifying'; dlCount++;
-              label = '\u2713';
               if (missingCount > 0) missingCount--;
               if (peerCount > 0 && !s.local) peerCount--;
             }
 
-            var title = 'Shard ' + s.index + ' (' + formatBytes(s.size_bytes) + ')';
-            if (cls === 'local') title += ' \u2014 Verified, stored locally';
-            else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer(s)';
+            if (s.peer_downloads && s.peer_downloads.length > 0) {
+              if (cls !== 'local' && cls !== 'downloading' && cls !== 'verifying') {
+                dlPct = s.peer_downloads[0].progress_pct || 0;
+                cls = 'peer-downloading'; peerDlCount++;
+                if (missingCount > 0) missingCount--;
+                if (peerCount > 0) peerCount--;
+              }
+            }
+
+            var title = 'Shard ' + s.index + (s.size_bytes ? ' (' + formatBytes(s.size_bytes) + ')' : '');
+            if (cls === 'local') title += ' \u2014 Stored locally';
+            else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
-            else if (cls === 'verifying') title += ' \u2014 Downloaded, verifying (BLAKE3)...';
+            else if (cls === 'verifying') title += ' \u2014 Verifying (BLAKE3)';
             else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
             else title += ' \u2014 Not available';
 
@@ -1025,26 +1019,31 @@ var SwarmLLM = (function() {
             if (cls === 'downloading' || cls === 'peer-downloading') {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
-            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
+            // Lock icon only in compact cell mode (too small to show in bar)
+            var lockIcon = (!useBar && s.locked) ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
             var isEndpoint = (s.index === 0 || s.index === shards.length - 1) && shards.length > 1 && m.encrypted_pipeline;
             var endpointClass = '';
             if (isEndpoint && !s.local) endpointClass = ' shard-endpoint';
             if (isEndpoint && s.local) endpointClass = ' shard-pinned';
-            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style + ' data-shard="' + safeId + '-' + s.index + '" data-shard-model="' + escapeHtml(m.id) + '" data-shard-index="' + s.index + '" data-shard-locked="' + (s.locked ? '1' : '0') + '" title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
+            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style +
+              ' data-shard="' + safeId + '-' + s.index + '"' +
+              ' data-shard-model="' + escapeHtml(m.id) + '"' +
+              ' data-shard-index="' + s.index + '"' +
+              ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
+              ' title="' + escapeHtml(title) + '">' + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
-          // Legend
-          var legendParts = [];
-          if (localCount > 0) legendParts.push('<span class="leg-local">Local (' + localCount + ')</span>');
-          if (peerCount > 0) legendParts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
-          if (dlCount > 0) legendParts.push('<span class="leg-dl">Downloading (' + dlCount + ')</span>');
-          if (peerDlCount > 0) legendParts.push('<span class="leg-peer-dl">Peer DL (' + peerDlCount + ')</span>');
-          if (queuedCount > 0) legendParts.push('<span class="leg-queued">Queued (' + queuedCount + ')</span>');
-          if (missingCount > 0) legendParts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
-          if (legendParts.length > 0) {
-            // Insert legend both above (compact) and below (detailed) the grid
-            shardHtml = '<div class="shard-legend shard-legend-mini" data-model-legend="' + safeId + '">' + legendParts.join('') + '</div>' + shardHtml;
+          // Shard summary (dot + count — replaces verbose legend)
+          var summaryParts = [];
+          if (localCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + localCount + ' local</span>');
+          if (peerCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
+          if (dlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + dlCount + ' downloading</span>');
+          if (peerDlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + peerDlCount + ' peer DL</span>');
+          if (queuedCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + queuedCount + ' queued</span>');
+          if (missingCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + missingCount + ' missing</span>');
+          if (summaryParts.length > 0) {
+            shardHtml += '<div class="shard-summary" data-model-summary="' + safeId + '">' + summaryParts.join('') + '</div>';
           }
         }
 
@@ -1148,7 +1147,7 @@ var SwarmLLM = (function() {
 
         // Per-shard download bars — stacked vertically (WI-13)
         var perShardDlHtml = '';
-        if (isDownloading && shards.length > 0) {
+        if (isDownloading && shards.length > 0 && shardCount <= 20) {
           var dlShardBars = shards.filter(function(s) {
             return s.download && s.download.state === 'Downloading';
           });
@@ -1176,7 +1175,7 @@ var SwarmLLM = (function() {
 
         card.innerHTML =
           '<div class="model-header">' +
-            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + encBadge + probedBadge + sourceLabel + trustBadge + '</span>' +
+            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + encBadge + sourceLabel + trustBadge + '</span>' +
             '<span>' + metaBtnHtml + gearHtml + statusHtml + (unloadHtml ? ' ' + unloadHtml : '') + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
           '</div>' +
           '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
@@ -1493,17 +1492,17 @@ var SwarmLLM = (function() {
             }
           }
 
-          // Update legend if present
-          var legendEl = document.querySelector('[data-model-legend="' + safeId + '"]');
-          if (legendEl && shardDetails.length > 0) {
-            var parts = [];
-            if (localCount > 0) parts.push('<span class="leg-local">Local (' + localCount + ')</span>');
-            if (peerCount > 0) parts.push('<span class="leg-peer">Peer (' + peerCount + ')</span>');
-            if (dlCount > 0) parts.push('<span class="leg-dl">Downloading (' + dlCount + ')</span>');
-            if (peerDlCount > 0) parts.push('<span class="leg-peer-dl">Peer DL (' + peerDlCount + ')</span>');
-            if (queuedCount > 0) parts.push('<span class="leg-queued">Queued (' + queuedCount + ')</span>');
-            if (missingCount > 0) parts.push('<span class="leg-missing">Missing (' + missingCount + ')</span>');
-            legendEl.innerHTML = parts.join('');
+          // Update shard summary if present
+          var summaryEl = document.querySelector('[data-model-summary="' + safeId + '"]');
+          if (summaryEl && shardDetails.length > 0) {
+            var summParts = [];
+            if (localCount > 0) summParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + localCount + ' local</span>');
+            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
+            if (dlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + dlCount + ' downloading</span>');
+            if (peerDlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + peerDlCount + ' peer DL</span>');
+            if (queuedCount > 0) summParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + queuedCount + ' queued</span>');
+            if (missingCount > 0) summParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + missingCount + ' missing</span>');
+            summaryEl.innerHTML = summParts.join('');
           }
         });
       }
