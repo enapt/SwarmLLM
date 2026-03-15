@@ -17,8 +17,8 @@ var NeuralBg = (function() {
 
   // --- Tuning ---
   var BOID_COUNT = 90;
-  var MAX_SPEED = 1.2;
-  var MAX_FORCE = 0.028;
+  var MAX_SPEED = 0.7;
+  var MAX_FORCE = 0.018;
 
   // Flocking radii — wider spread than default
   var SEPARATION_DIST = 30;
@@ -30,11 +30,11 @@ var NeuralBg = (function() {
   var LINK_OPACITY = 0.18;
 
   // Force weights
-  var SEPARATION_W = 2.8;     // stronger separation = nodes stay apart
-  var ALIGNMENT_W = 0.5;
-  var COHESION_W = 0.4;       // weaker cohesion = don't blob up
-  var WANDER_W = 0.8;         // strong wander = individual movement
-  var LINK_PULL_W = 0.1;      // weak link pull = don't clump
+  var SEPARATION_W = 2.5;     // nodes stay apart
+  var ALIGNMENT_W = 0.9;      // clusters move together as a group
+  var COHESION_W = 0.3;       // loose cohesion = don't blob up
+  var WANDER_W = 0.4;         // gentle drift when calm
+  var LINK_PULL_W = 0.08;     // very weak link pull
 
   // Feelers — long-range probing tendrils
   var FEELER_DIST = 380;      // max reach
@@ -51,10 +51,10 @@ var NeuralBg = (function() {
   var SCATTER_DECAY = 0.94;
 
   // Spontaneous startles — random boids spook their neighbors
-  var STARTLE_CHANCE = 0.0012;  // per boid per frame (~1 startle every ~12s for 90 boids)
-  var STARTLE_RADIUS = 120;     // how far the panic spreads
-  var STARTLE_BURST = 3.0;      // impulse strength
-  var STARTLE_CONTAGION = 0.5;  // scattered boids can spook calm neighbors
+  var STARTLE_CHANCE = 0.0006;  // per boid per frame (~1 startle every ~18s for 90 boids)
+  var STARTLE_RADIUS = 140;     // how far the panic spreads
+  var STARTLE_BURST = 3.5;      // impulse strength — noticeable burst in slow swarm
+  var STARTLE_CONTAGION = 0.6;  // scattered boids can spook calm neighbors
 
   // Visual
   var TRAIL_ALPHA = 0.07;
@@ -139,7 +139,7 @@ var NeuralBg = (function() {
           wanderAngle: a + (Math.random() - 0.5) * 0.5,
           size: 1.5 + Math.random() * 2,
           energy: 0,
-          speedMul: 0.5 + Math.random() * 1.0,
+          speedMul: 0.3 + Math.random() * 1.4,
           scattered: 0
         });
       }
@@ -345,11 +345,11 @@ var NeuralBg = (function() {
         fy += pv[1] * LINK_PULL_W * calm;
       }
 
-      // Wander — organic randomness, amplified during scatter
-      var wanderMul = 1 + b.scattered * 3;
-      b.wanderAngle += (Math.random() - 0.5) * (0.5 + b.scattered * 2.5);
-      if (Math.random() < 0.005 + b.scattered * 0.06) {
-        b.wanderAngle += (Math.random() - 0.5) * Math.PI * 0.7;
+      // Wander — slow lazy drift when calm, erratic when startled
+      var wanderMul = 1 + b.scattered * 4;
+      b.wanderAngle += (Math.random() - 0.5) * (0.25 + b.scattered * 3.0);
+      if (Math.random() < 0.003 + b.scattered * 0.08) {
+        b.wanderAngle += (Math.random() - 0.5) * Math.PI * 0.5;
       }
       fx += Math.cos(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
       fy += Math.sin(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
