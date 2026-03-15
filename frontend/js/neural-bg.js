@@ -18,7 +18,7 @@ var NeuralBg = (function() {
   // --- Tuning ---
   var BOID_COUNT = 90;
   var MAX_SPEED = 1.2;
-  var MAX_FORCE = 0.035;
+  var MAX_FORCE = 0.028;
 
   // Flocking radii — wider spread than default
   var SEPARATION_DIST = 30;
@@ -347,9 +347,9 @@ var NeuralBg = (function() {
 
       // Wander — organic randomness, amplified during scatter
       var wanderMul = 1 + b.scattered * 3;
-      b.wanderAngle += (Math.random() - 0.5) * (0.8 + b.scattered * 2.5);
-      if (Math.random() < 0.008 + b.scattered * 0.06) {
-        b.wanderAngle += (Math.random() - 0.5) * Math.PI;
+      b.wanderAngle += (Math.random() - 0.5) * (0.5 + b.scattered * 2.5);
+      if (Math.random() < 0.005 + b.scattered * 0.06) {
+        b.wanderAngle += (Math.random() - 0.5) * Math.PI * 0.7;
       }
       fx += Math.cos(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
       fy += Math.sin(b.wanderAngle) * curMaxForce * WANDER_W * wanderMul;
@@ -427,9 +427,9 @@ var NeuralBg = (function() {
       b.vx = lim[0];
       b.vy = lim[1];
 
-      // Damping
-      b.vx *= 0.985;
-      b.vy *= 0.985;
+      // Damping — smooth glide
+      b.vx *= 0.99;
+      b.vy *= 0.99;
 
       // Minimum drift
       var spd2 = b.vx * b.vx + b.vy * b.vy;
