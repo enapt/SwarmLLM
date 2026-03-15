@@ -1,9 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # Run on PRs (if any) but NOT on direct pushes to main — local pre-push hooks
+  # (cargo fmt + cargo clippy) already enforce quality before every commit.
+  # Trigger manually via GitHub Actions UI or gh CLI: gh workflow run ci.yml
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
