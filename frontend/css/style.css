@@ -1377,7 +1377,7 @@ kbd {
 .badge-trust-popular { background: var(--green); color: var(--bg-primary); }
 .badge-trust-verified { background: var(--accent); color: #fff; }
 .badge-trust-pinned { background: #f59e0b; color: var(--bg-primary); }
-.badge-trust-discovered { background: var(--text-muted); color: var(--bg-primary); }
+
 
 /* HF search badges */
 .badge-swarm { background: var(--green); color: var(--bg-primary); font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }

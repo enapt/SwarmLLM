@@ -949,8 +949,6 @@ var SwarmLLM = (function() {
           trustBadge = '<span class="badge-trust badge-trust-verified" title="Has received real inference requests">Verified</span>';
         } else if (m.trust_level === 'pinned') {
           trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
-        } else if (m.source === 'network' && hostedShards === 0) {
-          trustBadge = '<span class="badge-trust badge-trust-discovered" title="Discovered via gossip — not yet verified. Auto-manage will not download unless pinned or used.">Unverified</span>';
         }
 
         // Meta info

@@ -391,6 +391,9 @@ impl AutoShardManager {
             }
 
             // ── Trust gate: skip models not yet verified for auto-propagation ──
+            // Exception: if this node already hosts at least one shard, always
+            // allow gap-filling regardless of trust level. Only new-model adoption
+            // (zero local shards) requires explicit trust / user pinning.
             {
                 let trust = self.shared_state.model_trust.get(&manifest.id);
                 let trust_level = trust
@@ -398,7 +401,20 @@ impl AutoShardManager {
                     .map(|t| &t.trust_level)
                     .unwrap_or(&crate::types::ModelTrustLevel::Discovered);
                 let is_pinned = trust.as_ref().map(|t| t.pinned_by_user).unwrap_or(false);
-                if *trust_level < crate::types::ModelTrustLevel::DemandVerified && !is_pinned {
+                let already_hosting = manifest.shards.iter().any(|s| {
+                    let sid = ShardId {
+                        model_id: manifest.id.clone(),
+                        index: s.index,
+                    };
+                    self.shared_state
+                        .model_registry
+                        .shard_holders(&sid)
+                        .contains(local_node_id)
+                });
+                if *trust_level < crate::types::ModelTrustLevel::DemandVerified
+                    && !is_pinned
+                    && !already_hosting
+                {
                     tracing::debug!(
                         model = %manifest.id,
                         trust = %trust_level,
