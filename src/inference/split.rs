@@ -34,10 +34,6 @@ pub use super::tensor_util::{
 };
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
-// Also import for use within this file
-#[allow(unused_imports)]
-use super::layers::{masked_fill, run_attention, standard_attention, topk_cpu};
-
 const DEFAULT_MAX_SEQ_LEN: usize = 4096;
 
 // ── Per-request KV-cache store ──
@@ -5108,6 +5104,7 @@ impl SplitModel {
 /// Format: [4B ndim][4B*ndim shape][4B dtype_tag][data bytes]
 #[cfg(test)]
 mod tests {
+    use super::super::layers::{run_attention, standard_attention, topk_cpu};
     use super::*;
 
     #[test]

@@ -117,14 +117,6 @@ impl CachedDecoder {
     }
 }
 
-/// Timeout for a single layer forward pass across the network.
-/// Used in full distributed execution (Phase 6+ with Cap'n Proto protocol).
-const _LAYER_FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Maximum number of failover attempts per segment.
-/// Used in full distributed execution (Phase 6+ with robust retry logic).
-const _MAX_FAILOVER_ATTEMPTS: u32 = 2;
-
 /// Executes a distributed inference pipeline across multiple nodes.
 ///
 /// The pipeline is a sequence of segments, each assigned to a node.

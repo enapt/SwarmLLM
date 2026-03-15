@@ -1156,14 +1156,21 @@ impl AutoShardManager {
                 };
 
                 // Download header + tied output weight (if weight-tied) + shard
-                crate::model::huggingface::download_gguf_header(
+                if let Err(e) = crate::model::huggingface::download_gguf_header(
                     &repo_id,
                     &filename,
                     &dest,
                     info.header_size,
                 )
                 .await
-                .ok();
+                {
+                    tracing::warn!(
+                        model = %model_id,
+                        shard = shard_idx,
+                        error = %e,
+                        "AutoShardManager: gguf_header.bin download failed — shard registered but first-segment local inference will be unavailable until header is re-downloaded"
+                    );
+                }
 
                 // Download tied output weight for weight-tied models
                 if let Err(e) = crate::model::huggingface::download_tied_output_weight(
@@ -1252,7 +1259,13 @@ impl AutoShardManager {
                                 manifest.manifest_hash = manifest.compute_hash();
                                 let model_dir =
                                     shared.config.node.data_dir.join("models").join(&model_id.0);
-                                let _ = manifest.save_to_dir(&model_dir);
+                                if let Err(e) = manifest.save_to_dir(&model_dir) {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        error = %e,
+                                        "AutoShardManager: failed to persist manifest after shard hash update — hash in memory only"
+                                    );
+                                }
                                 shared.model_registry.register_manifest(manifest);
                             }
                         }

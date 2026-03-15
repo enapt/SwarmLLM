@@ -301,9 +301,6 @@ pub enum SplitTokenizer {
 pub struct SpmTokenizer {
     /// Token string → (token_id, score)
     piece_to_id: HashMap<String, (u32, f32)>,
-    /// Token ID → token string
-    #[allow(dead_code)]
-    vocab: Vec<String>,
     /// Whether to prepend ▁ to the input
     add_space_prefix: bool,
     /// BOS token ID
@@ -354,7 +351,6 @@ impl SpmTokenizer {
 
         Self {
             piece_to_id,
-            vocab: tokens.to_vec(),
             add_space_prefix,
             bos_id,
             add_bos_token,

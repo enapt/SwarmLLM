@@ -290,12 +290,18 @@ impl EscrowManager {
                     let mut bal = balance.write().await;
                     bal.balance = bal.balance.saturating_add(amount);
                     bal.last_updated = chrono::Utc::now();
-                    // Persist balance after refund
-                    let _ = self.db.put_json(
+                    // Persist balance after refund — log error on failure (balance is correct in memory)
+                    if let Err(e) = self.db.put_json(
                         crate::credit::ledger::TREE_CREDITS,
                         crate::credit::ledger::KEY_BALANCE,
                         &*bal,
-                    );
+                    ) {
+                        tracing::error!(
+                            escrow_id = %id,
+                            error = %e,
+                            "Failed to persist credit balance after escrow expiry refund — balance correct in memory but will be lost on restart"
+                        );
+                    }
                 }
 
                 tracing::info!(
