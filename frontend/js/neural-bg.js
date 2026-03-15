@@ -50,16 +50,21 @@ var NeuralBg = (function() {
   var SCATTER_BURST = 5.0;
   var SCATTER_DECAY = 0.94;
 
-  // Spontaneous startles — random boids spook their neighbors
-  var STARTLE_CHANCE = 0.0006;  // per boid per frame (~1 startle every ~18s for 90 boids)
-  var STARTLE_RADIUS = 140;     // how far the panic spreads
-  var STARTLE_BURST = 3.5;      // impulse strength — noticeable burst in slow swarm
-  var STARTLE_CONTAGION = 0.6;  // scattered boids can spook calm neighbors
+  // Spontaneous startles — cascading wave through the swarm
+  var STARTLE_CHANCE = 0.0004;  // ~1 every ~28s
+  var STARTLE_RADIUS = 180;     // how far ripple reaches from each startled boid
+  var STARTLE_BURST = 1.2;      // initial impulse — gentle swoop
+  var STARTLE_CONTAGION = 0.35; // how much energy spreads per wave step
+  var STARTLE_WAVE_SPEED = 3;   // frames between each ripple ring expanding
+  var STARTLE_RAMP_FRAMES = 12; // frames to ramp up velocity (smooth acceleration)
 
   // Visual
   var TRAIL_ALPHA = 0.07;
   var PULSE_SPEED = 0.002;
   var DPR = 1;
+
+  // Startle wave queue — [{sourceIdx, frame, ring}]
+  var startleWaves = [];
 
   // Active feelers list
   var feelers = [];
@@ -140,7 +145,10 @@ var NeuralBg = (function() {
           size: 1.5 + Math.random() * 2,
           energy: 0,
           speedMul: 0.3 + Math.random() * 1.4,
-          scattered: 0
+          scattered: 0,
+          startleRamp: 0,       // frames remaining for gradual acceleration
+          startleAngle: 0,      // direction of startle swoop
+          startleStrength: 0    // how hard this boid was startled
         });
       }
     }
@@ -382,33 +390,27 @@ var NeuralBg = (function() {
       // Scatter decay — gradually calm down and reform
       b.scattered *= SCATTER_DECAY;
 
-      // Spontaneous startle — random boid gets spooked and startles neighbors
+      // Spontaneous startle — initiates a wave, not an instant burst
       if (b.scattered < 0.1 && Math.random() < STARTLE_CHANCE) {
-        b.scattered = 0.8;
-        b.energy = 0.6;
         var burstAngle = Math.random() * Math.PI * 2;
-        b.vx += Math.cos(burstAngle) * STARTLE_BURST;
-        b.vy += Math.sin(burstAngle) * STARTLE_BURST;
-        // Ripple: spook nearby calm boids
-        for (var si = 0; si < neighbors.length; si++) {
-          var sj = neighbors[si];
-          if (sj === i) continue;
-          var sOther = boids[sj];
-          var sdx = sOther.x - b.x;
-          var sdy = sOther.y - b.y;
-          var sd2 = sdx * sdx + sdy * sdy;
-          if (sd2 < STARTLE_RADIUS * STARTLE_RADIUS && sd2 > 0) {
-            var sd = Math.sqrt(sd2);
-            var intensity = 1 - sd / STARTLE_RADIUS;
-            // Contagion: already-scattered boids spread panic further
-            var spread = intensity * STARTLE_CONTAGION;
-            sOther.scattered = Math.min(1, sOther.scattered + spread);
-            sOther.energy = Math.min(1, sOther.energy + spread * 0.3);
-            var fleeAngle = Math.atan2(sdy, sdx) + (Math.random() - 0.5) * 1.2;
-            sOther.vx += Math.cos(fleeAngle) * STARTLE_BURST * intensity * 0.6;
-            sOther.vy += Math.sin(fleeAngle) * STARTLE_BURST * intensity * 0.6;
-          }
-        }
+        b.startleRamp = STARTLE_RAMP_FRAMES;
+        b.startleAngle = burstAngle;
+        b.startleStrength = STARTLE_BURST;
+        b.scattered = 0.7;
+        b.energy = 0.5;
+        // Queue the wave — it will spread outward over multiple frames
+        startleWaves.push({ originX: b.x, originY: b.y, frame: 0, ring: 0 });
+      }
+
+      // Startle ramp-up — smooth acceleration over several frames instead of instant pop
+      if (b.startleRamp > 0) {
+        var rampFraction = 1 - (b.startleRamp / STARTLE_RAMP_FRAMES); // 0→1
+        // Ease-in curve: slow start, accelerate
+        var ease = rampFraction * rampFraction;
+        var impulse = b.startleStrength * ease / STARTLE_RAMP_FRAMES * 2.5;
+        b.vx += Math.cos(b.startleAngle) * impulse;
+        b.vy += Math.sin(b.startleAngle) * impulse;
+        b.startleRamp--;
       }
 
       // Soft boundaries
@@ -474,6 +476,41 @@ var NeuralBg = (function() {
             progress: 0  // 0→1 how far the tendril has reached
           });
         }
+      }
+    }
+
+    // --- Propagate startle waves ---
+    for (var wi = startleWaves.length - 1; wi >= 0; wi--) {
+      var wave = startleWaves[wi];
+      wave.frame++;
+      // Every WAVE_SPEED frames, expand the ring
+      if (wave.frame % STARTLE_WAVE_SPEED === 0) {
+        wave.ring++;
+        var innerR = (wave.ring - 1) * 60;  // previous ring edge
+        var outerR = wave.ring * 60;         // current ring edge
+        // Infect boids within this ring
+        for (var bi = 0; bi < n; bi++) {
+          var wb = boids[bi];
+          if (wb.startleRamp > 0) continue;  // already startling
+          if (wb.scattered > 0.4) continue;  // already panicked
+          var wdx = wb.x - wave.originX;
+          var wdy = wb.y - wave.originY;
+          var wd = Math.sqrt(wdx * wdx + wdy * wdy);
+          if (wd >= innerR && wd < outerR) {
+            var falloff = 1 - (wd / (outerR + 60));  // weaker at edges
+            if (falloff < 0.1) continue;
+            var fleeAngle = Math.atan2(wdy, wdx) + (Math.random() - 0.5) * 0.8;
+            wb.startleRamp = STARTLE_RAMP_FRAMES;
+            wb.startleAngle = fleeAngle;
+            wb.startleStrength = STARTLE_BURST * falloff * STARTLE_CONTAGION;
+            wb.scattered = Math.min(1, wb.scattered + falloff * STARTLE_CONTAGION);
+            wb.energy = Math.min(1, wb.energy + falloff * 0.25);
+          }
+        }
+      }
+      // Wave dies after reaching max radius
+      if (wave.ring * 60 > STARTLE_RADIUS * 2.5) {
+        startleWaves.splice(wi, 1);
       }
     }
 
