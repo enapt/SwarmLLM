@@ -183,7 +183,7 @@ a:hover { color: var(--accent-hover); }
   background: var(--bg-secondary); border: 1px solid var(--border-light); border-radius: var(--radius);
   box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000;
   min-width: 260px; max-width: 320px; max-height: 400px;
-  flex-direction: column;
+  flex-direction: column; overflow: hidden;
 }
 .model-dropdown.open .model-dropdown-panel { display: flex; }
 .model-dropdown-search {

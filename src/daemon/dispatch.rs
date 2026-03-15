@@ -571,17 +571,11 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Process model manifests from peers — register in model_registry
                             SwarmMessage::ModelManifest(manifest) => {
-                                // SEC: Verify publisher identity matches transport-authenticated sender
-                                if let Some(ref sender) = authenticated_sender {
-                                    if sender != &manifest.publisher {
-                                        tracing::warn!(
-                                            claimed = %manifest.publisher,
-                                            actual = %sender,
-                                            "ModelManifest publisher mismatch — dropping"
-                                        );
-                                        continue;
-                                    }
-                                } else {
+                                // SEC: Require transport-authenticated sender (prevents anonymous injection).
+                                // We do NOT require sender == publisher because any node that holds shards
+                                // should be able to re-gossip a manifest they received from the publisher.
+                                // Content integrity is guaranteed by verify_hash_strict() below.
+                                if authenticated_sender.is_none() {
                                     tracing::debug!("Dropping unauthenticated ModelManifest");
                                     continue;
                                 }
