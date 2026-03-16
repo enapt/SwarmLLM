@@ -4333,7 +4333,7 @@ var SwarmLLM = (function() {
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
       encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--text-muted)">' +
         '&#127760; Distributed inference \u2014 shards split across peers' +
-        '<br><span style="font-size:0.75rem">Enable encrypted pipeline in the model card for end-to-end privacy.</span>' +
+        '<br><span style="font-size:0.75rem">Use the \u201cEnable prompt privacy\u201d button in the bar above to encrypt your prompts end-to-end.</span>' +
         '</div>';
     }
 
