@@ -4134,7 +4134,7 @@ var SwarmLLM = (function() {
         avatarEl.textContent = 'AI';
       }
     } else {
-      avatarEl.innerHTML = '<img src="/static/favicon.svg" alt="" style="width:16px;height:16px;display:block;">';
+      avatarEl.innerHTML = '<img src="/static/icons/swarm.svg" alt="" style="width:16px;height:16px;display:block;">';
     }
     div.appendChild(avatarEl);
 

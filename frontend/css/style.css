@@ -137,9 +137,11 @@ a:hover { color: var(--accent-hover); }
   font-weight: 700;
   color: var(--accent);
   letter-spacing: -0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
-
-.app-header .logo::before { content: '\2B21 '; font-size: 1.1rem; }
+.app-header .logo .logo-icon { flex-shrink: 0; display: block; }
 
 /* Tab buttons */
 .tab-btn {
