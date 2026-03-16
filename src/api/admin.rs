@@ -417,6 +417,10 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
 }
 
 /// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
+pub fn detect_gpu_nvidia_smi_pub() -> (Option<String>, Option<u64>) {
+    detect_gpu_nvidia_smi()
+}
+
 fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
     let output = std::process::Command::new("nvidia-smi")
         .args([

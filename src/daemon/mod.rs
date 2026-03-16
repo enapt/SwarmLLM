@@ -166,8 +166,30 @@ impl Daemon {
             model_info.clone()
         };
 
-        // Detect GPU via llama.cpp backend
-        let gpu_info = crate::inference::executor::detect_gpu();
+        // Detect GPU via llama.cpp backend; fall back to candle CUDA probe
+        let gpu_info = {
+            let llama_gpu = crate::inference::executor::detect_gpu();
+            #[cfg(feature = "candle-cuda")]
+            let gpu_info = llama_gpu.or_else(|| {
+                let cuda_ok = candle_core::Device::cuda_if_available(0)
+                    .map(|d| d.is_cuda())
+                    .unwrap_or(false);
+                if cuda_ok {
+                    let (name, vram_mb) = crate::api::admin::detect_gpu_nvidia_smi_pub();
+                    Some(crate::inference::executor::GpuInfo {
+                        name: name.unwrap_or_else(|| "NVIDIA GPU".to_string()),
+                        vram_total_mb: vram_mb.unwrap_or(0),
+                        vram_free_mb: 0,
+                        backend: "CUDA".to_string(),
+                    })
+                } else {
+                    None
+                }
+            });
+            #[cfg(not(feature = "candle-cuda"))]
+            let gpu_info = llama_gpu;
+            gpu_info
+        };
         if let Some(ref gpu) = gpu_info {
             tracing::info!(gpu = %gpu.name, vram_mb = gpu.vram_total_mb, backend = %gpu.backend, "GPU detected");
         }
