@@ -623,20 +623,36 @@
                 <h2>Node</h2>
                 <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
               </div>
-              <div class="node-hw-row">
-                <span class="node-hw-label"><span class="node-hw-icon">⚙</span>CPU</span>
-                <span class="mono node-hw-value" id="node-cpu">...</span>
-              </div>
-              <div class="node-hw-row">
-                <span class="node-hw-label"><span class="node-hw-icon">▪</span>GPU</span>
-                <span class="mono node-hw-value" id="node-gpu">Detecting...</span>
-              </div>
-              <div class="node-hw-row">
-                <span class="node-hw-label"><span class="node-hw-icon">◈</span>VRAM</span>
-                <span class="mono node-hw-value" id="node-vram">...</span>
+              <div class="node-hw-grid">
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span>CPU</span>
+                  <span class="mono node-hw-value" id="node-cpu">...</span>
+                </div>
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">▪</span>GPU</span>
+                  <span class="mono node-hw-value" id="node-gpu">Detecting...</span>
+                </div>
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">≡</span>RAM</span>
+                  <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
+                  <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
+                </div>
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">◫</span>Disk</span>
+                  <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
+                  <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
+                </div>
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">◈</span>VRAM</span>
+                  <span class="mono node-hw-value" id="node-vram">...</span>
+                </div>
+                <div class="node-hw-cell">
+                  <span class="node-hw-label"><span class="node-hw-icon">⬡</span>Shards</span>
+                  <span class="mono node-hw-value" id="hosted-shards">0</span>
+                </div>
               </div>
               <div class="vram-bar-container">
-                <div class="progress-bar vram-progress" style="height:10px">
+                <div class="progress-bar vram-progress" style="height:8px">
                   <div class="fill cyan" id="vram-bar" style="width:0%"></div>
                   <div class="vram-tick" style="left:25%" title="Minimal contribution"></div>
                   <div class="vram-tick" style="left:50%" title="Moderate contribution"></div>
@@ -648,20 +664,6 @@
                   <span style="left:75%">Max</span>
                 </div>
                 <div id="vram-breakdown" class="vram-breakdown"></div>
-              </div>
-              <div class="node-hw-row">
-                <span class="node-hw-label"><span class="node-hw-icon">≡</span>RAM</span>
-                <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
-                <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
-              </div>
-              <div class="node-hw-row">
-                <span class="node-hw-label"><span class="node-hw-icon">◫</span>Disk</span>
-                <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
-                <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
-              </div>
-              <div class="node-hw-row" style="margin-top:2px">
-                <span class="node-hw-label"><span class="node-hw-icon">⬡</span>Shards</span>
-                <span class="mono node-hw-value" id="hosted-shards">0</span>
               </div>
             </div>
 
