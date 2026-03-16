@@ -2958,6 +2958,9 @@ var SwarmLLM = (function() {
         }
       } catch (e) {}
 
+      // Keep _lastModelsData in sync so the enc banner and toggle always have fresh data
+      window._lastModelsData = adminModels || [];
+
       // Build set of ready model IDs
       var readySet = {};
       adminModels.forEach(function(m) {
