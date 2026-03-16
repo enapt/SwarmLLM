@@ -5,10 +5,12 @@ pub mod kv_cache;
 pub(crate) mod layers;
 pub mod local_embedder;
 pub(crate) mod model_arch;
+pub mod model_worker;
 #[cfg(feature = "paged-attn")]
 pub mod paged_kv;
 pub mod pipeline;
 pub mod prefix_cache;
+pub mod process_pool;
 pub mod router;
 pub mod sampling;
 pub mod scheduler;
@@ -18,3 +20,4 @@ pub mod split;
 pub(crate) mod tensor_util;
 pub(crate) mod tokenizer;
 pub mod vision;
+pub mod worker_ipc;

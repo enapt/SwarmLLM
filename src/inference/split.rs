@@ -173,39 +173,93 @@ pub struct SplitModelEntry {
     pub is_complete: bool,
     /// Cached EOS token IDs for lock-free sampling after batched forward passes.
     pub eos_tokens: Vec<u32>,
+    // ── Cached metadata for subprocess-isolated inference (no GPU tensors) ──
+    /// EOS token string (e.g., "<|endoftext|>").
+    pub eos_token_str: String,
+    /// BOS token string (e.g., "<s>").
+    pub bos_token: String,
+    /// Chat template from GGUF metadata (Jinja2 format).
+    pub cached_chat_template: Option<String>,
+    /// Full vocabulary for lock-free token decoding.
+    pub vocab: Option<Vec<String>>,
 }
 
 impl SplitModelEntry {
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Build common fields from a SplitModel reference, returning a partially-initialized entry.
+    /// Caller sets `model`, `batch_forwarder`, and `last_used` after this.
+    #[allow(clippy::type_complexity)]
+    fn common_fields(
+        model: &SplitModel,
+    ) -> (
+        u64,
+        bool,
+        Vec<u32>,
+        String,
+        String,
+        Option<String>,
+        Option<Vec<String>>,
+    ) {
+        (
+            model.estimate_vram_mb(),
+            model.is_first() && model.is_last(),
+            model.eos_tokens().to_vec(),
+            model.eos_token_str().to_string(),
+            model.bos_token().to_string(),
+            model.chat_template().map(|s| s.to_string()),
+            model.vocab().cloned(),
+        )
+    }
+
     /// Create a new entry wrapping a split model.
+    #[allow(clippy::type_complexity)]
     pub fn new(model: SplitModel) -> Self {
-        let estimated_vram_mb = model.estimate_vram_mb();
-        let is_complete = model.is_first() && model.is_last();
-        let eos_tokens = model.eos_tokens().to_vec();
+        let (
+            estimated_vram_mb,
+            is_complete,
+            eos_tokens,
+            eos_token_str,
+            bos_token,
+            chat_tmpl,
+            vocab,
+        ) = Self::common_fields(&model);
         Self {
             model: std::sync::Arc::new(tokio::sync::Mutex::new(model)),
-            last_used: std::sync::atomic::AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            last_used: std::sync::atomic::AtomicU64::new(Self::now_secs()),
             estimated_vram_mb,
             batch_forwarder: None,
             is_complete,
             eos_tokens,
+            eos_token_str,
+            bos_token,
+            cached_chat_template: chat_tmpl,
+            vocab,
         }
     }
 
     /// Create a new entry with batching enabled.
+    #[allow(clippy::type_complexity)]
     pub fn new_with_batching(
         model: SplitModel,
         kv_cache_store: std::sync::Arc<KvCacheStore>,
         max_batch_size: usize,
         batch_timeout: std::time::Duration,
     ) -> Self {
-        let estimated_vram_mb = model.estimate_vram_mb();
-        let is_complete = model.is_first() && model.is_last();
-        let eos_tokens = model.eos_tokens().to_vec();
+        let (
+            estimated_vram_mb,
+            is_complete,
+            eos_tokens,
+            eos_token_str,
+            bos_token,
+            chat_tmpl,
+            vocab,
+        ) = Self::common_fields(&model);
         let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
         let batch_forwarder = if max_batch_size > 1 {
             Some(std::sync::Arc::new(BatchForwarder::new(
@@ -219,16 +273,15 @@ impl SplitModelEntry {
         };
         Self {
             model: model_arc,
-            last_used: std::sync::atomic::AtomicU64::new(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            last_used: std::sync::atomic::AtomicU64::new(Self::now_secs()),
             estimated_vram_mb,
             batch_forwarder,
             is_complete,
             eos_tokens,
+            eos_token_str,
+            bos_token,
+            cached_chat_template: chat_tmpl,
+            vocab,
         }
     }
 
@@ -5338,6 +5391,10 @@ mod tests {
             batch_forwarder: None,
             is_complete: false,
             eos_tokens: vec![],
+            eos_token_str: String::new(),
+            bos_token: String::new(),
+            cached_chat_template: None,
+            vocab: None,
         }
     }
 

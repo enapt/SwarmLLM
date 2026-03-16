@@ -928,8 +928,25 @@ var SwarmLLM = (function() {
           }
           if (hw.gpu_vram_mb) {
             var vramUsed = hw.gpu_vram_used_mb || 0;
-            document.getElementById('node-vram').textContent = formatMB(vramUsed) + ' / ' + formatMB(hw.gpu_vram_mb);
-            var vramPct = hw.gpu_vram_mb > 0 ? (vramUsed / hw.gpu_vram_mb * 100) : 0;
+            var vramTotal = hw.gpu_vram_mb;
+            // Compute active VRAM from currently-loaded models (beats CUDA cache confusion)
+            var activeVramMb = 0;
+            if (window._lastModelsData && window._lastModelsData.length) {
+              window._lastModelsData.forEach(function(m) {
+                if (m.status === 'loaded' && m.estimated_vram_mb) activeVramMb += m.estimated_vram_mb;
+              });
+            }
+            var displayUsed = activeVramMb > 0 ? activeVramMb : vramUsed;
+            var vramEl = document.getElementById('node-vram');
+            if (activeVramMb > 0 && vramUsed > activeVramMb + 200) {
+              // CUDA is caching freed model memory — show active separately
+              vramEl.textContent = formatMB(activeVramMb) + ' active / ' + formatMB(vramTotal);
+              vramEl.title = formatMB(vramUsed) + ' reserved by CUDA (freed models are cached — normal GPU behavior)';
+            } else {
+              vramEl.textContent = formatMB(displayUsed) + ' / ' + formatMB(vramTotal);
+              vramEl.title = '';
+            }
+            var vramPct = vramTotal > 0 ? (displayUsed / vramTotal * 100) : 0;
             document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
             document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
           }

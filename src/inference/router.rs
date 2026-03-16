@@ -64,7 +64,7 @@ pub struct InferenceOutput {
 }
 
 /// A single token's log probability info for the logprobs response field.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TokenLogProbEntry {
     /// The token text.
     pub token: String,

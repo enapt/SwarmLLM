@@ -96,6 +96,16 @@ enum Commands {
         #[arg(long, default_value = "Hello, how are you?")]
         prompt: String,
     },
+    /// [Internal] Run a model worker subprocess (managed by daemon, not for direct use)
+    #[command(hide = true)]
+    ModelWorker {
+        /// Unix socket path to connect to the daemon
+        #[arg(long)]
+        socket: PathBuf,
+        /// Data directory
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
     /// Run inference benchmarks against a running daemon
     Bench {
         /// Number of tokens to generate per request
@@ -185,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
             let port = cli.port.unwrap_or(8800);
             let data_dir = resolve_data_dir(&cli.data_dir);
             query_peers(port, &data_dir, json).await
+        }
+        Commands::ModelWorker { socket, data_dir } => {
+            swarmllm::inference::model_worker::run_worker(socket, data_dir).await;
+            Ok(())
         }
         Commands::Update { check_only } => run_update_command(check_only).await,
         Commands::TestSplit { max_tokens, prompt } => {
