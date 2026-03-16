@@ -1267,110 +1267,89 @@ var SwarmLLM = (function() {
           return sorted;
         }
 
-        // Helper: render model tag HTML
-        function renderCloudTag(cm) {
-          var metaChip = '';
-          if (cm.meta) {
-            var parts = [];
-            if (cm.meta.owned_by) parts.push(cm.meta.owned_by);
-            var ctx = getCtxLen(cm);
-            if (ctx > 0) {
-              var ctxK = ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString();
-              parts.push(ctxK + ' ctx');
-            }
-            if (parts.length > 0) metaChip = ' <span class="cloud-tag-meta">' + escapeHtml(parts.join(' \u00b7 ')) + '</span>';
-          }
-          var tooltip = cm.meta ? escapeHtml(cm.id + '\n' + JSON.stringify(cm.meta, null, 2)) : escapeHtml(cm.id);
-          return '<span class="cloud-model-tag" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + tooltip + '">' + escapeHtml(cm.name || cm.id) + metaChip + '</span>';
+        // Helper: render a single model row
+        function renderCloudRow(cm) {
+          var ctx = getCtxLen(cm);
+          var ctxStr = ctx > 0 ? (ctx >= 1000 ? Math.round(ctx / 1000) + 'K' : ctx.toString()) : '';
+          var pingHtml = modelStatusBadgeHtml(cm.id);
+          return '<div class="cloud-model-row" data-select-cloud="' + escapeHtml(cm.id) + '" title="' + escapeHtml(cm.id) + '">' +
+            '<span class="cloud-model-row-name">' + escapeHtml(cm.name || cm.id) + '</span>' +
+            (ctxStr ? '<span class="cloud-model-row-ctx">' + ctxStr + '</span>' : '<span class="cloud-model-row-ctx"></span>') +
+            '<span class="cloud-model-row-ping">' + pingHtml + '</span>' +
+            '</div>';
         }
 
-        // Helper: render tags into container with limit
-        function renderTagsInto(container, models, tagId) {
-          var CLOUD_TAG_LIMIT = 12;
-          var tagHtmlArr = models.map(renderCloudTag);
-          var hasMore = tagHtmlArr.length > CLOUD_TAG_LIMIT;
-          var visible = hasMore ? tagHtmlArr.slice(0, CLOUD_TAG_LIMIT) : tagHtmlArr;
-          var hidden = hasMore ? tagHtmlArr.slice(CLOUD_TAG_LIMIT) : [];
-          container.innerHTML = visible.join('') +
-            (hasMore ? '<span class="cloud-tags-hidden" id="' + tagId + '" style="display:none">' + hidden.join('') + '</span>' +
-              '<button class="btn btn-sm cloud-show-more" data-toggle-tags="' + tagId + '" data-show-label="Show all ' + models.length + ' models" style="margin:4px 0;font-size:0.7rem">' +
-              'Show all ' + models.length + ' models</button>' : '');
+        // Helper: render all rows into the list container
+        function renderRowsInto(container, models) {
+          container.innerHTML = models.length > 0
+            ? models.map(renderCloudRow).join('')
+            : '<div class="cloud-model-empty">No models match</div>';
         }
 
         Object.keys(byProvider).forEach(function(p) {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
-          // Default sort: popular models first
           var sorted = sortCloudModels(pModels, 'popular');
-          var tagId = 'cloud-tags-' + p;
           var filterId = 'cloud-filter-' + p;
           var sortId = 'cloud-sort-' + p;
+          var listId = 'cloud-list-wrap-' + p;
 
           var card = document.createElement('div');
           card.className = 'model-card cloud-model';
           card.setAttribute('data-provider', p);
 
-          var headerHtml =
-            '<div class="model-header">' +
-              '<span class="model-name">' + escapeHtml(pLabel) + '</span>' +
-              '<span><span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
-              '<span style="color:var(--green);font-weight:600;font-size:0.8rem;margin-left:8px">Connected</span></span>' +
-            '</div>';
-
-          // Sort + filter controls
-          var controlsHtml = pModels.length > 5 ?
-            '<div class="cloud-model-controls">' +
-              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="Filter models\u2026" autocomplete="off">' +
+          card.innerHTML =
+            '<div class="cloud-card-header">' +
+              '<span class="cloud-provider-name">' + escapeHtml(pLabel) + '</span>' +
+              '<span>' +
+                '<span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
+                '<span class="cloud-status-ok">\u25cf Connected</span>' +
+              '</span>' +
+            '</div>' +
+            '<div class="cloud-card-controls">' +
+              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="Search models\u2026" autocomplete="off">' +
               '<select class="cloud-model-sort" id="' + sortId + '">' +
                 '<option value="popular">Newest</option>' +
                 '<option value="az">A\u2013Z</option>' +
                 '<option value="ctx-desc">Context \u2193</option>' +
                 '<option value="ctx-asc">Context \u2191</option>' +
-                '<option value="avail">Availability</option>' +
+                '<option value="avail">Ping \u2193</option>' +
               '</select>' +
-            '</div>' : '';
+            '</div>' +
+            '<div class="cloud-model-list" id="' + listId + '"></div>' +
+            '<div class="cloud-card-note">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</div>';
 
-          card.innerHTML = headerHtml + controlsHtml +
-            '<div class="cloud-model-tags" id="cloud-tags-wrap-' + p + '"></div>' +
-            '<div class="model-meta"><span style="color:var(--text-muted);font-size:0.75rem">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</span></div>';
           list.appendChild(card);
 
-          var tagsContainer = document.getElementById('cloud-tags-wrap-' + p);
-          if (tagsContainer) renderTagsInto(tagsContainer, sorted, tagId);
+          var listContainer = document.getElementById(listId);
+          if (listContainer) renderRowsInto(listContainer, sorted);
 
-          // Probe visible models for availability (first 12)
-          var visibleIds = sorted.slice(0, 12).map(function(cm) { return cm.id; });
+          // Probe first 20 models for ping
+          var visibleIds = sorted.slice(0, 20).map(function(cm) { return cm.id; });
           setTimeout(function() { probeModelStatus(visibleIds); }, 500);
 
-          // Wire up filter + sort if controls exist
-          if (pModels.length > 5) {
-            var filterEl = document.getElementById(filterId);
-            var sortEl = document.getElementById(sortId);
-            function refreshTags() {
-              var query = (filterEl ? filterEl.value : '').toLowerCase().trim();
-              var sortBy = sortEl ? sortEl.value : 'az';
-              var filtered = pModels;
-              if (query) {
-                filtered = pModels.filter(function(cm) {
-                  var text = ((cm.name || '') + ' ' + cm.id + ' ' + (cm.meta && cm.meta.owned_by ? cm.meta.owned_by : '')).toLowerCase();
-                  return text.indexOf(query) !== -1;
-                });
-              }
-              var s = sortCloudModels(filtered, sortBy);
-              renderTagsInto(tagsContainer, s, tagId + '-f');
-            }
-            if (filterEl) filterEl.addEventListener('input', refreshTags);
-            if (sortEl) sortEl.addEventListener('change', function() {
-              refreshTags();
-              // When switching to availability sort, probe all visible models
-              if (sortEl.value === 'avail') {
-                var ids = pModels.map(function(cm) { return cm.id; });
-                probeModelStatus(ids.slice(0, 20));
-              }
-            });
+          // Wire filter + sort
+          var filterEl = document.getElementById(filterId);
+          var sortEl = document.getElementById(sortId);
+          function refreshRows() {
+            var query = filterEl ? filterEl.value.toLowerCase().trim() : '';
+            var sortBy = sortEl ? sortEl.value : 'popular';
+            var filtered = query ? pModels.filter(function(cm) {
+              var text = ((cm.name || '') + ' ' + cm.id + ' ' + (cm.meta && cm.meta.owned_by ? cm.meta.owned_by : '')).toLowerCase();
+              return text.indexOf(query) !== -1;
+            }) : pModels;
+            var s = sortCloudModels(filtered, sortBy);
+            if (listContainer) renderRowsInto(listContainer, s);
+            // Probe newly visible models
+            probeModelStatus(s.slice(0, 20).map(function(cm) { return cm.id; }));
           }
+          if (filterEl) filterEl.addEventListener('input', refreshRows);
+          if (sortEl) sortEl.addEventListener('change', function() {
+            refreshRows();
+            if (sortEl.value === 'avail') probeModelStatus(pModels.map(function(cm) { return cm.id; }).slice(0, 40));
+          });
         });
-        // Apply cached probe results to newly rendered tags
+        // Apply cached probe results to newly rendered rows
         if (Object.keys(modelStatus).length > 0) updateModelStatusBadges();
       }
     },
@@ -2765,14 +2744,11 @@ var SwarmLLM = (function() {
   }
 
   function updateModelStatusBadges() {
-    // Update cloud model tags on dashboard
-    document.querySelectorAll('.cloud-model-tag[data-select-cloud]').forEach(function(tag) {
-      var modelId = tag.getAttribute('data-select-cloud');
-      var existing = tag.querySelector('.model-status-badge');
-      var html = modelStatusBadgeHtml(modelId);
-      if (html) {
-        if (existing) { existing.outerHTML = html; } else { tag.insertAdjacentHTML('beforeend', ' ' + html); }
-      }
+    // Update cloud model rows on dashboard
+    document.querySelectorAll('.cloud-model-row[data-select-cloud]').forEach(function(row) {
+      var modelId = row.getAttribute('data-select-cloud');
+      var pingEl = row.querySelector('.cloud-model-row-ping');
+      if (pingEl) pingEl.innerHTML = modelStatusBadgeHtml(modelId);
     });
     // Update chat dropdown items
     document.querySelectorAll('.model-dropdown-item[data-value]').forEach(function(item) {

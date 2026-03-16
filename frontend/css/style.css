@@ -1450,23 +1450,28 @@ kbd {
 .model-card.cloud-model:hover {
   background: linear-gradient(135deg, rgba(59,130,246,0.14) 0%, rgba(34,211,238,0.08) 100%);
 }
-/* cloud cards use old model-header/meta layout */
-.model-card.cloud-model .model-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.model-card.cloud-model .model-name { font-weight: 700; font-size: 0.95rem; }
-.model-card.cloud-model .model-meta { display: flex; gap: 12px; font-size: 0.8rem; color: var(--text-secondary); margin-top: 6px; }
+/* Cloud provider cards */
+.cloud-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cloud-provider-name { font-weight: 700; font-size: 0.95rem; }
+.cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
+.cloud-card-controls { display: flex; gap: 6px; margin-bottom: 6px; }
+.cloud-model-filter { flex: 1; padding: 5px 8px; font-size: 0.78rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); outline: none; }
+.cloud-model-filter:focus { border-color: var(--accent); }
+.cloud-model-sort { flex: 0 0 auto; padding: 5px 6px; font-size: 0.73rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); cursor: pointer; outline: none; }
+.cloud-model-sort:focus { border-color: var(--accent); }
+/* Scrollable model list */
+.cloud-model-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; scrollbar-width: thin; }
+.cloud-model-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.82rem; transition: background 0.1s; }
+.cloud-model-row:last-child { border-bottom: none; }
+.cloud-model-row:hover { background: var(--bg-tertiary); }
+.cloud-model-row-name { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-model-row-ctx { font-size: 0.68rem; color: var(--text-muted); flex-shrink: 0; min-width: 28px; text-align: right; }
+.cloud-model-row-ping { flex-shrink: 0; min-width: 44px; text-align: right; }
+.cloud-model-empty { padding: 12px 10px; font-size: 0.8rem; color: var(--text-muted); text-align: center; }
+.cloud-card-note { font-size: 0.72rem; color: var(--text-muted); }
 .cloud-models-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0 8px; }
 .cloud-divider-line { flex: 1; height: 1px; background: var(--border); }
 .cloud-divider-label { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; }
-.cloud-model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.cloud-model-tag { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px 3px 10px; font-size: 0.8rem; color: var(--text-primary); cursor: pointer; transition: all 0.15s; display: inline-flex; flex-direction: column; line-height: 1.3; }
-.cloud-model-tag:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
-.cloud-tag-meta { opacity: 0.6; font-size: 0.67rem; }
-.cloud-model-tag:hover .cloud-tag-meta { opacity: 0.85; }
-.cloud-model-controls { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
-.cloud-model-filter { flex: 1 1 auto; min-width: 120px; max-width: 260px; padding: 4px 8px; font-size: 0.75rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); outline: none; }
-.cloud-model-filter:focus { border-color: var(--accent); }
-.cloud-model-sort { flex: 0 0 auto; max-width: 120px; padding: 4px 6px; font-size: 0.72rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); cursor: pointer; outline: none; }
-.cloud-model-sort:focus { border-color: var(--accent); }
 .provider-health-badge { display: inline-block; font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
 .health-fast { background: rgba(76,175,80,0.15); color: var(--green); }
 .health-ok { background: rgba(255,193,7,0.15); color: var(--orange); }
