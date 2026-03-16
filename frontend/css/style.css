@@ -1212,8 +1212,11 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-messages.chat-messenger .chat-msg.assistant.group-mid .msg-avatar {
   visibility: hidden;
 }
-/* No avatar for user messages */
-.chat-messages.chat-messenger .chat-msg.user .msg-avatar { display: none; }
+/* User avatar: preserve space on non-last, hide on first/mid */
+.chat-messages.chat-messenger .chat-msg.user.group-first .msg-avatar,
+.chat-messages.chat-messenger .chat-msg.user.group-mid .msg-avatar {
+  visibility: hidden;
+}
 
 /* ---- Bubble ---- */
 .chat-messages.chat-messenger .msg-bubble {

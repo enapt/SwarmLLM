@@ -3987,11 +3987,15 @@ var SwarmLLM = (function() {
       sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
     }
 
-    // Avatar slot — visible only in messenger mode for assistant messages
+    // Avatar slot — visible only in messenger mode
     var avatarEl = document.createElement('div');
     avatarEl.className = 'msg-avatar';
     avatarEl.setAttribute('aria-hidden', 'true');
-    if (role === 'assistant') avatarEl.textContent = 'AI';
+    if (role === 'assistant') {
+      avatarEl.textContent = 'AI';
+    } else {
+      avatarEl.innerHTML = '<img src="/static/favicon.svg" alt="" style="width:16px;height:16px;display:block;">';
+    }
     div.appendChild(avatarEl);
 
     // Bubble wrapper — used by messenger mode; transparent pass-through in linear mode
