@@ -2,63 +2,8 @@
 
 // ============================================================================
 // SwarmLLM — Unified single-page application
+// Provider metadata (icons, names) → js/providers.js
 // ============================================================================
-
-// ============================================================================
-// Provider icons — bundled SVGs served from /static/icons/
-// ============================================================================
-var _ICON_BASE = '/static/icons/';
-var _ICON_MAP = {
-  openai:     'openai',
-  anthropic:  'anthropic',
-  deepseek:   'deepseek-color',
-  mistral:    'mistral-color',
-  groq:       'groq',
-  nvidia_nim: 'nvidia-color',
-  cerebras:   'cerebras-color',
-  sambanova:  'sambanova-color',
-  fireworks:  'fireworks-color',
-  together:   'together-color',
-  deepinfra:  'deepinfra-color',
-  moonshot:   'moonshot',
-  // model-family → icon (for local/swarm models)
-  llama:      'meta-color',
-  gemma:      'gemma-color',
-  gemini:     'gemini-color',
-  qwen:       'qwen-color',
-  phi:        'microsoft-color',
-  claude:     'claude-color',
-};
-
-function providerIconUrl(key) {
-  var id = _ICON_MAP[key];
-  return id ? _ICON_BASE + id + '.svg' : null;
-}
-
-// Returns an <img> tag string for a provider/model icon, or '' if unknown.
-// size defaults to 16.
-function providerIconHtml(key, size) {
-  var url = providerIconUrl(key);
-  if (!url) return '';
-  size = size || 16;
-  return '<img src="' + url + '" width="' + size + '" height="' + size + '" alt="" aria-hidden="true" class="provider-icon" style="display:inline-block;vertical-align:middle;flex-shrink:0">';
-}
-
-// Infer a provider/family key from a model ID string.
-function modelIconKey(modelId) {
-  if (!modelId) return null;
-  var m = modelId.toLowerCase();
-  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') || m.includes('-openai')) return 'openai';
-  if (m.startsWith('claude')) return 'claude';
-  if (m.startsWith('deepseek')) return 'deepseek';
-  if (m.startsWith('mistral') || m.startsWith('mixtral') || m.startsWith('codestral')) return 'mistral';
-  if (m.startsWith('llama') || m.startsWith('meta-llama')) return 'llama';
-  if (m.startsWith('gemma')) return 'gemma';
-  if (m.startsWith('gemini')) return 'gemini';
-  if (m.startsWith('qwen')) return 'qwen';
-  if (m.startsWith('phi')) return 'phi';
-  return null;
-}
 
 var SwarmLLM = (function() {
   var ws = null;
@@ -141,6 +86,75 @@ var SwarmLLM = (function() {
     }
     return fetch(url, opts);
   }
+
+  // ========================================================================
+  // Data Store — single fetch point, in-flight deduplication, shared cache
+  // All API reads go through here so callers never duplicate network requests.
+  // ========================================================================
+  var data = (function() {
+    var _inFlight = {};
+    var cache = {
+      models: [],
+      cloudModels: [],
+      stats: null,
+      config: null,
+    };
+
+    // Deduplicate concurrent calls: if a fetch is in-flight, callers share it.
+    function dedupe(key, fn) {
+      if (_inFlight[key]) return _inFlight[key];
+      _inFlight[key] = Promise.resolve().then(fn).finally(function() {
+        delete _inFlight[key];
+      });
+      return _inFlight[key];
+    }
+
+    // Fetch admin model list + cloud provider models.
+    // Sets window._lastModelsData so enc banner / toggle always have fresh data.
+    function loadModels() {
+      return dedupe('models', async function() {
+        var models = [];
+        var cloudModels = [];
+        try {
+          var r = await fetch('/api/admin/models');
+          if (r.ok) models = await r.json();
+        } catch (e) {}
+        try {
+          var r2 = await authFetch('/api/admin/provider-models');
+          if (r2.ok) { var d = await r2.json(); cloudModels = d.models || []; }
+        } catch (e) {}
+        cache.models = models;
+        cache.cloudModels = cloudModels;
+        window._lastModelsData = models;
+        return { models: models, cloudModels: cloudModels };
+      });
+    }
+
+    // Fetch daemon stats + running config. Non-critical fields degrade silently.
+    function loadStats() {
+      return dedupe('stats', async function() {
+        var stats = null;
+        var config = null;
+        try {
+          var r = await fetch('/api/admin/stats');
+          if (r.ok) stats = await r.json();
+        } catch (e) {}
+        try {
+          var r2 = await fetch('/api/admin/config');
+          if (r2.ok) config = await r2.json();
+        } catch (e) {}
+        cache.stats = stats;
+        cache.config = config;
+        return { stats: stats, config: config };
+      });
+    }
+
+    return {
+      loadModels: loadModels,
+      loadStats: loadStats,
+      cache: cache,
+    };
+  })();
 
   // ========================================================================
   // UI Module — tab switching, sidebar, modals
@@ -518,19 +532,22 @@ var SwarmLLM = (function() {
         var isDistributed = modelData && modelData.shard_count > 1;
         var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
-        var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Disable</button>';
-        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Enable prompt privacy</button>';
+        var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.disable') + '</button>';
+        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.enable_privacy') + '</button>';
         if (isAllLocal) {
           encBanner.className = 'chat-enc-banner enc-full';
-          encBanner.innerHTML = '&#128274; <strong>Running locally</strong> \u2014 all shards on this device, prompts never leave';
+          encBanner.innerHTML = '&#128274; ' + escapeHtml(I18n.t('enc.running_locally'));
           encBanner.style.display = '';
         } else if (isDistributed && isEncrypted) {
           encBanner.className = 'chat-enc-banner enc-boomerang';
-          encBanner.innerHTML = '&#128274; <strong>Full E2E encryption</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
+          encBanner.innerHTML = '&#128274; ' + escapeHtml(I18n.t('enc.full_e2e')) +
+            ' \u00b7 <span class="enc-overhead">' + escapeHtml(I18n.t('enc.full_e2e_overhead')) + '</span> ' + disableBtn;
           encBanner.style.display = '';
         } else if (isDistributed) {
           encBanner.className = 'chat-enc-banner enc-warn';
-          encBanner.innerHTML = '&#128275; <strong>Transport encrypted</strong> \u2014 but serving peers can see your prompts \u00b7 <span class="enc-overhead">gain speed, lose some privacy</span>' + (canBoomerang ? ' ' + enableBtn : '');
+          encBanner.innerHTML = '&#128275; ' + escapeHtml(I18n.t('enc.transport_encrypted')) +
+            ' \u00b7 <span class="enc-overhead">' + escapeHtml(I18n.t('enc.gain_speed')) + '</span>' +
+            (canBoomerang ? ' ' + enableBtn : '');
           encBanner.style.display = '';
         } else {
           encBanner.style.display = 'none';
@@ -832,54 +849,30 @@ var SwarmLLM = (function() {
   // ========================================================================
   var dashboard = {
     loadInitial: async function() {
+      // Fetch stats + models in parallel — both use the shared data store so
+      // concurrent calls from polling and WebSocket events are deduplicated.
+      var statsResult, modelsResult;
       try {
-        var resp = await fetch('/api/admin/stats');
-        var data = await resp.json();
-        dashboard.updateFull(data);
+        var results = await Promise.all([data.loadStats(), loadModels()]);
+        statsResult = results[0];
+        modelsResult = results[1];
       } catch (e) {
-        ui.showBanner('error', "Can't reach SwarmLLM — is it running?");
+        ui.showBanner('error', I18n.t('errors.server_unreachable'));
+        return;
       }
 
-      try {
-        var resp = await fetch('/api/admin/config');
-        var cfg = await resp.json();
+      if (statsResult.stats) {
+        dashboard.updateFull(statsResult.stats);
+      } else {
+        ui.showBanner('error', I18n.t('errors.server_unreachable'));
+      }
+
+      if (statsResult.config) {
+        var cfg = statsResult.config;
         if (cfg.contribution) document.getElementById('settings-contribution').value = cfg.contribution;
         if (cfg.max_concurrent_requests) document.getElementById('settings-max-requests').value = cfg.max_concurrent_requests;
         if (cfg.max_bandwidth_mbps !== undefined) document.getElementById('settings-bandwidth').value = cfg.max_bandwidth_mbps;
         if (cfg.max_disk_mb) document.getElementById('settings-disk').value = cfg.max_disk_mb;
-      } catch (e) { /* config is non-critical on initial load */ }
-
-      try {
-        // Ensure API key is loaded before fetching authenticated endpoints
-        if (settings._apiKeyPromise) await settings._apiKeyPromise;
-
-        var resp = await fetch('/api/admin/models');
-        var models = await resp.json();
-        var cloudModels = [];
-        try {
-          var pmResp = await authFetch('/api/admin/provider-models');
-          if (pmResp.ok) {
-            var pmData = await pmResp.json();
-            cloudModels = pmData.models || [];
-          }
-        } catch (e) {}
-        dashboard.renderModels(models, cloudModels);
-        // If cloud models came back empty, retry once after 3s (provider APIs may be slow on cold start)
-        if (cloudModels.length === 0) {
-          setTimeout(async function() {
-            try {
-              var retry = await authFetch('/api/admin/provider-models');
-              if (retry.ok) {
-                var rd = await retry.json();
-                if (rd.models && rd.models.length > 0) {
-                  dashboard.renderModels(models, rd.models);
-                }
-              }
-            } catch(e) {}
-          }, 3000);
-        }
-      } catch (e) {
-        ui.showBanner('error', 'Failed to load model list');
       }
 
       dlQueue.load();
@@ -1364,12 +1357,6 @@ var SwarmLLM = (function() {
 
       // Cloud provider models — one compact card per provider
       if (hasCloud) {
-        var providerLabels = {
-          openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-          mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
-          cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
-          together: 'Together AI', deepinfra: 'DeepInfra', moonshot: 'Moonshot (Kimi)'
-        };
         // Group by provider
         var byProvider = {};
         cloudModels.forEach(function(cm) {
@@ -1464,7 +1451,7 @@ var SwarmLLM = (function() {
         list.appendChild(cloudSection);
 
         Object.keys(byProvider).forEach(function(p) {
-          var pLabel = providerLabels[p] || p;
+          var pLabel = PROVIDER_NAMES[p] || p;
           var pModels = byProvider[p];
           var sorted = sortCloudModels(pModels, 'popular');
           var filterId = 'cloud-filter-' + p;
@@ -2672,12 +2659,12 @@ var SwarmLLM = (function() {
           var level = n.level === 'error' ? 'error' : (n.level === 'warn' ? 'warning' : 'info');
           showToast(n.title + ': ' + n.message, level, 10000);
         } else if (msg.type === 'models_changed') {
-          // Debounce: coalesce rapid model change events
+          // Debounce: coalesce rapid model change events.
+          // loadModels() renders both dashboard grid + chat dropdown via the data store.
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
           window._modelsChangedTimer = setTimeout(function() {
             loadModels();
             loadModeIndicator();
-            dashboard.loadInitial();
           }, 1000);
         }
       } catch (e) {
@@ -2689,7 +2676,7 @@ var SwarmLLM = (function() {
       wsHealthy = false;
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(0.3);
       if (wsWasConnected) {
-        showWsBanner('disconnected', 'Lost connection to SwarmLLM \u2014 reconnecting...');
+        showWsBanner('disconnected', I18n.t('errors.connection_lost'));
       }
       // Resume REST polling as fallback while WebSocket is disconnected
       startPolling();
@@ -2700,8 +2687,9 @@ var SwarmLLM = (function() {
 
   function startPolling() {
     if (pollTimers.length > 0) return; // already polling
+    // Single interval — loadInitial calls loadModels() via the data store,
+    // so a separate models interval would be a duplicate network round-trip.
     pollTimers.push(setInterval(dashboard.loadInitial, 30000));
-    pollTimers.push(setInterval(loadModels, 30000));
   }
 
   // Provider health probe — lightweight ping to each configured provider
@@ -2736,23 +2724,6 @@ var SwarmLLM = (function() {
     healthTimer = setInterval(fetchProviderHealth, intervalSec * 1000);
   }
 
-  // --- Provider badge icons (inline SVG, 18x18) ---
-  var providerIcons = (function() {
-    var icons = {};
-    ['anthropic','openai','deepseek','mistral','groq','nvidia_nim',
-     'cerebras','sambanova','fireworks','together','deepinfra','moonshot'].forEach(function(p) {
-      var url = providerIconUrl(p);
-      icons[p] = url ? '<img src="' + url + '" width="18" height="18" alt="" class="provider-icon" style="display:block">' : '';
-    });
-    return icons;
-  }());
-
-  var providerDisplayNames = {
-    anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek',
-    mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
-    cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks',
-    together: 'Together', deepinfra: 'DeepInfra', moonshot: 'Kimi'
-  };
 
   function updateProviderBannerBadges() {
     var strip = document.getElementById('provider-badges');
@@ -2790,8 +2761,8 @@ var SwarmLLM = (function() {
         dotClass = 'dot-error';
         latencyText = 'Down';
       }
-      var iconHtml = providerIcons[p] || '';
-      var name = providerDisplayNames[p] || p;
+      var iconHtml = providerIconHtml(p, 18);
+      var name = PROVIDER_NAMES[p] || p;
       badge.innerHTML = '<span class="pb-icon">' + iconHtml + '</span>' +
         '<span class="pb-name">' + escapeHtml(name) + '</span>' +
         '<span class="pb-dot ' + dotClass + '"></span>' +
@@ -2943,25 +2914,20 @@ var SwarmLLM = (function() {
   // ========================================================================
   var _modelDropdownData = []; // [{id, name, group, provider}]
 
+  // loadModels — canonical model refresh.
+  // Fetches via the shared data store (deduped), then renders BOTH the dashboard
+  // model grid AND the chat dropdown in one pass.
   async function loadModels() {
     try {
-      // Fetch admin model list + provider models in parallel
-      var adminResp = await fetch('/api/admin/models');
-      var adminModels = adminResp.ok ? await adminResp.json() : [];
+      if (settings._apiKeyPromise) await settings._apiKeyPromise;
+      var result = await data.loadModels();
+      var adminModels = result.models;
+      var providerModels = result.cloudModels;
 
-      var providerModels = [];
-      try {
-        var pmResp = await authFetch('/api/admin/provider-models');
-        if (pmResp.ok) {
-          var pmData = await pmResp.json();
-          providerModels = pmData.models || [];
-        }
-      } catch (e) {}
+      // Render dashboard model grid
+      dashboard.renderModels(adminModels, providerModels);
 
-      // Keep _lastModelsData in sync so the enc banner and toggle always have fresh data
-      window._lastModelsData = adminModels || [];
-
-      // Build set of ready model IDs
+      // Build set of ready model IDs (for chat dropdown)
       var readySet = {};
       adminModels.forEach(function(m) {
         var isReady = m.status === 'loaded' || m.status === 'ready' ||
@@ -2972,13 +2938,7 @@ var SwarmLLM = (function() {
       var readyModels = adminModels.filter(function(m) { return readySet[m.id]; });
       var hasAny = readyModels.length > 0 || providerModels.length > 0;
 
-      // Build grouped data
-      var providerLabels = {
-        openai: 'OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek',
-        mistral: 'Mistral', groq: 'Groq', nvidia_nim: 'NVIDIA NIM',
-        cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
-        together: 'Together AI', deepinfra: 'DeepInfra', moonshot: 'Moonshot (Kimi)'
-      };
+      // Build grouped dropdown data — use PROVIDER_NAMES from providers.js
       var groups = [];
       _modelDropdownData = [];
 
@@ -3019,7 +2979,7 @@ var SwarmLLM = (function() {
             var na = a.name.toLowerCase(), nb = b.name.toLowerCase();
             return na < nb ? -1 : na > nb ? 1 : 0;
           });
-          groups.push({ key: p, label: (providerLabels[p] || p) + ' (cloud)', items: items });
+          groups.push({ key: p, label: (PROVIDER_NAMES[p] || p) + ' (cloud)', items: items });
           _modelDropdownData = _modelDropdownData.concat(items);
         });
       }
@@ -3052,7 +3012,7 @@ var SwarmLLM = (function() {
         chat.renderMessages();
       }
     } catch (e) {
-      ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
+      ui.showBanner('error', I18n.t('errors.server_unreachable'));
     }
   }
 
@@ -5189,10 +5149,11 @@ var SwarmLLM = (function() {
             body: JSON.stringify({ enabled: !isActive }),
           }).then(function(r) {
             if (r.ok) {
-              ui.showBanner('success', (!isActive ? 'Encrypted pipeline enabled' : 'Encrypted pipeline disabled') + ' for ' + encToggle);
+              var key = isActive ? 'enc.pipeline_disabled' : 'enc.pipeline_enabled';
+              ui.showBanner('success', I18n.t(key, { model: encToggle }));
               loadModels();
             } else {
-              ui.showBanner('error', 'Failed to toggle encrypted pipeline');
+              ui.showBanner('error', I18n.t('errors.failed_toggle_enc'));
             }
           });
         } else {
@@ -5605,12 +5566,16 @@ var SwarmLLM = (function() {
   var _cachedProviderData = null;
 
   async function loadModeIndicator() {
-    var statsData = null;
+    // Reuse cached stats if available — avoids a redundant /api/admin/stats fetch
+    // when called right after loadInitial() or loadModels().
+    var statsData = data.cache.stats;
+    if (!statsData) {
+      try {
+        var resp = await fetch('/api/admin/stats');
+        if (resp.ok) statsData = await resp.json();
+      } catch (e) {}
+    }
     var providerData = null;
-    try {
-      var resp = await fetch('/api/admin/stats');
-      if (resp.ok) statsData = await resp.json();
-    } catch (e) {}
     try {
       var resp2 = await authFetch('/api/admin/providers');
       if (resp2.ok) providerData = await resp2.json();
@@ -5712,19 +5677,18 @@ var SwarmLLM = (function() {
     // Initialize neural network background
     if (typeof NeuralBg !== 'undefined') NeuralBg.init();
 
+    // ── Data loading ────────────────────────────────────────────────────────
+    // loadInitial() fetches stats + models (via data store) + network in one
+    // pass.  loadPruneHistory / loadSchedule / loadModeIndicator are lightweight
+    // and load in parallel.  WebSocket connection + REST polling fallback follow.
     dashboard.loadInitial();
-    loadModels().then(function() { syncMobileModelSelect(); });
     loadPruneHistory();
     loadSchedule();
     loadModeIndicator();
-    connectWebSocket();
     identity.loadNickname();
-
-    // Start polling as fallback — will be paused once WebSocket connects
-    startPolling();
-
-    // Start provider health probe (default every 30s, configurable)
-    startHealthPolling();
+    connectWebSocket();
+    startPolling();      // REST fallback — paused while WebSocket is healthy
+    startHealthPolling(); // provider health probe (default 30s)
   }
 
   // Delegated error handler for provider icons — replaces inline onerror (blocked by CSP)
