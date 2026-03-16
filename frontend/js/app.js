@@ -5177,8 +5177,9 @@ var SwarmLLM = (function() {
       if (encToggle) {
         var encReady = (target.getAttribute('data-enc-ready') || (target.closest('[data-enc-ready]') || {}).getAttribute && (target.closest('[data-enc-ready]') || {}).getAttribute('data-enc-ready')) === '1';
         if (encReady) {
-          // Toggle encrypted pipeline
-          var isActive = target.classList.contains('active') || (target.closest('.active') != null);
+          // Toggle encrypted pipeline — derive current state from model data, not CSS class
+          var encModelData = (window._lastModelsData || []).find(function(m) { return m.id === encToggle; });
+          var isActive = encModelData ? !!encModelData.encrypted_pipeline : (target.classList.contains('active') || target.closest('.active') != null);
           authFetch('/api/admin/models/' + encodeURIComponent(encToggle) + '/encrypted-pipeline', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
