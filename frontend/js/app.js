@@ -431,15 +431,16 @@ var SwarmLLM = (function() {
         }
         var modelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
         var source = getModelSource(s.model || '');
-        var sourceIcon = source === 'local' ? '&#128187;' : source === 'cloud' ? '&#9729;' : '&#11042;';
         var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
+        var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model || '');
+        var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
         var isEncrypted = modelItem && modelItem.encrypted;
         var encIcon = isEncrypted ? ' &#128274;' : '';
         var badgeClass = 'session-model-badge session-source-' + source;
         var tooltipParts = [escapeHtml(s.model || '')];
         if (source !== 'local') tooltipParts.push(sourceLabel);
         if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
-        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + sourceIcon + ' ' + escapeHtml(formatModelDisplayName(s.model)) + encIcon + '</span>' : '';
+        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + escapeHtml(formatModelDisplayName(s.model)) + encIcon + '</span>' : '';
         var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
@@ -487,10 +488,13 @@ var SwarmLLM = (function() {
       var modelName = s.model ? formatModelDisplayName(s.model) : 'No model';
       var allIds = _modelDropdownData.map(function(m) { return m.id; });
       var available = !s.model || allIds.indexOf(s.model) !== -1;
-      var badgeClass = 'chat-session-model' + (available ? '' : ' unavailable');
+      var headerSource = getModelSource(s.model || '');
+      var badgeClass = 'chat-session-model source-' + headerSource + (available ? '' : ' unavailable');
       var badgeTitle = available ? s.model : 'Model no longer available';
       var headerModelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
       var headerEncIcon = (headerModelItem && headerModelItem.encrypted) ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '';
+      var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
+      var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
       var msgCount = s.messages.length;
       var countLabel = msgCount === 0 ? 'New' : (msgCount === 1 ? '1 message' : msgCount + ' messages');
       var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
@@ -498,7 +502,7 @@ var SwarmLLM = (function() {
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
+        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
     },
 
     renderMessages: function() {
