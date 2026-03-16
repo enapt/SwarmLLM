@@ -5144,7 +5144,7 @@ var SwarmLLM = (function() {
       if (el.getAttribute('data-goto-browse')) { ui.openModelBrowser(); }
       if (el.getAttribute('data-goto-settings')) { ui.openSettings(true); }
       if (el.getAttribute('data-goto-hf')) { ui.openModelBrowser(); }
-      if (el.getAttribute('data-goto-network-code')) { ui.switchTab('dashboard'); setTimeout(function() { var btn = document.getElementById('btn-share-network'); if (btn) btn.click(); }, 200); }
+      if (el.getAttribute('data-goto-network-code')) { var btn = document.getElementById('btn-share-network'); if (btn) btn.click(); }
     });
 
     // Network discovery — share popover toggle
@@ -5206,10 +5206,11 @@ var SwarmLLM = (function() {
     document.addEventListener('click', function(e) {
       var target = e.target;
 
-      // Close share popover when clicking outside
+      // Close share popover when clicking outside the share button wrapper
       var pop = document.getElementById('share-popover');
-      if (pop && pop.classList.contains('show') && !pop.contains(target) && target.id !== 'btn-share-network') {
-        pop.classList.remove('show');
+      if (pop && pop.classList.contains('show')) {
+        var wrap = document.querySelector('.share-btn-wrap');
+        if (wrap && !wrap.contains(target)) pop.classList.remove('show');
       }
 
       // Session delete button
@@ -6213,24 +6214,6 @@ var SwarmLLM = (function() {
     try {
       var resp = await authFetch('/api/admin/network-code');
       var data = await resp.json();
-      var panel = document.getElementById('invite-code-panel');
-      if (!panel) return;
-
-      var phase = data.phase || 'seedling';
-      var peerCount = data.peer_count || 0;
-      var badge = document.getElementById('network-phase-badge');
-      if (badge) {
-        if (phase === 'established') {
-          badge.textContent = peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + ' connected';
-          badge.className = 'badge badge-green';
-        } else {
-          badge.textContent = 'No peers';
-          badge.className = 'badge badge-orange';
-        }
-      }
-
-      // Always show the panel — users need it to share/join even when connected
-      panel.style.display = '';
       var codeInput = document.getElementById('my-network-code');
       if (codeInput && data.code) codeInput.value = data.code;
     } catch (e) {
