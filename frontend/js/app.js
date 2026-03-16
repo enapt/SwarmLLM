@@ -1006,6 +1006,9 @@ var SwarmLLM = (function() {
         document.getElementById('stat-chip-cloud-val').textContent = statCloudTotal;
         document.getElementById('stat-chip-providers-val').textContent = statProviders;
         statsBar.style.display = '';
+        // Hide remote chip when 0 (no clutter)
+        var netChip = document.getElementById('stat-chip-network');
+        if (netChip) netChip.style.display = statNet > 0 ? '' : 'none';
         // Hide cloud chips if no cloud models
         var cloudChip = document.getElementById('stat-chip-cloud');
         var provChip = document.getElementById('stat-chip-providers');
