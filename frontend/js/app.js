@@ -5187,7 +5187,7 @@ var SwarmLLM = (function() {
           }).then(function(r) {
             if (r.ok) {
               ui.showBanner('success', (!isActive ? 'Encrypted pipeline enabled' : 'Encrypted pipeline disabled') + ' for ' + encToggle);
-              refreshModels();
+              loadModels();
             } else {
               ui.showBanner('error', 'Failed to toggle encrypted pipeline');
             }
