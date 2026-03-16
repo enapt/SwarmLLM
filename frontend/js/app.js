@@ -2826,10 +2826,23 @@ var SwarmLLM = (function() {
         '<span class="pb-dot ' + dotClass + '"></span>' +
         (latencyText ? '<span class="pb-latency">' + escapeHtml(latencyText) + '</span>' : '');
       badge.title = name + ': ' + h.status + (h.detail ? ' — ' + h.detail : '') + (h.latency_ms ? ' (' + h.latency_ms + 'ms)' : '');
-      if (isError) {
-        badge.style.cursor = 'pointer';
-        badge.addEventListener('click', function() { ui.openSettings(true); });
-      }
+      badge.style.cursor = 'pointer';
+      (function(providerKey, errored) {
+        badge.addEventListener('click', function() {
+          // Switch to dashboard and scroll to provider card
+          ui.switchTab('dashboard');
+          setTimeout(function() {
+            var card = document.querySelector('.cloud-model[data-provider="' + providerKey + '"]');
+            if (card) {
+              card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              card.classList.add('provider-highlight');
+              setTimeout(function() { card.classList.remove('provider-highlight'); }, 1500);
+            } else if (errored) {
+              ui.openSettings(true);
+            }
+          }, 100);
+        });
+      }(p, isError));
       strip.appendChild(badge);
     });
   }
