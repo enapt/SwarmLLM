@@ -435,13 +435,13 @@ var SwarmLLM = (function() {
         var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model || '');
         var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
         var isEncrypted = modelItem && modelItem.encrypted;
-        var encIcon = isEncrypted ? ' &#128274;' : '';
         var badgeClass = 'session-model-badge session-source-' + source;
         var tooltipParts = [escapeHtml(s.model || '')];
         if (source !== 'local') tooltipParts.push(sourceLabel);
         if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
-        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + escapeHtml(formatModelDisplayName(s.model)) + encIcon + '</span>' : '';
-        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
+        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + escapeHtml(formatModelDisplayName(s.model)) + '</span>' : '';
+        var encBadge = isEncrypted ? '<span class="session-enc-lock" title="Encrypted pipeline active">&#128274;</span>' : '';
+        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + encBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
           '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
@@ -478,10 +478,12 @@ var SwarmLLM = (function() {
 
     updateChatHeader: function() {
       var header = document.getElementById('chat-session-header');
+      var encBanner = document.getElementById('chat-enc-banner');
       if (!header) return;
       if (!currentSessionId || !sessions[currentSessionId]) {
         header.classList.remove('visible');
         header.innerHTML = '';
+        if (encBanner) encBanner.style.display = 'none';
         return;
       }
       var s = sessions[currentSessionId];
@@ -492,7 +494,8 @@ var SwarmLLM = (function() {
       var badgeClass = 'chat-session-model source-' + headerSource + (available ? '' : ' unavailable');
       var badgeTitle = available ? s.model : 'Model no longer available';
       var headerModelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
-      var headerEncIcon = (headerModelItem && headerModelItem.encrypted) ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '';
+      var isEncrypted = headerModelItem && headerModelItem.encrypted;
+      var headerEncIcon = isEncrypted ? ' <span class="badge-encrypted active" title="Encrypted pipeline active">&#128274;</span>' : '';
       var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
       var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
       var msgCount = s.messages.length;
@@ -503,6 +506,24 @@ var SwarmLLM = (function() {
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + escapeHtml(countLabel) + '</span>' +
         '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
+
+      // Encryption banner — shown when encrypted pipeline is active
+      if (encBanner) {
+        if (isEncrypted) {
+          var modelData = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
+          var isFullLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
+          if (isFullLocal) {
+            encBanner.className = 'chat-enc-banner enc-full';
+            encBanner.innerHTML = '&#128274; <strong>End-to-end encrypted</strong> \u2014 all shards local, your prompts never leave this device';
+          } else {
+            encBanner.className = 'chat-enc-banner enc-boomerang';
+            encBanner.innerHTML = '&#128274; <strong>Boomerang routing</strong> \u2014 first &amp; last shard local, middle shards encrypted in transit';
+          }
+          encBanner.style.display = '';
+        } else {
+          encBanner.style.display = 'none';
+        }
+      }
     },
 
     renderMessages: function() {

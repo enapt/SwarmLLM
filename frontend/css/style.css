@@ -405,6 +405,7 @@ a:hover { color: var(--accent-hover); }
 
 .session-info { display: flex; flex-direction: column; overflow: hidden; flex: 1; gap: 3px; }
 .session-meta { font-size: 0.6rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+.session-enc-lock { font-size: 0.8rem; line-height: 1; color: var(--green); flex-shrink: 0; }
 .session-model-badge {
   display: inline-flex; align-items: center; gap: 3px;
   font-size: 0.55rem;
@@ -1043,6 +1044,25 @@ input[type="range"]::-webkit-slider-thumb {
   min-height: 38px;
 }
 .chat-session-header.visible { display: flex; }
+
+/* Encryption banner — shown below session header when pipeline is encrypted */
+.chat-enc-banner {
+  padding: 6px 20px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid transparent;
+}
+.chat-enc-banner.enc-full {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.25);
+  color: var(--green);
+}
+.chat-enc-banner.enc-boomerang {
+  background: rgba(34, 211, 238, 0.08);
+  border-color: rgba(34, 211, 238, 0.2);
+  color: var(--cyan, #22d3ee);
+}
 
 .chat-session-title {
   font-size: 0.85rem;
