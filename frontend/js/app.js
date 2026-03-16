@@ -448,14 +448,11 @@ var SwarmLLM = (function() {
         var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
         var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model || '');
         var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
-        var isEncrypted = modelItem && modelItem.encrypted;
         var badgeClass = 'session-model-badge session-source-' + source;
         var tooltipParts = [escapeHtml(s.model || '')];
         if (source !== 'local') tooltipParts.push(sourceLabel);
-        if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
         var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + escapeHtml(formatModelDisplayName(s.model)) + '</span>' : '';
-        var encBadge = isEncrypted ? '<span class="session-enc-lock" title="Encrypted pipeline active">&#128274;</span>' : '';
-        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + encBadge + '</span>';
+        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
           '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
@@ -514,17 +511,12 @@ var SwarmLLM = (function() {
       var msgCount = s.messages.length;
       var countLabel = msgCount === 0 ? 'New' : (msgCount === 1 ? '1 message' : msgCount + ' messages');
       var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
-      // Standalone lock — outside the model badge, clickable toggle
       var safeModelId = escapeHtml(s.model || '');
-      var lockBadge = isEncrypted
-        ? '<span class="chat-header-lock active" data-enc-toggle="' + safeModelId + '" data-enc-ready="1" title="Encrypted pipeline active \u2014 click to disable">&#128274;</span>'
-        : '';
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>' +
-        lockBadge;
+        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>';
 
       // Encryption banner — active, suggestion, or hidden
       if (encBanner) {
@@ -3175,10 +3167,8 @@ var SwarmLLM = (function() {
   function updateModelDropdownLabel(text) {
     var label = document.getElementById('model-dropdown-label');
     if (!label) return;
-    // Check if current model has encrypted pipeline via the dropdown data
     var item = _modelDropdownData.find(function(m) { return m.name === text || m.id === text; });
-    var enc = item && item.encrypted;
-    label.innerHTML = escapeHtml(text) + (enc ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '');
+    label.textContent = text;
     // Show full model ID on hover so users can see quantization details
     var trigger = document.getElementById('model-dropdown-trigger');
     if (trigger && item) trigger.title = item.id;
