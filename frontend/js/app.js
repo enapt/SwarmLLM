@@ -3032,6 +3032,10 @@ var SwarmLLM = (function() {
       // (fixes wrong source badges on sessions loaded before model fetch completes)
       if (typeof chat !== 'undefined' && chat.updateChatHeader) chat.updateChatHeader();
       if (typeof chat !== 'undefined' && chat.renderSessionList) chat.renderSessionList();
+      // Refresh empty state if current session has no messages (was rendered before model data arrived)
+      if (typeof chat !== 'undefined' && chat.renderMessages && currentSessionId && sessions[currentSessionId] && sessions[currentSessionId].messages.length === 0) {
+        chat.renderMessages();
+      }
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
