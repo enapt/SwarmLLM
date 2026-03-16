@@ -3137,8 +3137,14 @@ var SwarmLLM = (function() {
           el.title = item.id;
         }
         el.addEventListener('click', function() {
+          var prevM = currentModel;
           selectModelDropdown(item.id);
           closeModelDropdown();
+          // Open a session if model changed or no session exists yet
+          if (item.id !== prevM || !currentSessionId || !sessions[currentSessionId]) {
+            chat.newSession();
+          }
+          ui.switchTab('chat');
         });
         itemsEl.appendChild(el);
       });
