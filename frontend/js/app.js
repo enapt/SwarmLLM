@@ -3096,10 +3096,9 @@ var SwarmLLM = (function() {
     document.getElementById('model-select').value = modelId;
     try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
 
-    // Update trigger label + empty state icon
+    // Update trigger label
     var item = _modelDropdownData.find(function(m) { return m.id === modelId; });
     updateModelDropdownLabel(item ? item.name : modelId);
-    updateChatEmptyIcon(modelId);
 
     // Update selected state
     var items = document.querySelectorAll('#model-dropdown-list .model-dropdown-item');
@@ -3129,19 +3128,6 @@ var SwarmLLM = (function() {
         chat.updateChatHeader();
         chat.renderSessionList();
       }
-    }
-  }
-
-  function updateChatEmptyIcon(modelId) {
-    var el = document.getElementById('chat-empty-icon');
-    if (!el) return;
-    var item = modelId ? _modelDropdownData.find(function(m) { return m.id === modelId; }) : null;
-    var iconKey = (item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(modelId || '');
-    var iconUrl = iconKey ? providerIconUrl(iconKey) : null;
-    if (iconUrl) {
-      el.innerHTML = '<img src="' + iconUrl + '" width="48" height="48" alt="" style="opacity:0.6;border-radius:8px;">';
-    } else {
-      el.innerHTML = '&#11203;';
     }
   }
 
@@ -4195,7 +4181,11 @@ var SwarmLLM = (function() {
     }
 
     var title = modelName ? 'Chat with ' + escapeHtml(modelName) : 'Chat with AI';
-    var icon = '&#11088;';
+    var _emIconKey = currentModel ? ((item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(currentModel)) : null;
+    var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
+    var icon = _emIconUrl
+      ? '<img src="' + _emIconUrl + '" width="48" height="48" alt="" style="opacity:0.55;border-radius:10px;">'
+      : '&#11088;';
 
     // Encryption / routing info
     var encHint = '';
