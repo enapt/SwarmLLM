@@ -915,7 +915,8 @@ var SwarmLLM = (function() {
 
       models.forEach(function(m) {
         var shards = m.shards || [];
-        var shardCount = m.shard_count || 0;
+        // Derive shard count from actual shard list if API field missing/zero
+        var shardCount = m.shard_count || shards.length || 0;
         var hostedShards = m.hosted_shards || 0;
         var globalAvail = m.global_available || hostedShards;
         var isDownloading = m.acquisition === 'downloading';
@@ -927,7 +928,7 @@ var SwarmLLM = (function() {
         card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
         card.setAttribute('data-model-id', m.id);
 
-        // Status badge
+        // Status pill (compact, for title bar)
         var statusHtml = '';
         if (m.status === 'loaded') {
           statusHtml = '<span class="model-status-pill active">● Active</span>';
@@ -951,36 +952,44 @@ var SwarmLLM = (function() {
           trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
         }
 
-        // Meta info
-        var metaParts = [];
-        metaParts.push(formatBytes(m.total_size_bytes || 0));
-        if (shardCount > 0) metaParts.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
-        if (m.estimated_vram_mb) metaParts.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
-        if (m.peers_hosting > 0) metaParts.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
-        else if (hostedShards > 0) metaParts.push('<span style="color:var(--orange)">Local only</span>');
-
-        // Local file indicators (manifest + header needed to run shards)
-        var fileIndicators = '';
-        if (hostedShards > 0 || isDownloading) {
-          var hasManifest = m.has_manifest !== false;
-          var hasHeader = m.has_header !== false;
-          if (!hasManifest || !hasHeader) {
-            var missing = [];
-            if (!hasManifest) missing.push('manifest');
-            if (!hasHeader) missing.push('header');
-            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem;margin-left:6px" title="Missing: ' + missing.join(', ') + '">Missing ' + missing.join(' + ') + '</span>';
-          }
+        // Encrypted pipeline badge
+        var encBadge = '';
+        if (m.shard_count > 1 && m.local) {
+          var encReady = m.has_first_shard && m.has_last_shard;
+          var encActive = m.encrypted_pipeline;
+          var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
+          var encTitle = encActive ? 'Encrypted pipeline active \u2014 click to disable' :
+            (encReady ? 'Encrypted pipeline available \u2014 click to enable' :
+              'Encrypted pipeline unavailable \u2014 need first + last shard');
+          var missingParts = [];
+          if (!m.has_first_shard) missingParts.push('first (shard 0)');
+          if (!m.has_last_shard) missingParts.push('last (shard ' + (m.shard_count - 1) + ')');
+          if (missingParts.length > 0) encTitle += '. Missing: ' + missingParts.join(', ');
+          encBadge = '<span class="' + encClass + '" data-enc-toggle="' + escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + escapeHtml(encTitle) + '">&#128274;</span>';
         }
 
-        // Shard visualization — compact cells (≤20 shards) or proportional bar (>20 shards)
+        // Source label
+        var sourceLabel = '';
+        if (m.source === 'network' && hostedShards === 0) {
+          sourceLabel = '<span class="badge badge-remote" title="Available via network peers">Remote</span>';
+        }
+
+        // Gear + info buttons
+        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
+        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>' : '';
+
+        // ── Shard grid (always numbered, 3 size tiers) ──────────────────────
         var shardHtml = '';
         if (shards.length > 0) {
-          var useBar = shardCount > 20;
-          var containerClass = useBar ? 'shard-bar' : 'shard-grid-compact';
-          shardHtml = '<div class="' + containerClass + '" data-model-grid="' + safeId + '">';
+          var lastIdx = shardCount - 1;
+          // Size tier: adapt cell size to shard count
+          var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
+          shardHtml = '<div class="shard-grid' + sizeClass + '" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
+
           shards.forEach(function(s) {
             var cls = 'missing';
+            var label = '' + s.index;
             var dlPct = 0;
 
             if (s.local) { cls = 'local'; localCount++; }
@@ -990,10 +999,12 @@ var SwarmLLM = (function() {
             if (s.download && s.download.state === 'Downloading') {
               dlPct = s.download.progress_pct || 0;
               cls = 'downloading'; dlCount++;
+              label = dlPct + '%';
               if (missingCount > 0) missingCount--;
               if (peerCount > 0 && !s.local) peerCount--;
             } else if (s.download && s.download.state === 'Verifying') {
               cls = 'verifying'; dlCount++;
+              label = '\u2713';
               if (missingCount > 0) missingCount--;
               if (peerCount > 0 && !s.local) peerCount--;
             }
@@ -1002,6 +1013,7 @@ var SwarmLLM = (function() {
               if (cls !== 'local' && cls !== 'downloading' && cls !== 'verifying') {
                 dlPct = s.peer_downloads[0].progress_pct || 0;
                 cls = 'peer-downloading'; peerDlCount++;
+                label = dlPct + '%';
                 if (missingCount > 0) missingCount--;
                 if (peerCount > 0) peerCount--;
               }
@@ -1019,22 +1031,29 @@ var SwarmLLM = (function() {
             if (cls === 'downloading' || cls === 'peer-downloading') {
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
-            // Lock icon only in compact cell mode (too small to show in bar)
-            var lockIcon = (!useBar && s.locked) ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
-            var isEndpoint = (s.index === 0 || s.index === shards.length - 1) && shards.length > 1 && m.encrypted_pipeline;
+
+            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
+
+            // First/last shard: always mark as endpoints (pipeline structural boundaries)
             var endpointClass = '';
-            if (isEndpoint && !s.local) endpointClass = ' shard-endpoint';
-            if (isEndpoint && s.local) endpointClass = ' shard-pinned';
+            if (shardCount > 1 && (s.index === 0 || s.index === lastIdx)) {
+              if (m.encrypted_pipeline && s.local) {
+                endpointClass = ' shard-pinned';
+              } else {
+                endpointClass = ' shard-endpoint';
+              }
+            }
+
             shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style +
               ' data-shard="' + safeId + '-' + s.index + '"' +
               ' data-shard-model="' + escapeHtml(m.id) + '"' +
               ' data-shard-index="' + s.index + '"' +
               ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
-              ' title="' + escapeHtml(title) + '">' + lockIcon + '</div>';
+              ' title="' + escapeHtml(title) + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
-          // Shard summary (dot + count — replaces verbose legend)
+          // Shard summary counts
           var summaryParts = [];
           if (localCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + localCount + ' local</span>');
           if (peerCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
@@ -1060,9 +1079,8 @@ var SwarmLLM = (function() {
           if (speed > 0 && totalBytes > dlBytes) {
             etaStr = formatEta((totalBytes - dlBytes) / speed);
           }
-          // Build segmented bar — one segment per downloading shard
-          var dlShards = shards.filter(function(s) { return s.download || s.local; });
-          var segmentCount = Math.max(dlShards.length, shardCount);
+          var dlShards2 = shards.filter(function(s) { return s.download || s.local; });
+          var segmentCount = Math.max(dlShards2.length, shardCount);
           var segmentsHtml = '';
           if (segmentCount > 0) {
             var segW = (100 / segmentCount);
@@ -1087,65 +1105,7 @@ var SwarmLLM = (function() {
             '</div>';
         }
 
-        // Action button
-        var actionHtml = '';
-        if (m.status === 'loaded') {
-          // already active — no button needed
-        } else if (isReady) {
-          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + escapeHtml(m.id) + '">Use</button>';
-        } else if (isDownloading) {
-          // Cancel download button
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + escapeHtml(m.id) + '" title="Cancel download">&times;</button>';
-        } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" data-request-model="' + escapeHtml(m.id) + '">Download</button>';
-        }
-
-        // Remove model button (for models with local shards, not currently downloading)
-        var removeHtml = '';
-        if (hostedShards > 0 && !isDownloading) {
-          removeHtml = ' <button class="model-remove-btn" data-remove-model="' + escapeHtml(m.id) + '">Remove</button>';
-        }
-
-        // Probed badge — show when HF metadata fetched but no shards downloaded yet
-        var probedBadge = '';
-        if (m.probed && hostedShards === 0 && !isDownloading) {
-          probedBadge = '<span class="badge-probed">Probed</span>';
-        }
-
-        // Encrypted pipeline badge
-        var encBadge = '';
-        if (m.shard_count > 1 && m.local) {
-          var encReady = m.has_first_shard && m.has_last_shard;
-          var encActive = m.encrypted_pipeline;
-          var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
-          var encTitle = encActive ? 'Encrypted pipeline active — click to disable' :
-            (encReady ? 'Encrypted pipeline available — click to enable' :
-              'Encrypted pipeline unavailable — need first + last shard');
-          var missingParts = [];
-          if (!m.has_first_shard) missingParts.push('first (shard 0)');
-          if (!m.has_last_shard) missingParts.push('last (shard ' + (m.shard_count - 1) + ')');
-          if (missingParts.length > 0) encTitle += '. Missing: ' + missingParts.join(', ');
-          encBadge = '<span class="' + encClass + '" data-enc-toggle="' + escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + escapeHtml(encTitle) + '">&#128274;</span>';
-        }
-
-        // Gear icon for per-model auto-manage settings
-        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
-
-        // GGUF metadata info button (only if header file exists)
-        var metaBtnHtml = '';
-        if (m.has_header) {
-          metaBtnHtml = '<button class="model-meta-btn" data-meta-toggle="' + escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>';
-        }
-
-        var name = formatModelDisplayName(m.name || m.id);
-
-        // Unload button for loaded models (WI-3)
-        var unloadHtml = '';
-        if (m.status === 'loaded') {
-          unloadHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + escapeHtml(m.id) + '" style="margin-right:4px">Unload</button>';
-        }
-
-        // Per-shard download bars — stacked vertically (WI-13)
+        // Per-shard download bars (only for small-medium models)
         var perShardDlHtml = '';
         if (isDownloading && shards.length > 0 && shardCount <= 20) {
           var dlShardBars = shards.filter(function(s) {
@@ -1154,32 +1114,84 @@ var SwarmLLM = (function() {
           if (dlShardBars.length > 1) {
             perShardDlHtml = '<div class="per-shard-dl">';
             dlShardBars.forEach(function(s) {
-              var pct = s.download.progress_pct || 0;
+              var pct2 = s.download.progress_pct || 0;
               var bytes = s.download.downloaded_bytes || 0;
               var total = s.download.total_bytes || s.size_bytes || 0;
               perShardDlHtml += '<div class="per-shard-dl-row">' +
                 '<span class="per-shard-dl-label">Shard ' + s.index + '</span>' +
-                '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct + '%"></div></div>' +
-                '<span class="per-shard-dl-pct">' + formatBytes(bytes) + '/' + formatBytes(total) + ' (' + pct + '%)</span>' +
+                '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct2 + '%"></div></div>' +
+                '<span class="per-shard-dl-pct">' + formatBytes(bytes) + '/' + formatBytes(total) + ' (' + pct2 + '%)</span>' +
                 '</div>';
             });
             perShardDlHtml += '</div>';
           }
         }
 
-        // Source label (HF / Network)
-        var sourceLabel = '';
-        if (m.source === 'network' && hostedShards === 0) {
-          sourceLabel = '<span class="badge badge-remote" title="Available via network peers">Remote</span>';
+        // Footer meta info
+        var footerMeta = [];
+        footerMeta.push(formatBytes(m.total_size_bytes || 0));
+        if (shardCount > 0) footerMeta.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
+        if (m.estimated_vram_mb) footerMeta.push('~' + formatMB(m.estimated_vram_mb) + ' VRAM');
+        if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
+        else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">Local only</span>');
+
+        // Missing files warning
+        var fileIndicators = '';
+        if (hostedShards > 0 || isDownloading) {
+          var hasManifest = m.has_manifest !== false;
+          var hasHeader = m.has_header !== false;
+          if (!hasManifest || !hasHeader) {
+            var missingFiles = [];
+            if (!hasManifest) missingFiles.push('manifest');
+            if (!hasHeader) missingFiles.push('header');
+            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem" title="Missing: ' + missingFiles.join(', ') + '">&#9888; Missing ' + missingFiles.join(' + ') + '</span>';
+          }
         }
 
+        // Action buttons (go in footer)
+        var actionHtml = '';
+        if (m.status === 'loaded') {
+          // Active — no Use button needed, show Chat hint
+          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + escapeHtml(m.id) + '">Unload</button>';
+        } else if (isReady) {
+          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + escapeHtml(m.id) + '">Use</button>';
+        } else if (isDownloading) {
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + escapeHtml(m.id) + '" title="Cancel download">&times; Cancel</button>';
+        } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
+          actionHtml = '<button class="btn btn-sm" data-request-model="' + escapeHtml(m.id) + '">Download</button>';
+        }
+
+        var removeHtml = '';
+        if (hostedShards > 0 && !isDownloading) {
+          removeHtml = '<button class="model-remove-btn" data-remove-model="' + escapeHtml(m.id) + '">Remove</button>';
+        }
+
+        var name = formatModelDisplayName(m.name || m.id);
+
+        // ── Card HTML ───────────────────────────────────────────────────────
         card.innerHTML =
-          '<div class="model-header">' +
-            '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + encBadge + sourceLabel + trustBadge + '</span>' +
-            '<span>' + metaBtnHtml + gearHtml + statusHtml + (unloadHtml ? ' ' + unloadHtml : '') + (actionHtml ? ' ' + actionHtml : '') + removeHtml + '</span>' +
+          // Title bar
+          '<div class="model-card-title">' +
+            '<div class="model-card-name-row">' +
+              '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + '</span>' +
+              encBadge + sourceLabel + trustBadge +
+            '</div>' +
+            '<div class="model-card-controls">' +
+              statusHtml + metaBtnHtml + gearHtml +
+            '</div>' +
           '</div>' +
-          '<div class="model-meta">' + metaParts.map(function(p) { return '<span>' + p + '</span>'; }).join('') + fileIndicators + '</div>' +
-          shardHtml + progressHtml + perShardDlHtml +
+          // Shard body
+          '<div class="model-card-shards">' +
+            shardHtml + progressHtml + perShardDlHtml +
+          '</div>' +
+          // Footer: stats + actions
+          '<div class="model-card-footer">' +
+            '<div class="model-card-meta">' +
+              footerMeta.map(function(p) { return '<span>' + p + '</span>'; }).join('') +
+              (fileIndicators ? '<span>' + fileIndicators + '</span>' : '') +
+            '</div>' +
+            '<div class="model-card-actions">' + actionHtml + removeHtml + '</div>' +
+          '</div>' +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + escapeHtml(m.id) + '"></div>';
 
         list.appendChild(card);
