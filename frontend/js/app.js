@@ -529,9 +529,16 @@ var SwarmLLM = (function() {
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
         var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.disable') + '</button>';
         var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.enable_privacy') + '</button>';
-        if (isAllLocal) {
-          encBanner.className = 'chat-enc-banner enc-full';
-          encBanner.innerHTML = '&#128274; ' + escapeHtml(I18n.t('enc.running_locally'));
+        if (headerSource === 'cloud') {
+          var providerName = (headerModelItem && headerModelItem.group) ? (PROVIDER_NAMES[headerModelItem.group] || headerModelItem.group) : 'cloud provider';
+          var providerIcon = (headerModelItem && headerModelItem.group) ? providerIconHtml(headerModelItem.group, 12) : '';
+          encBanner.className = 'chat-enc-banner enc-cloud';
+          encBanner.innerHTML = (providerIcon ? providerIcon + ' ' : '') +
+            'Routed to ' + escapeHtml(providerName) + ' \u2014 subject to their privacy policy \u00b7 not processed by the swarm';
+          encBanner.style.display = '';
+        } else if (isAllLocal) {
+          encBanner.className = 'chat-enc-banner enc-local';
+          encBanner.innerHTML = '&#128187; ' + escapeHtml(I18n.t('enc.running_locally'));
           encBanner.style.display = '';
         } else if (isDistributed && isEncrypted) {
           encBanner.className = 'chat-enc-banner enc-boomerang';
