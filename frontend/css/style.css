@@ -1442,12 +1442,18 @@ kbd {
 /* Cloud provider badge & cards */
 .badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
 .model-card.cloud-model {
+  padding: 14px 16px;
+  display: block;
   border-left: 3px solid var(--accent);
   background: linear-gradient(135deg, rgba(59,130,246,0.07) 0%, rgba(34,211,238,0.04) 100%);
 }
 .model-card.cloud-model:hover {
   background: linear-gradient(135deg, rgba(59,130,246,0.14) 0%, rgba(34,211,238,0.08) 100%);
 }
+/* cloud cards use old model-header/meta layout */
+.model-card.cloud-model .model-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.model-card.cloud-model .model-name { font-weight: 700; font-size: 0.95rem; }
+.model-card.cloud-model .model-meta { display: flex; gap: 12px; font-size: 0.8rem; color: var(--text-secondary); margin-top: 6px; }
 .cloud-models-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0 8px; }
 .cloud-divider-line { flex: 1; height: 1px; background: var(--border); }
 .cloud-divider-label { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; }
