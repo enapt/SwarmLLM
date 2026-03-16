@@ -397,8 +397,12 @@
   <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-labelledby="model-browser-title">
     <div class="modal modal-lg">
       <div class="modal-header">
-        <h2 id="model-browser-title" data-i18n="model_browser.title">Browse Models</h2>
+        <h2 id="model-browser-title">Find &amp; Download Models</h2>
         <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" aria-label="Close model browser">&times;</button>
+      </div>
+      <div class="hf-swarm-notice">
+        <span class="hf-swarm-notice-icon">&#9432;</span>
+        <span>Downloading a model lets you <strong>host it</strong> and earn credits. To run inference without enough local VRAM, swarm peers must already be hosting it — check the <strong>On Swarm</strong> badge in results.</span>
       </div>
       <div class="model-browser-search">
         <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, phi, gemma)..." data-i18n-placeholder="model_browser.search_placeholder">
@@ -421,7 +425,7 @@
         </select>
       </div>
       <div id="hf-results">
-        <div class="empty-state"><p>Search HuggingFace for AI models to run on your computer or contribute to the network</p></div>
+        <div class="empty-state"><p>Search for a model above. Results show whether it&rsquo;s already on the swarm (<strong>On Swarm</strong>) or new to the network, and whether your hardware can host or run it.</p></div>
       </div>
       <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
         <div class="spinner"></div>
@@ -456,7 +460,7 @@
           </div>
         </div>
         <input type="hidden" id="model-select" value="" />
-        <button class="btn btn-sm" id="btn-open-model-browser" title="Browse models" aria-label="Browse models">+</button>
+        <button class="btn btn-sm" id="btn-open-model-browser" title="Find models on HuggingFace to download and host. Models only run distributed if swarm peers are already hosting them." aria-label="Find models">&#43; Find model</button>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>
       <div class="header-lang-picker" style="position:relative">
@@ -683,7 +687,7 @@
           <div class="panel mt-2">
             <div class="panel-header">
               <h2>Models</h2>
-              <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
+              <button class="btn btn-sm" id="btn-browse-hf">Find Models</button>
             </div>
             <div id="models-stats-bar" class="models-stats-bar" style="display:none">
               <span class="models-stat-group">

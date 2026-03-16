@@ -531,6 +531,14 @@ a:hover { color: var(--accent-hover); }
 .settings-advanced > .mt-2 { padding: 0 14px 14px; }
 
 /* ---- Model Browser ---- */
+.hf-swarm-notice {
+  display: flex; align-items: flex-start; gap: 8px;
+  background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.2);
+  border-radius: 6px; padding: 9px 12px; margin-bottom: 14px;
+  font-size: 0.8rem; line-height: 1.45; color: var(--text-secondary);
+}
+.hf-swarm-notice-icon { flex-shrink: 0; font-size: 1rem; color: var(--accent); margin-top: 1px; }
+
 .model-browser-search {
   display: flex;
   gap: 8px;
