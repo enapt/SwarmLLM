@@ -1304,7 +1304,7 @@ var SwarmLLM = (function() {
           // Title bar
           '<div class="model-card-title">' +
             '<div class="model-card-name-row">' +
-              (creatorIconHtml ? '<span class="model-creator-icon">' + creatorIconHtml + '</span>' : '') +
+              creatorIconHtml +
               '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + '</span>' +
               encBadge + sourceLabel + trustBadge +
             '</div>' +

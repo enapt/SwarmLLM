@@ -1689,7 +1689,7 @@ details.models-section:not([open]) .models-section-header::before {
 }
 .models-section-icon { font-size: 0.9rem; flex-shrink: 0; }
 .models-section-logo { display: inline-block; vertical-align: middle; flex-shrink: 0; }
-.model-creator-icon { display: inline-flex; align-items: center; flex-shrink: 0; margin-right: 2px; opacity: 0.85; }
+.model-card-name-row .provider-icon { margin-right: 4px; opacity: 0.85; }
 .models-section-title { flex: 1; }
 .models-section-count {
   font-size: 0.72rem; font-weight: 500;
