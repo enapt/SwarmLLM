@@ -1647,6 +1647,54 @@ kbd {
 .provider-signup-link { font-size: 0.75rem; color: var(--accent); text-decoration: none; margin-left: 8px; opacity: 0.8; }
 .provider-signup-link:hover { opacity: 1; text-decoration: underline; }
 
+/* Models stats bar */
+.models-stats-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 8px 0 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+  font-size: 0.75rem; color: var(--text-secondary);
+}
+.models-stat-chip { display: inline-flex; align-items: center; gap: 4px; }
+.models-stat-chip.dim { color: var(--text-muted); }
+.models-stat-chip.accent .models-stat-value { color: var(--accent); }
+.models-stat-value { font-weight: 700; font-size: 0.82rem; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.models-stat-chip.dim .models-stat-value { color: var(--text-secondary); }
+.models-stat-sep { width: 1px; height: 14px; background: var(--border); margin: 0 2px; }
+
+/* Collapsible model section (swarm / cloud) */
+.models-section { margin-bottom: 6px; }
+.models-section > summary { list-style: none; }
+.models-section > summary::-webkit-details-marker { display: none; }
+.models-section-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px 7px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.82rem; font-weight: 600;
+  color: var(--text-primary);
+  transition: background var(--transition);
+  position: relative;
+}
+.models-section-header:hover { background: var(--bg-hover); }
+.models-section-header::before {
+  content: '\25BE'; /* ▾ */
+  font-size: 0.7rem; color: var(--text-muted);
+  transition: transform 0.18s;
+  flex-shrink: 0;
+}
+details.models-section:not([open]) .models-section-header::before {
+  transform: rotate(-90deg);
+}
+.models-section-icon { font-size: 0.9rem; flex-shrink: 0; }
+.models-section-title { flex: 1; }
+.models-section-count {
+  font-size: 0.72rem; font-weight: 500;
+  color: var(--text-muted); white-space: nowrap;
+}
+.models-section-body { padding-top: 4px; }
+
 /* Cloud provider badge & cards */
 .badge-cloud { background: var(--accent); color: #fff; font-size: 0.65rem; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
 .model-card.cloud-model {

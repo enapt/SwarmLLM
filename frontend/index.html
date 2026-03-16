@@ -434,7 +434,7 @@
   <header class="app-header">
     <div class="header-left">
       <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
-      <div class="logo">SwarmLLM</div>
+      <div class="logo" id="logo" style="cursor:pointer">SwarmLLM</div>
     </div>
     <div class="header-center">
       <button class="tab-btn tab-btn-chat" data-tab="chat" data-i18n="nav.chat">Chat</button>
@@ -479,7 +479,10 @@
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
     <!-- Sidebar: chat sessions -->
-    <aside class="sidebar collapsed" id="sidebar" style="display:none">
+    <aside class="sidebar collapsed" id="sidebar">
+      <!-- Full-height invisible hover strip + visible tab, both ride the sidebar transform -->
+      <div class="sidebar-edge-hover"></div>
+      <div class="sidebar-chat-tab" id="sidebar-edge-trigger" title="Open chats">&#128172;</div>
       <div class="sidebar-header">
         <span class="sidebar-title" data-i18n="sidebar.title">Chats</span>
         <button class="btn btn-ghost btn-sm" id="btn-new-session" title="New chat">+</button>
@@ -681,6 +684,15 @@
             <div class="panel-header">
               <h2>Models</h2>
               <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
+            </div>
+            <div id="models-stats-bar" class="models-stats-bar" style="display:none">
+              <span class="models-stat-chip" id="stat-chip-total"><span class="models-stat-value" id="stat-chip-total-val">0</span> total</span>
+              <span class="models-stat-sep"></span>
+              <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span> ready</span>
+              <span class="models-stat-chip dim" id="stat-chip-network"><span class="models-stat-value" id="stat-chip-network-val">0</span> on network</span>
+              <span class="models-stat-sep"></span>
+              <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span> cloud models</span>
+              <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span> providers</span>
             </div>
             <div id="models-container">
               <div id="models-loading">

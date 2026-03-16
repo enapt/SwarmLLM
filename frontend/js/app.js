@@ -958,6 +958,8 @@ var SwarmLLM = (function() {
       if ((!models || models.length === 0) && !hasCloud) {
         list.innerHTML = '';
         empty.style.display = '';
+        var _sb = document.getElementById('models-stats-bar');
+        if (_sb) _sb.style.display = 'none';
         return;
       }
 
@@ -973,11 +975,68 @@ var SwarmLLM = (function() {
       if (models.length === 0 && !hasCloud) {
         list.innerHTML = '';
         empty.style.display = '';
+        var _sb2 = document.getElementById('models-stats-bar');
+        if (_sb2) _sb2.style.display = 'none';
         return;
       }
 
       empty.style.display = 'none';
       list.innerHTML = '';
+
+      // ── Quick stats ─────────────────────────────────────────────────────────
+      var statsBar = document.getElementById('models-stats-bar');
+      if (statsBar) {
+        var statLocal = models.filter(function(m) { return m.local || m.hosted_shards > 0; }).length;
+        var statReady = models.filter(function(m) {
+          var hc = m.hosted_shards || 0, sc = m.shard_count || (m.shards || []).length;
+          return m.status === 'loaded' || m.status === 'ready' || (hc === sc && sc > 0);
+        }).length;
+        var statNet = models.filter(function(m) { return !m.local && !(m.hosted_shards > 0) && m.peers_hosting > 0; }).length;
+        var statCloudTotal = hasCloud ? cloudModels.length : 0;
+        var statProviders = 0;
+        if (hasCloud) {
+          var _pset = {};
+          cloudModels.forEach(function(cm) { _pset[cm.provider || 'cloud'] = 1; });
+          statProviders = Object.keys(_pset).length;
+        }
+        var statTotal = models.length + statCloudTotal;
+        document.getElementById('stat-chip-total-val').textContent = statTotal;
+        document.getElementById('stat-chip-ready-val').textContent = statReady;
+        document.getElementById('stat-chip-network-val').textContent = statNet;
+        document.getElementById('stat-chip-cloud-val').textContent = statCloudTotal;
+        document.getElementById('stat-chip-providers-val').textContent = statProviders;
+        statsBar.style.display = '';
+        // Hide cloud chips if no cloud models
+        var cloudChip = document.getElementById('stat-chip-cloud');
+        var provChip = document.getElementById('stat-chip-providers');
+        var sep2 = statsBar.querySelectorAll('.models-stat-sep')[1];
+        if (cloudChip) cloudChip.style.display = hasCloud ? '' : 'none';
+        if (provChip) provChip.style.display = hasCloud ? '' : 'none';
+        if (sep2) sep2.style.display = hasCloud ? '' : 'none';
+      }
+
+      // ── Swarm models section ─────────────────────────────────────────────────
+      var swarmBody;
+      if (models.length > 0) {
+        var swarmSection = document.createElement('details');
+        swarmSection.className = 'models-section';
+        swarmSection.open = true;
+        var swarmReadyCount = models.filter(function(m) {
+          var hc = m.hosted_shards || 0, sc = m.shard_count || (m.shards || []).length;
+          return m.status === 'loaded' || m.status === 'ready' || (hc === sc && sc > 0);
+        }).length;
+        var swarmMeta = models.length + ' model' + (models.length !== 1 ? 's' : '') +
+          (swarmReadyCount > 0 ? ' \u00b7 ' + swarmReadyCount + ' ready' : '');
+        swarmSection.innerHTML = '<summary class="models-section-header">' +
+          '<span class="models-section-icon">&#9881;&#65039;</span>' +
+          '<span class="models-section-title">Swarm Models</span>' +
+          '<span class="models-section-count">' + swarmMeta + '</span>' +
+          '</summary>';
+        swarmBody = document.createElement('div');
+        swarmBody.className = 'models-section-body';
+        swarmSection.appendChild(swarmBody);
+        list.appendChild(swarmSection);
+      }
 
       models.forEach(function(m) {
         var shards = m.shards || [];
@@ -1260,7 +1319,7 @@ var SwarmLLM = (function() {
           '</div>' +
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + escapeHtml(m.id) + '"></div>';
 
-        list.appendChild(card);
+        if (swarmBody) swarmBody.appendChild(card);
       });
 
       // Cloud provider models — one compact card per provider
@@ -1271,11 +1330,6 @@ var SwarmLLM = (function() {
           cerebras: 'Cerebras', sambanova: 'SambaNova', fireworks: 'Fireworks AI',
           together: 'Together AI', deepinfra: 'DeepInfra', moonshot: 'Moonshot (Kimi)'
         };
-        var divider = document.createElement('div');
-        divider.className = 'cloud-models-divider';
-        divider.innerHTML = '<span class="cloud-divider-line"></span><span class="cloud-divider-label">\u2601\uFE0F Cloud Providers</span><span class="cloud-divider-line"></span>';
-        list.appendChild(divider);
-
         // Group by provider
         var byProvider = {};
         cloudModels.forEach(function(cm) {
@@ -1352,6 +1406,23 @@ var SwarmLLM = (function() {
             : '<div class="cloud-model-empty">No models match</div>';
         }
 
+        // Cloud section wrapper (collapsible)
+        var providerCount = Object.keys(byProvider).length;
+        var cloudSection = document.createElement('details');
+        cloudSection.className = 'models-section';
+        cloudSection.open = true;
+        var cloudMeta = providerCount + ' provider' + (providerCount !== 1 ? 's' : '') +
+          ' \u00b7 ' + cloudModels.length + ' models';
+        cloudSection.innerHTML = '<summary class="models-section-header">' +
+          '<span class="models-section-icon">\u2601\ufe0f</span>' +
+          '<span class="models-section-title">Cloud Providers</span>' +
+          '<span class="models-section-count">' + cloudMeta + '</span>' +
+          '</summary>';
+        var cloudBody = document.createElement('div');
+        cloudBody.className = 'models-section-body';
+        cloudSection.appendChild(cloudBody);
+        list.appendChild(cloudSection);
+
         Object.keys(byProvider).forEach(function(p) {
           var pLabel = providerLabels[p] || p;
           var pModels = byProvider[p];
@@ -1386,7 +1457,7 @@ var SwarmLLM = (function() {
             '<div class="cloud-model-list" id="' + listId + '"></div>' +
             '<div class="cloud-card-note">Requests routed to ' + escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</div>';
 
-          list.appendChild(card);
+          cloudBody.appendChild(card);
 
           var listContainer = document.getElementById(listId);
           if (listContainer) renderRowsInto(listContainer, sorted);
