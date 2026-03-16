@@ -448,11 +448,14 @@ var SwarmLLM = (function() {
         var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
         var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model || '');
         var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
+        var isEncrypted = modelItem && modelItem.encrypted;
         var badgeClass = 'session-model-badge session-source-' + source;
         var tooltipParts = [escapeHtml(s.model || '')];
         if (source !== 'local') tooltipParts.push(sourceLabel);
+        if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
         var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + escapeHtml(formatModelDisplayName(s.model)) + '</span>' : '';
-        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + '</span>';
+        var encBadge = isEncrypted ? '<span class="session-enc-lock" title="Encrypted pipeline active">&#128274;</span>' : '';
+        var metaHtml = '<span class="session-meta">' + escapeHtml(timeStr) + modelBadge + encBadge + '</span>';
         var titleSpan = '<span class="session-title" data-rename-session="' + escapeHtml(s.id) + '" title="Double-click to rename">' + escapeHtml(title) + '</span>';
         div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
           '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + escapeHtml(s.id) + '" title="Delete">&times;</button>';
@@ -4302,12 +4305,10 @@ var SwarmLLM = (function() {
     if (modelData && modelData.encrypted_pipeline && modelData.shard_count > 1) {
       var isFullLocal = modelData.hosted_shards === modelData.shard_count;
       if (isFullLocal) {
-        icon = '&#128274;';
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--green)">' +
           '&#128274; Running locally \u2014 all shards on this device, prompts never leave' +
           '</div>';
       } else {
-        icon = '&#128274;';
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
           '&#128274; Full E2E encryption \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
           '<br><span style="font-size:0.75rem;color:var(--text-muted)">~2\u20135s extra latency per request.</span>' +
