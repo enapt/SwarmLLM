@@ -526,7 +526,7 @@ var SwarmLLM = (function() {
           encBanner.style.display = '';
         } else if (isDistributed && isEncrypted) {
           encBanner.className = 'chat-enc-banner enc-boomerang';
-          encBanner.innerHTML = '&#128274; <strong>Prompt-private</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
+          encBanner.innerHTML = '&#128274; <strong>Full E2E encryption</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
           encBanner.style.display = '';
         } else if (isDistributed) {
           encBanner.className = 'chat-enc-banner enc-warn';
@@ -4236,7 +4236,7 @@ var SwarmLLM = (function() {
       } else {
         icon = '&#128274;';
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
-          '&#128274; Prompt-private \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
+          '&#128274; Full E2E encryption \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
           '<br><span style="font-size:0.75rem;color:var(--text-muted)">~2\u20135s extra latency per request.</span>' +
           '</div>';
       }
