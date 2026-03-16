@@ -910,18 +910,37 @@ var SwarmLLM = (function() {
 
       if (data.hardware) {
         var hw = data.hardware;
+        var gpuEl = document.getElementById('node-gpu');
+        var gpuBadge = document.getElementById('node-gpu-badge');
         if (hw.gpu_name) {
-          document.getElementById('node-gpu').textContent = hw.gpu_name;
+          gpuEl.textContent = hw.gpu_name;
+          if (gpuBadge) {
+            if (hw.gpu_inference) {
+              var backendLabel = hw.inference_backend || 'GPU';
+              gpuBadge.textContent = backendLabel;
+              gpuBadge.className = 'node-mode-badge node-mode-gpu';
+              gpuBadge.title = 'Inference running on GPU via ' + backendLabel;
+            } else {
+              gpuBadge.textContent = 'CPU mode';
+              gpuBadge.className = 'node-mode-badge node-mode-cpu';
+              gpuBadge.title = 'GPU detected but inference running on CPU — check build flags';
+            }
+          }
           if (hw.gpu_vram_mb) {
             var vramUsed = hw.gpu_vram_used_mb || 0;
-            document.getElementById('node-vram').textContent = formatMB(vramUsed) + ' / ' + formatMB(hw.gpu_vram_mb) + ' VRAM';
+            document.getElementById('node-vram').textContent = formatMB(vramUsed) + ' / ' + formatMB(hw.gpu_vram_mb);
             var vramPct = hw.gpu_vram_mb > 0 ? (vramUsed / hw.gpu_vram_mb * 100) : 0;
             document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
             document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
           }
         } else {
-          document.getElementById('node-gpu').textContent = 'CPU only';
-          document.getElementById('node-vram').textContent = '';
+          gpuEl.textContent = 'None';
+          if (gpuBadge) {
+            gpuBadge.textContent = 'CPU mode';
+            gpuBadge.className = 'node-mode-badge node-mode-cpu';
+            gpuBadge.title = 'No GPU detected — all inference runs on CPU';
+          }
+          document.getElementById('node-vram').textContent = '—';
           document.getElementById('vram-bar').style.width = '0%';
         }
         document.getElementById('node-cpu').textContent = hw.cpu_name ? hw.cpu_name + ' (' + hw.cpu_cores + ' cores)' : 'Unknown';

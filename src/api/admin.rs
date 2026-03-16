@@ -396,10 +396,16 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         }
     };
 
+    // gpu_inference: true only when llama.cpp actually bound to the GPU device
+    let gpu_inference = shared_state.gpu_info.is_some();
+    let inference_backend = shared_state.gpu_info.as_ref().map(|g| g.backend.clone());
+
     serde_json::json!({
         "gpu_name": gpu_name,
         "gpu_vram_mb": gpu_vram_mb,
         "gpu_vram_used_mb": gpu_vram_used_mb,
+        "gpu_inference": gpu_inference,
+        "inference_backend": inference_backend,
         "total_ram_mb": total_ram_mb,
         "used_ram_mb": used_ram_mb,
         "available_disk_mb": available_disk_mb,

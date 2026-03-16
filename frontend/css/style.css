@@ -995,6 +995,18 @@ label {
 .node-hw-label { width: 44px; color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
 .node-hw-icon { font-size: 0.7rem; opacity: 0.55; line-height: 1; }
 .node-hw-value { flex: 1; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
+.node-mode-badge {
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: 4px; flex-shrink: 0; white-space: nowrap;
+}
+.node-mode-gpu {
+  background: rgba(34, 197, 94, 0.15); color: var(--green);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.node-mode-cpu {
+  background: rgba(255, 193, 7, 0.12); color: var(--orange);
+  border: 1px solid rgba(255, 193, 7, 0.25);
+}
 .progress-bar.mini-bar { width: 44px; height: 4px; flex-shrink: 0; }
 .vram-bar-container { margin: 6px 0 2px; }
 .progress-bar.vram-progress { position: relative; }
