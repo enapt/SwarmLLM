@@ -1135,7 +1135,8 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 0.95rem;
   gap: 10px;
 }
-.chat-empty .chat-empty-icon { font-size: 2.5rem; opacity: 0.4; }
+.chat-empty .chat-empty-icon { font-size: 2.5rem; opacity: 0.4; display: flex; justify-content: center; align-items: center; min-height: 52px; }
+.chat-empty .chat-empty-icon img { border-radius: 10px; }
 .chat-empty-title { font-size: 1.2rem; font-weight: 600; color: var(--text-primary); }
 .chat-empty-hint { color: var(--text-muted); }
 
