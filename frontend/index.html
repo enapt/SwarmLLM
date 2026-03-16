@@ -898,6 +898,41 @@
     <button class="shard-ctx-btn" id="shard-ctx-action"></button>
   </div>
 
+  <!-- ============================================================
+       UI Templates — cloned by JavaScript, never rendered directly
+       ============================================================ -->
+
+  <!-- Peer list row (used by dashboard.renderPeerItem) -->
+  <template id="tmpl-peer-row">
+    <div class="peer-row-item">
+      <span class="status-dot"></span>
+      <span class="peer-lan-badge lan-badge" hidden></span>
+      <span class="peer-label"></span>
+      <span class="peer-gpu text-muted"></span>
+    </div>
+  </template>
+
+  <!-- Download queue item (used by dlQueue.render / dlQueue.renderItem) -->
+  <template id="tmpl-dl-queue-item">
+    <div class="dl-queue-item">
+      <div class="dl-queue-row">
+        <span class="dl-queue-name"></span>
+        <div class="dl-queue-actions">
+          <span class="dl-queue-source"></span>
+          <span class="dl-queue-state"></span>
+          <!-- cancel button injected conditionally -->
+        </div>
+      </div>
+      <div class="dl-queue-bar"><div class="dl-queue-bar-fill"></div></div>
+      <div class="dl-queue-stats">
+        <span class="dqs-left"></span>
+        <span class="dqs-right"></span>
+      </div>
+      <div class="dl-queue-log-row"></div>
+      <!-- log panel injected conditionally -->
+    </div>
+  </template>
+
   <script src="/static/js/i18n.js"></script>
   <script src="/static/js/neural-bg.js"></script>
   <script src="/static/js/topojson-client.min.js"></script>

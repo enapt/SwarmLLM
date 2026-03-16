@@ -1,13 +1,11 @@
 {
   "_lang": "Español",
   "_dir": "ltr",
-
   "nav.chat": "Chat",
   "nav.dashboard": "Panel",
   "nav.leaderboard": "Clasificación",
   "nav.network_map": "Mapa de Red",
   "nav.compare": "Comparar",
-
   "setup.welcome": "Bienvenido a SwarmLLM",
   "setup.subtitle": "Chatea con IA usando tu propio ordenador, o únete a otros para ejecutar modelos más grandes",
   "setup.step1": "Tu Ordenador",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Permite que otros usen parte de la potencia de tu ordenador para ejecutar IA. Ganas créditos a cambio.",
   "setup.cloud_ai": "Servicio IA en la Nube",
   "setup.cloud_hint": "Conecta un servicio como OpenAI o DeepSeek para empezar a chatear de inmediato. La mayoría ofrecen planes gratuitos.",
-
   "chat.empty_title": "Chatea con IA",
   "chat.empty_hint": "Elige un modelo del menú de arriba y empieza a chatear",
   "chat.placeholder": "Escribe tu mensaje... (Enter para enviar, Shift+Enter para nueva línea)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Tu PC",
   "chat.source_cloud": "Nube",
   "chat.source_network": "Red",
-
   "sidebar.title": "Chats",
-
   "stats.peers": "Nodos",
   "stats.peers_help": "Otros ordenadores ejecutando SwarmLLM a los que estás conectado",
   "stats.credits": "Créditos",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Cálculos que tu ordenador realizó como parte de la red (gana créditos)",
   "stats.active": "Activos",
   "stats.active_help": "Peticiones IA que se están procesando ahora mismo",
-
   "models.title": "Modelos",
   "models.browse": "Explorar HuggingFace",
   "models.empty": "Aún no hay modelos.",
@@ -59,7 +53,6 @@
   "models.download_started": "Descarga iniciada — los datos del modelo estarán listos pronto",
   "models.download_slow": "La descarga es lenta ({speed}) — esto puede pasar con modelos populares. Seguirá descargando.",
   "models.checking": "Comprobando disponibilidad del modelo...",
-
   "model_browser.title": "Explorar Modelos",
   "model_browser.search_placeholder": "Buscar modelos en HuggingFace (ej. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Todos los niveles de calidad",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Alta (Q5 — equilibrada)",
   "model_browser.quality_very_high": "Muy Alta (Q6 — más lento, mejor calidad)",
   "model_browser.quality_maximum": "Máxima (Q8 — más lento, mejor calidad)",
-
   "compare.title": "Comparar Modelos",
   "compare.subtitle": "Envía el mismo prompt a varios modelos y compara resultados lado a lado. Los resultados varían según la longitud de contexto, capacidades y especialización del modelo.",
   "compare.prompt_placeholder": "Escribe tu prompt aquí...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Creatividad",
   "compare.max_length": "Longitud máxima de respuesta",
   "compare.history_title": "Comparaciones Recientes",
-
   "settings.title": "Ajustes",
   "settings.access_token": "Token de Acceso",
   "settings.access_token_hint": "Tu clave privada para conectar otras aplicaciones a SwarmLLM. Mantenla en secreto.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Descarga partes de modelos IA para que la red pueda ejecutarlos. Usa espacio en disco.",
   "settings.model_data_stored": "Datos de modelos almacenados",
   "settings.network_gpu_memory": "Memoria GPU de la red",
-
   "errors.server_unreachable": "No se puede conectar a SwarmLLM — ¿está ejecutándose?",
   "errors.connection_lost": "Conexión perdida con SwarmLLM — reconectando...",
   "errors.model_download_unavailable": "Descarga de modelo no disponible",
-
-
   "leaderboard.empty": "Aún no hay actividad. Los créditos se ganan ayudando a otros a ejecutar modelos IA.",
-
   "actions.copy": "Copiar",
   "actions.try_other_models": "Probar otros modelos",
-
-  "network.no_peers_yet": "Aún no hay pares conectados. Comparte tu Código de Red para combinar recursos — cuantos más pares, más grandes serán los modelos que podrás ejecutar juntos."
+  "network.no_peers_yet": "Aún no hay pares conectados. Comparte tu Código de Red para combinar recursos — cuantos más pares, más grandes serán los modelos que podrás ejecutar juntos.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

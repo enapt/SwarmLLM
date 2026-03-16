@@ -1,13 +1,11 @@
 {
   "_lang": "Français",
   "_dir": "ltr",
-
   "nav.chat": "Chat",
   "nav.dashboard": "Tableau de bord",
   "nav.leaderboard": "Classement",
   "nav.network_map": "Carte du réseau",
   "nav.compare": "Comparer",
-
   "setup.welcome": "Bienvenue sur SwarmLLM",
   "setup.subtitle": "Discutez avec une IA sur votre propre ordinateur, ou associez-vous à d'autres pour utiliser des modèles plus grands",
   "setup.step1": "Votre ordinateur",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Permettez à d'autres d'utiliser une partie de la puissance de votre ordinateur pour exécuter l'IA. Vous gagnez des crédits en retour.",
   "setup.cloud_ai": "Service IA cloud",
   "setup.cloud_hint": "Connectez un service comme OpenAI ou DeepSeek pour commencer à discuter immédiatement. La plupart offrent des niveaux gratuits.",
-
   "chat.empty_title": "Discutez avec l'IA",
   "chat.empty_hint": "Choisissez un modèle dans le menu ci-dessus et commencez à discuter",
   "chat.placeholder": "Tapez votre message... (Entrée pour envoyer, Maj+Entrée pour nouvelle ligne)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Votre PC",
   "chat.source_cloud": "Cloud",
   "chat.source_network": "Réseau",
-
   "sidebar.title": "Discussions",
-
   "stats.peers": "Pairs",
   "stats.peers_help": "Autres ordinateurs exécutant SwarmLLM auxquels vous êtes connecté",
   "stats.credits": "Crédits",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Calculs que votre ordinateur a effectués dans le réseau (rapporte des crédits)",
   "stats.active": "Actifs",
   "stats.active_help": "Requêtes IA en cours de traitement",
-
   "models.title": "Modèles",
   "models.browse": "Parcourir HuggingFace",
   "models.empty": "Aucun modèle pour l'instant.",
@@ -59,7 +53,6 @@
   "models.download_started": "Téléchargement lancé — les données du modèle seront bientôt prêtes",
   "models.download_slow": "Le téléchargement est lent ({speed}) — cela arrive avec les modèles populaires. Il continuera.",
   "models.checking": "Vérification de la disponibilité du modèle...",
-
   "model_browser.title": "Parcourir les modèles",
   "model_browser.search_placeholder": "Rechercher des modèles HuggingFace (ex. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Tous les niveaux de qualité",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Haute (Q5 — équilibrée)",
   "model_browser.quality_very_high": "Très haute (Q6 — plus lent, meilleure qualité)",
   "model_browser.quality_maximum": "Maximum (Q8 — le plus lent, la meilleure qualité)",
-
   "compare.title": "Comparer les modèles",
   "compare.subtitle": "Envoyez le même prompt à plusieurs modèles et comparez les résultats côte à côte. Les résultats varient selon la longueur de contexte, les capacités et la spécialisation du modèle.",
   "compare.prompt_placeholder": "Entrez votre prompt ici...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Créativité",
   "compare.max_length": "Longueur max de réponse",
   "compare.history_title": "Comparaisons récentes",
-
   "settings.title": "Paramètres",
   "settings.access_token": "Jeton d'accès",
   "settings.access_token_hint": "Votre clé privée pour connecter d'autres applications à SwarmLLM. Gardez-la secrète.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Télécharge des parties de modèles IA pour que le réseau puisse les exécuter. Utilise de l'espace disque.",
   "settings.model_data_stored": "Données de modèles stockées",
   "settings.network_gpu_memory": "Mémoire GPU du réseau",
-
   "errors.server_unreachable": "Impossible de joindre SwarmLLM — est-il en marche ?",
   "errors.connection_lost": "Connexion perdue avec SwarmLLM — reconnexion...",
   "errors.model_download_unavailable": "Téléchargement de modèle non disponible",
-
-
   "leaderboard.empty": "Aucune activité pour l'instant. Les crédits se gagnent en aidant les autres à exécuter des modèles IA.",
-
   "actions.copy": "Copier",
   "actions.try_other_models": "Essayer d'autres modèles",
-
-  "network.no_peers_yet": "Aucun pair connecté pour l'instant. Partagez votre Code Réseau pour combiner les ressources — plus il y a de pairs, plus les modèles que vous pouvez exécuter ensemble sont grands."
+  "network.no_peers_yet": "Aucun pair connecté pour l'instant. Partagez votre Code Réseau pour combiner les ressources — plus il y a de pairs, plus les modèles que vous pouvez exécuter ensemble sont grands.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

@@ -1,13 +1,11 @@
 {
   "_lang": "ไทย",
   "_dir": "ltr",
-
   "nav.chat": "แชท",
   "nav.dashboard": "แดชบอร์ด",
   "nav.leaderboard": "อันดับ",
   "nav.network_map": "แผนที่เครือข่าย",
   "nav.compare": "เปรียบเทียบ",
-
   "setup.welcome": "ยินดีต้อนรับสู่ SwarmLLM",
   "setup.subtitle": "แชทกับ AI บนคอมพิวเตอร์ของคุณเอง หรือร่วมกับผู้อื่นเพื่อรันโมเดลที่ใหญ่ขึ้น",
   "setup.step1": "คอมพิวเตอร์ของคุณ",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "ให้ผู้อื่นใช้พลังประมวลผลบางส่วนของคอมพิวเตอร์คุณเพื่อรัน AI คุณจะได้รับเครดิตเป็นการตอบแทน",
   "setup.cloud_ai": "บริการ AI บนคลาวด์",
   "setup.cloud_hint": "เชื่อมต่อบริการเช่น OpenAI หรือ DeepSeek เพื่อเริ่มแชทได้ทันที ส่วนใหญ่มีแพ็กเกจฟรี",
-
   "chat.empty_title": "แชทกับ AI",
   "chat.empty_hint": "เลือกโมเดลจากเมนูด้านบนแล้วเริ่มแชท",
   "chat.placeholder": "พิมพ์ข้อความ... (Enter เพื่อส่ง, Shift+Enter เพื่อขึ้นบรรทัดใหม่)",
@@ -35,9 +32,7 @@
   "chat.source_local": "เครื่องคุณ",
   "chat.source_cloud": "คลาวด์",
   "chat.source_network": "เครือข่าย",
-
   "sidebar.title": "แชท",
-
   "stats.peers": "โหนด",
   "stats.peers_help": "คอมพิวเตอร์เครื่องอื่นที่รัน SwarmLLM ที่คุณเชื่อมต่ออยู่",
   "stats.credits": "เครดิต",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "การคำนวณที่คอมพิวเตอร์ของคุณทำในฐานะส่วนหนึ่งของเครือข่าย (ได้เครดิต)",
   "stats.active": "กำลังดำเนินการ",
   "stats.active_help": "คำขอ AI ที่กำลังประมวลผลอยู่ตอนนี้",
-
   "models.title": "โมเดล",
   "models.browse": "ค้นหาจาก HuggingFace",
   "models.empty": "ยังไม่มีโมเดล",
@@ -59,7 +53,6 @@
   "models.download_started": "เริ่มดาวน์โหลดแล้ว — ข้อมูลโมเดลจะพร้อมในไม่ช้า",
   "models.download_slow": "ดาวน์โหลดช้า ({speed}) — อาจเกิดขึ้นกับโมเดลยอดนิยม จะดาวน์โหลดต่อไป",
   "models.checking": "กำลังตรวจสอบว่าโมเดลพร้อมใช้งาน...",
-
   "model_browser.title": "ค้นหาโมเดล",
   "model_browser.search_placeholder": "ค้นหาโมเดล HuggingFace (เช่น llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "ทุกระดับคุณภาพ",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "สูง (Q5 — สมดุล)",
   "model_browser.quality_very_high": "สูงมาก (Q6 — ช้าลง คุณภาพดีกว่า)",
   "model_browser.quality_maximum": "สูงสุด (Q8 — ช้าที่สุด คุณภาพดีที่สุด)",
-
   "compare.title": "เปรียบเทียบโมเดล",
   "compare.subtitle": "ส่งข้อความเดียวกันไปยังหลายโมเดลและเปรียบเทียบผลลัพธ์แบบเคียงข้างกัน ผลลัพธ์แตกต่างกันตามความยาวบริบท ความสามารถ และความเชี่ยวชาญ",
   "compare.prompt_placeholder": "ป้อนพรอมต์ของคุณที่นี่...",
@@ -77,7 +69,6 @@
   "compare.creativity": "ความสร้างสรรค์",
   "compare.max_length": "ความยาวการตอบกลับสูงสุด",
   "compare.history_title": "การเปรียบเทียบล่าสุด",
-
   "settings.title": "การตั้งค่า",
   "settings.access_token": "โทเค็นการเข้าถึง",
   "settings.access_token_hint": "คีย์ส่วนตัวของคุณสำหรับเชื่อมต่อแอปอื่นกับ SwarmLLM เก็บเป็นความลับ",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "ดาวน์โหลดส่วนหนึ่งของโมเดล AI เพื่อให้เครือข่ายสามารถรันได้ ใช้พื้นที่ดิสก์",
   "settings.model_data_stored": "ข้อมูลโมเดลที่จัดเก็บ",
   "settings.network_gpu_memory": "หน่วยความจำ GPU ของเครือข่าย",
-
   "errors.server_unreachable": "ไม่สามารถเชื่อมต่อ SwarmLLM ได้ — กำลังทำงานอยู่หรือไม่?",
   "errors.connection_lost": "การเชื่อมต่อกับ SwarmLLM ขาดหาย — กำลังเชื่อมต่อใหม่...",
   "errors.model_download_unavailable": "ไม่สามารถดาวน์โหลดโมเดลได้",
-
-
   "leaderboard.empty": "ยังไม่มีกิจกรรม เครดิตจะได้รับจากการช่วยผู้อื่นรันโมเดล AI",
-
   "actions.copy": "คัดลอก",
   "actions.try_other_models": "ลองโมเดลอื่น",
-
-  "network.no_peers_yet": "ยังไม่มีเพียร์เชื่อมต่อ แชร์รหัสเครือข่ายของคุณเพื่อรวมทรัพยากร — ยิ่งมีเพียร์มากเท่าไหร่ ก็ยิ่งสามารถรันโมเดลขนาดใหญ่ร่วมกันได้มากขึ้น"
+  "network.no_peers_yet": "ยังไม่มีเพียร์เชื่อมต่อ แชร์รหัสเครือข่ายของคุณเพื่อรวมทรัพยากร — ยิ่งมีเพียร์มากเท่าไหร่ ก็ยิ่งสามารถรันโมเดลขนาดใหญ่ร่วมกันได้มากขึ้น",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

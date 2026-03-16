@@ -1,13 +1,11 @@
 {
   "_lang": "한국어",
   "_dir": "ltr",
-
   "nav.chat": "채팅",
   "nav.dashboard": "대시보드",
   "nav.leaderboard": "순위표",
   "nav.network_map": "네트워크 지도",
   "nav.compare": "비교",
-
   "setup.welcome": "SwarmLLM에 오신 것을 환영합니다",
   "setup.subtitle": "내 컴퓨터에서 AI와 대화하거나, 다른 사용자와 협력하여 더 큰 모델을 실행하세요",
   "setup.step1": "내 컴퓨터",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "다른 사용자가 AI를 실행하는 데 컴퓨터 성능의 일부를 사용하게 합니다. 크레딧을 보상으로 받습니다.",
   "setup.cloud_ai": "클라우드 AI 서비스",
   "setup.cloud_hint": "OpenAI나 DeepSeek 같은 서비스를 연결하여 바로 대화를 시작하세요. 대부분 무료 요금제를 제공합니다.",
-
   "chat.empty_title": "AI와 채팅",
   "chat.empty_hint": "위의 드롭다운에서 모델을 선택하고 채팅을 시작하세요",
   "chat.placeholder": "메시지 입력... (Enter로 전송, Shift+Enter로 줄바꿈)",
@@ -35,9 +32,7 @@
   "chat.source_local": "내 PC",
   "chat.source_cloud": "클라우드",
   "chat.source_network": "네트워크",
-
   "sidebar.title": "대화 목록",
-
   "stats.peers": "피어",
   "stats.peers_help": "연결된 다른 SwarmLLM 컴퓨터",
   "stats.credits": "크레딧",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "네트워크의 일부로 수행한 계산 (크레딧 획득)",
   "stats.active": "활성",
   "stats.active_help": "현재 처리 중인 AI 요청",
-
   "models.title": "모델",
   "models.browse": "HuggingFace 탐색",
   "models.empty": "아직 모델이 없습니다.",
@@ -59,7 +53,6 @@
   "models.download_started": "다운로드 시작 — 모델 데이터가 곧 준비됩니다",
   "models.download_slow": "다운로드가 느립니다 ({speed}) — 인기 모델에서 발생할 수 있습니다. 계속 진행됩니다.",
   "models.checking": "모델 가용성 확인 중...",
-
   "model_browser.title": "모델 탐색",
   "model_browser.search_placeholder": "HuggingFace 모델 검색 (예: llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "모든 품질 수준",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "높음 (Q5 — 균형)",
   "model_browser.quality_very_high": "매우 높음 (Q6 — 느림, 더 좋은 품질)",
   "model_browser.quality_maximum": "최대 (Q8 — 가장 느림, 최고 품질)",
-
   "compare.title": "모델 비교",
   "compare.subtitle": "같은 프롬프트를 여러 모델에 보내고 결과를 나란히 비교합니다. 결과는 컨텍스트 길이, 능력, 전문 분야에 따라 다릅니다.",
   "compare.prompt_placeholder": "프롬프트를 입력하세요...",
@@ -77,7 +69,6 @@
   "compare.creativity": "창의성",
   "compare.max_length": "최대 응답 길이",
   "compare.history_title": "최근 비교",
-
   "settings.title": "설정",
   "settings.access_token": "액세스 토큰",
   "settings.access_token_hint": "다른 앱을 SwarmLLM에 연결하기 위한 비공개 키입니다. 비밀로 유지하세요.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "네트워크에서 실행할 수 있도록 AI 모델의 일부를 다운로드합니다. 디스크 공간을 사용합니다.",
   "settings.model_data_stored": "저장된 모델 데이터",
   "settings.network_gpu_memory": "네트워크 GPU 메모리",
-
   "errors.server_unreachable": "SwarmLLM에 연결할 수 없습니다 — 실행 중인가요?",
   "errors.connection_lost": "SwarmLLM 연결이 끊어졌습니다 — 재연결 중...",
   "errors.model_download_unavailable": "모델 다운로드를 사용할 수 없습니다",
-
-
   "leaderboard.empty": "아직 활동이 없습니다. 다른 사용자의 AI 모델 실행을 도와 크레딧을 획득하세요.",
-
   "actions.copy": "복사",
   "actions.try_other_models": "다른 모델 시도",
-
-  "network.no_peers_yet": "아직 연결된 피어가 없습니다. 네트워크 코드를 공유하여 리소스를 결합하세요 — 피어가 많을수록 더 큰 모델을 함께 실행할 수 있습니다."
+  "network.no_peers_yet": "아직 연결된 피어가 없습니다. 네트워크 코드를 공유하여 리소스를 결합하세요 — 피어가 많을수록 더 큰 모델을 함께 실행할 수 있습니다.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

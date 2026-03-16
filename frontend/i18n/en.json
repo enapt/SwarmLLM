@@ -107,6 +107,12 @@
 
   "actions.copy": "Copy",
   "actions.try_other_models": "Try other models",
+  "actions.cancel": "Cancel",
+
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed",
 
   "network.no_peers_yet": "No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together."
 }

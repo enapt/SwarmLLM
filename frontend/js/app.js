@@ -1716,59 +1716,97 @@ var SwarmLLM = (function() {
 
 
     _peersExpanded: false,
+    _lastPeers: [],
 
     renderPeerItem: function(p) {
-      var div = document.createElement('div');
-      div.style.cssText = 'padding:6px 10px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:4px;display:flex;align-items:center;gap:8px;font-size:0.8rem';
-      var statusDot = '<span class="status-dot ' + (p.healthy ? 'online' : 'degraded') + '"></span>';
-      var lanTag = p.is_lan_peer ? '<span class="lan-badge">LAN</span>' : '';
-      var peerLabel = p.nickname ? escapeHtml(p.nickname) + ' <span class="text-muted mono" style="font-size:0.65rem">(' + escapeHtml(p.node_id || '').substring(0, 8) + ')</span>' : '<span class="mono">' + escapeHtml(p.node_id || 'unknown').substring(0, 16) + '</span>';
-      var gpu = p.gpu ? '<span class="text-muted" style="font-size:0.7rem;margin-left:auto">' + escapeHtml(p.gpu) + '</span>' : '';
-      div.innerHTML = statusDot + lanTag + peerLabel + gpu;
+      var tmpl = document.getElementById('tmpl-peer-row');
+      var node = tmpl.content.cloneNode(true);
+      var div = node.querySelector('.peer-row-item');
+
+      var dot = node.querySelector('.status-dot');
+      dot.classList.add(p.healthy ? 'online' : 'degraded');
+
+      var lanBadge = node.querySelector('.peer-lan-badge');
+      if (p.is_lan_peer) {
+        lanBadge.removeAttribute('hidden');
+        lanBadge.textContent = 'LAN';
+      }
+
+      var label = node.querySelector('.peer-label');
+      if (p.nickname) {
+        label.textContent = p.nickname;
+        var sub = document.createElement('span');
+        sub.className = 'text-muted mono';
+        sub.style.fontSize = '0.65rem';
+        sub.textContent = ' (' + (p.node_id || '').substring(0, 8) + ')';
+        label.appendChild(sub);
+      } else {
+        label.className = 'peer-label mono';
+        label.textContent = (p.node_id || 'unknown').substring(0, 16);
+      }
+
+      var gpu = node.querySelector('.peer-gpu');
+      if (p.gpu) {
+        gpu.textContent = p.gpu;
+      } else {
+        gpu.remove();
+      }
+
       return div;
     },
 
-    loadNetworkData: async function() {
+    // Render an array of peers into the peers-list panel.
+    // Called on initial load AND whenever a peer_list WS message arrives.
+    renderPeers: function(peers) {
       var PEER_LIMIT = 5;
-      try {
-        var resp = await fetch('/api/admin/peers');
-        var peers = await resp.json();
-        var list = document.getElementById('peers-list');
-        var summary = document.getElementById('peers-summary');
-        var overflow = document.getElementById('peers-overflow');
-        var pLoading = document.getElementById('peers-loading');
-        if (pLoading) pLoading.remove();
+      var list = document.getElementById('peers-list');
+      var summary = document.getElementById('peers-summary');
+      var overflow = document.getElementById('peers-overflow');
+      var pLoading = document.getElementById('peers-loading');
+      if (pLoading) pLoading.remove();
+      if (!list) return;
 
-        if (peers && peers.length > 0) {
-          var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
-          var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
-          if (summary) {
-            summary.textContent = peers.length + ' peer' + (peers.length !== 1 ? 's' : '') +
-              (lanCount > 0 ? ' \u00B7 ' + lanCount + ' LAN' : '') +
-              ' \u00B7 ' + healthyCount + ' healthy';
-          }
+      dashboard._lastPeers = peers || [];
 
-          list.innerHTML = '';
-          var showAll = dashboard._peersExpanded;
-          var visible = showAll ? peers : peers.slice(0, PEER_LIMIT);
-          visible.forEach(function(p) {
-            list.appendChild(dashboard.renderPeerItem(p));
-          });
-
-          if (overflow) {
-            if (peers.length > PEER_LIMIT && !showAll) {
-              overflow.style.display = '';
-              var btn = document.getElementById('btn-show-all-peers');
-              if (btn) btn.textContent = 'Show all ' + peers.length + ' peers';
-            } else {
-              overflow.style.display = 'none';
-            }
-          }
-        } else {
-          if (summary) summary.textContent = '';
-          list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
-          if (overflow) overflow.style.display = 'none';
+      if (peers && peers.length > 0) {
+        var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
+        var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
+        if (summary) {
+          summary.textContent = peers.length + ' peer' + (peers.length !== 1 ? 's' : '') +
+            (lanCount > 0 ? ' \u00B7 ' + lanCount + ' LAN' : '') +
+            ' \u00B7 ' + healthyCount + ' healthy';
         }
+
+        list.innerHTML = '';
+        var showAll = dashboard._peersExpanded;
+        var visible = showAll ? peers : peers.slice(0, PEER_LIMIT);
+        visible.forEach(function(p) {
+          list.appendChild(dashboard.renderPeerItem(p));
+        });
+
+        if (overflow) {
+          if (peers.length > PEER_LIMIT && !showAll) {
+            overflow.style.display = '';
+            var btn = document.getElementById('btn-show-all-peers');
+            if (btn) btn.textContent = 'Show all ' + peers.length + ' peers';
+          } else {
+            overflow.style.display = 'none';
+          }
+        }
+      } else {
+        if (summary) summary.textContent = '';
+        list.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + I18n.t('network.no_peers_yet') + '</div>';
+        if (overflow) overflow.style.display = 'none';
+      }
+    },
+
+    // Initial REST load — also used as fallback when WS is down.
+    loadNetworkData: async function() {
+      try {
+        var resp = await authFetch('/api/admin/peers');
+        if (!resp.ok) throw new Error('fetch failed');
+        var peers = await resp.json();
+        dashboard.renderPeers(peers);
       } catch (e) {
         var list = document.getElementById('peers-list');
         var pLoading2 = document.getElementById('peers-loading');
@@ -2647,12 +2685,15 @@ var SwarmLLM = (function() {
           showLanDiscoveryToast('Found ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on your local network \u2014 zero configuration needed!');
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
+        } else if (msg.type === 'peer_list') {
+          dashboard.renderPeers(msg.data.peers || []);
         } else if (msg.type === 'prune_event') {
           var d = msg.data;
           var freed = formatBytes(d.freed_bytes || 0);
           var text = 'Pruned shard ' + escapeHtml(String(d.shard_index)) + ' of ' + escapeHtml(d.model_name || d.model_id) +
             ' \u2014 ' + escapeHtml(String(d.holder_count_before)) + '\u2192' + escapeHtml(String(d.holder_count_after)) + ' holders (freed ' + escapeHtml(freed) + ')';
           showPruneToast(text);
+          prependPruneHistory(d);
           // models_changed event from prune will trigger refresh below
         } else if (msg.type === 'system_notification') {
           var n = msg.data;
@@ -3385,6 +3426,22 @@ var SwarmLLM = (function() {
     }
   }
 
+  function buildPruneRow(e) {
+    var freed = formatBytes(e.freed_bytes || 0);
+    var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+    var row = document.createElement('div');
+    row.className = 'prune-event-row';
+    row.style.cssText = 'display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem';
+    var left = document.createElement('span');
+    left.textContent = (e.model_name || e.model_id) + ' shard ' + e.shard_index;
+    var right = document.createElement('span');
+    right.className = 'text-muted';
+    right.textContent = freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts;
+    row.appendChild(left);
+    row.appendChild(right);
+    return row;
+  }
+
   function renderPruneHistory(events) {
     var el = document.getElementById('prune-history-list');
     if (!el) return;
@@ -3392,16 +3449,22 @@ var SwarmLLM = (function() {
       el.innerHTML = '<div class="text-muted" style="padding:0.5rem">No prune events yet</div>';
       return;
     }
-    var html = '';
+    el.innerHTML = '';
     events.slice(0, 20).forEach(function(e) {
-      var freed = formatBytes(e.freed_bytes || 0);
-      var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
-      html += '<div class="prune-event-row" style="display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem">' +
-        '<span>' + escapeHtml(e.model_name || e.model_id) + ' shard ' + escapeHtml(String(e.shard_index)) + '</span>' +
-        '<span class="text-muted">' + escapeHtml(freed) + ' \u2022 ' + escapeHtml(String(e.holder_count_before)) + '\u2192' + escapeHtml(String(e.holder_count_after)) + ' \u2022 ' + escapeHtml(ts) + '</span>' +
-      '</div>';
+      el.appendChild(buildPruneRow(e));
     });
-    el.innerHTML = html;
+  }
+
+  // Prepend a single prune event row to the history list without a REST refetch.
+  function prependPruneHistory(e) {
+    var el = document.getElementById('prune-history-list');
+    if (!el) return;
+    // Remove "no events yet" placeholder if present
+    var placeholder = el.querySelector('.text-muted');
+    if (placeholder && el.children.length === 1) el.innerHTML = '';
+    el.prepend(buildPruneRow(e));
+    // Keep the list bounded to 20 rows
+    while (el.children.length > 20) el.removeChild(el.lastChild);
   }
 
   // ========================================================================
@@ -3691,6 +3754,89 @@ var SwarmLLM = (function() {
       }
     },
 
+    // Build a single download queue item from the template.
+    // Returns the populated .dl-queue-item element.
+    renderItem: function(dl) {
+      var tmpl = document.getElementById('tmpl-dl-queue-item');
+      var node = tmpl.content.cloneNode(true);
+      var item = node.querySelector('.dl-queue-item');
+      item.setAttribute('data-dl-model', dl.model_id);
+
+      // Name
+      var nameEl = item.querySelector('.dl-queue-name');
+      nameEl.textContent = dl.model_name || dl.model_id;
+      nameEl.title = dl.model_id;
+
+      // Source badge
+      var sourceEl = item.querySelector('.dl-queue-source');
+      sourceEl.textContent = dl.source === 'huggingface' ? 'HF' : 'Network';
+      sourceEl.classList.add(dl.source === 'huggingface' ? 'hf' : 'net');
+
+      // State badge
+      var stateName = typeof dl.state === 'string' ? dl.state : 'unknown';
+      var stateLabel = stateName, stateClass = 'waiting';
+      if (stateName === 'downloading') { stateLabel = I18n.t('dl.state_downloading'); stateClass = 'active'; }
+      else if (stateName === 'awaiting_manifest') { stateLabel = I18n.t('dl.state_preparing'); stateClass = 'waiting'; }
+      else if (stateName === 'complete') { stateLabel = I18n.t('dl.state_complete'); stateClass = 'done'; }
+      else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
+        stateLabel = I18n.t('dl.state_failed'); stateClass = 'fail';
+        if (typeof dl.state === 'object' && dl.state.failed) {
+          stateLabel += ': ' + (dl.state.failed.reason || '').substring(0, 40);
+        }
+      }
+      var stateEl = item.querySelector('.dl-queue-state');
+      stateEl.textContent = stateLabel;
+      stateEl.classList.add(stateClass);
+
+      // Cancel button (conditionally injected)
+      if (dl.cancellable) {
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'dl-queue-cancel';
+        cancelBtn.setAttribute('data-dl-cancel', dl.model_id);
+        cancelBtn.textContent = I18n.t('actions.cancel');
+        item.querySelector('.dl-queue-actions').appendChild(cancelBtn);
+      }
+
+      // Progress bar
+      var pct = dl.overall_pct != null ? dl.overall_pct :
+        (dl.total_bytes > 0 ? Math.min(100, Math.round((dl.downloaded_bytes / dl.total_bytes) * 100)) : 0);
+      item.querySelector('.dl-queue-bar-fill').style.width = pct + '%';
+
+      // Stats row
+      var shardInfo = (dl.downloaded_shards || 0) + '/' + (dl.total_shards || 0) + ' shards';
+      if (dl.verified_shards > 0) shardInfo += ' (' + dl.verified_shards + ' verified)';
+      item.querySelector('.dqs-left').textContent = shardInfo + ' \u00b7 ' + pct + '%';
+
+      var speed = dl.speed_bytes_per_sec || 0;
+      var statsRight = formatBytes(dl.downloaded_bytes || 0) + ' / ' + formatBytes(dl.total_bytes || 0);
+      if (speed > 0) statsRight += ' \u00b7 ' + formatSpeed(speed);
+      if (dl.eta_secs) statsRight += ' \u00b7 ETA ' + formatEta(dl.eta_secs);
+      item.querySelector('.dqs-right').textContent = statsRight;
+
+      // Log toggle + log panel (conditionally injected)
+      if (dl.log && dl.log.length > 0) {
+        var logRow = item.querySelector('.dl-queue-log-row');
+        var logToggle = document.createElement('button');
+        logToggle.className = 'dl-queue-log-toggle';
+        logToggle.setAttribute('data-dl-log-toggle', dl.model_id);
+        logToggle.textContent = 'Log (' + dl.log.length + ')';
+        logRow.appendChild(logToggle);
+
+        var logPanel = document.createElement('div');
+        logPanel.className = 'dl-queue-log';
+        logPanel.setAttribute('data-dl-log', dl.model_id);
+        dl.log.forEach(function(l) {
+          var line = document.createElement('div');
+          line.className = 'dl-queue-log-line';
+          line.textContent = l;
+          logPanel.appendChild(line);
+        });
+        item.appendChild(logPanel);
+      }
+
+      return item;
+    },
+
     render: function(downloads) {
       var panel = document.getElementById('download-queue-panel');
       var list = document.getElementById('download-queue-list');
@@ -3705,106 +3851,80 @@ var SwarmLLM = (function() {
 
       if (active.length === 0 && downloads.length === 0) { panel.classList.add('hidden'); return; }
       panel.classList.remove('hidden');
-      if (active.length === 0) { list.innerHTML = ''; empty.classList.remove('hidden'); count.textContent = ''; return; }
+      if (active.length === 0) {
+        list.innerHTML = '';
+        if (empty) empty.classList.remove('hidden');
+        if (count) count.textContent = '';
+        return;
+      }
 
-      empty.classList.add('hidden');
-      count.textContent = active.length + ' active';
+      if (empty) empty.classList.add('hidden');
+      if (count) count.textContent = active.length + ' active';
       list.innerHTML = '';
-
       active.forEach(function(dl) {
-        var item = document.createElement('div');
-        item.className = 'dl-queue-item';
-        item.setAttribute('data-dl-model', dl.model_id);
-
-        var stateName = typeof dl.state === 'string' ? dl.state : 'unknown';
-        var stateLabel = stateName, stateClass = 'waiting';
-        if (stateName === 'downloading') { stateLabel = 'Downloading'; stateClass = 'active'; }
-        else if (stateName === 'awaiting_manifest') { stateLabel = 'Preparing download...'; stateClass = 'waiting'; }
-        else if (stateName === 'complete') { stateLabel = 'Complete'; stateClass = 'done'; }
-        else if (stateName.indexOf('failed') >= 0 || typeof dl.state === 'object') {
-          stateLabel = 'Failed'; stateClass = 'fail';
-          if (typeof dl.state === 'object' && dl.state.failed) stateLabel = 'Failed: ' + escapeHtml((dl.state.failed.reason || '').substring(0, 40));
-        }
-
-        var sourceLabel = dl.source === 'huggingface' ? 'HF' : 'Network';
-        var sourceClass = dl.source === 'huggingface' ? 'hf' : 'net';
-        var pct = dl.overall_pct || 0;
-        var speed = dl.speed_bytes_per_sec || 0;
-        var etaStr = '';
-        if (dl.eta_secs) {
-          etaStr = formatEta(dl.eta_secs);
-        }
-
-        var statsRight = formatBytes(dl.downloaded_bytes || 0) + ' / ' + formatBytes(dl.total_bytes || 0);
-        if (speed > 0) statsRight += ' \u00b7 ' + formatSpeed(speed);
-        if (etaStr) statsRight += ' \u00b7 ETA ' + etaStr;
-
-        var cancelBtn = dl.cancellable ? '<button class="dl-queue-cancel" data-dl-cancel="' + escapeHtml(dl.model_id) + '">Cancel</button>' : '';
-        var logToggle = (dl.log && dl.log.length > 0) ? '<button class="dl-queue-log-toggle" data-dl-log-toggle="' + escapeHtml(dl.model_id) + '">Log (' + dl.log.length + ')</button>' : '';
-        var logHtml = '';
-        if (dl.log && dl.log.length > 0) {
-          logHtml = '<div class="dl-queue-log" data-dl-log="' + escapeHtml(dl.model_id) + '">' +
-            dl.log.map(function(l) { return '<div class="dl-queue-log-line">' + escapeHtml(l) + '</div>'; }).join('') + '</div>';
-        }
-
-        var shardInfo = dl.downloaded_shards + '/' + dl.total_shards + ' shards';
-        if (dl.verified_shards > 0) shardInfo += ' (' + dl.verified_shards + ' verified)';
-
-        item.innerHTML =
-          '<div class="dl-queue-row">' +
-            '<span class="dl-queue-name" title="' + escapeHtml(dl.model_id) + '">' + escapeHtml(dl.model_name || dl.model_id) + '</span>' +
-            '<div class="dl-queue-actions">' +
-              '<span class="dl-queue-source ' + sourceClass + '">' + sourceLabel + '</span>' +
-              '<span class="dl-queue-state ' + stateClass + '">' + stateLabel + '</span>' +
-              cancelBtn +
-            '</div>' +
-          '</div>' +
-          '<div class="dl-queue-bar"><div class="dl-queue-bar-fill" style="width:' + pct + '%"></div></div>' +
-          '<div class="dl-queue-stats">' +
-            '<span>' + shardInfo + ' \u00b7 ' + pct + '%</span>' +
-            '<span>' + statsRight + '</span>' +
-          '</div>' +
-          '<div class="dl-queue-row">' + logToggle + '</div>' + logHtml;
-
-        list.appendChild(item);
+        list.appendChild(dlQueue.renderItem(dl));
       });
     },
 
     updateFromWs: function(acquisitions) {
       if (!acquisitions || acquisitions.length === 0) return;
       var panel = document.getElementById('download-queue-panel');
-      if (!panel) return;
+      var list = document.getElementById('download-queue-list');
+      if (!panel || !list) return;
 
       var hasActive = acquisitions.some(function(a) {
         var st = typeof a.state === 'string' ? a.state : '';
         return st === 'downloading' || st === 'awaiting_manifest';
       });
-      if (hasActive && panel.classList.contains('hidden')) { dlQueue.load(); return; }
 
+      // Panel was hidden — show it and do a full render
+      if (hasActive && panel.classList.contains('hidden')) {
+        dlQueue.render(acquisitions);
+        return;
+      }
+
+      var count = document.getElementById('download-queue-count');
       acquisitions.forEach(function(acq) {
-        var item = document.querySelector('[data-dl-model="' + acq.model_id + '"]');
-        if (!item) {
-          if (acq.state === 'downloading' || acq.state === 'awaiting_manifest') dlQueue.load();
+        var existing = list.querySelector('[data-dl-model="' + acq.model_id + '"]');
+
+        // New active item with no existing card — render and prepend it
+        if (!existing) {
+          if (acq.state === 'downloading' || acq.state === 'awaiting_manifest') {
+            panel.classList.remove('hidden');
+            var empty = document.getElementById('download-queue-empty');
+            if (empty) empty.classList.add('hidden');
+            list.prepend(dlQueue.renderItem(acq));
+            if (count) {
+              var n = list.querySelectorAll('.dl-queue-item').length;
+              count.textContent = n + ' active';
+            }
+          }
           return;
         }
 
+        // Update progress bar in-place
         var totalBytes = acq.total_bytes || 0;
         var dlBytes = acq.downloaded_bytes || 0;
-        var pct = totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0;
+        var pct = acq.overall_pct != null ? acq.overall_pct :
+          (totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0);
         var speed = acq.speed_bytes_per_sec || 0;
 
-        var barFill = item.querySelector('.dl-queue-bar-fill');
+        var barFill = existing.querySelector('.dl-queue-bar-fill');
         if (barFill) barFill.style.width = pct + '%';
 
-        var statsEl = item.querySelector('.dl-queue-stats');
-        if (statsEl) {
+        var leftEl = existing.querySelector('.dqs-left');
+        if (leftEl) {
           var shardInfo = (acq.downloaded_shards || 0) + '/' + (acq.total_shards || 0) + ' shards';
+          leftEl.textContent = shardInfo + ' \u00b7 ' + pct + '%';
+        }
+
+        var rightEl = existing.querySelector('.dqs-right');
+        if (rightEl) {
           var right = formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes);
           if (speed > 0) right += ' \u00b7 ' + formatSpeed(speed);
-          if (speed > 0 && totalBytes > dlBytes) {
-            right += ' \u00b7 ETA ' + formatEta((totalBytes - dlBytes) / speed);
-          }
-          statsEl.innerHTML = '<span>' + shardInfo + ' \u00b7 ' + pct + '%</span><span>' + right + '</span>';
+          if (acq.eta_secs) right += ' \u00b7 ETA ' + formatEta(acq.eta_secs);
+          else if (speed > 0 && totalBytes > dlBytes) right += ' \u00b7 ETA ' + formatEta((totalBytes - dlBytes) / speed);
+          rightEl.textContent = right;
         }
 
         if (typeof acq.state === 'string' && acq.state === 'complete') {
@@ -4861,7 +4981,12 @@ var SwarmLLM = (function() {
 
     on('btn-show-all-peers', 'click', function() {
       dashboard._peersExpanded = !dashboard._peersExpanded;
-      dashboard.loadNetworkData();
+      // Re-render from cached peers if available, otherwise fetch
+      if (dashboard._lastPeers && dashboard._lastPeers.length > 0) {
+        dashboard.renderPeers(dashboard._lastPeers);
+      } else {
+        dashboard.loadNetworkData();
+      }
     });
 
     // Provider test buttons (CSP-safe — data attribute binding)

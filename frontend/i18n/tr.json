@@ -1,13 +1,11 @@
 {
   "_lang": "Türkçe",
   "_dir": "ltr",
-
   "nav.chat": "Sohbet",
   "nav.dashboard": "Panel",
   "nav.leaderboard": "Sıralama",
   "nav.network_map": "Ağ Haritası",
   "nav.compare": "Karşılaştır",
-
   "setup.welcome": "SwarmLLM'e Hoş Geldiniz",
   "setup.subtitle": "Kendi bilgisayarınızda yapay zeka ile sohbet edin veya daha büyük modelleri çalıştırmak için başkalarıyla birleşin",
   "setup.step1": "Bilgisayarınız",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Başkalarının yapay zeka çalıştırmak için bilgisayarınızın gücünün bir kısmını kullanmasına izin verin. Karşılığında kredi kazanırsınız.",
   "setup.cloud_ai": "Bulut Yapay Zeka Servisi",
   "setup.cloud_hint": "Hemen sohbete başlamak için OpenAI veya DeepSeek gibi bir servisi bağlayın. Çoğu ücretsiz plan sunar.",
-
   "chat.empty_title": "Yapay Zeka ile Sohbet",
   "chat.empty_hint": "Yukarıdaki açılır menüden bir model seçin ve sohbete başlayın",
   "chat.placeholder": "Mesajınızı yazın... (Göndermek için Enter, yeni satır için Shift+Enter)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Bilgisayarınız",
   "chat.source_cloud": "Bulut",
   "chat.source_network": "Ağ",
-
   "sidebar.title": "Sohbetler",
-
   "stats.peers": "Eşler",
   "stats.peers_help": "Bağlı olduğunuz SwarmLLM çalıştıran diğer bilgisayarlar",
   "stats.credits": "Krediler",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Bilgisayarınızın ağın parçası olarak yaptığı hesaplamalar (kredi kazandırır)",
   "stats.active": "Aktif",
   "stats.active_help": "Şu anda işlenmekte olan yapay zeka istekleri",
-
   "models.title": "Modeller",
   "models.browse": "HuggingFace'i Gez",
   "models.empty": "Henüz model yok.",
@@ -59,7 +53,6 @@
   "models.download_started": "İndirme başladı — model verileri yakında hazır olacak",
   "models.download_slow": "İndirme yavaş ({speed}) — popüler modellerde olabilir. Devam edecektir.",
   "models.checking": "Model erişilebilirliği kontrol ediliyor...",
-
   "model_browser.title": "Modelleri Gez",
   "model_browser.search_placeholder": "HuggingFace modellerini ara (ör. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Tüm kalite seviyeleri",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Yüksek (Q5 — dengeli)",
   "model_browser.quality_very_high": "Çok Yüksek (Q6 — yavaş, daha iyi kalite)",
   "model_browser.quality_maximum": "Maksimum (Q8 — en yavaş, en iyi kalite)",
-
   "compare.title": "Model Karşılaştırma",
   "compare.subtitle": "Aynı istemi birden fazla modele gönderin ve sonuçları yan yana karşılaştırın. Sonuçlar bağlam uzunluğu, yetenekler ve uzmanlığa göre değişir.",
   "compare.prompt_placeholder": "İsteminizi buraya girin...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Yaratıcılık",
   "compare.max_length": "Maksimum yanıt uzunluğu",
   "compare.history_title": "Son Karşılaştırmalar",
-
   "settings.title": "Ayarlar",
   "settings.access_token": "Erişim Anahtarı",
   "settings.access_token_hint": "Diğer uygulamaları SwarmLLM'e bağlamak için özel anahtarınız. Gizli tutun.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Ağın çalıştırabilmesi için yapay zeka modellerinin parçalarını indirir. Disk alanı kullanır.",
   "settings.model_data_stored": "Saklanan model verileri",
   "settings.network_gpu_memory": "Ağ GPU belleği",
-
   "errors.server_unreachable": "SwarmLLM'e ulaşılamıyor — çalışıyor mu?",
   "errors.connection_lost": "SwarmLLM bağlantısı kesildi — yeniden bağlanılıyor...",
   "errors.model_download_unavailable": "Model indirme kullanılamıyor",
-
-
   "leaderboard.empty": "Henüz etkinlik yok. Başkalarının yapay zeka modellerini çalıştırmasına yardım ederek kredi kazanın.",
-
   "actions.copy": "Kopyala",
   "actions.try_other_models": "Diğer modelleri dene",
-
-  "network.no_peers_yet": "Henüz bağlı eş yok. Kaynakları birleştirmek için Ağ Kodunuzu paylaşın — ne kadar çok eş olursa, birlikte o kadar büyük modeller çalıştırabilirsiniz."
+  "network.no_peers_yet": "Henüz bağlı eş yok. Kaynakları birleştirmek için Ağ Kodunuzu paylaşın — ne kadar çok eş olursa, birlikte o kadar büyük modeller çalıştırabilirsiniz.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

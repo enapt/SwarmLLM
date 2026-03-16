@@ -1,13 +1,11 @@
 {
   "_lang": "Polski",
   "_dir": "ltr",
-
   "nav.chat": "Czat",
   "nav.dashboard": "Panel",
   "nav.leaderboard": "Ranking",
   "nav.network_map": "Mapa sieci",
   "nav.compare": "Porównaj",
-
   "setup.welcome": "Witaj w SwarmLLM",
   "setup.subtitle": "Rozmawiaj z AI na swoim komputerze lub połącz siły z innymi, aby uruchamiać większe modele",
   "setup.step1": "Twój komputer",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Pozwól innym korzystać z części mocy obliczeniowej twojego komputera do uruchamiania AI. W zamian otrzymujesz kredyty.",
   "setup.cloud_ai": "Usługa AI w chmurze",
   "setup.cloud_hint": "Podłącz usługę taką jak OpenAI lub DeepSeek, aby od razu zacząć rozmawiać. Większość oferuje darmowe plany.",
-
   "chat.empty_title": "Czatuj z AI",
   "chat.empty_hint": "Wybierz model z menu powyżej i zacznij rozmowę",
   "chat.placeholder": "Wpisz wiadomość... (Enter aby wysłać, Shift+Enter dla nowej linii)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Twój PC",
   "chat.source_cloud": "Chmura",
   "chat.source_network": "Sieć",
-
   "sidebar.title": "Rozmowy",
-
   "stats.peers": "Węzły",
   "stats.peers_help": "Inne komputery z SwarmLLM, z którymi jesteś połączony",
   "stats.credits": "Kredyty",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Obliczenia wykonane przez twój komputer w sieci (zdobywa kredyty)",
   "stats.active": "Aktywne",
   "stats.active_help": "Żądania AI przetwarzane w tej chwili",
-
   "models.title": "Modele",
   "models.browse": "Przeglądaj HuggingFace",
   "models.empty": "Brak modeli.",
@@ -59,7 +53,6 @@
   "models.download_started": "Pobieranie rozpoczęte — dane modelu będą wkrótce gotowe",
   "models.download_slow": "Pobieranie jest wolne ({speed}) — to się zdarza przy popularnych modelach. Będzie kontynuowane.",
   "models.checking": "Sprawdzanie dostępności modelu...",
-
   "model_browser.title": "Przeglądaj modele",
   "model_browser.search_placeholder": "Szukaj modeli HuggingFace (np. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Wszystkie poziomy jakości",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Wysoka (Q5 — zrównoważona)",
   "model_browser.quality_very_high": "Bardzo wysoka (Q6 — wolniejsza, lepsza jakość)",
   "model_browser.quality_maximum": "Maksymalna (Q8 — najwolniejsza, najlepsza jakość)",
-
   "compare.title": "Porównanie modeli",
   "compare.subtitle": "Wyślij ten sam prompt do wielu modeli i porównaj wyniki obok siebie. Wyniki różnią się w zależności od długości kontekstu, możliwości i specjalizacji.",
   "compare.prompt_placeholder": "Wpisz swój prompt tutaj...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Kreatywność",
   "compare.max_length": "Maksymalna długość odpowiedzi",
   "compare.history_title": "Ostatnie porównania",
-
   "settings.title": "Ustawienia",
   "settings.access_token": "Token dostępu",
   "settings.access_token_hint": "Twój prywatny klucz do podłączania innych aplikacji do SwarmLLM. Trzymaj go w tajemnicy.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Pobiera części modeli AI, aby sieć mogła je uruchamiać. Zajmuje miejsce na dysku.",
   "settings.model_data_stored": "Przechowywane dane modeli",
   "settings.network_gpu_memory": "Pamięć GPU sieci",
-
   "errors.server_unreachable": "Nie można połączyć się z SwarmLLM — czy jest uruchomiony?",
   "errors.connection_lost": "Utracono połączenie z SwarmLLM — ponowne łączenie...",
   "errors.model_download_unavailable": "Pobieranie modelu niedostępne",
-
-
   "leaderboard.empty": "Brak aktywności. Kredyty zdobywa się pomagając innym uruchamiać modele AI.",
-
   "actions.copy": "Kopiuj",
   "actions.try_other_models": "Wypróbuj inne modele",
-
-  "network.no_peers_yet": "Brak połączonych peerów. Udostępnij swój Kod Sieci, aby połączyć zasoby — im więcej peerów, tym większe modele możecie wspólnie uruchamiać."
+  "network.no_peers_yet": "Brak połączonych peerów. Udostępnij swój Kod Sieci, aby połączyć zasoby — im więcej peerów, tym większe modele możecie wspólnie uruchamiać.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

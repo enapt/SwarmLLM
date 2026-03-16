@@ -193,6 +193,9 @@ pub struct SharedState {
     pub lan_peer_count: std::sync::atomic::AtomicUsize,
     /// Broadcast channel for LAN peer discovery events (WebSocket push).
     pub lan_discovery_tx: broadcast::Sender<u32>,
+    /// Broadcast channel fired whenever the peer_registry changes (connect/disconnect).
+    /// WebSocket subscribers push a full `peer_list` message so the dashboard updates live.
+    pub peer_list_changed_tx: broadcast::Sender<()>,
     /// Runtime-mutable cloud provider configuration (API keys for Anthropic, OpenAI, etc.).
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
     /// Update checker shared state (version info, last checked, etc.).
@@ -669,6 +672,7 @@ impl SharedState {
             channel_metrics: ChannelMetricsSet::new(),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             lan_discovery_tx: broadcast::channel(16).0,
+            peer_list_changed_tx: broadcast::channel(4).0,
             providers_config: RwLock::new({
                 // Hydrate from database (persisted via admin API), fall back to config.
                 // Database values may be encrypted — decrypt using the node's signing key.

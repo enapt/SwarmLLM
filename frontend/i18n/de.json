@@ -1,13 +1,11 @@
 {
   "_lang": "Deutsch",
   "_dir": "ltr",
-
   "nav.chat": "Chat",
   "nav.dashboard": "Übersicht",
   "nav.leaderboard": "Rangliste",
   "nav.network_map": "Netzwerkkarte",
   "nav.compare": "Vergleichen",
-
   "setup.welcome": "Willkommen bei SwarmLLM",
   "setup.subtitle": "Chatte mit KI auf deinem eigenen Computer oder schließe dich mit anderen zusammen, um größere Modelle zu nutzen",
   "setup.step1": "Dein Computer",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Lasse andere einen Teil deiner Rechenleistung für KI nutzen. Du erhältst dafür Credits.",
   "setup.cloud_ai": "Cloud-KI-Dienst",
   "setup.cloud_hint": "Verbinde einen Dienst wie OpenAI oder DeepSeek, um sofort loszulegen. Die meisten bieten kostenlose Stufen an.",
-
   "chat.empty_title": "Chatte mit KI",
   "chat.empty_hint": "Wähle ein Modell aus dem Dropdown oben und starte den Chat",
   "chat.placeholder": "Nachricht eingeben... (Enter zum Senden, Umschalt+Enter für neue Zeile)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Dein PC",
   "chat.source_cloud": "Cloud",
   "chat.source_network": "Netzwerk",
-
   "sidebar.title": "Chats",
-
   "stats.peers": "Peers",
   "stats.peers_help": "Andere Computer mit SwarmLLM, mit denen du verbunden bist",
   "stats.credits": "Credits",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Berechnungen, die dein Computer im Netzwerk durchgeführt hat (verdient Credits)",
   "stats.active": "Aktiv",
   "stats.active_help": "KI-Anfragen, die gerade verarbeitet werden",
-
   "models.title": "Modelle",
   "models.browse": "HuggingFace durchsuchen",
   "models.empty": "Noch keine Modelle.",
@@ -59,7 +53,6 @@
   "models.download_started": "Download gestartet — Modelldaten sind bald bereit",
   "models.download_slow": "Download ist langsam ({speed}) — das kann bei beliebten Modellen vorkommen. Er läuft weiter.",
   "models.checking": "Modellverfügbarkeit wird überprüft...",
-
   "model_browser.title": "Modelle durchsuchen",
   "model_browser.search_placeholder": "HuggingFace-Modelle suchen (z.B. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Alle Qualitätsstufen",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Hoch (Q5 — ausgewogen)",
   "model_browser.quality_very_high": "Sehr hoch (Q6 — langsamer, bessere Qualität)",
   "model_browser.quality_maximum": "Maximum (Q8 — am langsamsten, beste Qualität)",
-
   "compare.title": "Modelle vergleichen",
   "compare.subtitle": "Sende denselben Prompt an mehrere Modelle und vergleiche die Ergebnisse nebeneinander. Ergebnisse variieren je nach Kontextlänge, Fähigkeiten und Spezialisierung.",
   "compare.prompt_placeholder": "Geben Sie Ihren Prompt hier ein...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Kreativität",
   "compare.max_length": "Maximale Antwortlänge",
   "compare.history_title": "Letzte Vergleiche",
-
   "settings.title": "Einstellungen",
   "settings.access_token": "Zugangstoken",
   "settings.access_token_hint": "Dein privater Schlüssel zur Verbindung anderer Apps mit SwarmLLM. Halte ihn geheim.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Lädt Teile von KI-Modellen herunter, damit das Netzwerk sie nutzen kann. Benötigt Speicherplatz.",
   "settings.model_data_stored": "Gespeicherte Modelldaten",
   "settings.network_gpu_memory": "Netzwerk-GPU-Speicher",
-
   "errors.server_unreachable": "SwarmLLM nicht erreichbar — läuft es?",
   "errors.connection_lost": "Verbindung zu SwarmLLM verloren — verbinde neu...",
   "errors.model_download_unavailable": "Modell-Download nicht verfügbar",
-
-
   "leaderboard.empty": "Noch keine Aktivität. Credits werden verdient, indem du anderen hilfst, KI-Modelle auszuführen.",
-
   "actions.copy": "Kopieren",
   "actions.try_other_models": "Andere Modelle testen",
-
-  "network.no_peers_yet": "Noch keine Peers verbunden. Teilen Sie Ihren Netzwerk-Code, um Ressourcen zu bündeln — je mehr Peers, desto größere Modelle können Sie gemeinsam ausführen."
+  "network.no_peers_yet": "Noch keine Peers verbunden. Teilen Sie Ihren Netzwerk-Code, um Ressourcen zu bündeln — je mehr Peers, desto größere Modelle können Sie gemeinsam ausführen.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

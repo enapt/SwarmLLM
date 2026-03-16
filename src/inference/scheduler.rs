@@ -100,7 +100,35 @@ impl PipelineScheduler {
             return Err(SwarmError::InsufficientCapacity(model_id.clone()));
         }
 
-        // Greedy layer assignment
+        // Fast path: if the local node has full layer coverage (0..num_layers),
+        // run entirely locally without involving remote peers.  This prevents
+        // "Segment N failed with no standby" errors caused by remote peers that
+        // hold overlapping shards being pulled into the pipeline unnecessarily.
+        if let Some(local_cand) = candidates.iter().find(|c| {
+            c.node_id == *local_node_id
+                && c.available_ranges
+                    .iter()
+                    .any(|r| r.0 == 0 && r.1 >= num_layers)
+        }) {
+            tracing::info!(
+                model = %model_id,
+                num_layers,
+                "Local node has full layer coverage — single local segment (no remote peers)"
+            );
+            let segment = PipelineSegment {
+                node_id: local_node_id.clone(),
+                shard_id: local_cand.shard_id.clone(),
+                layer_range: (0, num_layers),
+            };
+            return Ok(PipelineAssignment {
+                request_id,
+                segments: vec![segment],
+                standbys: vec![],
+                tp_groups: vec![],
+            });
+        }
+
+        // Greedy layer assignment (distributed path — local doesn't have full coverage)
         let raw_segments = self.greedy_assign(num_layers, &candidates, encrypted)?;
 
         // Merge contiguous segments on the same node into a single segment.
@@ -635,16 +663,29 @@ impl PipelineScheduler {
     ) -> Vec<PipelineSegment> {
         let mut standbys = Vec::new();
 
+        let local_node_id = self.shared_state.identity.node_id();
+
         for segment in segments {
-            // Find the next-best candidate for the same layer range
-            // that isn't the primary node.  Check if ANY of the candidate's
-            // available_ranges fully covers the segment.
-            if let Some(backup) = candidates.iter().find(|c| {
-                c.node_id != segment.node_id
-                    && c.available_ranges
-                        .iter()
-                        .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
-            }) {
+            // Collect all eligible standbys, then pick the local node first.
+            // Preferring local prevents "no standby available" when a remote
+            // primary returns an inference error — the local node can always
+            // execute the segment if it has full coverage.
+            let mut eligible: Vec<&NodeCandidate> = candidates
+                .iter()
+                .filter(|c| {
+                    c.node_id != segment.node_id
+                        && c.available_ranges
+                            .iter()
+                            .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
+                })
+                .collect();
+            // Local node first, then by ascending latency
+            eligible.sort_by(|a, b| {
+                let la = u32::from(a.node_id != *local_node_id);
+                let lb = u32::from(b.node_id != *local_node_id);
+                la.cmp(&lb).then_with(|| a.latency_ms.cmp(&b.latency_ms))
+            });
+            if let Some(backup) = eligible.first() {
                 standbys.push(PipelineSegment {
                     node_id: backup.node_id.clone(),
                     shard_id: backup.shard_id.clone(),

@@ -910,6 +910,7 @@ impl NetworkManager {
                 self.shared_state
                     .peer_registry
                     .insert(node_id.clone(), peer_info);
+                let _ = self.shared_state.peer_list_changed_tx.send(());
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
                 // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
@@ -1196,6 +1197,7 @@ impl NetworkManager {
                             // dispatch from resolving NodeId for a peer that's being removed
                             self.peer_to_node.remove(&peer_id);
                             self.shared_state.peer_registry.remove(&node_id);
+                            let _ = self.shared_state.peer_list_changed_tx.send(());
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
                             tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");

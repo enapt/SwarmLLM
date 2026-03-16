@@ -1,13 +1,11 @@
 {
   "_lang": "Čeština",
   "_dir": "ltr",
-
   "nav.chat": "Chat",
   "nav.dashboard": "Přehled",
   "nav.leaderboard": "Žebříček",
   "nav.network_map": "Mapa sítě",
   "nav.compare": "Porovnat",
-
   "setup.welcome": "Vítejte ve SwarmLLM",
   "setup.subtitle": "Komunikujte s AI na svém počítači nebo se spojte s ostatními pro spuštění větších modelů",
   "setup.step1": "Váš počítač",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "Umožněte ostatním využívat část výkonu vašeho počítače pro AI. Na oplátku získáte kredity.",
   "setup.cloud_ai": "Cloudová služba AI",
   "setup.cloud_hint": "Připojte službu jako OpenAI nebo DeepSeek a ihned začněte chatovat. Většina nabízí bezplatné tarify.",
-
   "chat.empty_title": "Chatujte s AI",
   "chat.empty_hint": "Vyberte model z nabídky výše a začněte chatovat",
   "chat.placeholder": "Napište zprávu... (Enter pro odeslání, Shift+Enter pro nový řádek)",
@@ -35,9 +32,7 @@
   "chat.source_local": "Váš PC",
   "chat.source_cloud": "Cloud",
   "chat.source_network": "Síť",
-
   "sidebar.title": "Konverzace",
-
   "stats.peers": "Uzly",
   "stats.peers_help": "Další počítače se SwarmLLM, ke kterým jste připojeni",
   "stats.credits": "Kredity",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "Výpočty, které váš počítač provedl jako součást sítě (získává kredity)",
   "stats.active": "Aktivní",
   "stats.active_help": "Požadavky AI právě zpracovávané",
-
   "models.title": "Modely",
   "models.browse": "Procházet HuggingFace",
   "models.empty": "Zatím žádné modely.",
@@ -59,7 +53,6 @@
   "models.download_started": "Stahování zahájeno — data modelu budou brzy připravena",
   "models.download_slow": "Stahování je pomalé ({speed}) — u populárních modelů se to stává. Bude pokračovat.",
   "models.checking": "Kontrola dostupnosti modelu...",
-
   "model_browser.title": "Procházet modely",
   "model_browser.search_placeholder": "Hledat modely HuggingFace (např. llama, qwen, phi, gemma)...",
   "model_browser.quality_all": "Všechny úrovně kvality",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "Vysoká (Q5 — vyvážená)",
   "model_browser.quality_very_high": "Velmi vysoká (Q6 — pomalejší, lepší kvalita)",
   "model_browser.quality_maximum": "Maximální (Q8 — nejpomalejší, nejlepší kvalita)",
-
   "compare.title": "Porovnání modelů",
   "compare.subtitle": "Pošlete stejný prompt více modelům a porovnejte výsledky vedle sebe. Výsledky se liší podle délky kontextu, schopností a specializace.",
   "compare.prompt_placeholder": "Zadejte svůj prompt zde...",
@@ -77,7 +69,6 @@
   "compare.creativity": "Kreativita",
   "compare.max_length": "Maximální délka odpovědi",
   "compare.history_title": "Poslední porovnání",
-
   "settings.title": "Nastavení",
   "settings.access_token": "Přístupový token",
   "settings.access_token_hint": "Váš soukromý klíč pro připojení jiných aplikací ke SwarmLLM. Uchovejte v tajnosti.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "Stahuje části modelů AI, aby je síť mohla spouštět. Zabírá místo na disku.",
   "settings.model_data_stored": "Uložená data modelů",
   "settings.network_gpu_memory": "GPU paměť sítě",
-
   "errors.server_unreachable": "Nelze se spojit se SwarmLLM — běží?",
   "errors.connection_lost": "Spojení se SwarmLLM ztraceno — opětovné připojování...",
   "errors.model_download_unavailable": "Stahování modelu není dostupné",
-
-
   "leaderboard.empty": "Zatím žádná aktivita. Kredity se získávají pomocí ostatním se spouštěním modelů AI.",
-
   "actions.copy": "Kopírovat",
   "actions.try_other_models": "Zkusit jiné modely",
-
-  "network.no_peers_yet": "Zatím nejsou připojeni žádní peers. Sdílejte svůj Síťový kód pro spojení zdrojů — čím více peers, tím větší modely můžete společně spouštět."
+  "network.no_peers_yet": "Zatím nejsou připojeni žádní peers. Sdílejte svůj Síťový kód pro spojení zdrojů — čím více peers, tím větší modely můžete společně spouštět.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }

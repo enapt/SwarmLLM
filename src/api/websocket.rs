@@ -90,7 +90,17 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let mut update_rx = shared_state.update_tx.subscribe();
     let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
     let mut system_rx = shared_state.system_notify_tx.subscribe();
+    let mut peer_list_rx = shared_state.peer_list_changed_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
+        // Send the current peer list immediately on connect so the dashboard
+        // populates without waiting for the first peer_list_changed event.
+        let initial_peers = build_peer_list_message(&push_state);
+        let _ = sender
+            .send(Message::Text(
+                serde_json::to_string(&initial_peers).unwrap_or_default(),
+            ))
+            .await;
+
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         // Track previous shard registry snapshot for change detection
@@ -178,6 +188,13 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                         }
                     }
                 }
+                _ = peer_list_rx.recv() => {
+                    let peers = build_peer_list_message(&push_state);
+                    let msg_str = serde_json::to_string(&peers).unwrap_or_default();
+                    if sender.send(Message::Text(msg_str)).await.is_err() {
+                        break;
+                    }
+                }
                 update_info = update_rx.recv() => {
                     if let Ok(info) = update_info {
                         let msg = serde_json::json!({
@@ -228,6 +245,51 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     tracing::debug!("DIAG: websocket client disconnected");
 }
 
+/// Build a `peer_list` WS message with the current peer registry snapshot.
+/// Same data shape as GET /api/admin/peers so the frontend can share one render path.
+fn build_peer_list_message(state: &SharedState) -> serde_json::Value {
+    let timeout = chrono::Duration::seconds(90);
+    let now = chrono::Utc::now();
+
+    let peers: Vec<serde_json::Value> = state
+        .peer_registry
+        .iter()
+        .map(|entry| {
+            let peer = entry.value();
+            let healthy = now.signed_duration_since(peer.last_seen) < timeout;
+            let hosted_models: Vec<String> = peer
+                .capability
+                .as_ref()
+                .map(|c| {
+                    c.hosted_shards
+                        .iter()
+                        .map(|s| s.model_id.0.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let nickname = state
+                .nickname_registry
+                .get(&peer.node_id)
+                .map(|r| r.nickname.clone());
+            serde_json::json!({
+                "node_id": format!("{}", peer.node_id),
+                "nickname": nickname,
+                "latency_ms": peer.latency_ms,
+                "trust_score": peer.trust_score,
+                "healthy": healthy,
+                "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
+                "hosted_models": hosted_models,
+                "is_lan_peer": peer.is_lan_peer,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "type": "peer_list",
+        "data": { "peers": peers }
+    })
+}
+
 /// Lightweight snapshot of a shard's holder state for change detection.
 #[derive(Clone, PartialEq)]
 struct ShardSnapshot {
@@ -276,15 +338,48 @@ async fn build_stats_message(
                 })
                 .collect();
 
+            let model_name = state
+                .model_registry
+                .get_manifest(&status.model_id)
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| status.model_id.0.clone());
+            let source = if state.hf_sources.contains_key(&status.model_id) {
+                "huggingface"
+            } else {
+                "network"
+            };
+            let cancellable = matches!(
+                status.state,
+                crate::model::acquisition::AcquisitionState::Downloading
+                    | crate::model::acquisition::AcquisitionState::AwaitingManifest
+            );
+            let overall_pct = if status.total_bytes > 0 {
+                ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
+            } else {
+                0
+            };
+            let eta_secs = if status.speed_bytes_per_sec > 0
+                && status.total_bytes > status.downloaded_bytes
+            {
+                Some((status.total_bytes - status.downloaded_bytes) / status.speed_bytes_per_sec)
+            } else {
+                None
+            };
             serde_json::json!({
                 "model_id": status.model_id.0,
+                "model_name": model_name,
                 "state": serde_json::to_value(&status.state).unwrap_or_default(),
+                "source": source,
                 "total_shards": status.total_shards,
                 "downloaded_shards": status.downloaded_shards,
                 "verified_shards": status.verified_shards,
                 "total_bytes": status.total_bytes,
                 "downloaded_bytes": status.downloaded_bytes,
+                "overall_pct": overall_pct,
                 "speed_bytes_per_sec": status.speed_bytes_per_sec,
+                "eta_secs": eta_secs,
+                "cancellable": cancellable,
+                "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
                 "shard_details": shard_details,
             })
         })

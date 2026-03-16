@@ -1,13 +1,11 @@
 {
   "_lang": "العربية",
   "_dir": "rtl",
-
   "nav.chat": "محادثة",
   "nav.dashboard": "لوحة التحكم",
   "nav.leaderboard": "لوحة المتصدرين",
   "nav.network_map": "خريطة الشبكة",
   "nav.compare": "مقارنة",
-
   "setup.welcome": "مرحباً بك في SwarmLLM",
   "setup.subtitle": "تحدث مع الذكاء الاصطناعي على جهازك، أو تعاون مع آخرين لتشغيل نماذج أكبر",
   "setup.step1": "جهازك",
@@ -23,7 +21,6 @@
   "setup.resource_hint": "اسمح للآخرين باستخدام جزء من قوة حاسوبك لتشغيل الذكاء الاصطناعي. تكسب رصيداً في المقابل.",
   "setup.cloud_ai": "خدمة ذكاء اصطناعي سحابية",
   "setup.cloud_hint": "اربط خدمة مثل OpenAI أو DeepSeek لبدء المحادثة فوراً. معظمها يوفر باقات مجانية.",
-
   "chat.empty_title": "تحدث مع الذكاء الاصطناعي",
   "chat.empty_hint": "اختر نموذجاً من القائمة أعلاه وابدأ المحادثة",
   "chat.placeholder": "اكتب رسالتك... (Enter للإرسال، Shift+Enter لسطر جديد)",
@@ -35,9 +32,7 @@
   "chat.source_local": "جهازك",
   "chat.source_cloud": "سحابي",
   "chat.source_network": "الشبكة",
-
   "sidebar.title": "المحادثات",
-
   "stats.peers": "الأقران",
   "stats.peers_help": "أجهزة أخرى تشغّل SwarmLLM متصلة بك",
   "stats.credits": "الرصيد",
@@ -50,7 +45,6 @@
   "stats.forwards_help": "الحسابات التي أجراها جهازك كجزء من الشبكة (تكسب رصيداً)",
   "stats.active": "نشط",
   "stats.active_help": "طلبات الذكاء الاصطناعي قيد المعالجة الآن",
-
   "models.title": "النماذج",
   "models.browse": "تصفح HuggingFace",
   "models.empty": "لا توجد نماذج بعد.",
@@ -59,7 +53,6 @@
   "models.download_started": "بدأ التنزيل — ستكون بيانات النموذج جاهزة قريباً",
   "models.download_slow": "التنزيل بطيء ({speed}) — هذا يحدث مع النماذج الشائعة. سيستمر.",
   "models.checking": "جارٍ التحقق من توفر النموذج...",
-
   "model_browser.title": "تصفح النماذج",
   "model_browser.search_placeholder": "ابحث عن نماذج HuggingFace (مثل llama، qwen، phi، gemma)...",
   "model_browser.quality_all": "جميع مستويات الجودة",
@@ -67,7 +60,6 @@
   "model_browser.quality_high": "عالي (Q5 — متوازن)",
   "model_browser.quality_very_high": "عالي جداً (Q6 — أبطأ، جودة أفضل)",
   "model_browser.quality_maximum": "أقصى (Q8 — الأبطأ، أفضل جودة)",
-
   "compare.title": "مقارنة النماذج",
   "compare.subtitle": "أرسل نفس الأمر لعدة نماذج وقارن النتائج جنباً إلى جنب. تختلف النتائج حسب طول السياق والقدرات والتخصص.",
   "compare.prompt_placeholder": "أدخل الطلب هنا...",
@@ -77,7 +69,6 @@
   "compare.creativity": "الإبداعية",
   "compare.max_length": "الحد الأقصى لطول الرد",
   "compare.history_title": "المقارنات الأخيرة",
-
   "settings.title": "الإعدادات",
   "settings.access_token": "رمز الوصول",
   "settings.access_token_hint": "مفتاحك الخاص لربط تطبيقات أخرى بـ SwarmLLM. احتفظ به سراً.",
@@ -85,16 +76,16 @@
   "settings.auto_download_hint": "ينزّل أجزاء من نماذج الذكاء الاصطناعي ليتمكن الشبكة من تشغيلها. يستخدم مساحة القرص.",
   "settings.model_data_stored": "بيانات النماذج المخزنة",
   "settings.network_gpu_memory": "ذاكرة GPU الشبكة",
-
   "errors.server_unreachable": "لا يمكن الوصول إلى SwarmLLM — هل هو قيد التشغيل؟",
   "errors.connection_lost": "فُقد الاتصال بـ SwarmLLM — جارٍ إعادة الاتصال...",
   "errors.model_download_unavailable": "تنزيل النموذج غير متاح",
-
-
   "leaderboard.empty": "لا يوجد نشاط بعد. تُكتسب الأرصدة بمساعدة الآخرين في تشغيل نماذج الذكاء الاصطناعي.",
-
   "actions.copy": "نسخ",
   "actions.try_other_models": "جرّب نماذج أخرى",
-
-  "network.no_peers_yet": "لا يوجد أقران متصلون بعد. شارك رمز الشبكة لدمج الموارد — كلما زاد عدد الأقران، زادت النماذج التي يمكنك تشغيلها معًا."
+  "network.no_peers_yet": "لا يوجد أقران متصلون بعد. شارك رمز الشبكة لدمج الموارد — كلما زاد عدد الأقران، زادت النماذج التي يمكنك تشغيلها معًا.",
+  "actions.cancel": "Cancel",
+  "dl.state_downloading": "Downloading",
+  "dl.state_preparing": "Preparing download...",
+  "dl.state_complete": "Complete",
+  "dl.state_failed": "Failed"
 }
