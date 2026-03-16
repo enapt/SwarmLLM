@@ -1454,13 +1454,14 @@ kbd {
 .cloud-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; }
 .cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
-.cloud-card-controls { display: flex; gap: 6px; margin-bottom: 6px; }
-.cloud-model-filter { flex: 1; padding: 5px 8px; font-size: 0.78rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); outline: none; }
-.cloud-model-filter:focus { border-color: var(--accent); }
-.cloud-model-sort { flex: 0 0 auto; padding: 5px 6px; font-size: 0.73rem; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); cursor: pointer; outline: none; }
+.cloud-card-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; width: 100%; }
+input.cloud-model-filter { flex: 1 1 0%; min-width: 0; padding: 6px 10px; font-size: 13px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); outline: none; box-sizing: border-box; }
+input.cloud-model-filter::placeholder { color: var(--text-muted); }
+input.cloud-model-filter:focus { border-color: var(--accent); background: var(--bg-primary); }
+select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-size: 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 5px; color: var(--text-primary); cursor: pointer; outline: none; }
 .cloud-model-sort:focus { border-color: var(--accent); }
 /* Scrollable model list */
-.cloud-model-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; scrollbar-width: thin; }
+.cloud-model-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 8px; scrollbar-width: thin; }
 .cloud-model-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.82rem; transition: background 0.1s; }
 .cloud-model-row:last-child { border-bottom: none; }
 .cloud-model-row:hover { background: var(--bg-tertiary); }

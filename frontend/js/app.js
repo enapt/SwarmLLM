@@ -1331,7 +1331,7 @@ var SwarmLLM = (function() {
           // Wire filter + sort
           var filterEl = document.getElementById(filterId);
           var sortEl = document.getElementById(sortId);
-          function refreshRows() {
+          var refreshRows = function() {
             var query = filterEl ? filterEl.value.toLowerCase().trim() : '';
             var sortBy = sortEl ? sortEl.value : 'popular';
             var filtered = query ? pModels.filter(function(cm) {
@@ -1342,8 +1342,12 @@ var SwarmLLM = (function() {
             if (listContainer) renderRowsInto(listContainer, s);
             // Probe newly visible models
             probeModelStatus(s.slice(0, 20).map(function(cm) { return cm.id; }));
+          };
+          if (filterEl) {
+            filterEl.addEventListener('input', refreshRows);
+            filterEl.addEventListener('keyup', refreshRows);
+            filterEl.addEventListener('paste', function() { setTimeout(refreshRows, 0); });
           }
-          if (filterEl) filterEl.addEventListener('input', refreshRows);
           if (sortEl) sortEl.addEventListener('change', function() {
             refreshRows();
             if (sortEl.value === 'avail') probeModelStatus(pModels.map(function(cm) { return cm.id; }).slice(0, 40));

@@ -116,13 +116,14 @@ impl RateLimiter {
             .retain(|_key, (_, last_refill)| now.duration_since(*last_refill) < max_idle);
     }
 
-    /// Try to consume one token for the given IP and path.
+    /// Try to consume one token for the given IP, path, and HTTP method.
     /// Returns `true` if allowed, `false` if rate-limited.
-    fn try_acquire(&self, ip: IpAddr, path: &str) -> bool {
-        // Sensitive key-management endpoints get a much stricter limit (5/min)
-        let (kind, limit) = if path == "/api/admin/providers"
-            || path == "/api/admin/api-key"
-            || path == "/api/admin/provider-model-status"
+    fn try_acquire(&self, ip: IpAddr, path: &str, is_mutating: bool) -> bool {
+        // Sensitive endpoints: external-API probes always restricted; key/provider
+        // mutations restricted but reads use the normal admin bucket (page loads
+        // call these on every refresh and hitting 5/min breaks the dashboard).
+        let (kind, limit) = if path == "/api/admin/provider-model-status"
+            || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
         {
             (BucketKind::SensitiveAdmin, 5)
         } else if path.starts_with("/api/admin/") {
@@ -186,9 +187,13 @@ pub async fn rate_limit_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path().to_string();
+    let is_mutating = !matches!(
+        req.method(),
+        &axum::http::Method::GET | &axum::http::Method::HEAD | &axum::http::Method::OPTIONS
+    );
     let limiter = &state.rate_limiter;
 
-    if !limiter.try_acquire(addr.ip(), &path) {
+    if !limiter.try_acquire(addr.ip(), &path, is_mutating) {
         tracing::warn!(
             ip = %addr.ip(),
             path = %path,
@@ -593,10 +598,10 @@ mod tests {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
         // First 5 requests should be allowed
         for _ in 0..5 {
-            assert!(limiter.try_acquire(ip, "/v1/chat/completions"));
+            assert!(limiter.try_acquire(ip, "/v1/chat/completions", false));
         }
         // 6th request should be denied
-        assert!(!limiter.try_acquire(ip, "/v1/chat/completions"));
+        assert!(!limiter.try_acquire(ip, "/v1/chat/completions", false));
     }
 
     #[test]
@@ -604,14 +609,14 @@ mod tests {
         let limiter = RateLimiter::new(2, 5);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         // Exhaust normal budget
-        assert!(limiter.try_acquire(ip, "/v1/models"));
-        assert!(limiter.try_acquire(ip, "/v1/models"));
-        assert!(!limiter.try_acquire(ip, "/v1/models"));
+        assert!(limiter.try_acquire(ip, "/v1/models", false));
+        assert!(limiter.try_acquire(ip, "/v1/models", false));
+        assert!(!limiter.try_acquire(ip, "/v1/models", false));
         // Admin budget is separate — still available
         for _ in 0..5 {
-            assert!(limiter.try_acquire(ip, "/api/admin/stats"));
+            assert!(limiter.try_acquire(ip, "/api/admin/stats", false));
         }
-        assert!(!limiter.try_acquire(ip, "/api/admin/stats"));
+        assert!(!limiter.try_acquire(ip, "/api/admin/stats", false));
     }
 
     #[test]
@@ -620,9 +625,9 @@ mod tests {
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         // Non-API paths are not rate-limited
         for _ in 0..100 {
-            assert!(limiter.try_acquire(ip, "/health"));
-            assert!(limiter.try_acquire(ip, "/static/js/app.js"));
-            assert!(limiter.try_acquire(ip, "/admin"));
+            assert!(limiter.try_acquire(ip, "/health", false));
+            assert!(limiter.try_acquire(ip, "/static/js/app.js", false));
+            assert!(limiter.try_acquire(ip, "/admin", false));
         }
     }
 
@@ -632,13 +637,13 @@ mod tests {
         let ip1: IpAddr = "10.0.0.1".parse().unwrap();
         let ip2: IpAddr = "10.0.0.2".parse().unwrap();
         // Exhaust ip1 budget
-        assert!(limiter.try_acquire(ip1, "/v1/chat/completions"));
-        assert!(limiter.try_acquire(ip1, "/v1/chat/completions"));
-        assert!(!limiter.try_acquire(ip1, "/v1/chat/completions"));
+        assert!(limiter.try_acquire(ip1, "/v1/chat/completions", false));
+        assert!(limiter.try_acquire(ip1, "/v1/chat/completions", false));
+        assert!(!limiter.try_acquire(ip1, "/v1/chat/completions", false));
         // ip2 still has full budget
-        assert!(limiter.try_acquire(ip2, "/v1/chat/completions"));
-        assert!(limiter.try_acquire(ip2, "/v1/chat/completions"));
-        assert!(!limiter.try_acquire(ip2, "/v1/chat/completions"));
+        assert!(limiter.try_acquire(ip2, "/v1/chat/completions", false));
+        assert!(limiter.try_acquire(ip2, "/v1/chat/completions", false));
+        assert!(!limiter.try_acquire(ip2, "/v1/chat/completions", false));
     }
 
     // --- constant_time_eq tests ---
@@ -745,18 +750,25 @@ mod tests {
     fn sensitive_admin_rate_limit() {
         let limiter = RateLimiter::new(100, 100);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        // Sensitive endpoints get 5/min regardless of configured rpm
+        // Mutating (PUT/POST) sensitive endpoints get 5/min regardless of configured rpm
         for _ in 0..5 {
-            assert!(limiter.try_acquire(ip, "/api/admin/providers"));
+            assert!(limiter.try_acquire(ip, "/api/admin/providers", true));
         }
-        assert!(!limiter.try_acquire(ip, "/api/admin/providers"));
+        assert!(!limiter.try_acquire(ip, "/api/admin/providers", true));
 
-        // Same for api-key endpoint
+        // GETs on the same paths use normal admin budget (200/min) — page loads need this
         let ip2: IpAddr = "10.0.0.2".parse().unwrap();
-        for _ in 0..5 {
-            assert!(limiter.try_acquire(ip2, "/api/admin/api-key"));
+        for _ in 0..50 {
+            assert!(limiter.try_acquire(ip2, "/api/admin/api-key", false));
+            assert!(limiter.try_acquire(ip2, "/api/admin/providers", false));
         }
-        assert!(!limiter.try_acquire(ip2, "/api/admin/api-key"));
+
+        // provider-model-status is always SensitiveAdmin (makes external API calls)
+        let ip3: IpAddr = "10.0.0.3".parse().unwrap();
+        for _ in 0..5 {
+            assert!(limiter.try_acquire(ip3, "/api/admin/provider-model-status", false));
+        }
+        assert!(!limiter.try_acquire(ip3, "/api/admin/provider-model-status", false));
     }
 
     #[test]
@@ -764,7 +776,7 @@ mod tests {
         let limiter = RateLimiter::new(10, 10);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         // Create an entry
-        limiter.try_acquire(ip, "/v1/chat/completions");
+        limiter.try_acquire(ip, "/v1/chat/completions", false);
         assert_eq!(limiter.buckets.len(), 1);
         // Cleanup with zero window removes everything (all entries are "stale")
         limiter.cleanup(std::time::Duration::from_secs(0));
@@ -775,7 +787,7 @@ mod tests {
     fn rate_limiter_cleanup_keeps_recent_entries() {
         let limiter = RateLimiter::new(10, 10);
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        limiter.try_acquire(ip, "/v1/chat/completions");
+        limiter.try_acquire(ip, "/v1/chat/completions", false);
         assert_eq!(limiter.buckets.len(), 1);
         // Cleanup with large window keeps recent entries
         limiter.cleanup(std::time::Duration::from_secs(3600));
