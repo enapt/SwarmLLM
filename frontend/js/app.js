@@ -515,22 +515,22 @@ var SwarmLLM = (function() {
       // Encryption banner — active, suggestion, or hidden
       if (encBanner) {
         var modelData = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
-        var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && modelData.shard_count > 1;
+        var isDistributed = modelData && modelData.shard_count > 1;
+        var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
+        var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
         var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Disable</button>';
-        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Enable</button>';
-        if (isEncrypted) {
-          var isFullLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
-          if (isFullLocal) {
-            encBanner.className = 'chat-enc-banner enc-full';
-            encBanner.innerHTML = '&#128274; <strong>Running locally</strong> \u2014 all shards on this device, prompts never leave ' + disableBtn;
-          } else {
-            encBanner.className = 'chat-enc-banner enc-boomerang';
-            encBanner.innerHTML = '&#128274; <strong>Prompt-private</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
-          }
+        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Enable prompt privacy</button>';
+        if (isAllLocal) {
+          encBanner.className = 'chat-enc-banner enc-full';
+          encBanner.innerHTML = '&#128274; <strong>Running locally</strong> \u2014 all shards on this device, prompts never leave';
           encBanner.style.display = '';
-        } else if (canBoomerang) {
-          encBanner.className = 'chat-enc-banner enc-suggest';
-          encBanner.innerHTML = '&#128274; <strong>Prompt privacy available</strong> \u2014 enable to keep raw prompts on this device; peers will only see encrypted hidden states \u00b7 <span class="enc-overhead">adds ~2\u20135s per request</span> ' + enableBtn;
+        } else if (isDistributed && isEncrypted) {
+          encBanner.className = 'chat-enc-banner enc-boomerang';
+          encBanner.innerHTML = '&#128274; <strong>Prompt-private</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
+          encBanner.style.display = '';
+        } else if (isDistributed) {
+          encBanner.className = 'chat-enc-banner enc-warn';
+          encBanner.innerHTML = '&#128275; <strong>Transport encrypted</strong> \u2014 but serving peers can see your prompts \u00b7 <span class="enc-overhead">lose speed, gain privacy</span>' + (canBoomerang ? ' ' + enableBtn : '');
           encBanner.style.display = '';
         } else {
           encBanner.style.display = 'none';

@@ -1082,6 +1082,11 @@ input[type="range"]::-webkit-slider-thumb {
   border-color: rgba(167, 139, 250, 0.2);
   color: var(--text-secondary);
 }
+.chat-enc-banner.enc-warn {
+  background: rgba(255, 193, 7, 0.06);
+  border-color: rgba(255, 193, 7, 0.2);
+  color: var(--text-secondary);
+}
 .enc-overhead { opacity: 0.7; font-weight: 400; }
 .enc-banner-btn {
   margin-left: auto; flex-shrink: 0;
