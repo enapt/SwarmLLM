@@ -1031,7 +1031,7 @@ var SwarmLLM = (function() {
         var swarmMeta = models.length + ' model' + (models.length !== 1 ? 's' : '') +
           (swarmReadyCount > 0 ? ' \u00b7 ' + swarmReadyCount + ' ready' : '');
         swarmSection.innerHTML = '<summary class="models-section-header">' +
-          '<span class="models-section-icon">&#9881;&#65039;</span>' +
+          '<img src="/static/icons/swarm.svg" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo">' +
           '<span class="models-section-title">Swarm Models</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
           '</summary>';
@@ -1296,11 +1296,15 @@ var SwarmLLM = (function() {
 
         var name = formatModelDisplayName(m.name || m.id);
 
+        // Creator/family icon for swarm model card
+        var creatorIconHtml = providerIconHtml(modelIconKey(m.id), 14);
+
         // ── Card HTML ───────────────────────────────────────────────────────
         card.innerHTML =
           // Title bar
           '<div class="model-card-title">' +
             '<div class="model-card-name-row">' +
+              (creatorIconHtml ? '<span class="model-creator-icon">' + creatorIconHtml + '</span>' : '') +
               '<span class="model-name" title="' + escapeHtml(m.id) + '">' + escapeHtml(name) + '</span>' +
               encBadge + sourceLabel + trustBadge +
             '</div>' +
@@ -1417,7 +1421,7 @@ var SwarmLLM = (function() {
         var cloudMeta = providerCount + ' provider' + (providerCount !== 1 ? 's' : '') +
           ' \u00b7 ' + cloudModels.length + ' models';
         cloudSection.innerHTML = '<summary class="models-section-header">' +
-          '<span class="models-section-icon">\u2601\ufe0f</span>' +
+          '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="models-section-logo" style="flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>' +
           '<span class="models-section-title">Cloud Providers</span>' +
           '<span class="models-section-count">' + cloudMeta + '</span>' +
           '</summary>';
