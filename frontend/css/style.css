@@ -1123,7 +1123,8 @@ input[type="range"]::-webkit-slider-thumb {
   margin: 0 auto 16px;
   padding: 14px 18px;
   border-radius: var(--radius-lg);
-  line-height: 1.7;
+  font-size: 0.88rem;
+  line-height: 1.45;
   animation: msgIn 0.2s ease-out;
 }
 @keyframes msgIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
