@@ -1226,6 +1226,7 @@ input[type="range"]::-webkit-slider-thumb {
 .chat-msg.assistant .msg-role { color: var(--accent); }
 .chat-msg .msg-content { white-space: pre-wrap; word-wrap: break-word; }
 .msg-enc-lock { font-size: 0.7rem; opacity: 0.7; margin-left: 4px; vertical-align: middle; }
+.send-enc-lock { font-size: 0.75rem; opacity: 0.85; margin-left: 3px; vertical-align: middle; }
 
 /* ---- Avatar slot: hidden in linear mode ---- */
 .msg-avatar { display: none; }
