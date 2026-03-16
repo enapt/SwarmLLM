@@ -663,12 +663,13 @@ var SwarmLLM = (function() {
         }
       }
 
-      // Show response time
+      // Show response time — append inside bubble so it renders correctly in both layouts
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
       timerEl.textContent = 'Response time: ' + elapsed + 's';
-      assistantEl.appendChild(timerEl);
+      var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
+      timerTarget.appendChild(timerEl);
 
       if (fullContent) {
         session.messages.push({ role: 'assistant', content: fullContent });
@@ -3937,6 +3938,35 @@ var SwarmLLM = (function() {
     return 'cloud';
   }
 
+  function applyMessageGrouping(container) {
+    var msgs = Array.prototype.slice.call(container.querySelectorAll('.chat-msg'));
+    if (!msgs.length) return;
+    var i = 0;
+    while (i < msgs.length) {
+      var role = msgs[i].classList.contains('user') ? 'user' : 'assistant';
+      var j = i;
+      while (j + 1 < msgs.length) {
+        var nextRole = msgs[j + 1].classList.contains('user') ? 'user' : 'assistant';
+        if (nextRole !== role) break;
+        j++;
+      }
+      var size = j - i + 1;
+      for (var k = i; k <= j; k++) {
+        msgs[k].classList.remove('group-solo', 'group-first', 'group-mid', 'group-last');
+        if (size === 1) {
+          msgs[k].classList.add('group-solo');
+        } else if (k === i) {
+          msgs[k].classList.add('group-first');
+        } else if (k === j) {
+          msgs[k].classList.add('group-last');
+        } else {
+          msgs[k].classList.add('group-mid');
+        }
+      }
+      i = j + 1;
+    }
+  }
+
   function appendMessageToDOM(role, content, isHtml, opts) {
     opts = opts || {};
     var container = document.getElementById('chat-messages');
@@ -3957,12 +3987,23 @@ var SwarmLLM = (function() {
       sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
     }
 
+    // Avatar slot — visible only in messenger mode for assistant messages
+    var avatarEl = document.createElement('div');
+    avatarEl.className = 'msg-avatar';
+    avatarEl.setAttribute('aria-hidden', 'true');
+    if (role === 'assistant') avatarEl.textContent = 'AI';
+    div.appendChild(avatarEl);
+
+    // Bubble wrapper — used by messenger mode; transparent pass-through in linear mode
+    var bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
     var label = role === 'user' ? 'You' : 'Assistant';
-    div.innerHTML = '<div class="msg-role">' + label + sourceHtml + '</div><div class="msg-content"></div>';
+    bubble.innerHTML = '<div class="msg-role">' + label + sourceHtml + '</div><div class="msg-content"></div>';
     if (isHtml) {
-      div.querySelector('.msg-content').innerHTML = content;
+      bubble.querySelector('.msg-content').innerHTML = content;
     } else {
-      div.querySelector('.msg-content').textContent = content;
+      bubble.querySelector('.msg-content').textContent = content;
     }
 
     // Add action buttons for assistant messages
@@ -3971,10 +4012,12 @@ var SwarmLLM = (function() {
       actions.className = 'msg-actions';
       actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy this response">Copy</button>' +
         '<button class="msg-action-btn" data-action="compare" title="Ask other models the same question">Try other models</button>';
-      div.appendChild(actions);
+      bubble.appendChild(actions);
     }
 
+    div.appendChild(bubble);
     container.appendChild(div);
+    applyMessageGrouping(container);
     chat.scrollToBottom();
     return div;
   }
