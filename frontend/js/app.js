@@ -4,6 +4,63 @@
 // SwarmLLM — Unified single-page application
 // ============================================================================
 
+// ============================================================================
+// Lobe Icons — provider icon helpers
+// CDN: unpkg @lobehub/icons-static-svg
+// ============================================================================
+var _LOBE_BASE = 'https://unpkg.com/@lobehub/icons-static-svg@latest/icons/';
+var _LOBE_MAP = {
+  openai:     'openai',
+  anthropic:  'anthropic',
+  deepseek:   'deepseek-color',
+  mistral:    'mistral-color',
+  groq:       'groq',
+  nvidia_nim: 'nvidia-color',
+  cerebras:   'cerebras-color',
+  sambanova:  'sambanova-color',
+  fireworks:  'fireworks-color',
+  together:   'together-color',
+  deepinfra:  'deepinfra-color',
+  moonshot:   'moonshot',
+  // model-family → icon (for local/swarm models)
+  llama:      'meta-color',
+  gemma:      'gemma-color',
+  gemini:     'gemini-color',
+  qwen:       'qwen-color',
+  phi:        'microsoft-color',
+  claude:     'claude-color',
+};
+
+function lobeIconUrl(key) {
+  var id = _LOBE_MAP[key];
+  return id ? _LOBE_BASE + id + '.svg' : null;
+}
+
+// Returns an <img> tag string for a provider/model icon, or '' if unknown.
+// size defaults to 16.
+function lobeIconHtml(key, size) {
+  var url = lobeIconUrl(key);
+  if (!url) return '';
+  size = size || 16;
+  return '<img src="' + url + '" width="' + size + '" height="' + size + '" alt="" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex-shrink:0" onerror="this.style.display=\'none\'">';
+}
+
+// Infer a provider/family key from a model ID string.
+function modelIconKey(modelId) {
+  if (!modelId) return null;
+  var m = modelId.toLowerCase();
+  if (m.startsWith('gpt') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4') || m.includes('-openai')) return 'openai';
+  if (m.startsWith('claude')) return 'claude';
+  if (m.startsWith('deepseek')) return 'deepseek';
+  if (m.startsWith('mistral') || m.startsWith('mixtral') || m.startsWith('codestral')) return 'mistral';
+  if (m.startsWith('llama') || m.startsWith('meta-llama')) return 'llama';
+  if (m.startsWith('gemma')) return 'gemma';
+  if (m.startsWith('gemini')) return 'gemini';
+  if (m.startsWith('qwen')) return 'qwen';
+  if (m.startsWith('phi')) return 'phi';
+  return null;
+}
+
 var SwarmLLM = (function() {
   var ws = null;
   var wsHealthy = false;
@@ -1308,9 +1365,10 @@ var SwarmLLM = (function() {
           card.className = 'model-card cloud-model';
           card.setAttribute('data-provider', p);
 
+          var cardIconHtml = lobeIconHtml(p, 18);
           card.innerHTML =
             '<div class="cloud-card-header">' +
-              '<span class="cloud-provider-name">' + escapeHtml(pLabel) + '</span>' +
+              '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + escapeHtml(pLabel) + '</span>' +
               '<span>' +
                 '<span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
                 '<span class="cloud-status-ok">\u25cf Connected</span>' +
@@ -2903,7 +2961,8 @@ var SwarmLLM = (function() {
 
       var header = document.createElement('div');
       header.className = 'model-dropdown-group-header';
-      header.innerHTML = '<span class="group-arrow">&#9662;</span> ' + escapeHtml(g.label) + ' <span style="opacity:0.5;font-weight:400">(' + g.items.length + ')</span>';
+      var groupIconHtml = lobeIconHtml(g.key, 14);
+      header.innerHTML = '<span class="group-arrow">&#9662;</span>' + (groupIconHtml ? ' ' + groupIconHtml : '') + ' ' + escapeHtml(g.label) + ' <span style="opacity:0.5;font-weight:400">(' + g.items.length + ')</span>';
       header.addEventListener('click', function() {
         groupEl.classList.toggle('collapsed');
       });
@@ -3992,7 +4051,16 @@ var SwarmLLM = (function() {
     avatarEl.className = 'msg-avatar';
     avatarEl.setAttribute('aria-hidden', 'true');
     if (role === 'assistant') {
-      avatarEl.textContent = 'AI';
+      var _sess = currentSessionId && sessions[currentSessionId] ? sessions[currentSessionId] : null;
+      var _mid = opts && opts.model ? opts.model : (_sess ? _sess.model : '') || currentModel || '';
+      var _avatarProvider = (_mid && _modelDropdownData.find(function(m) { return m.id === _mid; }) || {}).group || null;
+      var _iconKey = (_avatarProvider && _LOBE_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(_mid);
+      var _iconUrl = _iconKey ? lobeIconUrl(_iconKey) : null;
+      if (_iconUrl) {
+        avatarEl.innerHTML = '<img src="' + _iconUrl + '" width="16" height="16" alt="" style="display:block" onerror="this.parentNode.textContent=\'AI\'">';
+      } else {
+        avatarEl.textContent = 'AI';
+      }
     } else {
       avatarEl.innerHTML = '<img src="/static/favicon.svg" alt="" style="width:16px;height:16px;display:block;">';
     }
