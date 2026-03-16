@@ -5,11 +5,10 @@
 // ============================================================================
 
 // ============================================================================
-// Lobe Icons — provider icon helpers
-// CDN: unpkg @lobehub/icons-static-svg
+// Provider icons — bundled SVGs served from /static/icons/
 // ============================================================================
-var _LOBE_BASE = 'https://unpkg.com/@lobehub/icons-static-svg@latest/icons/';
-var _LOBE_MAP = {
+var _ICON_BASE = '/static/icons/';
+var _ICON_MAP = {
   openai:     'openai',
   anthropic:  'anthropic',
   deepseek:   'deepseek-color',
@@ -31,18 +30,18 @@ var _LOBE_MAP = {
   claude:     'claude-color',
 };
 
-function lobeIconUrl(key) {
-  var id = _LOBE_MAP[key];
-  return id ? _LOBE_BASE + id + '.svg' : null;
+function providerIconUrl(key) {
+  var id = _ICON_MAP[key];
+  return id ? _ICON_BASE + id + '.svg' : null;
 }
 
 // Returns an <img> tag string for a provider/model icon, or '' if unknown.
 // size defaults to 16.
-function lobeIconHtml(key, size) {
-  var url = lobeIconUrl(key);
+function providerIconHtml(key, size) {
+  var url = providerIconUrl(key);
   if (!url) return '';
   size = size || 16;
-  return '<img src="' + url + '" width="' + size + '" height="' + size + '" alt="" aria-hidden="true" style="display:inline-block;vertical-align:middle;flex-shrink:0" onerror="this.style.display=\'none\'">';
+  return '<img src="' + url + '" width="' + size + '" height="' + size + '" alt="" aria-hidden="true" class="provider-icon" style="display:inline-block;vertical-align:middle;flex-shrink:0">';
 }
 
 // Infer a provider/family key from a model ID string.
@@ -1365,7 +1364,7 @@ var SwarmLLM = (function() {
           card.className = 'model-card cloud-model';
           card.setAttribute('data-provider', p);
 
-          var cardIconHtml = lobeIconHtml(p, 18);
+          var cardIconHtml = providerIconHtml(p, 18);
           card.innerHTML =
             '<div class="cloud-card-header">' +
               '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + escapeHtml(pLabel) + '</span>' +
@@ -2961,7 +2960,7 @@ var SwarmLLM = (function() {
 
       var header = document.createElement('div');
       header.className = 'model-dropdown-group-header';
-      var groupIconHtml = lobeIconHtml(g.key, 14);
+      var groupIconHtml = providerIconHtml(g.key, 14);
       header.innerHTML = '<span class="group-arrow">&#9662;</span>' + (groupIconHtml ? ' ' + groupIconHtml : '') + ' ' + escapeHtml(g.label) + ' <span style="opacity:0.5;font-weight:400">(' + g.items.length + ')</span>';
       header.addEventListener('click', function() {
         groupEl.classList.toggle('collapsed');
@@ -4054,10 +4053,10 @@ var SwarmLLM = (function() {
       var _sess = currentSessionId && sessions[currentSessionId] ? sessions[currentSessionId] : null;
       var _mid = opts && opts.model ? opts.model : (_sess ? _sess.model : '') || currentModel || '';
       var _avatarProvider = (_mid && _modelDropdownData.find(function(m) { return m.id === _mid; }) || {}).group || null;
-      var _iconKey = (_avatarProvider && _LOBE_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(_mid);
-      var _iconUrl = _iconKey ? lobeIconUrl(_iconKey) : null;
+      var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(_mid);
+      var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
       if (_iconUrl) {
-        avatarEl.innerHTML = '<img src="' + _iconUrl + '" width="16" height="16" alt="" style="display:block" onerror="this.parentNode.textContent=\'AI\'">';
+        avatarEl.innerHTML = '<img src="' + _iconUrl + '" width="16" height="16" alt="" class="provider-icon provider-avatar-icon" style="display:block">';
       } else {
         avatarEl.textContent = 'AI';
       }
@@ -5609,6 +5608,19 @@ var SwarmLLM = (function() {
     // Start provider health probe (default every 30s, configurable)
     startHealthPolling();
   }
+
+  // Delegated error handler for provider icons — replaces inline onerror (blocked by CSP)
+  document.addEventListener('error', function(e) {
+    var t = e.target;
+    if (t.tagName !== 'IMG' || !t.classList.contains('provider-icon')) return;
+    if (t.classList.contains('provider-avatar-icon')) {
+      // Avatar fallback: replace broken img with text initials
+      var av = t.parentNode;
+      if (av) av.textContent = 'AI';
+    } else {
+      t.style.display = 'none';
+    }
+  }, true); // capture phase to catch before bubbling
 
   // Start when DOM is ready
   if (document.readyState === 'loading') {
