@@ -530,7 +530,7 @@ var SwarmLLM = (function() {
           encBanner.style.display = '';
         } else if (isDistributed) {
           encBanner.className = 'chat-enc-banner enc-warn';
-          encBanner.innerHTML = '&#128275; <strong>Transport encrypted</strong> \u2014 but serving peers can see your prompts \u00b7 <span class="enc-overhead">lose speed, gain privacy</span>' + (canBoomerang ? ' ' + enableBtn : '');
+          encBanner.innerHTML = '&#128275; <strong>Transport encrypted</strong> \u2014 but serving peers can see your prompts \u00b7 <span class="enc-overhead">gain speed, lose some privacy</span>' + (canBoomerang ? ' ' + enableBtn : '');
           encBanner.style.display = '';
         } else {
           encBanner.style.display = 'none';
