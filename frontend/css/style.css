@@ -176,6 +176,18 @@ a:hover { color: var(--accent-hover); }
   0% { border-color: var(--accent); box-shadow: 0 0 8px rgba(99,102,241,0.6); }
   100% { border-color: var(--border); box-shadow: none; }
 }
+.model-dropdown-trigger.no-model {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-glow);
+  animation: no-model-pulse 2s ease-in-out infinite;
+}
+.model-dropdown-trigger.no-model:hover { border-color: var(--accent-hover); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.model-dropdown-trigger.no-model .model-dropdown-arrow { opacity: 1; color: var(--accent); }
+@keyframes no-model-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.35); }
+  50% { box-shadow: 0 0 0 3px rgba(59,130,246,0.15); }
+}
 .model-dropdown-trigger span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
 .model-dropdown-arrow { font-size: 0.6rem; opacity: 0.6; flex-shrink: 0; }
 .model-dropdown-panel {
@@ -264,6 +276,86 @@ a:hover { color: var(--accent-hover); }
 }
 .sidebar.collapsed .sidebar-header,
 .sidebar.collapsed .session-list { visibility: hidden; }
+
+/* Float mode: fixed overlay used on non-chat tabs */
+.sidebar.sidebar-float {
+  position: fixed;
+  top: var(--header-height);
+  left: 0;
+  bottom: 0;
+  z-index: 150;
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+  border-right: 1px solid var(--border);
+  transform: translateX(-100%);
+  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.18s ease;
+  box-shadow: none;
+}
+.sidebar.sidebar-float:not(.collapsed) {
+  transform: translateX(0);
+  box-shadow: 6px 0 32px rgba(0, 0, 0, 0.28);
+}
+.sidebar.sidebar-float.collapsed {
+  width: var(--sidebar-width);
+  min-width: var(--sidebar-width);
+}
+.sidebar.sidebar-float .sidebar-header,
+.sidebar.sidebar-float .session-list { visibility: visible; }
+
+/* Full-height invisible hover strip — rides sidebar transform, triggers popout on left-edge hover */
+.sidebar-edge-hover {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  z-index: 9;
+  cursor: pointer;
+}
+.sidebar.sidebar-float .sidebar-edge-hover { display: block; }
+
+/* Chat tab — glued to right edge of sidebar, animates with its transform */
+.sidebar-chat-tab {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  color: var(--text-secondary);
+  font-size: 1rem;
+  cursor: pointer;
+  opacity: 0.65;
+  box-shadow: 3px 0 12px rgba(0,0,0,0.2);
+  transition: opacity 0.2s, color 0.2s, background 0.2s;
+  z-index: 10;
+  pointer-events: all;
+}
+.sidebar-chat-tab:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--bg-tertiary);
+}
+/* When sidebar is open, show a faint close cue */
+.sidebar.sidebar-float:not(.collapsed) .sidebar-chat-tab {
+  opacity: 0.3;
+  font-size: 0.75rem;
+}
+.sidebar.sidebar-float:not(.collapsed) .sidebar-chat-tab:hover {
+  opacity: 0.8;
+}
+/* Always visible in float mode — rides the sidebar transform naturally */
+.sidebar.sidebar-float { overflow: visible; }
+.sidebar.sidebar-float .sidebar-chat-tab { display: flex; }
 
 .sidebar-header {
   display: flex;
@@ -987,6 +1079,36 @@ input[type="range"]::-webkit-slider-thumb {
   background: color-mix(in srgb, var(--red, #f44) 10%, transparent);
   border-color: color-mix(in srgb, var(--red, #f44) 30%, transparent);
 }
+.chat-session-count {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  padding: 1px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.chat-session-count.is-new {
+  color: var(--green);
+  background: var(--green-dim);
+  border-color: color-mix(in srgb, var(--green) 30%, transparent);
+}
+.chat-empty-pick-model {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-glow);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  border-radius: var(--radius);
+  padding: 7px 16px;
+  font-size: 0.88rem; font-weight: 600;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.chat-empty-pick-model:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: var(--accent);
+}
 
 .chat-messages {
   flex: 1;
@@ -1310,6 +1432,19 @@ kbd {
   padding: 10px 14px 10px 14px;
   border-bottom: 1px solid var(--border);
   gap: 8px; min-width: 0;
+  transition: background 0.3s;
+}
+.model-card.ready .model-card-title {
+  background: linear-gradient(90deg, rgba(34,197,94,0.18) 0%, rgba(34,197,94,0.06) 60%, transparent 100%);
+  border-bottom-color: rgba(34,197,94,0.2);
+}
+.model-card.partial .model-card-title {
+  background: linear-gradient(90deg, rgba(245,158,11,0.18) 0%, rgba(245,158,11,0.06) 60%, transparent 100%);
+  border-bottom-color: rgba(245,158,11,0.2);
+}
+.model-card.downloading .model-card-title {
+  background: linear-gradient(90deg, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0.06) 60%, transparent 100%);
+  border-bottom-color: rgba(59,130,246,0.2);
 }
 .model-card-name-row { display: flex; align-items: center; gap: 0; min-width: 0; flex: 1; }
 .model-card .model-name { font-weight: 700; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1451,7 +1586,14 @@ kbd {
   background: linear-gradient(135deg, rgba(59,130,246,0.14) 0%, rgba(34,211,238,0.08) 100%);
 }
 /* Cloud provider cards */
-.cloud-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cloud-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: -14px -16px 10px -16px;
+  padding: 10px 16px;
+  background: linear-gradient(90deg, rgba(59,130,246,0.18) 0%, rgba(59,130,246,0.06) 60%, transparent 100%);
+  border-bottom: 1px solid rgba(59,130,246,0.2);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
 .cloud-provider-name { font-weight: 700; font-size: 0.95rem; }
 .cloud-status-ok { color: var(--green); font-weight: 600; font-size: 0.78rem; margin-left: 8px; }
 .cloud-card-controls { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; width: 100%; }

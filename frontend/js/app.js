@@ -116,14 +116,19 @@ var SwarmLLM = (function() {
       if (compareView) compareView.style.display = tab === 'compare' ? '' : 'none';
       // Show/hide sidebar based on tab
       var sidebar = document.getElementById('sidebar');
+      var edgeTrigger = document.getElementById('sidebar-edge-trigger');
       if (sidebar) {
         if (tab === 'chat') {
           sidebar.style.display = '';
+          sidebar.classList.remove('sidebar-float');
           // Auto-open on desktop, keep collapsed on mobile (user uses hamburger)
           if (window.innerWidth >= 768) sidebar.classList.remove('collapsed');
+          if (edgeTrigger) edgeTrigger.classList.remove('active');
         } else {
-          ui.closeSidebar();
-          sidebar.style.display = 'none';
+          sidebar.style.display = '';
+          sidebar.classList.add('sidebar-float');
+          sidebar.classList.add('collapsed');
+          if (edgeTrigger) edgeTrigger.classList.add('active');
         }
       }
       if (tab === 'chat') {
@@ -361,7 +366,7 @@ var SwarmLLM = (function() {
       sorted.forEach(function(s) {
         var div = document.createElement('div');
         div.className = 'session-item' + (s.id === currentSessionId ? ' active' : '');
-        div.onclick = function() { chat.switchSession(s.id); };
+        div.onclick = function() { chat.switchSession(s.id); if (activeTab !== 'chat') ui.switchTab('chat'); };
         var title = s.title.length > 28 ? s.title.substring(0, 28) + '...' : s.title;
         var timeStr = '';
         if (s.created) {
@@ -430,9 +435,13 @@ var SwarmLLM = (function() {
       var badgeTitle = available ? s.model : 'Model no longer available';
       var headerModelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
       var headerEncIcon = (headerModelItem && headerModelItem.encrypted) ? ' <span class="badge-encrypted" title="Encrypted pipeline active">&#128274;</span>' : '';
+      var msgCount = s.messages.length;
+      var countLabel = msgCount === 0 ? 'New' : (msgCount === 1 ? '1 message' : msgCount + ' messages');
+      var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
+        '<span class="' + countClass + '">' + escapeHtml(countLabel) + '</span>' +
         '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
     },
 
@@ -2867,9 +2876,10 @@ var SwarmLLM = (function() {
 
       syncMobileModelSelect();
       updateChatAvailability(hasAny);
-      // Re-render chat header now that model data is available
-      // (fixes "unavailable" badge on sessions loaded before model fetch completes)
+      // Re-render chat header and session list now that model data is available
+      // (fixes wrong source badges on sessions loaded before model fetch completes)
       if (typeof chat !== 'undefined' && chat.updateChatHeader) chat.updateChatHeader();
+      if (typeof chat !== 'undefined' && chat.renderSessionList) chat.renderSessionList();
     } catch (e) {
       ui.showBanner('error', 'Failed to load models: ' + (e.message || 'network error'));
     }
@@ -2999,6 +3009,8 @@ var SwarmLLM = (function() {
     // Show full model ID on hover so users can see quantization details
     var trigger = document.getElementById('model-dropdown-trigger');
     if (trigger && item) trigger.title = item.id;
+    // Highlight dropdown when no model is selected
+    if (trigger) trigger.classList.toggle('no-model', !currentModel);
   }
 
   function closeModelDropdown() {
@@ -4007,13 +4019,26 @@ var SwarmLLM = (function() {
         '</div>';
     }
 
+    var pickModelHtml = '';
+    if (!modelName) {
+      pickModelHtml = '<button class="chat-empty-pick-model" id="btn-chat-pick-model">&#9660; Select a model to start chatting</button>';
+    }
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
       '<div class="chat-empty-title">' + title + '</div>' +
       encHint +
+      pickModelHtml +
       '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
-      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
-        (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
-        '<kbd>Shift+Enter</kbd> for new line</div>';
+      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px"><kbd>Shift+Enter</kbd> for new line</div>';
+    // Wire up pick-model button after DOM insertion
+    setTimeout(function() {
+      var btn = document.getElementById('btn-chat-pick-model');
+      if (btn) btn.addEventListener('click', function() {
+        var dd = document.getElementById('model-dropdown');
+        var trigger = document.getElementById('model-dropdown-trigger');
+        if (dd) dd.classList.toggle('open');
+        if (trigger) trigger.focus();
+      });
+    }, 0);
     return div;
   }
 
@@ -4706,12 +4731,32 @@ var SwarmLLM = (function() {
 
     // Header
     on('hamburger-btn', 'click', function() { ui.toggleSidebar(); });
+    on('logo', 'click', function() { ui.switchTab('dashboard'); });
     on('btn-shutdown', 'click', function() { shutdown(); });
 
     // Sidebar
     on('sidebar-overlay', 'click', function() { ui.closeSidebar(); });
-    on('btn-new-session', 'click', function() { chat.newSession(); });
+    on('btn-new-session', 'click', function() { chat.newSession(); if (activeTab !== 'chat') ui.switchTab('chat'); });
     on('btn-close-sidebar', 'click', function() { ui.closeSidebar(); });
+
+    // Edge-trigger hover: pop sidebar out when hovering left edge on non-chat tabs
+    // Float-mode sidebar: hover tab or sidebar body to peek; leave to collapse
+    var _sidebarHoverTimer = null;
+    var sidebarEl = document.getElementById('sidebar');
+    if (sidebarEl) {
+      sidebarEl.addEventListener('mouseenter', function() {
+        clearTimeout(_sidebarHoverTimer);
+        if (this.classList.contains('sidebar-float')) this.classList.remove('collapsed');
+      });
+      sidebarEl.addEventListener('mouseleave', function() {
+        if (this.classList.contains('sidebar-float')) {
+          _sidebarHoverTimer = setTimeout(function() {
+            var s = document.getElementById('sidebar');
+            if (s && s.classList.contains('sidebar-float')) s.classList.add('collapsed');
+          }, 120);
+        }
+      });
+    }
 
     // Chat
     on('send-btn', 'click', function() { chat.send(); });
@@ -4845,8 +4890,8 @@ var SwarmLLM = (function() {
       var selectId = target.getAttribute('data-select-model');
       if (selectId) { selectModel(selectId); return; }
 
-      var cloudId = target.getAttribute('data-select-cloud');
-      if (cloudId) { selectModelDropdown(cloudId); ui.showBanner('success', 'Model selected: ' + cloudId); return; }
+      var cloudRow = target.closest('[data-select-cloud]');
+      if (cloudRow) { selectModelDropdown(cloudRow.getAttribute('data-select-cloud')); chat.newSession(); ui.switchTab('chat'); return; }
 
       var toggleTags = target.getAttribute('data-toggle-tags');
       if (toggleTags) {
@@ -5003,11 +5048,14 @@ var SwarmLLM = (function() {
         return;
       }
 
-      // Compare history re-run
-      var historyPrompt = target.getAttribute('data-compare-prompt') || (target.closest('[data-compare-prompt]') || {}).getAttribute && (target.closest('[data-compare-prompt]') || {}).getAttribute('data-compare-prompt');
-      if (historyPrompt) {
-        var promptEl = document.getElementById('compare-prompt');
-        if (promptEl) { promptEl.value = historyPrompt; promptEl.focus(); }
+      // Compare history restore
+      var historyRow = target.closest('[data-compare-idx]');
+      if (historyRow) {
+        var idx = parseInt(historyRow.getAttribute('data-compare-idx'), 10);
+        try {
+          var hist = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+          if (hist[idx]) compare.restoreFromHistory(hist[idx]);
+        } catch (e) {}
         return;
       }
 
@@ -5619,17 +5667,23 @@ var SwarmLLM = (function() {
         if (system.trim()) body.system = system.trim();
 
         var start = performance.now();
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() { controller.abort(); }, 45000);
         return authFetch('/v1/messages', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
+          signal: controller.signal,
         }).then(function(resp) {
+          clearTimeout(timeoutId);
           var elapsed = Math.round(performance.now() - start);
           return resp.json().then(function(data) {
             return { model: modelId, data: data, ok: resp.ok, latency_ms: elapsed };
           });
         }).catch(function(err) {
-          return { model: modelId, error: err.message, ok: false, latency_ms: Math.round(performance.now() - start) };
+          clearTimeout(timeoutId);
+          var msg = err.name === 'AbortError' ? 'Timed out after 45s' : err.message;
+          return { model: modelId, error: msg, ok: false, latency_ms: Math.round(performance.now() - start) };
         });
       });
 
@@ -5660,6 +5714,18 @@ var SwarmLLM = (function() {
             prompt: prompt.trim().substring(0, 200),
             models: compare.selected.slice(),
             timestamp: Date.now(),
+            results: results.map(function(r) {
+              var content = '';
+              if (!r.error && r.ok) {
+                (r.data.content || []).forEach(function(b) { if (b.type === 'text') content += b.text; });
+              }
+              return {
+                model: r.model, ok: r.ok, error: r.error || null,
+                latency_ms: r.latency_ms, content: content,
+                input_tokens: r.ok ? ((r.data.usage || {}).input_tokens || 0) : 0,
+                output_tokens: r.ok ? ((r.data.usage || {}).output_tokens || 0) : 0,
+              };
+            }),
           });
           if (history.length > 20) history = history.slice(0, 20);
           localStorage.setItem('swarmllm_compare_history', JSON.stringify(history));
@@ -5676,15 +5742,46 @@ var SwarmLLM = (function() {
         if (history.length === 0) { container.style.display = 'none'; return; }
         container.style.display = '';
         var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Recent Comparisons</div>';
-        history.slice(0, 10).forEach(function(item) {
+        history.slice(0, 10).forEach(function(item, idx) {
           var ago = compare.timeAgo(item.timestamp);
-          html += '<div class="compare-history-item" data-compare-prompt="' + escapeHtml(item.prompt) + '">' +
+          var modelList = (item.models || []).map(function(m) {
+            return m.split('/').pop().replace(/-\d{4}-\d{2}-\d{2}$/, '');
+          }).join(', ');
+          html += '<div class="compare-history-item" data-compare-idx="' + idx + '">' +
             '<span class="compare-history-prompt">' + escapeHtml(item.prompt) + '</span>' +
-            '<span class="compare-history-meta">' + item.models.length + ' models &middot; ' + ago + '</span>' +
+            '<span class="compare-history-meta">' + escapeHtml(modelList) + ' &middot; ' + ago + '</span>' +
           '</div>';
         });
         container.innerHTML = html;
       } catch (e) { container.style.display = 'none'; }
+    },
+
+    restoreFromHistory: function(item) {
+      var promptEl = document.getElementById('compare-prompt');
+      if (promptEl) promptEl.value = item.prompt;
+
+      var resultsDiv = document.getElementById('compare-results');
+      if (!resultsDiv || !item.results || !item.results.length) return;
+
+      resultsDiv.innerHTML = '';
+      item.results.forEach(function(r) {
+        var card = document.createElement('div');
+        card.className = 'compare-card';
+        card.id = 'compare-card-' + r.model.replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.innerHTML = '<div class="compare-card-body"></div>';
+        resultsDiv.appendChild(card);
+        compare.renderCard({
+          model: r.model, ok: r.ok, error: r.error,
+          latency_ms: r.latency_ms,
+          data: {
+            content: [{ type: 'text', text: r.content || '' }],
+            usage: { input_tokens: r.input_tokens, output_tokens: r.output_tokens },
+          },
+        });
+      });
+
+      var statusDiv = document.getElementById('compare-status');
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Restored from history &middot; ' + compare.timeAgo(item.timestamp) + '</span>'; }
     },
 
     timeAgo: function(ts) {
