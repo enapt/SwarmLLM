@@ -1045,12 +1045,26 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .chat-session-header.visible { display: flex; }
 
-/* Encryption banner — shown below session header when pipeline is encrypted */
+/* Standalone lock badge in chat header */
+.chat-header-lock {
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity var(--transition), transform var(--transition);
+  flex-shrink: 0;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.chat-header-lock:hover { opacity: 0.85; transform: scale(1.15); }
+.chat-header-lock.active { opacity: 1; color: var(--green); }
+
+/* Encryption banner — shown below session header */
 .chat-enc-banner {
-  padding: 6px 20px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 20px;
   font-size: 0.75rem;
   font-weight: 500;
-  letter-spacing: 0.01em;
   border-bottom: 1px solid transparent;
 }
 .chat-enc-banner.enc-full {
@@ -1063,6 +1077,22 @@ input[type="range"]::-webkit-slider-thumb {
   border-color: rgba(34, 211, 238, 0.2);
   color: var(--cyan, #22d3ee);
 }
+.chat-enc-banner.enc-suggest {
+  background: rgba(167, 139, 250, 0.07);
+  border-color: rgba(167, 139, 250, 0.2);
+  color: var(--text-secondary);
+}
+.enc-overhead { opacity: 0.7; font-weight: 400; }
+.enc-banner-btn {
+  margin-left: auto; flex-shrink: 0;
+  font-size: 0.68rem; padding: 2px 10px;
+  border-radius: 10px; font-weight: 600;
+  background: rgba(255,255,255,0.08); border: 1px solid currentColor;
+  color: inherit; cursor: pointer; opacity: 0.85;
+  transition: opacity var(--transition), background var(--transition);
+}
+.enc-banner-btn:hover { opacity: 1; background: rgba(255,255,255,0.15); }
+.enc-banner-btn-enable { color: var(--purple, #a78bfa); border-color: rgba(167,139,250,0.5); }
 
 .chat-session-title {
   font-size: 0.85rem;

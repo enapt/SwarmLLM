@@ -495,30 +495,42 @@ var SwarmLLM = (function() {
       var badgeTitle = available ? s.model : 'Model no longer available';
       var headerModelItem = s.model ? _modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
       var isEncrypted = headerModelItem && headerModelItem.encrypted;
-      var headerEncIcon = isEncrypted ? ' <span class="badge-encrypted active" title="Encrypted pipeline active">&#128274;</span>' : '';
       var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
       var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
       var msgCount = s.messages.length;
       var countLabel = msgCount === 0 ? 'New' : (msgCount === 1 ? '1 message' : msgCount + ' messages');
       var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
+      // Standalone lock — outside the model badge, clickable toggle
+      var safeModelId = escapeHtml(s.model || '');
+      var lockBadge = isEncrypted
+        ? '<span class="chat-header-lock active" data-enc-toggle="' + safeModelId + '" data-enc-ready="1" title="Encrypted pipeline active \u2014 click to disable">&#128274;</span>'
+        : '';
       header.classList.add('visible');
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + headerEncIcon + '</span>';
+        '<span class="' + badgeClass + '" title="' + escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>' +
+        lockBadge;
 
-      // Encryption banner — shown when encrypted pipeline is active
+      // Encryption banner — active, suggestion, or hidden
       if (encBanner) {
+        var modelData = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
+        var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && modelData.shard_count > 1;
+        var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Disable</button>';
+        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">Enable</button>';
         if (isEncrypted) {
-          var modelData = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
           var isFullLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
           if (isFullLocal) {
             encBanner.className = 'chat-enc-banner enc-full';
-            encBanner.innerHTML = '&#128274; <strong>End-to-end encrypted</strong> \u2014 all shards local, your prompts never leave this device';
+            encBanner.innerHTML = '&#128274; <strong>End-to-end encrypted</strong> \u2014 all shards local, prompts never leave this device ' + disableBtn;
           } else {
             encBanner.className = 'chat-enc-banner enc-boomerang';
-            encBanner.innerHTML = '&#128274; <strong>Boomerang routing</strong> \u2014 first &amp; last shard local, middle shards encrypted in transit';
+            encBanner.innerHTML = '&#128274; <strong>Boomerang routing active</strong> \u2014 first &amp; last shard local, middle shards encrypted in transit \u00b7 <span class="enc-overhead">~2\u20135s extra latency per request</span> ' + disableBtn;
           }
+          encBanner.style.display = '';
+        } else if (canBoomerang) {
+          encBanner.className = 'chat-enc-banner enc-suggest';
+          encBanner.innerHTML = '&#128274; <strong>Encrypted pipeline available</strong> \u2014 enable boomerang routing to keep prompts private \u00b7 <span class="enc-overhead">adds ~2\u20135s overhead per request</span> ' + enableBtn;
           encBanner.style.display = '';
         } else {
           encBanner.style.display = 'none';
