@@ -522,15 +522,15 @@ var SwarmLLM = (function() {
           var isFullLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
           if (isFullLocal) {
             encBanner.className = 'chat-enc-banner enc-full';
-            encBanner.innerHTML = '&#128274; <strong>Running locally</strong> \u2014 all shards on this device, prompts never sent over the network ' + disableBtn;
+            encBanner.innerHTML = '&#128274; <strong>Running locally</strong> \u2014 all shards on this device, prompts never leave ' + disableBtn;
           } else {
             encBanner.className = 'chat-enc-banner enc-boomerang';
-            encBanner.innerHTML = '&#128274; <strong>End-to-end encrypted</strong> \u2014 pipeline is distributed but your prompts are encrypted throughout \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
+            encBanner.innerHTML = '&#128274; <strong>Prompt-private</strong> \u2014 your device handles input &amp; output, peers only process encrypted hidden states \u00b7 <span class="enc-overhead">~2\u20135s extra latency</span> ' + disableBtn;
           }
           encBanner.style.display = '';
         } else if (canBoomerang) {
           encBanner.className = 'chat-enc-banner enc-suggest';
-          encBanner.innerHTML = '&#128274; <strong>E2E encryption available</strong> \u2014 you hold the endpoint shards for this model, so your prompts can be encrypted end-to-end \u00b7 <span class="enc-overhead">adds ~2\u20135s per request</span> ' + enableBtn;
+          encBanner.innerHTML = '&#128274; <strong>Prompt privacy available</strong> \u2014 enable to keep raw prompts on this device; peers will only see encrypted hidden states \u00b7 <span class="enc-overhead">adds ~2\u20135s per request</span> ' + enableBtn;
           encBanner.style.display = '';
         } else {
           encBanner.style.display = 'none';
@@ -4236,8 +4236,8 @@ var SwarmLLM = (function() {
       } else {
         icon = '&#128274;';
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
-          '&#128274; End-to-end encrypted \u2014 pipeline distributed, prompts encrypted throughout' +
-          '<br><span style="font-size:0.75rem;color:var(--text-muted)">Expect ~2\u20135s extra latency per request.</span>' +
+          '&#128274; Prompt-private \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
+          '<br><span style="font-size:0.75rem;color:var(--text-muted)">~2\u20135s extra latency per request.</span>' +
           '</div>';
       }
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
