@@ -569,15 +569,16 @@ var SwarmLLM = (function() {
       }
 
       msgs.forEach(function(msg) {
+        var msgOpts = { encrypted: !!msg.encrypted };
         if (msg.images && msg.images.length > 0) {
           var html = '<div style="margin-bottom:6px;">';
           msg.images.forEach(function(url) {
             html += '<img src="' + escapeHtml(url) + '" style="max-height:120px;max-width:200px;border-radius:8px;margin-right:4px;" />';
           });
           html += '</div>' + escapeHtml(msg.content);
-          appendMessageToDOM(msg.role, html, true);
+          appendMessageToDOM(msg.role, html, true, msgOpts);
         } else {
-          appendMessageToDOM(msg.role, msg.content);
+          appendMessageToDOM(msg.role, msg.content, false, msgOpts);
         }
       });
       chat.scrollToBottom();
@@ -616,7 +617,11 @@ var SwarmLLM = (function() {
       var session = sessions[currentSessionId];
       // Store display text and images separately for rendering
       var displayText = text || (images.length > 0 ? '[Image]' : '');
-      session.messages.push({ role: 'user', content: displayText, images: images.map(function(i) { return i.data_url; }) });
+      // Snapshot encryption state at the moment this message is sent
+      var _sendModel = session.model || currentModel || '';
+      var _sendModelData = _sendModel ? (window._lastModelsData || []).find(function(m) { return m.id === _sendModel; }) : null;
+      var msgEncrypted = !!(_sendModelData && _sendModelData.encrypted_pipeline && _sendModelData.shard_count > 1);
+      session.messages.push({ role: 'user', content: displayText, images: images.map(function(i) { return i.data_url; }), encrypted: msgEncrypted });
 
       // Auto-title from first message
       if (session.messages.length === 1) {
@@ -635,10 +640,10 @@ var SwarmLLM = (function() {
         userHtml += '</div>';
       }
       userHtml += escapeHtml(displayText);
-      appendMessageToDOM('user', userHtml, true);
+      appendMessageToDOM('user', userHtml, true, { encrypted: msgEncrypted });
 
       // Prepare assistant message for streaming
-      var assistantEl = appendMessageToDOM('assistant', '');
+      var assistantEl = appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted });
       var contentEl = assistantEl.querySelector('.msg-content');
       contentEl.innerHTML = '<span class="typing-indicator">Thinking...</span>';
 
@@ -777,7 +782,7 @@ var SwarmLLM = (function() {
       timerTarget.appendChild(timerEl);
 
       if (fullContent) {
-        session.messages.push({ role: 'assistant', content: fullContent });
+        session.messages.push({ role: 'assistant', content: fullContent, encrypted: msgEncrypted });
         chat.saveSessions();
       }
 
@@ -4256,7 +4261,8 @@ var SwarmLLM = (function() {
     bubble.className = 'msg-bubble';
 
     var label = role === 'user' ? 'You' : 'Assistant';
-    bubble.innerHTML = '<div class="msg-role">' + label + sourceHtml + '</div><div class="msg-content"></div>';
+    var encLock = (opts && opts.encrypted) ? ' <span class="msg-enc-lock" title="Sent with E2E encryption">&#128274;</span>' : '';
+    bubble.innerHTML = '<div class="msg-role">' + label + sourceHtml + encLock + '</div><div class="msg-content"></div>';
     if (isHtml) {
       bubble.querySelector('.msg-content').innerHTML = content;
     } else {
