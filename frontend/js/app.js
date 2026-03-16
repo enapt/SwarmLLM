@@ -999,23 +999,19 @@ var SwarmLLM = (function() {
           cloudModels.forEach(function(cm) { _pset[cm.provider || 'cloud'] = 1; });
           statProviders = Object.keys(_pset).length;
         }
-        var statTotal = models.length + statCloudTotal;
-        document.getElementById('stat-chip-total-val').textContent = statTotal;
         document.getElementById('stat-chip-ready-val').textContent = statReady;
         document.getElementById('stat-chip-network-val').textContent = statNet;
         document.getElementById('stat-chip-cloud-val').textContent = statCloudTotal;
         document.getElementById('stat-chip-providers-val').textContent = statProviders;
         statsBar.style.display = '';
-        // Hide remote chip when 0 (no clutter)
+        // Remote chip: only show when > 0
         var netChip = document.getElementById('stat-chip-network');
         if (netChip) netChip.style.display = statNet > 0 ? '' : 'none';
-        // Hide cloud chips if no cloud models
-        var cloudChip = document.getElementById('stat-chip-cloud');
-        var provChip = document.getElementById('stat-chip-providers');
-        var sep2 = statsBar.querySelectorAll('.models-stat-sep')[1];
-        if (cloudChip) cloudChip.style.display = hasCloud ? '' : 'none';
-        if (provChip) provChip.style.display = hasCloud ? '' : 'none';
-        if (sep2) sep2.style.display = hasCloud ? '' : 'none';
+        // Cloud group + separator: only show when cloud providers connected
+        var cloudGroup = document.getElementById('stat-group-cloud');
+        var sep = statsBar.querySelector('.models-stat-sep');
+        if (cloudGroup) cloudGroup.style.display = hasCloud ? '' : 'none';
+        if (sep) sep.style.display = hasCloud ? '' : 'none';
       }
 
       // ── Swarm models section ─────────────────────────────────────────────────

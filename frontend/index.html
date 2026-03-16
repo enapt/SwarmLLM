@@ -686,13 +686,19 @@
               <button class="btn btn-sm" id="btn-browse-hf">Browse HuggingFace</button>
             </div>
             <div id="models-stats-bar" class="models-stats-bar" style="display:none">
-              <span class="models-stat-chip" id="stat-chip-total"><span class="models-stat-value" id="stat-chip-total-val">0</span> total</span>
+              <span class="models-stat-group">
+                <img src="/static/icons/swarm.svg" width="13" height="13" alt="" aria-hidden="true" style="opacity:0.7;vertical-align:middle">
+                <span class="models-stat-label">Swarm</span>
+                <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span> ready</span>
+                <span class="models-stat-chip dim" id="stat-chip-network" style="display:none"><span class="models-stat-value" id="stat-chip-network-val">0</span> remote</span>
+              </span>
               <span class="models-stat-sep"></span>
-              <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span> ready</span>
-              <span class="models-stat-chip dim" id="stat-chip-network"><span class="models-stat-value" id="stat-chip-network-val">0</span> remote</span>
-              <span class="models-stat-sep"></span>
-              <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span> cloud models</span>
-              <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span> providers</span>
+              <span class="models-stat-group" id="stat-group-cloud" style="display:none">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="opacity:0.7;vertical-align:middle;flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>
+                <span class="models-stat-label">Cloud</span>
+                <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span> models</span>
+                <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span> providers</span>
+              </span>
             </div>
             <div id="models-container">
               <div id="models-loading">

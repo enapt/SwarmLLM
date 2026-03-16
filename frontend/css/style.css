@@ -1657,6 +1657,8 @@ kbd {
   margin-bottom: 10px;
   font-size: 0.75rem; color: var(--text-secondary);
 }
+.models-stat-group { display: inline-flex; align-items: center; gap: 6px; }
+.models-stat-label { font-weight: 600; font-size: 0.72rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
 .models-stat-chip { display: inline-flex; align-items: center; gap: 4px; }
 .models-stat-chip.dim { color: var(--text-muted); }
 .models-stat-chip.accent .models-stat-value { color: var(--accent); }
