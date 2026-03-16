@@ -1093,22 +1093,6 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--green-dim);
   border-color: color-mix(in srgb, var(--green) 30%, transparent);
 }
-.chat-empty-pick-model {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--accent-glow);
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  color: var(--accent);
-  border-radius: var(--radius);
-  padding: 7px 16px;
-  font-size: 0.88rem; font-weight: 600;
-  cursor: pointer;
-  margin-top: 4px;
-  transition: background 0.15s, border-color 0.15s;
-}
-.chat-empty-pick-model:hover {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-  border-color: var(--accent);
-}
 
 .chat-messages {
   flex: 1;

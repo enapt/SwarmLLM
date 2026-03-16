@@ -4019,26 +4019,13 @@ var SwarmLLM = (function() {
         '</div>';
     }
 
-    var pickModelHtml = '';
-    if (!modelName) {
-      pickModelHtml = '<button class="chat-empty-pick-model" id="btn-chat-pick-model">&#9660; Select a model to start chatting</button>';
-    }
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
       '<div class="chat-empty-title">' + title + '</div>' +
       encHint +
-      pickModelHtml +
       '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
-      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px"><kbd>Shift+Enter</kbd> for new line</div>';
-    // Wire up pick-model button after DOM insertion
-    setTimeout(function() {
-      var btn = document.getElementById('btn-chat-pick-model');
-      if (btn) btn.addEventListener('click', function() {
-        var dd = document.getElementById('model-dropdown');
-        var trigger = document.getElementById('model-dropdown-trigger');
-        if (dd) dd.classList.toggle('open');
-        if (trigger) trigger.focus();
-      });
-    }, 0);
+      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
+        (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
+        '<kbd>Shift+Enter</kbd> for new line</div>';
     return div;
   }
 
