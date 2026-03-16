@@ -553,6 +553,12 @@
 
       <!-- Dashboard view -->
       <div class="view" id="view-dashboard">
+        <!-- Offline cover — shown while WebSocket is disconnected -->
+        <div class="dashboard-offline-cover" id="dashboard-offline-cover">
+          <div class="cover-spinner"></div>
+          <div class="cover-msg">Connecting to SwarmLLM…</div>
+          <div class="cover-sub">Waiting for the daemon to respond</div>
+        </div>
         <div class="container">
           <!-- Status banner -->
           <div id="status-banner"></div>

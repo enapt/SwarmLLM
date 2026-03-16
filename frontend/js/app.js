@@ -2675,6 +2675,7 @@ var SwarmLLM = (function() {
     if (wsBannerTimer) { clearTimeout(wsBannerTimer); wsBannerTimer = null; }
     banner.innerHTML = '<div class="ws-banner-' + escapeHtml(type) + '">' + escapeHtml(text) + '</div>';
     banner.classList.add('show');
+    setDashboardCover(type !== 'connected');
   }
 
   function hideWsBanner(delay) {
@@ -2683,15 +2684,33 @@ var SwarmLLM = (function() {
     if (wsBannerTimer) clearTimeout(wsBannerTimer);
     wsBannerTimer = setTimeout(function() {
       banner.classList.remove('show');
+      setDashboardCover(false);
     }, delay || 0);
   }
 
+  function setDashboardCover(show) {
+    var cover = document.getElementById('dashboard-offline-cover');
+    if (!cover) return;
+    if (show) {
+      cover.classList.add('visible');
+      var msg = wsWasConnected ? 'Reconnecting to SwarmLLM\u2026' : 'Connecting to SwarmLLM\u2026';
+      var sub = wsWasConnected ? 'Lost connection \u2014 retrying every 3 seconds' : 'Waiting for the daemon to respond';
+      cover.querySelector('.cover-msg').textContent = msg;
+      cover.querySelector('.cover-sub').textContent = sub;
+    } else {
+      cover.classList.remove('visible');
+    }
+  }
+
   function connectWebSocket() {
+    // Show cover on first connect attempt (before daemon has responded)
+    if (!wsWasConnected) setDashboardCover(true);
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
 
     ws.onopen = function() {
       wsHealthy = true;
+      setDashboardCover(false);
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(1.0);
       // Pause REST polling while WebSocket is delivering live updates
       pollTimers.forEach(function(t) { clearInterval(t); });
@@ -2754,6 +2773,10 @@ var SwarmLLM = (function() {
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(0.3);
       if (wsWasConnected) {
         showWsBanner('disconnected', I18n.t('errors.connection_lost'));
+        // Clear stale peer state so we don't show ghost peers while disconnected
+        var peersEl = document.getElementById('stat-peers');
+        if (peersEl) peersEl.textContent = '0';
+        dashboard.renderPeers([]);
       }
       // Resume REST polling as fallback while WebSocket is disconnected
       startPolling();

@@ -2158,6 +2158,32 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
   50% { opacity: 1; }
 }
 
+/* ---- Dashboard offline cover ---- */
+.dashboard-offline-cover {
+  position: absolute; inset: 0; z-index: 50;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px;
+  background: rgba(var(--bg-base-rgb, 10, 14, 20), 0.82);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.dashboard-offline-cover.visible { opacity: 1; pointer-events: all; }
+#view-dashboard { position: relative; }
+.cover-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,0.12);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.cover-msg {
+  font-size: 0.95rem; font-weight: 600; color: var(--text-primary);
+}
+.cover-sub {
+  font-size: 0.78rem; color: var(--text-muted);
+}
+
 /* ---- Cancel download button ---- */
 .shard-cancel-btn {
   background: none;
