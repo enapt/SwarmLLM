@@ -128,7 +128,7 @@ pub async fn update_config(
     Json(body): Json<ConfigUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Persist the updated config to the config TOML file.
-    // For now, acknowledge the update — runtime config changes require daemon restart.
+    // Note: most config changes take effect after daemon restart.
     let config_path = state.config.node.data_dir.join("config.toml");
 
     // Build a partial config update

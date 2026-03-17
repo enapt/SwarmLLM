@@ -246,7 +246,7 @@ pub(crate) async fn dispatch_network_messages(
                                     "DIAG: dispatcher received LayerForward, spawning handler"
                                 );
                                 // SEC: Per-peer concurrent forward limit to prevent single-peer exhaustion
-                                let peer_sender = authenticated_sender.clone().unwrap();
+                                let peer_sender = authenticated_sender.clone().expect("guarded by Some check above");
                                 let peer_count = peer_forward_counts
                                     .entry(peer_sender.clone())
                                     .or_insert_with(|| std::sync::atomic::AtomicUsize::new(0));
