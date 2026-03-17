@@ -172,13 +172,10 @@ impl ShardRebalancer {
         // Re-announce our own shard holdings to help the new peer
         // discover what's available on the network.
         let local_node_id = self.shared_state.identity.node_id().clone();
-        let mut our_shards = Vec::new();
-
-        for (shard_id, holders) in self.shared_state.model_registry.all_shard_entries() {
-            if holders.contains(&local_node_id) {
-                our_shards.push(shard_id);
-            }
-        }
+        let our_shards = self
+            .shared_state
+            .model_registry
+            .shards_for_node(&local_node_id);
 
         if !our_shards.is_empty() {
             let announce = crate::types::ShardAnnounce {
@@ -257,16 +254,29 @@ impl ShardRebalancer {
     }
 
     /// Find all shards that are now under-replicated because `departed_peer` left.
+    /// Uses the reverse index to only check shards the departed peer held,
+    /// making this O(shards_held_by_peer) instead of O(all_shards).
     fn find_underreplicated_shards(&self, departed_peer: &NodeId) -> Vec<(ShardId, Vec<NodeId>)> {
         let mut result = Vec::new();
 
-        for (shard_id, holders) in self.shared_state.model_registry.all_shard_entries() {
-            // Remove the departed peer from the holder list
-            let remaining: Vec<NodeId> =
-                holders.into_iter().filter(|h| h != departed_peer).collect();
+        // Use reverse index: only check shards the departed peer was holding
+        let departed_shards = self
+            .shared_state
+            .model_registry
+            .shards_for_node(departed_peer);
 
-            if remaining.len() < MIN_REPLICATION {
-                result.push((shard_id, remaining));
+        if departed_shards.is_empty() {
+            // Fallback: departed peer had no reverse-index entries (possible if it
+            // was removed before we updated). Do a scoped scan by model.
+            return result;
+        }
+
+        for shard_id in departed_shards {
+            let holders = self.shared_state.model_registry.shard_holders(&shard_id);
+            // The departed peer has already been removed from shard_holders
+            // by remove_peer_from_all_shards(), so `holders` is the remaining set.
+            if holders.len() < MIN_REPLICATION {
+                result.push((shard_id, holders));
             }
         }
 

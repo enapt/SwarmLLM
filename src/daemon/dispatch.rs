@@ -1115,6 +1115,73 @@ pub(crate) async fn dispatch_network_messages(
                                     "AllReduce response received"
                                 );
                             }
+                            // Regional shard summary gossip (Phase 18)
+                            SwarmMessage::RegionShardSummary(summary) => {
+                                // Reject stale summaries (>15min old)
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                if now_ms.saturating_sub(summary.timestamp_ms) > 15 * 60 * 1000 {
+                                    tracing::debug!(
+                                        region = %summary.region,
+                                        model = %summary.model_id,
+                                        age_ms = now_ms.saturating_sub(summary.timestamp_ms),
+                                        "Dropping stale RegionShardSummary"
+                                    );
+                                    continue;
+                                }
+                                let key = (summary.region.clone(), summary.model_id.clone());
+                                // Keep the most recent summary per (region, model)
+                                let should_update = shared_state
+                                    .region_shard_summaries
+                                    .get(&key)
+                                    .map(|existing| summary.timestamp_ms > existing.timestamp_ms)
+                                    .unwrap_or(true);
+                                if should_update {
+                                    tracing::debug!(
+                                        region = %summary.region,
+                                        model = %summary.model_id,
+                                        node_count = summary.region_node_count,
+                                        shard_entries = summary.shard_counts.len(),
+                                        "RegionShardSummary updated"
+                                    );
+                                    shared_state.region_shard_summaries.insert(key, summary);
+                                }
+                            }
+
+                            // Model demand gossip (Phase 18)
+                            SwarmMessage::ModelDemandGossip(demand) => {
+                                // Reject stale demand (>15min old)
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                if now_ms.saturating_sub(demand.timestamp_ms) > 15 * 60 * 1000 {
+                                    tracing::debug!(
+                                        model = %demand.model_id,
+                                        region = %demand.region,
+                                        "Dropping stale ModelDemandGossip"
+                                    );
+                                    continue;
+                                }
+                                let key = (demand.model_id.clone(), demand.region.clone());
+                                // EMA blend: 0.8 * old + 0.2 * incoming
+                                let new_rate = if let Some(existing) = shared_state.region_demand.get(&key) {
+                                    *existing * 0.8 + demand.decayed_rate * 0.2
+                                } else {
+                                    demand.decayed_rate
+                                };
+                                shared_state.region_demand.insert(key, new_rate);
+                                tracing::debug!(
+                                    model = %demand.model_id,
+                                    region = %demand.region,
+                                    decayed_rate = demand.decayed_rate,
+                                    blended_rate = new_rate,
+                                    "ModelDemandGossip processed"
+                                );
+                            }
+
                             // Other messages handled by NetworkManager
                             _ => {}
                         }

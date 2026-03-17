@@ -87,5 +87,9 @@
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
   "dl.state_complete": "Complete",
-  "dl.state_failed": "Failed"
+  "dl.state_failed": "Failed",
+  "map.demand_rate": "อัตราความต้องการ",
+  "map.coverage_gaps": "ช่องว่างการครอบคลุม",
+  "map.regional_health": "สุขภาพภูมิภาค",
+  "map.replication_target": "เป้าหมายการจำลอง"
 }

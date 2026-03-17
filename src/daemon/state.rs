@@ -263,6 +263,13 @@ pub struct SharedState {
     pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
     /// Model process pool: one subprocess per loaded model for GPU memory isolation.
     pub model_process_pool: Arc<crate::inference::process_pool::ModelProcessPool>,
+    /// Regional shard summaries from gossip. Key: (region, model_id).
+    /// Updated by RegionShardSummary gossip dispatch + local broadcast.
+    pub region_shard_summaries:
+        DashMap<(String, crate::types::ModelId), crate::types::RegionShardSummary>,
+    /// Per-(model, region) EMA-decayed request rate from demand gossip.
+    /// Updated by ModelDemandGossip dispatch + local popularity decay tick.
+    pub region_demand: DashMap<(crate::types::ModelId, String), f64>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -725,6 +732,8 @@ impl SharedState {
             model_process_pool: Arc::new(crate::inference::process_pool::ModelProcessPool::new(
                 config.node.data_dir.clone(),
             )),
+            region_shard_summaries: DashMap::new(),
+            region_demand: DashMap::new(),
             shutdown_tx,
         });
 

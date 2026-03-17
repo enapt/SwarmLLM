@@ -35,6 +35,9 @@ pub const TOPIC_IDENTITY: &str = "swarm/identity";
 /// GossipSub topic for device pool management.
 pub const TOPIC_POOLS: &str = "swarm/pools";
 
+/// GossipSub topic for regional shard summaries and demand gossip.
+pub const TOPIC_REGIONS: &str = "swarm/regions";
+
 /// Maximum message size for request_response protocol (256 MB).
 const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 /// Maximum JSON control message size (4 MB).

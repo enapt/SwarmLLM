@@ -31,6 +31,44 @@ struct NodeCandidate {
     can_be_first: bool,
     /// True if this node has the final shard (output head, needed for is_last).
     can_be_last: bool,
+    /// Region proximity score: 1.0 same region, 0.5 adjacent, 0.2 distant, 0.7 unknown.
+    region_score: f32,
+}
+
+/// Static adjacency table for adjacent regions (0.5 score).
+/// These pairs represent geographically close countries where cross-region
+/// latency is typically acceptable for inference.
+const ADJACENT_REGIONS: &[(&str, &str)] = &[
+    ("US", "CA"),
+    ("US", "MX"),
+    ("DE", "FR"),
+    ("DE", "NL"),
+    ("DE", "AT"),
+    ("DE", "CH"),
+    ("DE", "PL"),
+    ("FR", "ES"),
+    ("FR", "IT"),
+    ("FR", "BE"),
+    ("GB", "IE"),
+    ("GB", "FR"),
+    ("GB", "NL"),
+    ("JP", "KR"),
+    ("JP", "TW"),
+    ("AU", "NZ"),
+    ("SE", "NO"),
+    ("SE", "FI"),
+    ("SE", "DK"),
+    ("BR", "AR"),
+    ("SG", "MY"),
+    ("IN", "BD"),
+];
+
+/// Check if two regions are adjacent.
+fn regions_adjacent(a: &str, b: &str) -> bool {
+    ADJACENT_REGIONS.iter().any(|(x, y)| {
+        (x.eq_ignore_ascii_case(a) && y.eq_ignore_ascii_case(b))
+            || (x.eq_ignore_ascii_case(b) && y.eq_ignore_ascii_case(a))
+    })
 }
 
 impl PipelineScheduler {
@@ -120,11 +158,15 @@ impl PipelineScheduler {
                 shard_id: local_cand.shard_id.clone(),
                 layer_range: (0, num_layers),
             };
+            // Still detect TP groups — LAN peers covering the same range
+            // can participate in tensor parallelism even in single-segment mode.
+            let tp_groups =
+                self.detect_tp_groups(std::slice::from_ref(&segment), &candidates, &manifest);
             return Ok(PipelineAssignment {
                 request_id,
                 segments: vec![segment],
                 standbys: vec![],
-                tp_groups: vec![],
+                tp_groups,
             });
         }
 
@@ -264,6 +306,13 @@ impl PipelineScheduler {
                 health_ping_load.max(local_pipeline_load)
             };
 
+            // Compute region_score: 1.0 same, 0.5 adjacent, 0.2 distant, 0.7 unknown.
+            let region_score = if &node_id == local_node_id {
+                1.0 // Local node is always "same region"
+            } else {
+                self.compute_region_score(&node_id, local_node_id)
+            };
+
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -273,6 +322,7 @@ impl PipelineScheduler {
                 trust_score,
                 can_be_first,
                 can_be_last,
+                region_score,
             });
         }
 
@@ -283,14 +333,19 @@ impl PipelineScheduler {
                 ranges = ?c.available_ranges,
                 can_be_first = c.can_be_first,
                 can_be_last = c.can_be_last,
+                region_score = c.region_score,
                 "Pipeline candidate"
             );
         }
 
-        // Sort: latency ASC, load ASC, trust DESC
+        // Sort: region_score DESC, latency ASC, load ASC, trust DESC.
+        // Region only wins as a tiebreaker — it prevents cross-continent routing
+        // when same-region alternatives exist, not a hard constraint.
         candidates.sort_by(|a, b| {
-            a.latency_ms
-                .cmp(&b.latency_ms)
+            b.region_score
+                .partial_cmp(&a.region_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.latency_ms.cmp(&b.latency_ms))
                 .then_with(|| {
                     a.load
                         .partial_cmp(&b.load)
@@ -312,6 +367,40 @@ impl PipelineScheduler {
         );
 
         candidates
+    }
+
+    /// Compute region proximity score for a remote node relative to us.
+    /// Returns 1.0 same, 0.5 adjacent, 0.2 distant, 0.7 unknown.
+    fn compute_region_score(&self, node_id: &NodeId, _local_node_id: &NodeId) -> f32 {
+        // Get our region
+        let our_region = if let Ok(guard) = self.shared_state.detected_region.try_read() {
+            guard.as_ref().map(|r| r.to_uppercase())
+        } else {
+            self.shared_state
+                .config
+                .identity
+                .region
+                .as_ref()
+                .map(|r| r.to_uppercase())
+        };
+        let our_region = match our_region {
+            Some(r) => r,
+            None => return 0.7, // Our region unknown
+        };
+
+        // Get the candidate node's region
+        let peer_region = self.shared_state.peer_registry.get(node_id).and_then(|p| {
+            p.capability
+                .as_ref()
+                .and_then(|c| c.region.as_ref().map(|r| r.to_uppercase()))
+        });
+
+        match peer_region {
+            Some(ref r) if *r == our_region => 1.0,
+            Some(ref r) if regions_adjacent(&our_region, r) => 0.5,
+            Some(_) => 0.2,
+            None => 0.7, // Unknown region — treat as neutral
+        }
     }
 
     /// Get latency and trust for a peer. Local node gets zero latency and max trust.
@@ -679,11 +768,34 @@ impl PipelineScheduler {
                             .any(|r| r.0 <= segment.layer_range.0 && r.1 >= segment.layer_range.1)
                 })
                 .collect();
-            // Local node first, then by ascending latency
+            // For standby anti-affinity: prefer DIFFERENT regions from primary
+            // so a regional outage doesn't kill both primary and standby.
+            // Local node first (most reliable), then different-region, then by latency.
+            let primary_region_score = candidates
+                .iter()
+                .find(|c| c.node_id == segment.node_id)
+                .map(|c| c.region_score)
+                .unwrap_or(0.7);
             eligible.sort_by(|a, b| {
                 let la = u32::from(a.node_id != *local_node_id);
                 let lb = u32::from(b.node_id != *local_node_id);
-                la.cmp(&lb).then_with(|| a.latency_ms.cmp(&b.latency_ms))
+                // Anti-affinity: if primary is same-region (1.0), prefer standbys
+                // with lower region_score (different region). If primary is distant,
+                // prefer same-region standbys for faster failover.
+                let region_cmp = if primary_region_score > 0.8 {
+                    // Primary is same-region — prefer different-region standbys
+                    a.region_score
+                        .partial_cmp(&b.region_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                } else {
+                    // Primary is distant — prefer same-region standbys
+                    b.region_score
+                        .partial_cmp(&a.region_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                };
+                la.cmp(&lb)
+                    .then(region_cmp)
+                    .then_with(|| a.latency_ms.cmp(&b.latency_ms))
             });
             if let Some(backup) = eligible.first() {
                 standbys.push(PipelineSegment {
@@ -946,6 +1058,7 @@ mod tests {
                 trust_score: 1.0,
                 can_be_first: true,
                 can_be_last: true,
+                region_score: 1.0,
             },
             NodeCandidate {
                 node_id: NodeId([2u8; 32]),
@@ -959,6 +1072,7 @@ mod tests {
                 trust_score: 0.8,
                 can_be_first: false,
                 can_be_last: false,
+                region_score: 0.7,
             },
         ];
 

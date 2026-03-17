@@ -87,5 +87,9 @@
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
   "dl.state_complete": "Complete",
-  "dl.state_failed": "Failed"
+  "dl.state_failed": "Failed",
+  "map.demand_rate": "수요율",
+  "map.coverage_gaps": "커버리지 갭",
+  "map.regional_health": "지역 상태",
+  "map.replication_target": "복제 대상"
 }

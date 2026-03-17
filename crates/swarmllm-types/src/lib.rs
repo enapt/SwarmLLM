@@ -649,6 +649,10 @@ pub enum SwarmMessage {
     // Tensor Parallelism — AllReduce coordination
     TpAllReduceRequest(TpAllReduceRequest),
     TpAllReduceResponse(TpAllReduceResponse),
+
+    // Geo-aware regional gossip — Phase 18
+    RegionShardSummary(RegionShardSummary),
+    ModelDemandGossip(ModelDemandGossip),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -843,6 +847,40 @@ pub struct HfSourceGossip {
     /// Filename of the mmproj GGUF on HuggingFace (for VLM models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj_filename: Option<String>,
+}
+
+/// Regional shard summary — compact per-region model availability gossip.
+/// Published periodically by each node for its region on `swarm/regions`.
+/// O(regions * models) entries (~1KB each), enabling geo-aware auto-manage
+/// decisions without iterating all holders.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegionShardSummary {
+    /// ISO 3166-1 alpha-2 region code (e.g. "US", "DE").
+    pub region: String,
+    pub model_id: ModelId,
+    /// Per-shard holder count in this region: (shard_index, holder_count).
+    pub shard_counts: Vec<(u32, u32)>,
+    /// Total nodes in this region (as seen by the publisher).
+    pub region_node_count: u32,
+    pub publisher: NodeId,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
+}
+
+/// Model demand gossip — EMA-smoothed request rate per model per region.
+/// Published alongside RegionShardSummary to inform replication targets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelDemandGossip {
+    pub model_id: ModelId,
+    /// ISO 3166-1 alpha-2 region code.
+    pub region: String,
+    /// Exponentially decayed request rate (requests per 10-minute window).
+    pub decayed_rate: f64,
+    /// Raw request count in the latest window (before decay).
+    pub window_requests: u64,
+    pub publisher: NodeId,
+    /// Milliseconds since Unix epoch.
+    pub timestamp_ms: u64,
 }
 
 /// Peer Exchange response — a list of known peer multiaddrs.

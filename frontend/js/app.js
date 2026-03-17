@@ -4776,9 +4776,65 @@ var SwarmLLM = (function() {
         }
       }
 
+      // Color-code regions by coverage health (Phase 18)
+      // green = all models covered, yellow = some gaps, red = critical gaps
+      for (var ci = 0; ci < codes.length; ci++) {
+        var cc = codes[ci];
+        var r = regions[cc];
+        var el = document.getElementById('region-' + cc);
+        if (!el || !counts[cc]) continue;
+        if (r.coverage_gaps && r.coverage_gaps.length > 0) {
+          var gapRatio = r.coverage_gaps.length / Math.max(Object.keys(r.models || {}).length + r.coverage_gaps.length, 1);
+          if (gapRatio > 0.5) {
+            // Critical: >50% models missing — red tint
+            el.style.stroke = 'rgba(239,68,68,' + (0.5 + (counts[cc] / Math.max(maxCount, 1)) * 0.5).toFixed(2) + ')';
+          } else {
+            // Some gaps — yellow tint
+            el.style.stroke = 'rgba(234,179,8,' + (0.5 + (counts[cc] / Math.max(maxCount, 1)) * 0.5).toFixed(2) + ')';
+          }
+        }
+      }
+
+      // Regional health summary bar
+      var totalGaps = 0;
+      var topDemandModel = '';
+      var topDemandRate = 0;
+      for (var di = 0; di < codes.length; di++) {
+        var rd = regions[codes[di]];
+        if (rd.coverage_gaps) totalGaps += rd.coverage_gaps.length;
+        if (rd.demand) {
+          var dkeys = Object.keys(rd.demand);
+          for (var dk = 0; dk < dkeys.length; dk++) {
+            if (rd.demand[dkeys[dk]] > topDemandRate) {
+              topDemandRate = rd.demand[dkeys[dk]];
+              topDemandModel = dkeys[dk];
+            }
+          }
+        }
+      }
+
       var statsEl = document.getElementById('map-stats-text');
-      if (statsEl) statsEl.textContent = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
+      var statsText = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
+      if (statsEl) statsEl.textContent = statsText;
       document.getElementById('map-legend-max').textContent = maxCount;
+
+      // Show regional health summary below stats
+      var healthEl = document.getElementById('map-regional-health');
+      if (!healthEl) {
+        healthEl = document.createElement('div');
+        healthEl.id = 'map-regional-health';
+        healthEl.className = 'text-xs text-muted mt-1';
+        if (statsEl && statsEl.parentNode) statsEl.parentNode.appendChild(healthEl);
+      }
+      if (healthEl) {
+        var healthText = totalRegions + (totalRegions === 1 ? ' region' : ' regions');
+        if (totalGaps > 0) healthText += ' | ' + totalGaps + ' coverage gap' + (totalGaps !== 1 ? 's' : '');
+        if (topDemandModel && topDemandRate > 0.1) {
+          var shortName = topDemandModel.length > 20 ? topDemandModel.substring(0, 20) + '...' : topDemandModel;
+          healthText += ' | top demand: ' + shortName + ' (' + topDemandRate.toFixed(1) + ' req/10m)';
+        }
+        healthEl.textContent = healthText;
+      }
     },
 
     applyFilter: function() {
@@ -4870,11 +4926,18 @@ var SwarmLLM = (function() {
             for (var i = 0; i < Math.min(mids.length, 5); i++) {
               var mName = formatModelDisplayName(mids[i]);
               if (mName.length > 22) mName = mName.substring(0, 22) + '...';
-              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mName) + '</span><span class="mono">' + escapeHtml(String(info.models[mids[i]])) + '</span></div>';
+              var demandStr = '';
+              if (info.demand && info.demand[mids[i]]) {
+                demandStr = ' <span style="color:var(--color-accent)">' + info.demand[mids[i]].toFixed(1) + ' req/10m</span>';
+              }
+              html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + escapeHtml(mName) + '</span><span class="mono">' + escapeHtml(String(info.models[mids[i]])) + demandStr + '</span></div>';
             }
             if (mids.length > 5) html += '<div class="text-muted">+' + (mids.length - 5) + ' more</div>';
             html += '</div>';
           }
+        }
+        if (info.coverage_gaps && info.coverage_gaps.length > 0) {
+          html += '<div class="mt-1" style="font-size:0.7rem;color:var(--color-warning)">' + I18n.t('map.coverage_gaps') + ': ' + info.coverage_gaps.length + ' model' + (info.coverage_gaps.length !== 1 ? 's' : '') + '</div>';
         }
       } else {
         html += '<span class="text-muted" style="margin-left:8px">No nodes</span>';

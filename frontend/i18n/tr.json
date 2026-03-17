@@ -87,5 +87,9 @@
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
   "dl.state_complete": "Complete",
-  "dl.state_failed": "Failed"
+  "dl.state_failed": "Failed",
+  "map.demand_rate": "Talep oranı",
+  "map.coverage_gaps": "Kapsam boşlukları",
+  "map.regional_health": "Bölgesel sağlık",
+  "map.replication_target": "Çoğaltma hedefi"
 }

@@ -61,6 +61,7 @@ impl HealthMonitor {
                     self.send_health_ping(nonce).await;
                     self.broadcast_capabilities().await;
                     self.broadcast_manifests().await;
+                    self.broadcast_region_summary().await;
                     self.check_peer_health().await;
                     self.cleanup_acquisition_progress();
                     self.cleanup_stale_channels();
@@ -233,6 +234,118 @@ impl HealthMonitor {
         }
     }
 
+    /// Broadcast compact per-region shard summaries and demand gossip.
+    /// Published on every 30s tick to `swarm/regions` topic.
+    async fn broadcast_region_summary(&self) {
+        // Determine our region — skip if unknown
+        let our_region = {
+            let detected = self.shared_state.detected_region.read().await;
+            match detected.as_ref() {
+                Some(r) => r.to_uppercase(),
+                None => {
+                    if let Some(ref r) = self.shared_state.config.identity.region {
+                        r.to_uppercase()
+                    } else {
+                        return; // No region — nothing to broadcast
+                    }
+                }
+            }
+        };
+
+        let our_id = self.shared_state.identity.node_id().clone();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // Count same-region peers (including self)
+        let mut region_node_count: u32 = 1; // self
+        for peer in self.shared_state.peer_registry.iter() {
+            if let Some(ref cap) = peer.value().capability {
+                if let Some(ref r) = cap.region {
+                    if r.to_uppercase() == our_region {
+                        region_node_count = region_node_count.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        // For each model, count same-region shard holders
+        for manifest in self.shared_state.model_registry.models() {
+            let mut shard_counts: Vec<(u32, u32)> = Vec::new();
+            for shard_info in &manifest.shards {
+                let sid = crate::types::ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard_info.index,
+                };
+                let holders = self.shared_state.model_registry.shard_holders(&sid);
+                // Count holders in our region
+                let mut regional_count: u32 = 0;
+                for holder in &holders {
+                    if *holder == our_id {
+                        regional_count += 1;
+                        continue;
+                    }
+                    if let Some(peer) = self.shared_state.peer_registry.get(holder) {
+                        if let Some(ref cap) = peer.capability {
+                            if let Some(ref r) = cap.region {
+                                if r.to_uppercase() == our_region {
+                                    regional_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                shard_counts.push((shard_info.index, regional_count));
+            }
+
+            if shard_counts.is_empty() {
+                continue;
+            }
+
+            let summary = crate::types::RegionShardSummary {
+                region: our_region.clone(),
+                model_id: manifest.id.clone(),
+                shard_counts,
+                region_node_count,
+                publisher: our_id.clone(),
+                timestamp_ms: now_ms,
+            };
+
+            // Also update our own shared state
+            let key = (our_region.clone(), manifest.id.clone());
+            self.shared_state
+                .region_shard_summaries
+                .insert(key, summary.clone());
+
+            let msg = NetworkCommand::Broadcast(SwarmMessage::RegionShardSummary(summary));
+            if let Err(e) = self.network_tx.send(msg).await {
+                tracing::debug!(error = %e, model = %manifest.id, "Failed to broadcast region summary");
+            }
+        }
+
+        // Broadcast demand gossip for models with recent requests
+        for entry in self.shared_state.region_demand.iter() {
+            let (model_id, region) = entry.key();
+            let rate = *entry.value();
+            if rate < 0.01 {
+                continue; // Don't gossip negligible demand
+            }
+            let demand = crate::types::ModelDemandGossip {
+                model_id: model_id.clone(),
+                region: region.clone(),
+                decayed_rate: rate,
+                window_requests: 0, // Raw count already decayed into rate
+                publisher: our_id.clone(),
+                timestamp_ms: now_ms,
+            };
+            let msg = NetworkCommand::Broadcast(SwarmMessage::ModelDemandGossip(demand));
+            if let Err(e) = self.network_tx.send(msg).await {
+                tracing::debug!(error = %e, "Failed to broadcast demand gossip");
+            }
+        }
+    }
+
     async fn check_peer_health(&self) {
         let now = chrono::Utc::now();
         let timeout =
@@ -383,9 +496,13 @@ impl HealthMonitor {
     /// Only runs when the map exceeds 1000 entries to avoid removing entries
     /// that are intentionally kept across disconnects for short periods.
     fn cleanup_stale_peer_id_map(&self) {
-        if self.shared_state.peer_id_map.len() <= 1_000 {
+        const SOFT_CAP: usize = 8_000;
+        const EVICT_TO: usize = 6_000;
+
+        if self.shared_state.peer_id_map.len() <= SOFT_CAP {
             return;
         }
+        // First pass: evict entries not in peer_registry (stale)
         let stale_peers: Vec<_> = self
             .shared_state
             .peer_id_map
@@ -396,6 +513,21 @@ impl HealthMonitor {
         let removed = stale_peers.len();
         for nid in stale_peers {
             self.shared_state.peer_id_map.remove(&nid);
+        }
+        // Second pass: if still over target, evict oldest (arbitrary order from DashMap)
+        if self.shared_state.peer_id_map.len() > EVICT_TO {
+            let excess = self.shared_state.peer_id_map.len() - EVICT_TO;
+            let to_evict: Vec<_> = self
+                .shared_state
+                .peer_id_map
+                .iter()
+                .filter(|entry| !self.shared_state.peer_registry.contains_key(entry.key()))
+                .take(excess)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for nid in &to_evict {
+                self.shared_state.peer_id_map.remove(nid);
+            }
         }
         if removed > 0 {
             tracing::debug!(

@@ -91,7 +91,11 @@ pub fn build_behaviour(
     // Auto-scale GossipSub mesh parameters based on known peer count.
     // Small clusters need low thresholds to form a mesh; large networks need
     // higher values for faster message propagation (O(log n) hops).
-    let (mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min) = if known_peers >= 100 {
+    let (mesh_n, mesh_n_low, mesh_n_high, mesh_outbound_min) = if known_peers >= 10_000 {
+        (8, 6, 16, 4) // Very large networks (10k+ nodes)
+    } else if known_peers >= 1_000 {
+        (7, 5, 14, 3) // Large networks (1k+ nodes)
+    } else if known_peers >= 100 {
         (6, 4, 12, 3) // Full GossipSub defaults — fast propagation
     } else if known_peers >= 30 {
         (4, 3, 8, 2) // Medium networks

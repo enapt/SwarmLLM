@@ -87,5 +87,9 @@
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
   "dl.state_complete": "Complete",
-  "dl.state_failed": "Failed"
+  "dl.state_failed": "Failed",
+  "map.demand_rate": "需求率",
+  "map.coverage_gaps": "覆盖缺口",
+  "map.regional_health": "区域健康",
+  "map.replication_target": "复制目标"
 }

@@ -114,5 +114,10 @@
   "dl.state_complete": "Complete",
   "dl.state_failed": "Failed",
 
-  "network.no_peers_yet": "No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together."
+  "network.no_peers_yet": "No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.",
+
+  "map.demand_rate": "Demand Rate",
+  "map.coverage_gaps": "Coverage Gaps",
+  "map.regional_health": "Regional Health",
+  "map.replication_target": "Replication Target"
 }

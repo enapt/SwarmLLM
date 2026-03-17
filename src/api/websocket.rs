@@ -473,7 +473,7 @@ async fn build_stats_message(
         }
     }
 
-    // Region summary for network map
+    // Region summary for network map — includes demand rates and coverage gaps
     {
         let mut region_counts: HashMap<String, u64> = HashMap::new();
         if let Some(ref region) = state.config.identity.region {
@@ -488,6 +488,50 @@ async fn build_stats_message(
         }
         if !region_counts.is_empty() {
             data["region_summary"] = serde_json::to_value(&region_counts).unwrap_or_default();
+        }
+
+        // Per-region demand rates
+        let mut region_demand: HashMap<String, HashMap<String, f64>> = HashMap::new();
+        for entry in state.region_demand.iter() {
+            let (model_id, region) = entry.key();
+            region_demand
+                .entry(region.clone())
+                .or_default()
+                .insert(model_id.0.clone(), *entry.value());
+        }
+        if !region_demand.is_empty() {
+            data["region_demand"] = serde_json::to_value(&region_demand).unwrap_or_default();
+        }
+
+        // Coverage gaps: per-region list of models with 0 holders
+        let all_model_ids: Vec<String> = state
+            .model_registry
+            .models()
+            .iter()
+            .map(|m| m.id.0.clone())
+            .collect();
+        if !all_model_ids.is_empty() && !region_counts.is_empty() {
+            let mut gaps: HashMap<String, Vec<String>> = HashMap::new();
+            for region_code in region_counts.keys() {
+                let mut region_gaps = Vec::new();
+                for model_id in &all_model_ids {
+                    let key = (region_code.clone(), crate::types::ModelId(model_id.clone()));
+                    let has_holders = state
+                        .region_shard_summaries
+                        .get(&key)
+                        .map(|s| s.shard_counts.iter().any(|(_, c)| *c > 0))
+                        .unwrap_or(false);
+                    if !has_holders {
+                        region_gaps.push(model_id.clone());
+                    }
+                }
+                if !region_gaps.is_empty() {
+                    gaps.insert(region_code.clone(), region_gaps);
+                }
+            }
+            if !gaps.is_empty() {
+                data["region_coverage_gaps"] = serde_json::to_value(&gaps).unwrap_or_default();
+            }
         }
     }
 

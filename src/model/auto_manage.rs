@@ -8,6 +8,20 @@ use crate::daemon::SharedState;
 use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, NetworkCommand, NodeId, ShardId};
 
+/// Compute a position on a u32 consistent hash ring for a node's virtual slot.
+fn hash_ring_position(node_bytes: &[u8; 32], virtual_node: u32) -> u32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(node_bytes);
+    hasher.update(&virtual_node.to_le_bytes());
+    let hash = hasher.finalize();
+    u32::from_le_bytes([
+        hash.as_bytes()[0],
+        hash.as_bytes()[1],
+        hash.as_bytes()[2],
+        hash.as_bytes()[3],
+    ])
+}
+
 /// Estimate VRAM required to run a model based on size and quantization.
 ///
 /// Rule of thumb for quantized GGUF models:
@@ -227,7 +241,7 @@ impl AutoShardManager {
                     }
                 }
                 _ = request_reset_interval.tick() => {
-                    self.reset_request_counts();
+                    self.decay_request_counts();
                     self.update_model_trust();
                 }
             }
@@ -578,8 +592,30 @@ impl AutoShardManager {
                 };
 
                 // Compute how many replicas this shard should have.
-                // base = min_replicas (2 by default), clamped to pool size.
-                let target_replicas = min_replicas.min(pool_size).max(1);
+                // Log-scaled floor: grows logarithmically with network size.
+                // At 10 nodes → 3, at 100 → 7, at 1000 → 10, at 10000 → 13.
+                let global_floor = if pool_size <= 1 {
+                    min_replicas
+                } else {
+                    let log2_pool = (pool_size as f64).log2().ceil() as usize;
+                    log2_pool.clamp(min_replicas, pool_size / 3).max(1)
+                };
+                // Demand factor: popular models get more replicas.
+                let request_count = self
+                    .shared_state
+                    .model_request_counts
+                    .get(&manifest.id)
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let demand_factor = match request_count {
+                    0 => 1.0,
+                    1..=5 => 1.5,
+                    6..=20 => 2.0,
+                    21..=100 => 2.5,
+                    _ => 3.0,
+                };
+                let global_target = (global_floor as f64 * demand_factor).ceil() as usize;
+                let target_replicas = global_target.min(pool_size).max(1);
 
                 // Skip shards that already meet the replica target.
                 // Using >= target_replicas (not > 0) ensures min_replicas drives
@@ -595,55 +631,62 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Small-network deduplication: when there are peers online, use a
-                // deterministic assignment so multiple nodes don't all race to download
-                // the same under-replicated shard. Each node "owns" a slot based on
-                // hash(node_id || model_id) % pool_size. Shard slots are assigned via
-                // hash(model_id || shard_index || replica_idx) % pool_size.
+                // Consistent hash ring deduplication: each node has 10 virtual slots
+                // on a u32 ring. On join/leave, only ~1/pool_size of assignments change
+                // (vs 100% with the old modulo approach). This prevents download storms.
                 let peers = self.shared_state.peer_registry.len();
                 if holder_count < target_replicas && peers > 0 && !in_configured_range {
-                    let node_count = pool_size as u32;
-                    // Use hash to assign this shard to a specific node slot
-                    // My stable slot: hash(node_id || model_id) % node_count
-                    let mut my_hasher = blake3::Hasher::new();
-                    my_hasher.update(&local_node_id.0);
-                    my_hasher.update(manifest.id.0.as_bytes());
-                    let my_hash = my_hasher.finalize();
-                    let my_slot = u32::from_le_bytes([
-                        my_hash.as_bytes()[0],
-                        my_hash.as_bytes()[1],
-                        my_hash.as_bytes()[2],
-                        my_hash.as_bytes()[3],
-                    ]) % node_count;
-
-                    // We need (target_replicas - holder_count) more replicas for this shard.
-                    // Assign each needed replica to a deterministic node slot via
-                    // hash(model_id || shard_index || replica_idx) % node_count.
-                    // If our slot matches any of those, we are responsible.
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
+
+                    // Build a ring of all known node IDs (peers + self), each with
+                    // VIRTUAL_SLOTS positions on a u32 ring.
+                    const VIRTUAL_SLOTS: u32 = 10;
+                    let mut ring: Vec<(u32, NodeId)> = Vec::new();
+
+                    // Add self
+                    for vn in 0..VIRTUAL_SLOTS {
+                        let pos = hash_ring_position(&local_node_id.0, vn);
+                        ring.push((pos, local_node_id.clone()));
+                    }
+                    // Add peers
+                    for peer in self.shared_state.peer_registry.iter() {
+                        for vn in 0..VIRTUAL_SLOTS {
+                            let pos = hash_ring_position(&peer.key().0, vn);
+                            ring.push((pos, peer.key().clone()));
+                        }
+                    }
+                    ring.sort_by_key(|(pos, _)| *pos);
+
+                    // For each needed replica, hash the shard+replica_idx to a ring
+                    // position and find the nearest node clockwise.
                     let i_am_assigned = (0..replicas_needed).any(|replica_idx| {
                         let mut hasher = blake3::Hasher::new();
                         hasher.update(manifest.id.0.as_bytes());
                         hasher.update(&shard.index.to_le_bytes());
                         hasher.update(&replica_idx.to_le_bytes());
                         let hash = hasher.finalize();
-                        let slot = u32::from_le_bytes([
+                        let target_pos = u32::from_le_bytes([
                             hash.as_bytes()[0],
                             hash.as_bytes()[1],
                             hash.as_bytes()[2],
                             hash.as_bytes()[3],
-                        ]) % node_count;
-                        slot == my_slot
+                        ]);
+                        // Binary search for the nearest node clockwise on the ring
+                        let idx = match ring.binary_search_by_key(&target_pos, |(p, _)| *p) {
+                            Ok(i) => i,
+                            Err(i) => i % ring.len().max(1),
+                        };
+                        ring.get(idx)
+                            .map(|(_, n)| n == local_node_id)
+                            .unwrap_or(false)
                     });
                     if !i_am_assigned {
                         tracing::debug!(
                             model = %manifest.id,
                             shard = shard.index,
-                            my_slot,
-                            node_count,
                             replicas_needed,
-                            "Skipping shard — not assigned to this node slot"
+                            "Skipping shard — not assigned on consistent hash ring"
                         );
                         continue;
                     }
@@ -669,14 +712,58 @@ impl AutoShardManager {
                     }
                 }
 
-                // Score = popularity * rarity_bonus * configured_bonus * vram_fitness
-                // - configured_bonus: 100x for shards we're supposed to serve (highest priority)
-                // - rarity_bonus: higher when this shard has fewer holders than average
-                // - vram_fitness: 0.1-1.0x based on whether pool can run the model
-                let rarity_bonus = if holder_count == 0 {
-                    10.0 // Very high priority for zero-holder shards
+                // Regional rarity: prefer shards missing from our region.
+                // Look up regional holder count from gossip summaries, falling back
+                // to counting peers in the registry.
+                let our_region = self.our_region();
+                let regional_holders = if let Some(ref region) = our_region {
+                    let key = (region.clone(), manifest.id.clone());
+                    if let Some(summary) = self.shared_state.region_shard_summaries.get(&key) {
+                        summary
+                            .shard_counts
+                            .iter()
+                            .find(|(idx, _)| *idx == shard.index)
+                            .map(|(_, c)| *c as usize)
+                            .unwrap_or(0)
+                    } else {
+                        // Fallback: count from peer_registry
+                        self.count_regional_holders(&holders, local_node_id, region)
+                    }
                 } else {
+                    holder_count // No region — use global count
+                };
+
+                // Per-region minimum: popular models need at least 2 copies per region.
+                let per_region_min: usize = if demand_factor >= 2.0 { 2 } else { 1 };
+
+                let regional_rarity = if regional_holders == 0 {
+                    20.0 // No regional coverage — very high priority
+                } else if regional_holders < per_region_min {
+                    10.0 / (regional_holders as f64 + 1.0)
+                } else {
+                    // Standard global rarity
                     (avg_holders + 1.0) / (holder_count as f64 + 1.0)
+                };
+
+                // Source bonus: prefer same-region peers or HF CDN.
+                let source_bonus = if our_region.is_some() {
+                    let has_regional_peer = holders.iter().any(|h| {
+                        if let Some(peer) = self.shared_state.peer_registry.get(h) {
+                            if let Some(ref cap) = peer.capability {
+                                if let Some(ref r) = cap.region {
+                                    return r.to_uppercase() == our_region.as_deref().unwrap_or("");
+                                }
+                            }
+                        }
+                        false
+                    });
+                    if has_regional_peer {
+                        1.5
+                    } else {
+                        1.0
+                    }
+                } else {
+                    1.0
                 };
 
                 let configured_bonus = if in_configured_range { 100.0 } else { 1.0 };
@@ -694,10 +781,11 @@ impl AutoShardManager {
                 };
 
                 let score = model_popularity
-                    * rarity_bonus
+                    * regional_rarity
                     * configured_bonus
                     * vram_fitness
                     * spread_bonus
+                    * source_bonus
                     + jitter;
 
                 candidates.push(ShardCandidate {
@@ -1896,6 +1984,48 @@ impl AutoShardManager {
         }
     }
 
+    /// Get our detected/configured region as uppercase ISO code.
+    fn our_region(&self) -> Option<String> {
+        // Try detected_region first (non-blocking try_read)
+        if let Ok(guard) = self.shared_state.detected_region.try_read() {
+            if let Some(ref r) = *guard {
+                return Some(r.to_uppercase());
+            }
+        }
+        self.shared_state
+            .config
+            .identity
+            .region
+            .as_ref()
+            .map(|r| r.to_uppercase())
+    }
+
+    /// Count shard holders that are in the same region as us.
+    fn count_regional_holders(
+        &self,
+        holders: &[NodeId],
+        local_node_id: &NodeId,
+        our_region: &str,
+    ) -> usize {
+        let mut count = 0;
+        for h in holders {
+            if *h == *local_node_id {
+                count += 1; // We're always in our own region
+                continue;
+            }
+            if let Some(peer) = self.shared_state.peer_registry.get(h) {
+                if let Some(ref cap) = peer.capability {
+                    if let Some(ref r) = cap.region {
+                        if r.to_uppercase() == our_region {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        count
+    }
+
     /// Compute target replicas based on popularity (request count in last window).
     fn target_replicas(&self, request_count: u64, min_replicas: u32, pool_size: usize) -> u32 {
         let base = min_replicas as f64;
@@ -2146,10 +2276,30 @@ impl AutoShardManager {
         }
     }
 
-    /// Reset model request counts (called periodically, e.g. every 10 min).
-    fn reset_request_counts(&self) {
+    /// Decay model request counts with EMA and feed into region_demand.
+    /// Instead of zeroing counters, we blend: new_rate = old * 0.85 + fresh * 0.15.
+    /// A spike of 100 requests persists ~30min and drops to noise after ~2h.
+    fn decay_request_counts(&self) {
+        let our_region = self.our_region().unwrap_or_else(|| "??".to_string());
+
         for entry in self.shared_state.model_request_counts.iter() {
-            entry.value().store(0, std::sync::atomic::Ordering::Relaxed);
+            let model_id = entry.key().clone();
+            let fresh = entry.value().swap(0, std::sync::atomic::Ordering::Relaxed);
+
+            let key = (model_id, our_region.clone());
+            let old = self
+                .shared_state
+                .region_demand
+                .get(&key)
+                .map(|v| *v)
+                .unwrap_or(0.0);
+            let new_rate = old * 0.85 + fresh as f64 * 0.15;
+            if new_rate > 0.001 {
+                self.shared_state.region_demand.insert(key, new_rate);
+            } else {
+                // Clean up negligible entries
+                self.shared_state.region_demand.remove(&key);
+            }
         }
     }
 

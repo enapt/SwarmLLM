@@ -15,6 +15,10 @@ pub struct ModelRegistry {
     /// Shard location tracking: which nodes hold which shards.
     /// Uses HashSet for O(1) deduplication.
     shard_holders: DashMap<ShardId, HashSet<NodeId>>,
+    /// Reverse index: which shards each node holds.
+    /// Maintained in sync by record_shard_holder() / remove_shard_holder().
+    /// Enables O(shards_held) peer departure instead of O(all_shards).
+    node_shards: DashMap<NodeId, HashSet<ShardId>>,
 }
 
 impl ModelRegistry {
@@ -22,6 +26,7 @@ impl ModelRegistry {
         Self {
             manifests: DashMap::new(),
             shard_holders: DashMap::new(),
+            node_shards: DashMap::new(),
         }
     }
 
@@ -38,16 +43,26 @@ impl ModelRegistry {
     }
 
     /// Record that a node holds a specific shard.
-    /// Uses HashSet for O(1) deduplication.
+    /// Uses HashSet for O(1) deduplication. Maintains reverse index.
     pub fn record_shard_holder(&self, shard_id: ShardId, node_id: NodeId) {
-        let mut holders = self.shard_holders.entry(shard_id).or_default();
-        holders.insert(node_id);
+        self.shard_holders
+            .entry(shard_id.clone())
+            .or_default()
+            .insert(node_id.clone());
+        self.node_shards
+            .entry(node_id)
+            .or_default()
+            .insert(shard_id);
     }
 
     /// Remove a node from shard holders (e.g., node went offline).
+    /// Maintains reverse index.
     pub fn remove_shard_holder(&self, shard_id: &ShardId, node_id: &NodeId) {
         if let Some(mut holders) = self.shard_holders.get_mut(shard_id) {
             holders.remove(node_id);
+        }
+        if let Some(mut shards) = self.node_shards.get_mut(node_id) {
+            shards.remove(shard_id);
         }
     }
 
@@ -107,10 +122,37 @@ impl ModelRegistry {
     }
 
     /// Remove a peer from all shard holder entries (e.g., peer went offline).
+    /// Uses reverse index for O(shards_held) instead of O(all_shards).
     pub fn remove_peer_from_all_shards(&self, node_id: &NodeId) {
-        for mut entry in self.shard_holders.iter_mut() {
-            entry.value_mut().remove(node_id);
+        if let Some((_, shards)) = self.node_shards.remove(node_id) {
+            for shard_id in shards {
+                if let Some(mut holders) = self.shard_holders.get_mut(&shard_id) {
+                    holders.remove(node_id);
+                }
+            }
         }
+    }
+
+    /// Get all shards held by a specific node (via reverse index).
+    pub fn shards_for_node(&self, node_id: &NodeId) -> Vec<ShardId> {
+        self.node_shards
+            .get(node_id)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get unique model IDs held by a specific node.
+    pub fn models_for_node(&self, node_id: &NodeId) -> Vec<ModelId> {
+        self.node_shards
+            .get(node_id)
+            .map(|shards| {
+                let mut models: HashSet<ModelId> = HashSet::new();
+                for shard in shards.iter() {
+                    models.insert(shard.model_id.clone());
+                }
+                models.into_iter().collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Iterate over all tracked shard entries (shard_id, holders).

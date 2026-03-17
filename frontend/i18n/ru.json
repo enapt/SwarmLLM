@@ -87,5 +87,9 @@
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
   "dl.state_complete": "Complete",
-  "dl.state_failed": "Failed"
+  "dl.state_failed": "Failed",
+  "map.demand_rate": "Частота запросов",
+  "map.coverage_gaps": "Пробелы покрытия",
+  "map.regional_health": "Региональное состояние",
+  "map.replication_target": "Цель репликации"
 }

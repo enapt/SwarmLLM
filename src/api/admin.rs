@@ -529,7 +529,19 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
         }
     }
 
-    // Build JSON
+    // Collect all known model IDs for coverage gap detection
+    let all_models: Vec<String> = state
+        .shared_state
+        .model_registry
+        .models()
+        .iter()
+        .map(|m| m.id.0.clone())
+        .collect();
+
+    let pool_size = state.shared_state.peer_registry.len() + 1;
+    let min_replicas = state.shared_state.config.auto_manage.min_replicas as usize;
+
+    // Build JSON with regional demand, coverage gaps, and replication targets
     let region_json: serde_json::Map<String, serde_json::Value> = regions
         .into_iter()
         .map(|(code, (total, models))| {
@@ -537,11 +549,62 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::json!(v)))
                 .collect();
+
+            // Per-model demand rates for this region
+            let mut demand: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for entry in state.shared_state.region_demand.iter() {
+                let (model_id, region) = entry.key();
+                if region.eq_ignore_ascii_case(&code) {
+                    demand.insert(model_id.0.clone(), serde_json::json!(*entry.value()));
+                }
+            }
+
+            // Coverage gaps: models where this region has 0 holders
+            let coverage_gaps: Vec<&str> = all_models
+                .iter()
+                .filter(|m| !models_json.contains_key(m.as_str()))
+                .map(|m| m.as_str())
+                .collect();
+
+            // Per-model replication target for this region
+            let mut replication_target: serde_json::Map<String, serde_json::Value> =
+                serde_json::Map::new();
+            for model_id_str in models_json.keys() {
+                let model_id = crate::types::ModelId(model_id_str.clone());
+                let request_count = state
+                    .shared_state
+                    .model_request_counts
+                    .get(&model_id)
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let global_floor = if pool_size <= 1 {
+                    min_replicas
+                } else {
+                    let log2_pool = (pool_size as f64).log2().ceil() as usize;
+                    log2_pool.clamp(min_replicas, pool_size / 3).max(1)
+                };
+                let demand_factor = match request_count {
+                    0 => 1.0,
+                    1..=5 => 1.5,
+                    6..=20 => 2.0,
+                    21..=100 => 2.5,
+                    _ => 3.0,
+                };
+                let target = (global_floor as f64 * demand_factor).ceil() as usize;
+                replication_target.insert(
+                    model_id_str.clone(),
+                    serde_json::json!(target.min(pool_size).max(1)),
+                );
+            }
+
             (
                 code,
                 serde_json::json!({
                     "total": total,
                     "models": models_json,
+                    "demand": demand,
+                    "coverage_gaps": coverage_gaps,
+                    "replication_target": replication_target,
                 }),
             )
         })
