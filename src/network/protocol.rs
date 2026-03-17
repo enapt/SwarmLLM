@@ -702,11 +702,6 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
     })
 }
 
-/// Encode an ACK response (empty payload marker).
-pub fn encode_ack() -> Vec<u8> {
-    vec![0] // Single zero byte = ACK
-}
-
 // ---- Encrypted Tensor Encoding ----
 //
 // Wire format for TENSOR_TAG_ENCRYPTED (0x10):

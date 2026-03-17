@@ -85,10 +85,18 @@ pub fn estimate_vram_from_shard_dir(
     layer_end: usize,
     total_layers: usize,
 ) -> u64 {
-    let total_bytes: u64 = (0..256u32)
-        .filter_map(|i| {
-            let path = model_dir.join(format!("shard_{i:03}.bin"));
-            std::fs::metadata(&path).ok().map(|m| m.len())
+    let total_bytes: u64 = std::fs::read_dir(model_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if name.starts_with("shard_") && name.ends_with(".bin") {
+                entry.metadata().ok().map(|m| m.len())
+            } else {
+                None
+            }
         })
         .sum();
     if total_layers == 0 {
@@ -336,28 +344,42 @@ pub(crate) async fn dispatch_network_messages(
                             SwarmMessage::VisionEncodeResponse(resp) => {
                                 // Verify the authenticated sender matches the expected responder
                                 // stored when the VisionEncodeRequest was sent.
-                                if let Some((_, (expected_node, tx))) = shared_state
+                                // SEC: Peek at entry first — only remove after sender is validated
+                                // to avoid dropping the oneshot sender on mismatch (which would hang the pipeline).
+                                let sender_ok = if let Some(entry) = shared_state
                                     .pending_vision_results
-                                    .remove(&resp.request_id)
+                                    .get(&resp.request_id)
                                 {
+                                    let expected_node = &entry.0;
                                     if let Some(ref sender) = authenticated_sender {
-                                        if sender != &expected_node {
+                                        if sender != expected_node {
                                             tracing::warn!(
                                                 request_id = %resp.request_id,
                                                 expected = %expected_node,
                                                 actual = %sender,
                                                 "VisionEncodeResponse sender mismatch — dropping"
                                             );
-                                            continue;
+                                            false
+                                        } else {
+                                            true
                                         }
                                     } else {
                                         tracing::warn!(
                                             request_id = %resp.request_id,
                                             "VisionEncodeResponse without authenticated sender — dropping"
                                         );
-                                        continue;
+                                        false
                                     }
-                                    let _ = tx.send(resp);
+                                } else {
+                                    false
+                                };
+                                if sender_ok {
+                                    if let Some((_, (_expected_node, tx))) = shared_state
+                                        .pending_vision_results
+                                        .remove(&resp.request_id)
+                                    {
+                                        let _ = tx.send(resp);
+                                    }
                                 }
                             }
                             msg @ SwarmMessage::InferenceRequest(_)

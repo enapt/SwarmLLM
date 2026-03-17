@@ -920,6 +920,10 @@ async fn run_bench(
     }
 
     // --- Summary ---
+    if results.is_empty() {
+        println!("No benchmark iterations completed.");
+        return Ok(());
+    }
     let avg_ms: f64 = results.iter().map(|r| r.total_ms).sum::<f64>() / results.len() as f64;
     let avg_tps: f64 = results.iter().map(|r| r.tokens_per_sec).sum::<f64>() / results.len() as f64;
     let min_tps = results

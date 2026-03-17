@@ -272,27 +272,6 @@ impl CreditLedger {
         Ok(())
     }
 
-    /// Update the peer balance list from a gossip message.
-    /// Balances are bucketed (rounded to nearest 100) for privacy.
-    /// SEC-M17: Rejects implausibly extreme balance values to prevent
-    /// percentile manipulation via gossip.
-    pub async fn update_peer_balance(&self, balance_bucket: i64) {
-        // Reject implausible balance buckets that could manipulate percentile calculations
-        const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000; // 100M credits
-        if balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
-            tracing::debug!(balance_bucket, "Ignoring implausible peer balance gossip");
-            return;
-        }
-
-        let mut balances = self.peer_balances.write().await;
-        balances.push(balance_bucket);
-        // Keep a rolling window of the most recent 1000 observations
-        if balances.len() > 1000 {
-            let excess = balances.len() - 1000;
-            balances.drain(..excess);
-        }
-    }
-
     /// Calculate the current priority tier based on balance and network percentile.
     pub async fn calculate_tier(&self) -> PriorityTier {
         let bal = self.balance.read().await;
@@ -855,8 +834,11 @@ mod tests {
         assert_eq!(tier, PriorityTier::Silver); // balance > 0, percentile 0.5
 
         // Add peer balances: our 500 should be above most
-        for b in [100, 200, 300, 150, 250, 50, 400, 350, 180, 220] {
-            ledger.update_peer_balance(b).await;
+        {
+            let mut balances = ledger.peer_balances().write().await;
+            for b in [100, 200, 300, 150, 250, 50, 400, 350, 180, 220] {
+                balances.push(b);
+            }
         }
 
         let tier = ledger.calculate_tier().await;

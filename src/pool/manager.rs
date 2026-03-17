@@ -15,6 +15,7 @@ use crate::types::{NetworkCommand, NodeId, SwarmMessage};
 const TREE_POOL_STATE: &str = "pool_state";
 const TREE_POOL_INVITATIONS: &str = "pool_invitations";
 const TREE_POOL_FORWARDS: &str = "pool_forwards";
+const TREE_POOL_REMOVAL_REPLAYS: &str = "pool_removal_replays";
 const KEY_MY_POOL: &str = "my_pool";
 
 /// The PoolManager is the 9th subsystem task.
@@ -882,7 +883,7 @@ impl PoolManager {
             if self
                 .shared_state
                 .db
-                .get_json::<bool>(TREE_POOL_STATE, &removal_key)
+                .get_json::<bool>(TREE_POOL_REMOVAL_REPLAYS, &removal_key)
                 .ok()
                 .flatten()
                 .is_some()
@@ -905,7 +906,7 @@ impl PoolManager {
             let _ = self
                 .shared_state
                 .db
-                .put_json(TREE_POOL_STATE, &removal_key, &true);
+                .put_json(TREE_POOL_REMOVAL_REPLAYS, &removal_key, &true);
 
             *self.shared_state.pool_state.write().await = None;
             let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);

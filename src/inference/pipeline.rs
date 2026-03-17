@@ -336,62 +336,6 @@ impl PipelineExecutor {
             .map_err(|e| SwarmError::Inference(format!("zstd compress: {e}")))
     }
 
-    /// Decompress zstd-compressed FP16 vision embeddings back to a Tensor.
-    #[allow(dead_code)]
-    fn decompress_vision_embeddings(
-        &self,
-        compressed: &[u8],
-    ) -> Result<candle_core::Tensor, SwarmError> {
-        // Cap decompressed size to prevent zstd bomb attacks from malicious vision peers
-        const MAX_VISION_DECOMPRESSED: u64 = 64 * 1024 * 1024; // 64 MB
-        let raw_bytes = {
-            let mut decoder = zstd::Decoder::new(std::io::Cursor::new(compressed))
-                .map_err(|e| SwarmError::Inference(format!("zstd init vision: {e}")))?;
-            let mut buf = Vec::new();
-            use std::io::Read;
-            decoder
-                .by_ref()
-                .take(MAX_VISION_DECOMPRESSED)
-                .read_to_end(&mut buf)
-                .map_err(|e| SwarmError::Inference(format!("zstd decompress vision: {e}")))?;
-            buf
-        };
-        // Raw bytes are FP16 LE — convert to f16 values
-        let num_f16 = raw_bytes.len() / 2;
-        // We need to know the shape. For LLaVA: 577 tokens × 4096 hidden dim.
-        // Infer hidden_dim from common sizes. Require a plausible token count
-        // (1..2048) to prevent shape confusion from crafted payloads.
-        const COMMON_HIDDEN_DIMS: &[usize] = &[5120, 4096, 3584, 3072, 2560, 2048, 1536, 1024];
-        const MAX_VISION_TOKENS: usize = 2048;
-        let hidden_dim = COMMON_HIDDEN_DIMS
-            .iter()
-            .copied()
-            .find(|&d| {
-                num_f16 % d == 0 && {
-                    let tokens = num_f16 / d;
-                    tokens > 0 && tokens <= MAX_VISION_TOKENS
-                }
-            })
-            .ok_or_else(|| {
-                SwarmError::Inference(format!(
-                    "Cannot infer vision embedding shape from {} values",
-                    num_f16
-                ))
-            })?;
-        let num_tokens = num_f16 / hidden_dim;
-        // Convert FP16 LE bytes → f32 in a single pass (avoids intermediate Vec<f16>)
-        let f32_values: Vec<f32> = raw_bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect();
-        candle_core::Tensor::from_vec(
-            f32_values,
-            &[num_tokens, hidden_dim],
-            &candle_core::Device::Cpu,
-        )
-        .map_err(|e| SwarmError::Inference(format!("Vision tensor from vec: {e}")))
-    }
-
     /// Compress an ImageData to JPEG for wire transfer.
     fn compress_image_jpeg(&self, img: &crate::types::ImageData) -> Result<Vec<u8>, SwarmError> {
         use image::ImageEncoder;
@@ -1026,12 +970,8 @@ impl PipelineExecutor {
             let vocab = entry.value().vocab.clone().unwrap_or_default();
 
             // Approximate prompt token count (no tokenizer in-process)
-            let ptc = if !vocab.is_empty() {
-                // Rough estimate: chars / 4 (average BPE token length)
-                prompt.chars().count() / 4
-            } else {
-                prompt.chars().count() / 4
-            };
+            // Rough estimate: chars / 4 (average BPE token length)
+            let ptc = prompt.chars().count() / 4;
 
             let decoder = CachedDecoder {
                 vocab: vocab.clone(),
@@ -1739,36 +1679,6 @@ impl PipelineExecutor {
     /// Try to identify a prefix-cacheable system prompt in the request.
     ///
     /// Returns `Some((blake3_hash, prefix_token_count))` if the request has system
-    /// messages whose tokens align with the start of the full prompt tokens.
-    #[allow(dead_code)]
-    fn try_prefix_lookup(
-        &self,
-        model: &crate::inference::split::SplitModel,
-        all_tokens: &[i64],
-    ) -> Option<([u8; 32], usize)> {
-        let prefix_text =
-            crate::inference::prefix_cache::build_system_prefix(&self.request.messages)?;
-
-        let tokenizer = model.tokenizer()?;
-        let prefix_tokens = tokenizer.encode(&prefix_text);
-        let prefix_len = prefix_tokens.len();
-
-        // Verify: prefix must be non-empty, shorter than full prompt, and tokens align
-        if prefix_len == 0 || prefix_len >= all_tokens.len() {
-            return None;
-        }
-        if all_tokens[..prefix_len] != prefix_tokens[..] {
-            tracing::debug!(
-                request_id = %self.request.id,
-                "Prefix cache: token alignment mismatch, skipping"
-            );
-            return None;
-        }
-
-        let hash = crate::inference::prefix_cache::hash_token_ids(&prefix_tokens);
-        Some((hash, prefix_len))
-    }
-
     /// Compute a reasonable timeout for a remote segment based on workload.
     ///
     /// Prefill (large activation = many input tokens) is much slower than decode

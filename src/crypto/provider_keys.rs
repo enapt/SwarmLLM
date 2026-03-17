@@ -209,7 +209,7 @@ pub fn scrub_api_keys(input: &str) -> String {
 
     // Named prefixes — redact everything after the prefix
     let prefixes = [
-        "sk-ant-", "sk-", "nvapi-", "gsk_", "csk-", "key-", "tok-", "xai-", "fw_", "di_", "sn-",
+        "sk-ant-", "sk-", "nvapi-", "gsk_", "csk-", "key-", "tok-", "xai-", "fw_", "di_", "sn_",
     ];
     for prefix in prefixes {
         let mut search_start = 0usize;

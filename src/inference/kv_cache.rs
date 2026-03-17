@@ -150,7 +150,9 @@ impl KvCacheManager {
                         self.sessions
                             .get(id)
                             .map(|s| s.last_accessed)
-                            .unwrap_or_else(Instant::now)
+                            // Orphans (session evicted but multi_turn entry remains) should
+                            // sort first (oldest) so they get evicted before valid sessions.
+                            .unwrap_or(Instant::now() - std::time::Duration::from_secs(86400))
                     })
                     .map(|(k, _)| k.clone())
                 {

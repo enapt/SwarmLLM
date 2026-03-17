@@ -290,7 +290,8 @@ async fn handle_forward(
                         None
                     } else {
                         let num_f16 = raw_bytes.len() / 2;
-                        const COMMON_HIDDEN_DIMS: &[usize] = &[4096, 2048, 1024];
+                        const COMMON_HIDDEN_DIMS: &[usize] =
+                            &[5120, 4096, 3584, 3072, 2560, 2048, 1536, 1024];
                         let hidden_dim = COMMON_HIDDEN_DIMS
                             .iter()
                             .copied()

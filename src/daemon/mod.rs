@@ -1279,6 +1279,14 @@ impl Daemon {
                                     "Critical subsystem failed — triggering graceful shutdown"
                                 );
                                 break;
+                            } else if *count >= MAX_RESTART_ATTEMPTS {
+                                tracing::error!(
+                                    subsystem = name,
+                                    restart_count = *count,
+                                    max_restarts = MAX_RESTART_ATTEMPTS,
+                                    "Non-critical subsystem exceeded max restarts — triggering shutdown"
+                                );
+                                break;
                             } else {
                                 // Non-critical: log and continue
                                 tracing::warn!(
