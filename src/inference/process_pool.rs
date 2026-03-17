@@ -44,6 +44,9 @@ impl Drop for WorkerHandle {
 /// driver reclaims all GPU memory immediately — no restart required.
 pub struct ModelProcessPool {
     workers: DashMap<ModelId, Arc<WorkerHandle>>,
+    /// Serializes worker spawning to prevent TOCTOU races where two concurrent
+    /// callers both miss the DashMap lookup and each spawn a subprocess.
+    spawn_lock: Mutex<()>,
     data_dir: PathBuf,
 }
 
@@ -51,16 +54,23 @@ impl ModelProcessPool {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
             workers: DashMap::new(),
+            spawn_lock: Mutex::new(()),
             data_dir,
         }
     }
 
     /// Get or spawn a worker for this model.
     async fn get_or_spawn(&self, model_id: &ModelId) -> Result<Arc<WorkerHandle>, SwarmError> {
+        // Fast path: worker already exists
         if let Some(handle) = self.workers.get(model_id) {
             return Ok(handle.clone());
         }
-        // Spawn new worker
+        // Slow path: serialize spawns to prevent duplicate workers
+        let _guard = self.spawn_lock.lock().await;
+        // Re-check after acquiring lock (another task may have spawned it)
+        if let Some(handle) = self.workers.get(model_id) {
+            return Ok(handle.clone());
+        }
         let handle = self.spawn_worker(model_id).await?;
         let handle = Arc::new(handle);
         self.workers.insert(model_id.clone(), handle.clone());
@@ -130,20 +140,33 @@ impl ModelProcessPool {
         let model_id = forward.model_id.clone();
         let handle = self.get_or_spawn(&model_id).await?;
 
-        let request_id = forward.request_id;
-        let activations = forward.activations.clone();
+        // Destructure to avoid cloning activations (can be large tensor data)
+        let crate::types::LayerForward {
+            request_id,
+            sequence_num,
+            index_pos,
+            activations,
+            format,
+            model_id: fwd_model_id,
+            layer_range,
+            tp_meta,
+            vision_embeddings,
+            sender_peer_bytes: _,
+            requester_node_id,
+            pre_embedded,
+        } = forward;
 
         let ipc_fwd = IpcForward {
             request_id,
-            sequence_num: forward.sequence_num,
-            index_pos: forward.index_pos,
-            format: forward.format.clone(),
-            model_id: forward.model_id.clone(),
-            layer_range: forward.layer_range,
-            tp_meta: forward.tp_meta.clone(),
-            vision_embeddings: forward.vision_embeddings.clone(),
-            requester_node_id: forward.requester_node_id,
-            pre_embedded: forward.pre_embedded,
+            sequence_num,
+            index_pos,
+            format,
+            model_id: fwd_model_id,
+            layer_range,
+            tp_meta,
+            vision_embeddings,
+            requester_node_id,
+            pre_embedded,
             sampling: Default::default(),
         };
 
