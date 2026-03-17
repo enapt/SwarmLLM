@@ -1932,21 +1932,23 @@ async fn split_stream_response(
             tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
 
         let pool = state.shared_state.model_process_pool.clone();
-        let model_id_clone = model_id.clone();
-        let params_clone = params.clone();
-        tokio::spawn(async move {
-            let _ = pool
-                .generate(
-                    &model_id_clone,
-                    layer_range,
-                    prompt,
-                    params_clone,
-                    rid,
-                    None,
-                    Some(token_tx),
-                )
-                .await;
-        });
+        {
+            let model_id = model_id.clone();
+            let params = params.clone();
+            tokio::spawn(async move {
+                let _ = pool
+                    .generate(
+                        &model_id,
+                        layer_range,
+                        prompt,
+                        params,
+                        rid,
+                        None,
+                        Some(token_tx),
+                    )
+                    .await;
+            });
+        }
 
         // Forward streaming tokens from the worker to SSE events
         let mut finish = "length".to_string();

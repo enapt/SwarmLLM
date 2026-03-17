@@ -990,12 +990,12 @@ pub async fn download_shards_v2(
 
         // Per-shard progress mapping to cumulative
         let (shard_tx, mut shard_rx) = tokio::sync::mpsc::channel::<DownloadProgress>(64);
-        let progress_tx_clone = progress_tx.clone();
+        let progress_tx = progress_tx.clone();
         let base = cumulative_downloaded;
         let total = total_shard_bytes;
         let progress_task = tokio::spawn(async move {
             while let Some(prog) = shard_rx.recv().await {
-                if let Some(ref tx) = progress_tx_clone {
+                if let Some(ref tx) = progress_tx {
                     let _ = tx.try_send(DownloadProgress {
                         downloaded_bytes: base + prog.downloaded_bytes,
                         total_bytes: total,

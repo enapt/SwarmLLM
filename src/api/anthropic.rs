@@ -855,14 +855,14 @@ async fn anthropic_stream(
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
     let rid = request_id.clone();
-    let model_clone = model.clone();
+    let model = model.clone();
 
     tokio::spawn(async move {
         // message_start
         let _ = sse_tx
             .send(AnthropicSseEvent::MessageStart {
                 id: rid.clone(),
-                model: model_clone.clone(),
+                model: model.clone(),
             })
             .await;
 
@@ -1146,17 +1146,17 @@ async fn anthropic_split_stream(
 ) -> Result<axum::response::Response, ApiError> {
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
-    let state_clone = state.clone();
+    let state = state.clone();
     let rid = request_id.clone();
-    let model_clone = model.clone();
     let model_for_lookup = model.clone();
+    let model = model.clone();
 
     tokio::spawn(async move {
         // message_start
         let _ = sse_tx
             .send(AnthropicSseEvent::MessageStart {
                 id: rid.clone(),
-                model: model_clone,
+                model,
             })
             .await;
 
@@ -1166,7 +1166,7 @@ async fn anthropic_split_stream(
             .await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
-        let model_entry = state_clone
+        let model_entry = state
             .shared_state
             .split_models
             .iter()
@@ -1205,16 +1205,16 @@ async fn anthropic_split_stream(
         let (token_tx, mut token_rx) =
             tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
 
-        let pool = state_clone.shared_state.model_process_pool.clone();
-        let mid_clone = requested_mid.clone();
-        let params_clone = params.clone();
+        let pool = state.shared_state.model_process_pool.clone();
+        let requested_mid = requested_mid.clone();
+        let params = params.clone();
         tokio::spawn(async move {
             let _ = pool
                 .generate(
-                    &mid_clone,
+                    &requested_mid,
                     layer_range,
                     prompt,
-                    params_clone,
+                    params,
                     gen_rid,
                     None,
                     Some(token_tx),

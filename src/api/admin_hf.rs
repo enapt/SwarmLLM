@@ -271,8 +271,8 @@ pub async fn hf_download(
     tracing::info!(repo = %repo_id, file = %filename, "Starting HuggingFace download");
 
     // Spawn download in background
-    let repo_clone = repo_id.clone();
-    let file_clone = filename.clone();
+    let repo_id = repo_id.clone();
+    let filename = filename.clone();
     let shared = state.shared_state.clone();
     let model_id_str = format!("hf:{}/{}", repo_id, filename);
     let mid = crate::types::ModelId(model_id_str.clone());
@@ -333,8 +333,8 @@ pub async fn hf_download(
 
         let download_result = tokio::select! {
             result = crate::model::huggingface::download_model(
-                &repo_clone,
-                &file_clone,
+                &repo_id,
+                &filename,
                 &dest_dir,
                 Some(ptx),
             ) => Some(result),
@@ -369,7 +369,7 @@ pub async fn hf_download(
                 // Try to load the downloaded model
                 let executor = download_shared.executor.clone();
                 let gpu_layers = download_shared.config.inference.gpu_layers;
-                let model_name = format!("{}/{}", repo_clone, file_clone);
+                let model_name = format!("{}/{}", repo_id, filename);
 
                 let mut exec = executor.lock().await;
                 match exec.load_model(&path, gpu_layers) {
@@ -1060,7 +1060,7 @@ pub async fn hf_download_shards(
 
             let (shard_tx, mut shard_rx) =
                 tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
-            let progress_tx_clone = ptx.clone();
+            let progress_tx = ptx.clone();
             let base_downloaded = cumulative_downloaded;
             let total = total_shard_bytes;
             let shard_progress_shared = shared.clone();
@@ -1072,11 +1072,10 @@ pub async fn hf_download_shards(
                 let mut last_broadcast_pct: u32 = 0;
                 while let Some(prog) = shard_rx.recv().await {
                     // Forward cumulative bytes to the overall progress updater
-                    let _ =
-                        progress_tx_clone.try_send(crate::model::huggingface::DownloadProgress {
-                            downloaded_bytes: base_downloaded + prog.downloaded_bytes,
-                            total_bytes: total,
-                        });
+                    let _ = progress_tx.try_send(crate::model::huggingface::DownloadProgress {
+                        downloaded_bytes: base_downloaded + prog.downloaded_bytes,
+                        total_bytes: total,
+                    });
                     // Update per-shard progress directly
                     if let Some(mut entry) = shard_progress_shared
                         .acquisition_progress

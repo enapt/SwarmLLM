@@ -129,7 +129,7 @@ impl NetworkManager {
             None
         };
 
-        let kp_clone = keypair.clone();
+        let keypair_for_behaviour = keypair.clone();
         let relay_cfg = relay_server_config;
         let enable_mdns = config.network.enable_mdns;
         let enable_autonat = config.network.enable_autonat;
@@ -154,7 +154,7 @@ impl NetworkManager {
             .map_err(|e| SwarmError::Network(format!("Relay client error: {e}")))?
             .with_behaviour(|_key, relay_behaviour| {
                 behaviour::build_behaviour(
-                    &kp_clone,
+                    &keypair_for_behaviour,
                     relay_behaviour,
                     relay_cfg.as_ref(),
                     enable_mdns,

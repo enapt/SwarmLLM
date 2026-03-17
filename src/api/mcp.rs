@@ -614,7 +614,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         let model_id = model_id.clone();
         let api_key = api_key.clone();
         let system_val = system.clone();
-        let prompt_clone = prompt.clone();
+        let prompt = prompt.clone();
 
         let handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
@@ -623,7 +623,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                 "model": model_id,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
-                "messages": [{"role": "user", "content": prompt_clone}],
+                "messages": [{"role": "user", "content": prompt}],
                 "stream": false,
             });
             if let Some(sys) = system_val {
@@ -803,7 +803,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         let model_id = model_id.clone();
         let api_key = api_key.clone();
         let system_val = system.clone();
-        let question_clone = question.clone();
+        let question = question.clone();
 
         let handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
@@ -812,7 +812,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                 "model": model_id,
                 "max_tokens": max_tokens,
                 "temperature": 0.7,
-                "messages": [{"role": "user", "content": question_clone}],
+                "messages": [{"role": "user", "content": question}],
                 "stream": false,
             });
             if let Some(sys) = system_val {

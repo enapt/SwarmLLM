@@ -1007,10 +1007,10 @@ async fn execute_local_batch(
 
             // Use streaming generation if the request has a token channel
             if let Some(ref tx) = token_tx {
-                let tx_clone = tx.clone();
+                let tx = tx.clone();
                 let session_id = request.session_id.clone();
                 let mut accumulated = String::new();
-                let stop_strings_clone = local_stop_strings.clone();
+                let stop_strings = local_stop_strings.clone();
                 let mut hit_stop = false;
                 match executor.generate_stream(
                     &prompt,
@@ -1018,7 +1018,7 @@ async fn execute_local_batch(
                     |token: &str| -> bool {
                         accumulated.push_str(token);
                         // Check for chat template stop strings
-                        if let Some(stop) = stop_strings_clone
+                        if let Some(stop) = stop_strings
                             .iter()
                             .find(|s| accumulated.contains(s.as_str()))
                         {
@@ -1033,7 +1033,7 @@ async fn execute_local_batch(
                             text: token.to_string(),
                             finish_reason: None,
                         };
-                        tx_clone.try_send(event).is_ok()
+                        tx.try_send(event).is_ok()
                     },
                 ) {
                     Ok(gen_result) => {
@@ -1231,7 +1231,7 @@ async fn execute_request(
 
         // Use streaming generation if token_tx is present
         if let Some(ref tx) = token_tx {
-            let tx_clone = tx.clone();
+            let tx = tx.clone();
             let mut accumulated = String::new();
             let gen_result = executor.generate_stream(
                 &prompt,
@@ -1242,7 +1242,7 @@ async fn execute_request(
                         text: token.to_string(),
                         finish_reason: None,
                     };
-                    tx_clone.try_send(event).is_ok()
+                    tx.try_send(event).is_ok()
                 },
             )?;
             // Send final done event
