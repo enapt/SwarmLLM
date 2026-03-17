@@ -91,5 +91,11 @@
   "map.demand_rate": "수요율",
   "map.coverage_gaps": "커버리지 갭",
   "map.regional_health": "지역 상태",
-  "map.replication_target": "복제 대상"
+  "map.replication_target": "복제 대상",
+  "actions.save_settings": "Save Settings",
+  "actions.saving": "Saving...",
+  "actions.confirm_cancel_download": "Cancel download for {model}?",
+  "actions.confirm_remove_shard": "Remove shard {index} of {model}?",
+  "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
+  "chat.reasoning_summary": "Reasoning ({chars} chars)"
 }

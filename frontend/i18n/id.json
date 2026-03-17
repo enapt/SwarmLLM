@@ -91,5 +91,11 @@
   "map.demand_rate": "Tingkat permintaan",
   "map.coverage_gaps": "Kesenjangan cakupan",
   "map.regional_health": "Kesehatan regional",
-  "map.replication_target": "Target replikasi"
+  "map.replication_target": "Target replikasi",
+  "actions.save_settings": "Save Settings",
+  "actions.saving": "Saving...",
+  "actions.confirm_cancel_download": "Cancel download for {model}?",
+  "actions.confirm_remove_shard": "Remove shard {index} of {model}?",
+  "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
+  "chat.reasoning_summary": "Reasoning ({chars} chars)"
 }

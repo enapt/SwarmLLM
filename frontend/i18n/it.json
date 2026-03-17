@@ -91,5 +91,11 @@
   "map.demand_rate": "Tasso di domanda",
   "map.coverage_gaps": "Lacune di copertura",
   "map.regional_health": "Salute regionale",
-  "map.replication_target": "Obiettivo di replica"
+  "map.replication_target": "Obiettivo di replica",
+  "actions.save_settings": "Save Settings",
+  "actions.saving": "Saving...",
+  "actions.confirm_cancel_download": "Cancel download for {model}?",
+  "actions.confirm_remove_shard": "Remove shard {index} of {model}?",
+  "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
+  "chat.reasoning_summary": "Reasoning ({chars} chars)"
 }

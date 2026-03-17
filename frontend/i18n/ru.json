@@ -91,5 +91,11 @@
   "map.demand_rate": "Частота запросов",
   "map.coverage_gaps": "Пробелы покрытия",
   "map.regional_health": "Региональное состояние",
-  "map.replication_target": "Цель репликации"
+  "map.replication_target": "Цель репликации",
+  "actions.save_settings": "Save Settings",
+  "actions.saving": "Saving...",
+  "actions.confirm_cancel_download": "Cancel download for {model}?",
+  "actions.confirm_remove_shard": "Remove shard {index} of {model}?",
+  "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
+  "chat.reasoning_summary": "Reasoning ({chars} chars)"
 }

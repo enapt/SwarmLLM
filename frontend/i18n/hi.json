@@ -91,5 +91,11 @@
   "map.demand_rate": "मांग दर",
   "map.coverage_gaps": "कवरेज अंतराल",
   "map.regional_health": "क्षेत्रीय स्वास्थ्य",
-  "map.replication_target": "प्रतिकृति लक्ष्य"
+  "map.replication_target": "प्रतिकृति लक्ष्य",
+  "actions.save_settings": "Save Settings",
+  "actions.saving": "Saving...",
+  "actions.confirm_cancel_download": "Cancel download for {model}?",
+  "actions.confirm_remove_shard": "Remove shard {index} of {model}?",
+  "actions.confirm_remove_model": "Remove all local shards for {model}? This cannot be undone.",
+  "chat.reasoning_summary": "Reasoning ({chars} chars)"
 }

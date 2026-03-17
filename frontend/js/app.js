@@ -761,7 +761,7 @@ var SwarmLLM = (function() {
                   // Close thinking block when content starts
                   if (thinkingEl && thinkingEl.open) {
                     thinkingEl.open = false;
-                    thinkingEl.querySelector('summary').textContent = 'Reasoning (' + reasoningContent.length + ' chars)';
+                    thinkingEl.querySelector('summary').textContent = I18n.t('chat.reasoning_summary', { chars: reasoningContent.length });
                   }
                   fullContent += delta.content;
                   // Append text after thinking block
@@ -780,12 +780,12 @@ var SwarmLLM = (function() {
         }
 
         if (!cleared && !fullContent && !reasoningContent) {
-          contentEl.textContent = 'No response received. The model might still be loading \u2014 wait a moment and try again.';
+          contentEl.textContent = I18n.t('chat.no_response');
           contentEl.classList.add('chat-error');
         }
       } catch (e) {
         if (!fullContent) {
-          contentEl.textContent = 'Connection failed \u2014 check that the server is running and try again.';
+          contentEl.textContent = I18n.t('chat.connection_failed');
           contentEl.classList.add('chat-error');
         }
       }
@@ -794,7 +794,7 @@ var SwarmLLM = (function() {
       var elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
       var timerEl = document.createElement('div');
       timerEl.className = 'msg-timer';
-      timerEl.textContent = 'Response time: ' + elapsed + 's';
+      timerEl.textContent = I18n.t('chat.response_time', { seconds: elapsed });
       var timerTarget = assistantEl.querySelector('.msg-bubble') || assistantEl;
       timerTarget.appendChild(timerEl);
 
@@ -2445,7 +2445,7 @@ var SwarmLLM = (function() {
 
     save: async function() {
       var saveBtn = document.getElementById('btn-save-settings');
-      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving...'; }
+      if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = I18n.t('actions.saving'); }
 
       var autoManageOn = document.getElementById('settings-auto-shards').value === 'on';
       var config = {
@@ -2485,7 +2485,7 @@ var SwarmLLM = (function() {
       // Save provider keys if any were entered
       await settings.saveProviders();
 
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Settings'; }
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = I18n.t('actions.save_settings'); }
     }
   };
 
@@ -3371,7 +3371,7 @@ var SwarmLLM = (function() {
   // Cancel Download
   // ========================================================================
   async function cancelDownload(modelId) {
-    if (!confirm('Cancel download for ' + modelId + '?')) return;
+    if (!confirm(I18n.t('actions.confirm_cancel_download', { model: modelId }))) return;
     try {
       var resp = await authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
       if (resp.ok) {
@@ -3685,7 +3685,7 @@ var SwarmLLM = (function() {
 
       if (state === 'local') {
         // Remove single shard
-        if (!confirm('Remove shard ' + idx + ' of ' + modelId + '?')) return;
+        if (!confirm(I18n.t('actions.confirm_remove_shard', { index: idx, model: modelId }))) return;
         try {
           var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx, { method: 'DELETE' });
           if (resp.ok) {
@@ -4161,7 +4161,7 @@ var SwarmLLM = (function() {
   }
 
   async function removeModel(modelId) {
-    if (!confirm('Remove all local shards for ' + modelId + '? This cannot be undone.')) return;
+    if (!confirm(I18n.t('actions.confirm_remove_model', { model: modelId }))) return;
     try {
       var resp = await authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
       if (resp.ok) {
