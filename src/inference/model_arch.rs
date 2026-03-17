@@ -98,7 +98,6 @@ impl ModelArch {
             "llama4",
             "qwen35",
             "qwen35moe",
-            // starcoder2 and glm4 have arch detection but no layer loading code yet
         ]
     }
 

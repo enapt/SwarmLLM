@@ -128,11 +128,18 @@ impl Database {
     fn check_schema_version(&self) -> Result<(), SwarmError> {
         match self.get_json::<u32>("meta", "schema_version")? {
             Some(stored) => {
-                if stored != DB_SCHEMA_VERSION {
+                if stored < DB_SCHEMA_VERSION {
+                    tracing::info!(
+                        stored_version = stored,
+                        current_version = DB_SCHEMA_VERSION,
+                        "Database schema upgraded (no migration needed for this version)"
+                    );
+                    self.put_json("meta", "schema_version", &DB_SCHEMA_VERSION)?;
+                } else if stored > DB_SCHEMA_VERSION {
                     tracing::warn!(
                         stored_version = stored,
                         current_version = DB_SCHEMA_VERSION,
-                        "Database schema version mismatch — data may need migration"
+                        "Database was created by a newer version — downgrade may cause issues"
                     );
                 }
             }
