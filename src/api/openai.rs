@@ -1263,33 +1263,6 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
 ///
 /// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
 /// encoding, SentencePiece byte fallbacks, etc).
-#[allow(dead_code)]
-pub(crate) fn decode_split_tokens(
-    model: &crate::inference::split::SplitModel,
-    token_ids: &[u32],
-) -> String {
-    if let Some(vocab) = model.vocab() {
-        if let Some(tokenizer) = model.tokenizer() {
-            let mut bytes = Vec::new();
-            for &id in token_ids {
-                if let Some(token_str) = vocab.get(id as usize) {
-                    bytes.extend(tokenizer.decode_token(token_str));
-                }
-            }
-            return String::from_utf8_lossy(&bytes).to_string();
-        }
-        // Fallback: raw vocab concatenation
-        token_ids
-            .iter()
-            .filter_map(|&id| vocab.get(id as usize))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("")
-    } else {
-        String::new()
-    }
-}
-
 fn peer_http_url(peer: &crate::types::PeerInfo) -> Option<String> {
     // Prefer UDP port (QUIC port == HTTP API port per convention),
     // fall back to TCP port - 10 (P2P TCP = HTTP + 10).

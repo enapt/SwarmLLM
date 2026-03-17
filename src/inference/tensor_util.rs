@@ -131,49 +131,6 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
     )
 }
 
-/// Sample the next token with optional logprobs. Returns (token_id, Option<logprob_info>).
-/// When `logprobs=true` in params, collects the top-N log probabilities.
-/// Token ID with its logprob, used for logprobs response.
-#[allow(dead_code)]
-pub type TokenLogProbs = Vec<(u32, f32)>;
-
-#[allow(dead_code)]
-pub fn sample_token_with_params_and_logprobs(
-    logits: &Tensor,
-    params: &crate::types::SamplingParams,
-) -> Result<(u32, Option<TokenLogProbs>), SwarmError> {
-    let logits_squeezed = logits
-        .squeeze(0)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let logits_f32 = logits_squeezed
-        .to_dtype(candle_core::DType::F32)
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-    let mut logits_vec = logits_f32
-        .to_vec1::<f32>()
-        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-
-    if logits_vec.is_empty() {
-        return Err(SwarmError::Internal("Empty logits".into()));
-    }
-
-    // Use the full sampling with logprobs
-    let mut ctx = crate::inference::sampling::SamplingContext::new(logits_vec.len());
-    let (token_id, logprob_info) =
-        crate::inference::sampling::sample_token_with_logprobs(&mut logits_vec, params, &mut ctx);
-
-    let top = logprob_info.map(|info| {
-        let mut result = vec![(info.token_id, info.logprob)];
-        for (tid, lp) in info.top_logprobs {
-            if tid != info.token_id {
-                result.push((tid, lp));
-            }
-        }
-        result
-    });
-
-    Ok((token_id, top))
-}
-
 /// Sample the next token from logits using full SamplingParams (top_k, frequency/presence penalty).
 pub fn sample_token_with_params(
     logits: &Tensor,
