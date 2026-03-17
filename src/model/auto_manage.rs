@@ -215,8 +215,7 @@ impl AutoShardManager {
 
                     // Re-check enabled — admin API can toggle at runtime
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
-                        self.evaluate_and_download().await;
-                        self.evaluate_and_prune().await;
+                        self.evaluate().await;
                     }
                 }
                 _ = self.notify.notified() => {
@@ -236,8 +235,7 @@ impl AutoShardManager {
                     if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         tracing::info!("AutoShardManager: triggered by new HF source or manifest");
                         last_notify_eval = std::time::Instant::now();
-                        self.evaluate_and_download().await;
-                        self.evaluate_and_prune().await;
+                        self.evaluate().await;
                     }
                 }
                 _ = request_reset_interval.tick() => {
@@ -248,7 +246,22 @@ impl AutoShardManager {
         }
     }
 
-    /// Core logic: evaluate network state and download the best candidate shards.
+    /// Unified auto-manage evaluation: download under-replicated shards, then
+    /// prune over-replicated ones. A single pass ensures consistent target replicas
+    /// and coordinates pruning with downloads (only prune when there's resource
+    /// pressure or when making room for higher-value shards).
+    async fn evaluate(&self) {
+        self.evaluate_and_download().await;
+
+        // Prune only if enabled — pruning is the last resort to free resources.
+        // The download phase already respects storage budgets, so pruning only
+        // fires when we're genuinely over-replicated or under resource pressure.
+        if self.shared_state.config.auto_manage.prune_enabled {
+            self.evaluate_and_prune().await;
+        }
+    }
+
+    /// Download under-replicated shards based on geo-aware scoring.
     async fn evaluate_and_download(&self) {
         let config = &self.shared_state.config.auto_manage;
         let local_node_id = self.shared_state.identity.node_id().clone();
@@ -591,31 +604,10 @@ impl AutoShardManager {
                     None => false,
                 };
 
-                // Compute how many replicas this shard should have.
-                // Log-scaled floor: grows logarithmically with network size.
-                // At 10 nodes → 3, at 100 → 7, at 1000 → 10, at 10000 → 13.
-                let global_floor = if pool_size <= 1 {
-                    min_replicas
-                } else {
-                    let log2_pool = (pool_size as f64).log2().ceil() as usize;
-                    log2_pool.clamp(min_replicas, pool_size / 3).max(1)
-                };
-                // Demand factor: popular models get more replicas.
-                let request_count = self
-                    .shared_state
-                    .model_request_counts
-                    .get(&manifest.id)
-                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                let demand_factor = match request_count {
-                    0 => 1.0,
-                    1..=5 => 1.5,
-                    6..=20 => 2.0,
-                    21..=100 => 2.5,
-                    _ => 3.0,
-                };
-                let global_target = (global_floor as f64 * demand_factor).ceil() as usize;
-                let target_replicas = global_target.min(pool_size).max(1);
+                // Compute target replicas using the unified geo-aware formula.
+                // Same calculation used by both download and prune paths.
+                let target_replicas =
+                    self.geo_target_replicas(&manifest.id, min_replicas as u32, pool_size) as usize;
 
                 // Skip shards that already meet the replica target.
                 // Using >= target_replicas (not > 0) ensures min_replicas drives
@@ -734,7 +726,12 @@ impl AutoShardManager {
                 };
 
                 // Per-region minimum: popular models need at least 2 copies per region.
-                let per_region_min: usize = if demand_factor >= 2.0 { 2 } else { 1 };
+                // Derive from target_replicas: if target >= 2× min_replicas, model is popular.
+                let per_region_min: usize = if target_replicas >= (min_replicas * 2) {
+                    2
+                } else {
+                    1
+                };
 
                 let regional_rarity = if regional_holders == 0 {
                     20.0 // No regional coverage — very high priority
@@ -1661,19 +1658,6 @@ impl AutoShardManager {
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
 
-        // Gather per-model request counts for popularity
-        let request_counts: std::collections::HashMap<ModelId, u64> = self
-            .shared_state
-            .model_request_counts
-            .iter()
-            .map(|e| {
-                (
-                    e.key().clone(),
-                    e.value().load(std::sync::atomic::Ordering::Relaxed),
-                )
-            })
-            .collect();
-
         let pool_size = self.shared_state.peer_registry.len() + 1; // +1 for us
 
         // Track how many shards pruned per model in this cycle
@@ -1706,9 +1690,8 @@ impl AutoShardManager {
                 }
             }
 
-            // Compute target replicas for this model
-            let request_count = request_counts.get(&manifest.id).copied().unwrap_or(0);
-            let target = self.target_replicas(request_count, config.min_replicas, pool_size);
+            // Compute target replicas for this model (unified with download path)
+            let target = self.geo_target_replicas(&manifest.id, config.min_replicas, pool_size);
 
             // Adjust target for resource pressure
             let adjusted_target =
@@ -1816,6 +1799,28 @@ impl AutoShardManager {
                         let age = modified.elapsed().unwrap_or_default();
                         if age < Duration::from_secs(1800) {
                             score -= 0.2;
+                        }
+                    }
+                }
+
+                // Regional demand penalty: protect shards for models with active
+                // demand in our region. Higher demand → harder to prune.
+                {
+                    let our_region = self.our_region().unwrap_or_default();
+                    if !our_region.is_empty() {
+                        let demand_key = (manifest.id.clone(), our_region);
+                        let ema_rate = self
+                            .shared_state
+                            .region_demand
+                            .get(&demand_key)
+                            .map(|v| *v)
+                            .unwrap_or(0.0);
+                        if ema_rate > 10.0 {
+                            score -= 1.0; // High demand — strongly resist pruning
+                        } else if ema_rate > 1.0 {
+                            score -= 0.5; // Moderate demand
+                        } else if ema_rate > 0.1 {
+                            score -= 0.2; // Low but non-zero demand
                         }
                     }
                 }
@@ -2026,17 +2031,64 @@ impl AutoShardManager {
         count
     }
 
-    /// Compute target replicas based on popularity (request count in last window).
-    fn target_replicas(&self, request_count: u64, min_replicas: u32, pool_size: usize) -> u32 {
-        let base = min_replicas as f64;
-        let factor = match request_count {
-            0 => 1.0,
-            1..=10 => 1.5,
-            11..=50 => 2.0,
-            _ => 3.0,
+    /// Unified target replicas: log-scaled floor × demand factor.
+    /// Used by BOTH download (gather_candidates) and prune (evaluate_and_prune) paths.
+    ///
+    /// | Pool size | Floor | Popular (3×) | Idle (1×) |
+    /// |-----------|-------|-------------|-----------|
+    /// | 10        | 3     | 9           | 3         |
+    /// | 100       | 7     | 21          | 7         |
+    /// | 1,000     | 10    | 30          | 10        |
+    /// | 10,000    | 13    | 39          | 13        |
+    fn geo_target_replicas(&self, model_id: &ModelId, min_replicas: u32, pool_size: usize) -> u32 {
+        let global_floor = if pool_size <= 1 {
+            min_replicas as usize
+        } else {
+            let log2_pool = (pool_size as f64).log2().ceil() as usize;
+            let upper = (pool_size / 3).max(min_replicas as usize);
+            log2_pool.clamp(min_replicas as usize, upper).max(1)
         };
-        let target = (base * factor).ceil() as u32;
-        target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
+
+        // Use EMA demand from region_demand (smoothed) if available,
+        // falling back to raw request counter.
+        let our_region = self.our_region().unwrap_or_default();
+        let demand_key = (model_id.clone(), our_region);
+        let ema_rate = self
+            .shared_state
+            .region_demand
+            .get(&demand_key)
+            .map(|v| *v)
+            .unwrap_or(0.0);
+
+        // Convert EMA rate to demand factor. The EMA rate is in requests/10min
+        // (decayed), so thresholds are lower than raw counts.
+        let demand_factor = if ema_rate < 0.1 {
+            // Also check raw counter as fallback (covers first window before decay kicks in)
+            let raw = self
+                .shared_state
+                .model_request_counts
+                .get(model_id)
+                .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0);
+            match raw {
+                0 => 1.0,
+                1..=5 => 1.5,
+                6..=20 => 2.0,
+                21..=100 => 2.5,
+                _ => 3.0,
+            }
+        } else if ema_rate < 1.0 {
+            1.5
+        } else if ema_rate < 5.0 {
+            2.0
+        } else if ema_rate < 20.0 {
+            2.5
+        } else {
+            3.0
+        };
+
+        let global_target = (global_floor as f64 * demand_factor).ceil() as u32;
+        global_target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
     }
 
     /// Adjust target based on resource pressure.
@@ -2066,20 +2118,16 @@ impl AutoShardManager {
         } else {
             config.resources.max_disk_mb / 2
         };
+        // Use reverse index for O(local_shards) instead of O(all_shards)
         let mut local_bytes = 0u64;
-        for manifest in self.shared_state.model_registry.models() {
-            for shard in &manifest.shards {
-                let sid = ShardId {
-                    model_id: manifest.id.clone(),
-                    index: shard.index,
-                };
-                if self
-                    .shared_state
-                    .model_registry
-                    .shard_holders(&sid)
-                    .contains(&local_node_id)
-                {
-                    local_bytes += shard.size_bytes;
+        let local_shards = self
+            .shared_state
+            .model_registry
+            .shards_for_node(&local_node_id);
+        for sid in &local_shards {
+            if let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id) {
+                if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == sid.index) {
+                    local_bytes += shard_info.size_bytes;
                 }
             }
         }
@@ -2144,13 +2192,7 @@ impl AutoShardManager {
         local_node_id: &NodeId,
         holders: &[NodeId],
     ) -> bool {
-        let our_region = self
-            .shared_state
-            .config
-            .identity
-            .region
-            .as_deref()
-            .unwrap_or("");
+        let our_region = self.our_region().unwrap_or_default();
 
         if our_region.is_empty() {
             // No region data — fallback: ensure at least 2 holders with low latency
@@ -2180,7 +2222,7 @@ impl AutoShardManager {
                     peer.capability
                         .as_ref()
                         .and_then(|c| c.region.as_deref())
-                        .map(|r| r.eq_ignore_ascii_case(our_region))
+                        .map(|r| r.eq_ignore_ascii_case(&our_region))
                         .unwrap_or(false)
                 } else {
                     false
@@ -2919,16 +2961,17 @@ mod tests {
 
     // --- Pruning unit tests ---
 
-    /// Helper: compute target replicas using the same formula as AutoShardManager.
-    fn target_replicas_pure(request_count: u64, min_replicas: u32, pool_size: usize) -> u32 {
-        let base = min_replicas as f64;
-        let factor = match request_count {
-            0 => 1.0,
-            1..=10 => 1.5,
-            11..=50 => 2.0,
-            _ => 3.0,
+    /// Helper: compute geo-scaled target replicas (log2-based).
+    /// Mirrors geo_target_replicas() but as a pure function for testing.
+    fn geo_target_pure(raw_demand_factor: f64, min_replicas: u32, pool_size: usize) -> u32 {
+        let global_floor = if pool_size <= 1 {
+            min_replicas as usize
+        } else {
+            let log2_pool = (pool_size as f64).log2().ceil() as usize;
+            let upper = (pool_size / 3).max(min_replicas as usize);
+            log2_pool.clamp(min_replicas as usize, upper).max(1)
         };
-        let target = (base * factor).ceil() as u32;
+        let target = (global_floor as f64 * raw_demand_factor).ceil() as u32;
         target.clamp(min_replicas, (pool_size as u32).max(min_replicas))
     }
 
@@ -2946,48 +2989,43 @@ mod tests {
     }
 
     #[test]
-    fn popularity_tiers_zero_requests() {
-        assert_eq!(target_replicas_pure(0, 2, 10), 2);
+    fn geo_target_idle_small_pool() {
+        // pool=10: log2(10)=4, floor=clamp(4, 2, 3)=3, factor 1.0 → 3
+        assert_eq!(geo_target_pure(1.0, 2, 10), 3);
     }
 
     #[test]
-    fn popularity_tiers_low_requests() {
-        // 1-10 requests → factor 1.5 → ceil(2*1.5) = 3
-        assert_eq!(target_replicas_pure(1, 2, 10), 3);
-        assert_eq!(target_replicas_pure(5, 2, 10), 3);
-        assert_eq!(target_replicas_pure(10, 2, 10), 3);
+    fn geo_target_popular_small_pool() {
+        // pool=10: floor=3, factor 3.0 → 9
+        assert_eq!(geo_target_pure(3.0, 2, 10), 9);
     }
 
     #[test]
-    fn popularity_tiers_medium_requests() {
-        // 11-50 requests → factor 2.0 → ceil(2*2.0) = 4
-        assert_eq!(target_replicas_pure(11, 2, 10), 4);
-        assert_eq!(target_replicas_pure(50, 2, 10), 4);
+    fn geo_target_medium_pool() {
+        // pool=100: log2(100)=7, floor=clamp(7, 2, 33)=7, factor 1.0 → 7
+        assert_eq!(geo_target_pure(1.0, 2, 100), 7);
+        // factor 2.0 → 14
+        assert_eq!(geo_target_pure(2.0, 2, 100), 14);
     }
 
     #[test]
-    fn popularity_tiers_high_requests() {
-        // 51+ requests → factor 3.0 → ceil(2*3.0) = 6
-        assert_eq!(target_replicas_pure(51, 2, 10), 6);
-        assert_eq!(target_replicas_pure(1000, 2, 10), 6);
+    fn geo_target_large_pool() {
+        // pool=1000: log2(1000)=10, floor=clamp(10, 2, 333)=10, factor 3.0 → 30
+        assert_eq!(geo_target_pure(3.0, 2, 1000), 30);
     }
 
     #[test]
-    fn popularity_clamped_by_pool_size() {
-        // pool_size=3, 51+ requests → ceil(2*3.0)=6, clamped to 3
-        assert_eq!(target_replicas_pure(100, 2, 3), 3);
-        // pool_size=4, 0 requests → base=2, factor=1.0, target=2
-        assert_eq!(target_replicas_pure(0, 2, 4), 2);
-        // pool_size=2, 51+ requests → ceil(2*3.0)=6, clamped to 2
-        assert_eq!(target_replicas_pure(100, 2, 2), 2);
+    fn geo_target_clamped_by_pool_size() {
+        // pool=3: log2(3)=2, floor=clamp(2, 2, 1)=2, factor 3.0 → 6, clamped to 3
+        assert_eq!(geo_target_pure(3.0, 2, 3), 3);
     }
 
     #[test]
-    fn popularity_pool_size_zero() {
-        // Single node, no peers → pool_size=0, should not panic
-        assert_eq!(target_replicas_pure(0, 1, 0), 1);
-        assert_eq!(target_replicas_pure(100, 2, 0), 2);
-        assert_eq!(target_replicas_pure(0, 1, 1), 1);
+    fn geo_target_single_node() {
+        // pool=1: floor=min_replicas=2, factor 1.0 → 2, clamped to 1
+        // Actually pool_size <= 1 uses min_replicas directly
+        assert_eq!(geo_target_pure(1.0, 2, 1), 2);
+        assert_eq!(geo_target_pure(3.0, 1, 1), 1);
     }
 
     #[test]
