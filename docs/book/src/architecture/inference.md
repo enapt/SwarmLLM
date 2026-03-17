@@ -1,8 +1,38 @@
 # Inference Pipeline
 
+## Subprocess-Per-Model Isolation
+
+Each loaded model runs in its own **`swarmllm model-worker` subprocess** (Ollama-style). When a model is unloaded, the subprocess is killed and the OS + CUDA driver immediately reclaim all GPU memory — no daemon restart required.
+
+```
+Main daemon                          model-worker subprocess (one per model)
+───────────────────────────────      ───────────────────────────────────────
+ModelProcessPool.generate()  ─────►  loads shards from disk on first request
+ModelProcessPool.forward()   ─────►  runs forward passes / full decode loop
+                             ◄─────  streams WorkerMsg::Token / LayerResult
+unload_model()               ─────►  kill process → OS frees all VRAM
+```
+
+**IPC**: Unix domain socket with binary framing — `[4B json_len][json header][4B payload_len][raw tensor bytes]`. JSON carries message metadata; the payload carries raw activation bytes to avoid base64 overhead.
+
+**Message types** (`src/inference/worker_ipc.rs`):
+
+| Message | Direction | Purpose |
+|---|---|---|
+| `DaemonMsg::Forward` | daemon → worker | Single-step LayerForward (distributed inference) |
+| `DaemonMsg::Generate` | daemon → worker | Full prompt→tokens decode loop (API inference) |
+| `DaemonMsg::Unload` | daemon → worker | Drop a layer range (partial memory reclaim) |
+| `DaemonMsg::Shutdown` | daemon → worker | Graceful worker exit |
+| `WorkerMsg::Token` | worker → daemon | Streaming decoded token |
+| `WorkerMsg::LayerResult` | worker → daemon | Activation result for pipeline forwarding |
+
+**`SplitModelEntry`** is metadata-only — it caches `eos_tokens`, `vocab`, `chat_template`, `bos_token`, and `eos_token_str` from the GGUF header without loading model weights. The weights live exclusively in the worker subprocess.
+
+**Worker granularity**: one process per `ModelId` (not per shard). A single worker handles all layer ranges for a model and owns its own `KvCacheStore`. Individual shard unload uses `DaemonMsg::Unload`; the process exits only when all shards are released.
+
 ## Split Inference Engine
 
-The split inference engine (`src/inference/split.rs`) enables distributed inference using candle for direct tensor computation with quantized GGUF weights. Each node loads only its assigned transformer layers, forwarding hidden-state activations between nodes.
+The split inference engine (`src/inference/split.rs`) enables distributed inference using candle for direct tensor computation with quantized GGUF weights. Each node loads only its assigned transformer layers (in the worker subprocess), forwarding hidden-state activations between nodes.
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly
@@ -62,7 +92,6 @@ The SplitModel loader reads `general.architecture` from GGUF metadata and applie
 
 ## Advanced Features
 
-- **Batched Inference** — `BatchForwarder` stacks concurrent decode requests into GPU batches
 - **Speculative Decoding** — Draft model proposes K tokens, target verifies in one pass
 - **Chunked Prefill** — Long prompts split into chunks to reduce peak memory
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)

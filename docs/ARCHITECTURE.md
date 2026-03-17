@@ -442,23 +442,52 @@ Long prompts are split into chunks for overlapped prefill and decode:
 - Config: `speculative_decoding`, `speculative_gamma`, `draft_model_path`
 - Falls back to standard decoding if no draft model available
 
-### Batched Inference (Pipeline Bubble Filling)
+### Subprocess-Per-Model Isolation (Ollama-style)
 
-- `BatchForwarder` collects concurrent decode-step requests into GPU batches
-- Position-independent ops (norms, MLP) run on stacked `[batch, seq, dim]` tensors
-- Attention runs per-request (different KV-caches and positions)
-- Output split back via `Tensor::narrow` per request
-- Prefill and single-item batches use sequential path
-- **Both local and remote requests** route through `BatchForwarder` — remote `LayerForward` requests (from `handle_layer_forward` in `daemon/dispatch.rs`) submit to the same batch queue as local pipeline segments, filling pipeline bubbles where a node would otherwise sit idle waiting for upstream/downstream nodes
-- Timeout-based batch collection: when a request arrives and fewer than `max_batch_size` items are queued, the processor waits up to `batch_timeout_ms` for more requests before dispatching
-- `SplitModelEntry` caches `eos_tokens: Vec<u32>` at construction, enabling lock-free sampling after batched forward passes (no model mutex needed for EOS detection)
-- Config: `max_batch_size` (default 1 = no batching), `batch_timeout_ms` (default 50ms)
+Each loaded model runs in its own `swarmllm model-worker` subprocess. This guarantees that unloading a model **immediately** reclaims all GPU memory — the OS and CUDA driver free all allocations when the process exits, bypassing the CUDA allocator cache that prevents memory release within a single process.
+
+```
+Main daemon (control + P2P + API)          Worker subprocess per model
+────────────────────────────────           ──────────────────────────
+InferenceRouter                            model-worker --socket /tmp/...
+  ↓                                          connects to daemon socket
+ModelProcessPool.generate()  ──socket──▶   loads shards from disk
+ModelProcessPool.forward()   ──socket──▶   runs forward passes / decode loop
+                             ◀──socket──   streams tokens / LayerResult back
+                                           exits on unload → VRAM freed
+```
+
+**Communication**: Unix domain socket with binary framing (`[4B json_len][json][4B payload_len][raw bytes]`). JSON carries message metadata; the payload carries raw activation tensor bytes to avoid base64 overhead.
+
+**Message types** (`src/inference/worker_ipc.rs`):
+- `DaemonMsg::Forward(IpcForward)` — single-step LayerForward for distributed inference
+- `DaemonMsg::Generate(IpcGenerate)` — full prompt→tokens decode loop for API inference
+- `DaemonMsg::Unload` — drop a layer range within the worker (partial memory reclaim)
+- `DaemonMsg::Shutdown` — graceful exit
+- `WorkerMsg::Token` — streaming token during Generate
+- `WorkerMsg::LayerResult` — activation result for distributed pipeline forwarding
+
+**`ModelProcessPool`** (`src/inference/process_pool.rs`):
+- `DashMap<ModelId, Arc<WorkerHandle>>` — one worker per active model
+- `get_or_spawn()` — lazily spawns a worker on the first request for a model
+- `forward()` — routes a `LayerForward` to the subprocess, awaits `LayerResult`
+- `generate()` — sends a full generate request, streams `WorkerMsg::Token` back
+- `unload_model()` — kills the subprocess → OS/CUDA reclaims all GPU memory
+
+**`SplitModelEntry`** is now **metadata-only** (no `Arc<Mutex<SplitModel>>` in the main process):
+- Caches `eos_tokens`, `vocab`, `chat_template`, `bos_token`, `eos_token_str` from the GGUF header
+- `estimated_vram_mb` from shard file sizes on disk
+- The actual model weights live exclusively in the worker subprocess
+
+**Granularity**: one process per `ModelId` (not per shard). A single worker handles all layer ranges for one model, owns its own `KvCacheStore`, and processes requests sequentially — matching the prior `Mutex<SplitModel>` serialization. Individual shard load/unload is handled within the worker via `DaemonMsg::Unload`; the process only exits when all shards are released or `Shutdown` is received.
+
+**Dashboard responsiveness**: since inference never runs on the main Tokio runtime, API and WebSocket handlers always get a fast response even under heavy inference load.
 
 ### VRAM-Aware Cache Eviction
 
-- `SplitModelEntry` wraps models with `last_used` timestamp and `estimated_vram_mb`
+- `SplitModelEntry` tracks `last_used` timestamp and `estimated_vram_mb` (from shard file sizes)
 - Configurable `max_split_model_memory_mb` budget (default unlimited)
-- LRU eviction: least-recently-used models evicted when over budget
+- LRU eviction: `evict_split_models_lru` removes metadata entries and kills the corresponding worker subprocess — VRAM is guaranteed freed
 - Active models (with in-flight pipelines) are never evicted
 
 ### LoRA Adapter Support
@@ -709,11 +738,13 @@ Discovered → Pinned → DemandVerified → NetworkPopular
 
 Models are loaded into VRAM only when needed, not eagerly at startup.
 
-**Trigger**: When `execute_request()` in the inference router encounters a model that has shards on disk but no entry in `split_models`:
-1. Check if `shard_000.bin` or `model.gguf` exists in the model directory
-2. If yes, call `check_and_load_model()` inline (runs in the spawned inference task, not the router loop)
-3. VRAM budget is checked; LRU eviction frees space from least-recently-used models
-4. Loading coordination: `DashMap<ModelId, Notify>` ensures only one task loads a model at a time; concurrent requests wait on the Notify
+**Trigger**: When `execute_request()` in the inference router encounters a model that has shards on disk but no worker subprocess running for it:
+1. `ModelProcessPool.get_or_spawn()` spawns a `swarmllm model-worker` subprocess
+2. Worker connects to the daemon's Unix socket and sends `WorkerMsg::Ready`
+3. First `Forward` or `Generate` request causes the worker to load shards from disk
+4. VRAM budget is tracked via `SplitModelEntry.estimated_vram_mb`; LRU eviction kills the oldest worker subprocess
+
+**Loading coordination**: the process pool `Mutex<WorkerSocket>` serializes requests per model — if two requests arrive simultaneously for an unloaded model, the second waits for the first to complete spawning.
 
 **VRAM Budget**: Configured via `resources.max_gpu_vram_mb` or auto-detected (80% of GPU VRAM). LRU eviction protects active pipeline models from eviction.
 
