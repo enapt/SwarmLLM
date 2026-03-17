@@ -270,6 +270,23 @@ impl HealthMonitor {
             }
         }
 
+        // Build a set of same-region node IDs once to avoid O(holders) peer_registry
+        // lookups per shard (was O(models × shards × holders), now O(models × shards)).
+        let same_region_nodes: std::collections::HashSet<crate::types::NodeId> = {
+            let mut set = std::collections::HashSet::new();
+            set.insert(our_id.clone());
+            for entry in self.shared_state.peer_registry.iter() {
+                if let Some(ref cap) = entry.capability {
+                    if let Some(ref r) = cap.region {
+                        if r.to_uppercase() == our_region {
+                            set.insert(entry.key().clone());
+                        }
+                    }
+                }
+            }
+            set
+        };
+
         // For each model, count same-region shard holders
         for manifest in self.shared_state.model_registry.models() {
             let mut shard_counts: Vec<(u32, u32)> = Vec::new();
@@ -279,23 +296,10 @@ impl HealthMonitor {
                     index: shard_info.index,
                 };
                 let holders = self.shared_state.model_registry.shard_holders(&sid);
-                // Count holders in our region
-                let mut regional_count: u32 = 0;
-                for holder in &holders {
-                    if *holder == our_id {
-                        regional_count += 1;
-                        continue;
-                    }
-                    if let Some(peer) = self.shared_state.peer_registry.get(holder) {
-                        if let Some(ref cap) = peer.capability {
-                            if let Some(ref r) = cap.region {
-                                if r.to_uppercase() == our_region {
-                                    regional_count += 1;
-                                }
-                            }
-                        }
-                    }
-                }
+                let regional_count = holders
+                    .iter()
+                    .filter(|h| same_region_nodes.contains(h))
+                    .count() as u32;
                 shard_counts.push((shard_info.index, regional_count));
             }
 
