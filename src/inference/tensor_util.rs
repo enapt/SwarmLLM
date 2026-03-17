@@ -134,8 +134,10 @@ pub fn sample_token(logits: &Tensor, temperature: f32, top_p: f32) -> Result<u32
 /// Sample the next token with optional logprobs. Returns (token_id, Option<logprob_info>).
 /// When `logprobs=true` in params, collects the top-N log probabilities.
 /// Token ID with its logprob, used for logprobs response.
+#[allow(dead_code)]
 pub type TokenLogProbs = Vec<(u32, f32)>;
 
+#[allow(dead_code)]
 pub fn sample_token_with_params_and_logprobs(
     logits: &Tensor,
     params: &crate::types::SamplingParams,

@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch, RwLock};
 
-use crate::error::SwarmError;
 use crate::identity::nickname::NicknameRecordExt;
 use crate::inference::router::RouterCommand;
 use crate::model::manifest::ModelManifestExt;
 use crate::types::{AuthenticatedMessage, EphemeralKeyExchange, NetworkCommand, SwarmMessage};
 
-use super::shard_loader::{try_load_from_shards, ShardLoadParams};
 use super::state::{SharedState, TpAllReduceCollector};
 
 /// Maximum number of concurrent LayerForward tasks.
@@ -80,6 +78,26 @@ fn seal_layer_result(result: &mut crate::types::LayerResult, requester_node_id: 
 /// Track inference participation: increment forwards_served and earn credits (non-blocking).
 /// `max_layers` caps the credited range to the model's actual layer count,
 /// preventing credit inflation from forged layer_range values.
+/// Estimate VRAM usage from shard files on disk (no model loading).
+pub fn estimate_vram_from_shard_dir(
+    model_dir: &std::path::Path,
+    layer_start: usize,
+    layer_end: usize,
+    total_layers: usize,
+) -> u64 {
+    let total_bytes: u64 = (0..256u32)
+        .filter_map(|i| {
+            let path = model_dir.join(format!("shard_{i:03}.bin"));
+            std::fs::metadata(&path).ok().map(|m| m.len())
+        })
+        .sum();
+    if total_layers == 0 {
+        return total_bytes / (1024 * 1024);
+    }
+    let layer_fraction = (layer_end - layer_start) as f64 / total_layers as f64;
+    ((total_bytes as f64 * layer_fraction) / (1024.0 * 1024.0)) as u64
+}
+
 fn track_forward_participation(
     shared_state: &SharedState,
     layer_start: usize,
@@ -1113,8 +1131,6 @@ async fn handle_layer_forward(
     network_tx: mpsc::Sender<NetworkCommand>,
     forward: crate::types::LayerForward,
 ) {
-    use crate::inference::split::{self, SplitModel};
-
     let request_id = forward.request_id;
     let sender_peer_bytes = match forward.sender_peer_bytes {
         Some(ref bytes) => bytes.clone(),
@@ -1204,592 +1220,69 @@ async fn handle_layer_forward(
     let is_first = layer_start == 0 && has_shard_0;
     let is_last = layer_end >= total_layers && has_last_shard;
 
-    // Ensure the split model is loaded
+    // Ensure the split model metadata entry exists (lightweight — no GPU loading)
     let split_key = (model_id.clone(), layer_start, layer_end);
     if !shared_state.split_models.contains_key(&split_key) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
         let model_dir = shard_store.models_dir().join(&model_id.0);
 
-        // Try loading the split model from available sources, in priority order:
-        // 1. Reconstructed model.gguf (all shards concatenated)
-        // 2. Original GGUF via source_path
-        // 3. Shard files + gguf_header.bin (no full GGUF needed)
-        let gguf_path = model_dir.join("model.gguf");
-        let source_path_file = model_dir.join("source_path");
+        // Estimate VRAM from shard file sizes on disk (no model loading)
+        let vram_estimate_mb =
+            estimate_vram_from_shard_dir(&model_dir, layer_start, layer_end, total_layers);
 
-        // CRITICAL: Model loading is CPU/IO-heavy (mmap + tensor copies).
-        // Must use block_in_place to avoid starving the Tokio runtime.
-        let load_result = tokio::task::block_in_place(|| {
-            if gguf_path.exists() {
-                tracing::info!(
-                    model = %model_id,
-                    layers = format!("[{layer_start}..{layer_end})"),
-                    path = %gguf_path.display(),
-                    "Loading split model from reconstructed GGUF"
-                );
-                SplitModel::load_from_gguf(&gguf_path, layer_start, layer_end, is_first, is_last)
-            } else if source_path_file.exists() {
-                match std::fs::read_to_string(&source_path_file) {
-                    Ok(p) => {
-                        let p = std::path::PathBuf::from(p.trim());
-                        // Verify source_path is within the data models directory
-                        // to prevent path traversal attacks via crafted source_path files.
-                        let data_models = shard_store.models_dir();
-                        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
-                        if !canonical.starts_with(&data_models) {
-                            tracing::warn!(
-                                path = %canonical.display(),
-                                "source_path outside data directory — ignoring"
-                            );
-                            return Err(crate::error::SwarmError::Internal(
-                                "source_path outside data directory".into(),
-                            ));
-                        }
-                        if canonical.exists() {
-                            tracing::info!(
-                                model = %model_id,
-                                layers = format!("[{layer_start}..{layer_end})"),
-                                path = %canonical.display(),
-                                "Loading split model from source GGUF"
-                            );
-                            // Use canonical path (not original p) to prevent TOCTOU race
-                            SplitModel::load_from_gguf(
-                                &canonical,
-                                layer_start,
-                                layer_end,
-                                is_first,
-                                is_last,
-                            )
-                        } else {
-                            try_load_from_shards(&ShardLoadParams {
-                                model_dir: &model_dir,
-                                shard_store: &shard_store,
-                                model_id: &model_id,
-                                layer_start,
-                                layer_end,
-                                is_first,
-                                is_last,
-                                manifest: &manifest,
-                            })
-                        }
-                    }
-                    Err(e) => Err(SwarmError::Io(e)),
-                }
-            } else {
-                try_load_from_shards(&ShardLoadParams {
-                    model_dir: &model_dir,
-                    shard_store: &shard_store,
-                    model_id: &model_id,
-                    layer_start,
-                    layer_end,
-                    is_first,
-                    is_last,
-                    manifest: &manifest,
-                })
-            }
-        });
-
-        match load_result {
-            Ok(model) => {
-                // Notify dashboard if model fell back to CPU
-                if model.device().is_cpu() {
-                    let _ = shared_state.system_notify_tx.send(
-                        crate::daemon::state::SystemNotification {
-                            level: "warn".into(),
-                            title: "Model loaded on CPU".into(),
-                            message: format!(
-                            "{} loaded on CPU (GPU VRAM insufficient). Inference will be slower. \
-                                 You can free VRAM by unloading other models from the Models page.",
-                            model_id
-                        ),
-                            model_id: Some(model_id.0.clone()),
-                        },
-                    );
-                }
-                // VRAM-aware eviction: if a memory budget is set, evict LRU
-                // models before inserting the new one.
-                let max_batch = shared_state.config.inference.max_batch_size as usize;
-                let batch_timeout = std::time::Duration::from_millis(
-                    shared_state.config.inference.batch_timeout_ms,
-                );
-                let new_entry = if max_batch > 1 {
-                    crate::inference::split::SplitModelEntry::new_with_batching(
-                        model,
-                        shared_state.kv_cache_store.clone(),
-                        max_batch,
-                        batch_timeout,
-                    )
-                } else {
-                    crate::inference::split::SplitModelEntry::new(model)
-                };
-                let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state)
-                    .or(shared_state.config.inference.max_split_model_memory_mb);
-                if let Some(budget_mb) = vram_budget {
-                    let evicted = crate::inference::split::evict_split_models_lru(
-                        &shared_state.split_models,
-                        &shared_state.active_pipelines,
-                        budget_mb,
-                        new_entry.estimated_vram_mb,
-                    );
-                    if evicted > 0 {
-                        tracing::info!(
-                            evicted,
-                            budget_mb,
-                            "Evicted LRU split models for VRAM budget"
-                        );
-                    }
-                }
-                shared_state
-                    .split_models
-                    .insert(split_key.clone(), new_entry);
-            }
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Load failed: {e}"),
-                )
-                .await;
-                return;
-            }
-        }
-    }
-
-    let (split_model_ref, batch_forwarder, cached_eos_tokens) =
-        match shared_state.split_models.get(&split_key) {
-            Some(r) => {
-                r.value().touch();
-                (
-                    r.value().model.clone(),
-                    r.value().batch_forwarder.clone(),
-                    r.value().eos_tokens.clone(),
-                )
-            }
-            None => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    "Split model vanished",
-                )
-                .await;
-                return;
-            }
-        };
-
-    // Clear per-request KV-cache at the start of a new request (prefill)
-    let req_id_str = request_id.to_string();
-    if forward.sequence_num == 0 {
-        // Include model_id to prevent cross-model cache key collisions
-        let model_key = format!(
-            "{}-{}-{}-{}",
-            model_id.0, layer_start, layer_end, total_layers
-        );
-        shared_state
-            .kv_cache_store
-            .clear_request(&model_key, &req_id_str);
-    }
-
-    // Try batch path for decode steps (seq > 0) when batching is enabled.
-    // Prefill (seq 0 on is_first) requires tokenization under the model lock,
-    // so it always falls through to the sequential path.
-    // Pre-embedded prefills can also use the batch path since no tokenization is needed.
-    let use_batch = batch_forwarder.is_some() && (forward.sequence_num > 0 || forward.pre_embedded);
-
-    if use_batch {
-        let forwarder = batch_forwarder.expect("batch_forwarder must exist when use_batch=true");
-
-        // Build input tensor without holding the model lock
-        let input_tensor = if forward.pre_embedded {
-            // Pre-embedded: activations are already hidden-state tensors
-            match split::bytes_to_tensor(&forward.activations) {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Pre-embedded decode: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        } else if is_first {
-            // Decode step on first segment: single token ID as i64 LE
-            let token_id = if forward.activations.len() >= 8 {
-                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
-                    Ok(b) => b,
-                    Err(_) => {
-                        send_error_result(
-                            &network_tx,
-                            &sender_peer_bytes,
-                            request_id,
-                            "Invalid activation data",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                i64::from_le_bytes(bytes)
-            } else {
-                0i64
-            };
-            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Tensor: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        } else {
-            match split::bytes_to_tensor(&forward.activations) {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Decode: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        };
-
-        // Submit to batch forwarder — will be batched with other concurrent requests
-        let output = match forwarder
-            .submit(input_tensor, forward.index_pos as usize, req_id_str)
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Batch forward: {e}"),
-                )
-                .await;
-                return;
-            }
-        };
-
-        // Post-process using cached eos_tokens (no model lock needed)
-        let result = if is_last {
-            match split::sample_token(&output, 0.7, 0.9) {
-                Ok(token_id) => {
-                    let finish = if cached_eos_tokens.contains(&token_id) {
-                        Some(crate::types::NetworkFinishReason::Stop)
-                    } else {
-                        None
-                    };
-                    crate::types::LayerResult {
-                        request_id,
-                        token_ids: vec![token_id],
-                        finish_reason: finish,
-                        activations: vec![],
-                        sealed_token_ids: None,
-                    }
-                }
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Sample: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        } else {
-            match split::tensor_to_bytes(&output) {
-                Ok(activation_bytes) => crate::types::LayerResult {
-                    request_id,
-                    token_ids: vec![],
-                    finish_reason: None,
-                    activations: activation_bytes,
-                    sealed_token_ids: None,
-                },
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Encode: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        };
-
-        let forward_elapsed = forward_start.elapsed();
-        tracing::info!(
-            request_id = %request_id,
-            tokens = result.token_ids.len(),
-            activations_bytes = result.activations.len(),
+        // Read metadata from GGUF header file
+        let header_path = model_dir.join("gguf_header.bin");
+        let entry = crate::inference::split::SplitModelEntry::from_header(
+            &header_path,
+            layer_start,
+            layer_end,
+            is_first,
             is_last,
-            elapsed_ms = forward_elapsed.as_millis() as u64,
-            model_id = %model_id,
-            layers = format!("[{layer_start}..{layer_end})"),
-            batched = true,
-            "DIAG: LayerForward processed via batch forwarder"
+            vram_estimate_mb,
         );
 
-        track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
-
-        // Pipeline sealing: encrypt token IDs for requester if this is the final segment
-        let mut result = result;
-        if is_last {
-            seal_layer_result(&mut result, forward.requester_node_id.as_ref());
+        // VRAM-aware eviction before inserting
+        let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state)
+            .or(shared_state.config.inference.max_split_model_memory_mb);
+        if let Some(budget_mb) = vram_budget {
+            let evicted = crate::inference::split::evict_split_models_lru(
+                &shared_state.split_models,
+                &shared_state.active_pipelines,
+                budget_mb,
+                entry.estimated_vram_mb,
+            );
+            if evicted > 0 {
+                tracing::info!(
+                    evicted,
+                    budget_mb,
+                    "Evicted LRU split models for VRAM budget"
+                );
+            }
         }
-
-        if let Err(e) = network_tx
-            .send(NetworkCommand::SendTensorResult {
-                target_peer_bytes: sender_peer_bytes,
-                result,
-            })
-            .await
-        {
-            tracing::warn!(error = %e, "Failed to send LayerResult back to peer");
-        }
-        return;
+        shared_state.split_models.insert(split_key.clone(), entry);
     }
 
-    // Sequential path: prefill or batching disabled
-    let mut split_model = split_model_ref.lock().await;
+    // Touch the metadata entry
+    if let Some(entry) = shared_state.split_models.get(&split_key) {
+        entry.value().touch();
+    }
 
-    // Local embedding privacy: if pre_embedded, activations are already hidden states
-    let pre_embedded = forward.pre_embedded;
+    // Capture requester_node_id before moving forward into the process pool
+    let requester_node_id = forward.requester_node_id;
 
-    // Convert activation bytes to a candle Tensor
-    let input_tensor = if pre_embedded {
-        // Pre-embedded: activations are serialized hidden-state tensors
-        match split::bytes_to_tensor(&forward.activations) {
-            Ok(t) => {
-                tracing::debug!(
-                    request_id = %request_id,
-                    shape = ?t.shape(),
-                    "Received pre-embedded activations (local embedding privacy)"
-                );
-                t
-            }
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Pre-embedded decode: {e}"),
-                )
-                .await;
-                return;
-            }
-        }
-    } else if is_first {
-        if forward.index_pos == 0 {
-            // Prefill: activations are the prompt text → tokenize with BPE if available
-            let prompt = String::from_utf8_lossy(&forward.activations);
-            let token_ids: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
-                tokenizer.encode(&prompt)
-            } else {
-                prompt.bytes().map(|b| b as i64).collect()
-            };
-            match candle_core::Tensor::from_vec(
-                token_ids.clone(),
-                &[1, token_ids.len()],
-                &candle_core::Device::Cpu,
-            ) {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Tensor: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        } else {
-            // Decode step: activations are a single i64 token ID (8 bytes LE)
-            let token_id = if forward.activations.len() >= 8 {
-                let bytes: [u8; 8] = match forward.activations[..8].try_into() {
-                    Ok(b) => b,
-                    Err(_) => {
-                        tracing::warn!("LayerForward activations too short for token ID");
-                        send_error_result(
-                            &network_tx,
-                            &sender_peer_bytes,
-                            request_id,
-                            "Invalid activation data",
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                i64::from_le_bytes(bytes)
-            } else {
-                0i64
-            };
-            match candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    send_error_result(
-                        &network_tx,
-                        &sender_peer_bytes,
-                        request_id,
-                        &format!("Tensor: {e}"),
-                    )
-                    .await;
-                    return;
-                }
-            }
-        }
-    } else {
-        match split::bytes_to_tensor(&forward.activations) {
-            Ok(t) => t,
-            Err(e) => {
-                send_error_result(
-                    &network_tx,
-                    &sender_peer_bytes,
-                    request_id,
-                    &format!("Decode: {e}"),
-                )
-                .await;
-                return;
-            }
-        }
-    };
+    // Route forward pass to subprocess via process pool
+    let result = shared_state.model_process_pool.forward(forward).await;
 
-    // Decompress vision embeddings from LayerForward if present
-    let vision_tensor: Option<candle_core::Tensor> = if let Some(ref compressed) =
-        forward.vision_embeddings
-    {
-        match zstd::decode_all(std::io::Cursor::new(compressed)) {
-            Ok(raw_bytes) => {
-                const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024; // 50MB
-                if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES {
-                    tracing::warn!(
-                        size = raw_bytes.len(),
-                        max = MAX_VISION_EMBEDDING_BYTES,
-                        "Vision embeddings too large after decompression, dropping"
-                    );
-                    None
-                } else {
-                    let num_f16 = raw_bytes.len() / 2;
-                    // Infer hidden dimension from common VLM sizes.
-                    const COMMON_HIDDEN_DIMS: &[usize] = &[4096, 2048, 1024];
-                    let hidden_dim = COMMON_HIDDEN_DIMS
-                        .iter()
-                        .copied()
-                        .find(|&d| num_f16 % d == 0)
-                        .unwrap_or(1024);
-                    let num_tokens = num_f16 / hidden_dim;
-                    let f32_values: Vec<f32> = raw_bytes
-                        .chunks_exact(2)
-                        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-                        .collect();
-                    candle_core::Tensor::from_vec(
-                        f32_values,
-                        &[num_tokens, hidden_dim],
-                        &candle_core::Device::Cpu,
-                    )
-                    .ok()
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to decompress vision embeddings from LayerForward");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Run the forward pass with per-request KV-cache isolation.
-    // CRITICAL: Use block_in_place() to prevent blocking the Tokio worker thread.
-    // split_model.forward() is CPU-bound (hundreds of ms for LLM inference) and
-    // would otherwise starve the network event loop — preventing yamux window
-    // updates and causing substream stalling on the next request_response exchange.
-    let compute_result =
-        tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
-            let output = if pre_embedded {
-                // Pre-embedded: skip embedding lookup in forward pass
-                split_model
-                    .forward_pre_embedded(
-                        &input_tensor,
-                        forward.index_pos as usize,
-                        &shared_state.kv_cache_store,
-                        &req_id_str,
-                    )
-                    .map_err(|e| format!("Forward pre-embedded: {e}"))?
-            } else if let Some(ref vis_emb) = vision_tensor {
-                split_model
-                    .forward_multimodal(
-                        &input_tensor,
-                        forward.index_pos as usize,
-                        &shared_state.kv_cache_store,
-                        &req_id_str,
-                        Some(vis_emb),
-                    )
-                    .map_err(|e| format!("Forward multimodal: {e}"))?
-            } else {
-                split_model
-                    .forward(
-                        &input_tensor,
-                        forward.index_pos as usize,
-                        &shared_state.kv_cache_store,
-                        &req_id_str,
-                    )
-                    .map_err(|e| format!("Forward: {e}"))?
-            };
-
-            if is_last {
-                let token_id =
-                    split::sample_token(&output, 0.7, 0.9).map_err(|e| format!("Sample: {e}"))?;
-                let eos_tokens = split_model.eos_tokens();
-                let finish = if eos_tokens.contains(&token_id) {
-                    Some(crate::types::NetworkFinishReason::Stop)
-                } else {
-                    None
-                };
-                Ok(crate::types::LayerResult {
-                    request_id,
-                    token_ids: vec![token_id],
-                    finish_reason: finish,
-                    activations: vec![],
-                    sealed_token_ids: None,
-                })
-            } else {
-                let activation_bytes =
-                    split::tensor_to_bytes(&output).map_err(|e| format!("Encode: {e}"))?;
-                Ok(crate::types::LayerResult {
-                    request_id,
-                    token_ids: vec![],
-                    finish_reason: None,
-                    activations: activation_bytes,
-                    sealed_token_ids: None,
-                })
-            }
-        });
-
-    let result = match compute_result {
+    let result = match result {
         Ok(r) => r,
         Err(e) => {
-            send_error_result(&network_tx, &sender_peer_bytes, request_id, &e).await;
+            send_error_result(
+                &network_tx,
+                &sender_peer_bytes,
+                request_id,
+                &format!("Worker: {e}"),
+            )
+            .await;
             return;
         }
     };
@@ -1803,7 +1296,7 @@ async fn handle_layer_forward(
         elapsed_ms = forward_elapsed.as_millis() as u64,
         model_id = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),
-        "DIAG: LayerForward processed, sending result back"
+        "DIAG: LayerForward processed via worker subprocess"
     );
 
     track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
@@ -1811,7 +1304,7 @@ async fn handle_layer_forward(
     // Pipeline sealing: encrypt token IDs for requester if this is the final segment
     let mut result = result;
     if is_last {
-        seal_layer_result(&mut result, forward.requester_node_id.as_ref());
+        seal_layer_result(&mut result, requester_node_id.as_ref());
     }
 
     // Send back as a separate request to the originating peer

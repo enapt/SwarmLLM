@@ -337,6 +337,7 @@ impl PipelineExecutor {
     }
 
     /// Decompress zstd-compressed FP16 vision embeddings back to a Tensor.
+    #[allow(dead_code)]
     fn decompress_vision_embeddings(
         &self,
         compressed: &[u8],
@@ -981,28 +982,16 @@ impl PipelineExecutor {
         })
     }
 
-    /// Decode token IDs to text using the GGUF vocabulary from the split model.
+    /// Decode token IDs to text using cached vocabulary from the split model metadata.
     async fn decode_tokens(&self, token_ids: &[u32]) -> String {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_arc = self
+        let entry = self
             .shared_state
             .split_models
             .iter()
-            .find(|e| e.key().0 == *model_id)
-            .map(|e| e.value().model.clone());
-        if let Some(model_arc) = model_arc {
-            let model = model_arc.lock().await;
-            if let Some(vocab) = model.vocab() {
-                // If we have a BPE tokenizer, use its byte decoder for proper decoding
-                if let Some(tokenizer) = model.tokenizer() {
-                    let mut bytes = Vec::new();
-                    for &id in token_ids {
-                        if let Some(token_str) = vocab.get(id as usize) {
-                            bytes.extend(tokenizer.decode_token(token_str));
-                        }
-                    }
-                    return String::from_utf8_lossy(&bytes).to_string();
-                }
+            .find(|e| e.key().0 == *model_id);
+        if let Some(entry) = entry {
+            if let Some(ref vocab) = entry.value().vocab {
                 // Fallback: raw vocab concatenation with GPT-2 byte decode
                 let mut raw = String::new();
                 for &id in token_ids {
@@ -1022,61 +1011,33 @@ impl PipelineExecutor {
             .collect::<String>()
     }
 
-    /// Extract prompt token count, EOS tokens, and a cached decoder in a SINGLE
-    /// model lock acquisition. This replaces three separate calls to
-    /// compute_prompt_token_count + get_eos_tokens + (per-token decode_tokens),
-    /// each of which previously acquired the model mutex independently.
+    /// Extract prompt token count, EOS tokens, and a cached decoder from metadata.
+    /// No model lock needed — uses cached metadata from SplitModelEntry.
     async fn extract_model_cache(&self, prompt: &str) -> (usize, Vec<u32>, CachedDecoder) {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let model_arc = self
+        let entry = self
             .shared_state
             .split_models
             .iter()
-            .find(|e| e.key().0 == *model_id)
-            .map(|e| e.value().model.clone());
+            .find(|e| e.key().0 == *model_id);
 
-        if let Some(model_arc) = model_arc {
-            let model = model_arc.lock().await;
+        if let Some(entry) = entry {
+            let eos = entry.value().eos_tokens.clone();
+            let vocab = entry.value().vocab.clone().unwrap_or_default();
 
-            // 1. Prompt token count (excluding <image> sub-tokens which get replaced)
-            let image_placeholder = crate::inference::chat_template::IMAGE_PLACEHOLDER;
-            let ptc = if let Some(tokenizer) = model.tokenizer() {
-                if let Some(img_pos) = prompt.find(image_placeholder) {
-                    // VLM: count tokens for before + after parts (excluding <image> text)
-                    let before = &prompt[..img_pos];
-                    let after = &prompt[img_pos + image_placeholder.len()..];
-                    tokenizer.encode(before).len() + tokenizer.encode(after).len()
-                } else {
-                    tokenizer.encode(prompt).len()
-                }
+            // Approximate prompt token count (no tokenizer in-process)
+            let ptc = if !vocab.is_empty() {
+                // Rough estimate: chars / 4 (average BPE token length)
+                prompt.chars().count() / 4
             } else {
                 prompt.chars().count() / 4
             };
 
-            // 2. EOS tokens
-            let eos = model.eos_tokens().to_vec();
-
-            // 3. Cached decoder — clone vocab + byte_decoder for lock-free decoding
-            let decoder = if let Some(vocab) = model.vocab() {
-                let (byte_decoder, is_sentencepiece, has_tokenizer) =
-                    if let Some(tokenizer) = model.tokenizer() {
-                        (tokenizer.byte_decoder(), tokenizer.is_sentencepiece(), true)
-                    } else {
-                        (HashMap::new(), false, false)
-                    };
-                CachedDecoder {
-                    vocab: vocab.clone(),
-                    byte_decoder,
-                    is_sentencepiece,
-                    has_tokenizer,
-                }
-            } else {
-                CachedDecoder {
-                    vocab: Vec::new(),
-                    byte_decoder: HashMap::new(),
-                    is_sentencepiece: false,
-                    has_tokenizer: false,
-                }
+            let decoder = CachedDecoder {
+                vocab: vocab.clone(),
+                byte_decoder: HashMap::new(),
+                is_sentencepiece: false,
+                has_tokenizer: false,
             };
 
             (ptc, eos, decoder)
@@ -1659,18 +1620,13 @@ impl PipelineExecutor {
         precomputed_vision_bytes: Option<&[u8]>,
         pre_embedded: bool,
     ) -> Result<LayerResult, SwarmError> {
-        use crate::inference::split::{self, SplitModel};
-
         let model_id = &segment.shard_id.model_id;
         let (layer_start, layer_end) = (
             segment.layer_range.0 as usize,
             segment.layer_range.1 as usize,
         );
 
-        // Ensure the split model is loaded for this model's layer range.
-        // Note: concurrent requests may both enter this block and double-load;
-        // the entry().or_insert() at the end ensures only one survives in the map.
-        // This is acceptable since the discarded model is freed immediately.
+        // Ensure the split model metadata entry exists (lightweight — no GPU loading)
         let split_key = (model_id.clone(), layer_start, layer_end);
         if !self.shared_state.split_models.contains_key(&split_key) {
             let shard_store =
@@ -1707,100 +1663,23 @@ impl PipelineExecutor {
             let is_first = layer_start == 0 && has_shard_0;
             let is_last = layer_end >= total_layers && has_last_shard;
 
-            // Try loading: GGUF file → source_path → shard files
-            let gguf_path = model_dir.join("model.gguf");
-            let source_path_file = model_dir.join("source_path");
-
-            // CRITICAL: Model loading is CPU/IO-heavy (mmap + tensor copies).
-            // Must use block_in_place to avoid starving the Tokio runtime.
-            let load_result = tokio::task::block_in_place(|| {
-                if gguf_path.exists() {
-                    tracing::info!(
-                        model = %model_id,
-                        layers = format!("[{layer_start}..{layer_end})"),
-                        "Loading split model from GGUF"
-                    );
-                    SplitModel::load_from_gguf(
-                        &gguf_path,
-                        layer_start,
-                        layer_end,
-                        is_first,
-                        is_last,
-                    )
-                } else if source_path_file.exists() {
-                    let p = std::fs::read_to_string(&source_path_file).map_err(SwarmError::Io)?;
-                    let path = std::path::PathBuf::from(p.trim());
-                    // Verify source_path is within the data models directory
-                    // to prevent path traversal attacks via crafted source_path files.
-                    let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                    if !canonical.starts_with(&model_dir) {
-                        return Err(SwarmError::Internal(
-                            "source_path outside data directory".into(),
-                        ));
-                    }
-                    tracing::info!(
-                        model = %model_id,
-                        layers = format!("[{layer_start}..{layer_end})"),
-                        "Loading split model from source_path"
-                    );
-                    SplitModel::load_from_gguf(
-                        &canonical,
-                        layer_start,
-                        layer_end,
-                        is_first,
-                        is_last,
-                    )
-                } else {
-                    let params = crate::daemon::ShardLoadParams {
-                        model_dir: &model_dir,
-                        shard_store: &shard_store,
-                        model_id,
-                        layer_start,
-                        layer_end,
-                        is_first,
-                        is_last,
-                        manifest: &manifest,
-                    };
-                    tracing::info!(
-                        model = %model_id,
-                        layers = format!("[{layer_start}..{layer_end})"),
-                        "Loading split model from shard files"
-                    );
-                    crate::daemon::try_load_from_shards(&params)
-                }
-            });
-
-            let split_model = load_result?;
-            // Notify dashboard if model fell back to CPU
-            if split_model.device().is_cpu() {
-                let _ = self.shared_state.system_notify_tx.send(
-                    crate::daemon::state::SystemNotification {
-                        level: "warn".into(),
-                        title: "Model loaded on CPU".into(),
-                        message: format!(
-                            "{} loaded on CPU (GPU VRAM insufficient). Inference will be slower. \
-                             You can free VRAM by unloading other models from the Models page.",
-                            model_id
-                        ),
-                        model_id: Some(model_id.0.clone()),
-                    },
-                );
-            }
-            // VRAM-aware eviction before inserting new model
-            let max_batch = self.shared_state.config.inference.max_batch_size as usize;
-            let batch_timeout = std::time::Duration::from_millis(
-                self.shared_state.config.inference.batch_timeout_ms,
+            // Read metadata from GGUF header (no model loading)
+            let header_path = model_dir.join("gguf_header.bin");
+            let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
+                &model_dir,
+                layer_start,
+                layer_end,
+                total_layers,
             );
-            let new_entry = if max_batch > 1 {
-                crate::inference::split::SplitModelEntry::new_with_batching(
-                    split_model,
-                    self.shared_state.kv_cache_store.clone(),
-                    max_batch,
-                    batch_timeout,
-                )
-            } else {
-                crate::inference::split::SplitModelEntry::new(split_model)
-            };
+            let new_entry = crate::inference::split::SplitModelEntry::from_header(
+                &header_path,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                vram_estimate,
+            );
+
             let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
                 .or(self.shared_state.config.inference.max_split_model_memory_mb);
             if let Some(budget_mb) = vram_budget {
@@ -1811,550 +1690,57 @@ impl PipelineExecutor {
                     new_entry.estimated_vram_mb,
                 );
             }
-            // Re-check before inserting to handle concurrent loaders
             self.shared_state
                 .split_models
                 .entry(split_key.clone())
                 .or_insert(new_entry);
         }
 
-        // Get model entry and extract what we need
-        let (split_model_ref, batch_forwarder, cached_eos_tokens) = {
+        // Touch the metadata entry and extract cached EOS tokens
+        let _cached_eos_tokens = {
             let entry = self
                 .shared_state
                 .split_models
                 .get(&split_key)
-                .ok_or_else(|| SwarmError::Internal("Split model not found after load".into()))?;
+                .ok_or_else(|| SwarmError::Internal("Split model not found".into()))?;
             entry.value().touch();
-            (
-                entry.value().model.clone(),
-                entry.value().batch_forwarder.clone(),
-                entry.value().eos_tokens.clone(),
-            )
+            entry.value().eos_tokens.clone()
         };
 
-        let request_id_str = self.request.id.to_string();
-
-        // Try batch path for decode steps (seq_num > 0) when batching is enabled
-        // and this is NOT the first segment (which needs tokenization under the model lock).
-        // LoRA adapters require per-request weight deltas, incompatible with batched MLP.
-        let use_batch =
-            batch_forwarder.is_some() && sequence_num > 0 && self.request.lora_adapter.is_none();
-
-        if use_batch {
-            let forwarder = batch_forwarder.unwrap();
-
-            // Build input tensor without holding the model lock
-            let input_tensor = if activation_bytes.len() == 8 {
-                // First segment, decode step: single token ID as i64 LE
-                let token_id = i64::from_le_bytes(activation_bytes[..8].try_into().unwrap());
-                candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
-                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?
-            } else {
-                // Non-first segment or hidden states
-                split::bytes_to_tensor(activation_bytes)?
-            };
-
-            // Submit to batch forwarder — will be grouped with other concurrent requests
-            let output = forwarder
-                .submit(input_tensor, index_pos, request_id_str.clone())
-                .await?;
-
-            // Track stats (credit persistence is batched at end of request)
-            if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
-                stats.forwards_served += 1;
-            }
-
-            // Determine is_last from segment info (no model lock needed)
-            let is_last = {
-                let manifest = self
-                    .shared_state
-                    .model_registry
-                    .get_manifest(model_id)
-                    .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
-                layer_end >= manifest.num_layers as usize
-            };
-
-            if is_last {
-                let (token_id, logprob_info) = if self.request.sampling_params.logprobs {
-                    crate::inference::tensor_util::sample_token_with_params_and_logprobs(
-                        &output,
-                        &self.request.sampling_params,
-                    )?
-                } else {
-                    (
-                        split::sample_token_with_params(&output, &self.request.sampling_params)?,
-                        None,
-                    )
-                };
-
-                // Collect logprobs if available
-                if let Some(top) = logprob_info {
-                    if let Ok(mut lp) = self.collected_logprobs.lock() {
-                        lp.push(TokenLogProbEntry {
-                            token: format!("{token_id}"),
-                            logprob: top.first().map(|t| t.1).unwrap_or(-9999.0),
-                            top_logprobs: top
-                                .iter()
-                                .map(|(tid, lp)| (format!("{tid}"), *lp))
-                                .collect(),
-                        });
-                    }
-                }
-
-                let finish = if cached_eos_tokens.contains(&token_id) {
-                    Some(NetworkFinishReason::Stop)
-                } else {
-                    None
-                };
-                return Ok(LayerResult {
-                    request_id: self.request.id,
-                    token_ids: vec![token_id],
-                    finish_reason: finish,
-                    activations: vec![],
-                    sealed_token_ids: None,
-                });
-            } else {
-                let activation_bytes = split::tensor_to_bytes(&output)?;
-                return Ok(LayerResult {
-                    request_id: self.request.id,
-                    token_ids: vec![],
-                    finish_reason: None,
-                    activations: activation_bytes,
-                    sealed_token_ids: None,
-                });
-            }
-        }
-
-        // Sequential path: prefill or batching disabled
-        let mut split_model = split_model_ref.lock().await;
-
-        // Clear per-request KV-cache at the start of a new request (prefill).
-        if sequence_num == 0 {
-            let model_key = format!(
-                "{}-{}-{}",
-                split_model.layer_start, split_model.layer_end, split_model.total_layers
-            );
-            self.shared_state
-                .kv_cache_store
-                .clear_request(&model_key, &request_id_str);
-        }
-
-        let is_first = split_model.layer_start == 0;
-        let is_last = split_model.layer_end >= split_model.total_layers;
-
-        // Convert activation bytes to a candle Tensor, with prefix cache support.
-        // For prefill (sequence_num==0, is_first): try to reuse cached KV state
-        // for the system prompt prefix, only computing the new (suffix) tokens.
-        let (input_tensor, effective_index_pos) = if pre_embedded {
-            // Pre-embedded: activations are already hidden-state tensors
-            let tensor = split::bytes_to_tensor(activation_bytes)?;
-            let seq_len = tensor
-                .dim(1)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?;
-            (
-                tensor,
-                if sequence_num == 0 {
-                    seq_len
-                } else {
-                    index_pos
-                },
-            )
-        } else if is_first {
-            if sequence_num == 0 {
-                // Prefill: activation_bytes contain the prompt text from execute_distributed.
-                let prompt = String::from_utf8_lossy(activation_bytes);
-                let image_placeholder = crate::inference::chat_template::IMAGE_PLACEHOLDER;
-                let all_tokens: Vec<i64> = if let Some(tokenizer) = split_model.tokenizer() {
-                    if let Some(img_pos) = prompt.find(image_placeholder) {
-                        // VLM: split prompt at <image>, tokenize parts, insert -1 marker
-                        let before = &prompt[..img_pos];
-                        let after = &prompt[img_pos + image_placeholder.len()..];
-                        let mut tokens = tokenizer.encode(before);
-                        tokens.push(-1); // marker for vision embedding insertion
-                        tokens.extend(tokenizer.encode(after));
-                        tokens
-                    } else {
-                        tokenizer.encode(&prompt)
-                    }
-                } else {
-                    prompt.bytes().map(|b| b as i64).collect()
-                };
-
-                // Try prefix caching for system prompt
-                let model_key = format!(
-                    "{}-{}-{}",
-                    split_model.layer_start, split_model.layer_end, split_model.total_layers
-                );
-                let num_layers = split_model.num_layers();
-                let prefix_cache_max = self.shared_state.config.inference.prefix_cache_max_entries;
-
-                let prefix_result = if prefix_cache_max > 0 && split_model.tokenizer().is_some() {
-                    self.try_prefix_lookup(&split_model, &all_tokens)
-                } else {
-                    None
-                };
-
-                if let Some((prefix_hash, prefix_len)) = prefix_result {
-                    let mut cache_guard = self
-                        .shared_state
-                        .prefix_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-
-                    if let Some((layer_kv, cached_prefix_len)) =
-                        cache_guard.get(&prefix_hash, &model_key)
-                    {
-                        // HIT: pre-populate KV cache store with cached prefix KV
-                        let prefix_len = cached_prefix_len;
-                        let layer_kv_cloned: Vec<(candle_core::Tensor, candle_core::Tensor)> =
-                            layer_kv
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
-                        drop(cache_guard);
-
-                        {
-                            let mut store_entry = self.shared_state.kv_cache_store.get_or_create(
-                                &model_key,
-                                &request_id_str,
-                                num_layers,
-                            );
-                            for (i, (cached_k, cached_v)) in layer_kv_cloned.iter().enumerate() {
-                                let mut kv =
-                                    candle_nn::kv_cache::KvCache::new(2, split_model.max_seq_len());
-                                let _ = kv.append(cached_k, cached_v).map_err(|e| {
-                                    SwarmError::Internal(format!("Prefix cache restore: {e}"))
-                                })?;
-                                store_entry.layers[i] = Some(kv);
-                            }
-                            store_entry.last_accessed = std::time::Instant::now();
-                        }
-
-                        tracing::info!(
-                            request_id = %self.request.id,
-                            prefix_len,
-                            suffix_len = all_tokens.len() - prefix_len,
-                            "Prefix cache HIT — skipping prefix prefill"
-                        );
-
-                        let suffix_tokens = all_tokens[prefix_len..].to_vec();
-                        let tensor = candle_core::Tensor::from_vec(
-                            suffix_tokens.clone(),
-                            &[1, suffix_tokens.len()],
-                            &candle_core::Device::Cpu,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
-                        (tensor, prefix_len)
-                    } else {
-                        drop(cache_guard);
-
-                        // MISS: process prefix first, cache KV, then process suffix
-                        let prefix_tokens = all_tokens[..prefix_len].to_vec();
-                        let suffix_tokens = all_tokens[prefix_len..].to_vec();
-
-                        let prefix_tensor = candle_core::Tensor::from_vec(
-                            prefix_tokens,
-                            &[1, prefix_len],
-                            &candle_core::Device::Cpu,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
-
-                        // Forward prefix through model (populates KV cache).
-                        // block_in_place: CPU-bound inference must not starve yamux.
-                        let _prefix_out = tokio::task::block_in_place(|| {
-                            split_model.forward(
-                                &prefix_tensor,
-                                0,
-                                &self.shared_state.kv_cache_store,
-                                &request_id_str,
-                            )
-                        })?;
-
-                        // Extract and cache prefix KV state
-                        {
-                            let entry = self.shared_state.kv_cache_store.get_or_create(
-                                &model_key,
-                                &request_id_str,
-                                num_layers,
-                            );
-                            let layer_kv: Vec<(candle_core::Tensor, candle_core::Tensor)> = entry
-                                .layers
-                                .iter()
-                                .filter_map(|c: &Option<candle_nn::kv_cache::KvCache>| {
-                                    c.as_ref().and_then(|cache: &candle_nn::kv_cache::KvCache| {
-                                        let k = cache.k().ok()??;
-                                        let v = cache.v().ok()??;
-                                        Some((k.clone(), v.clone()))
-                                    })
-                                })
-                                .collect();
-
-                            if layer_kv.len() == num_layers {
-                                let mut cache_guard = self
-                                    .shared_state
-                                    .prefix_cache
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
-                                cache_guard.insert(
-                                    prefix_hash,
-                                    model_key.clone(),
-                                    layer_kv,
-                                    prefix_len,
-                                );
-                                tracing::info!(
-                                    request_id = %self.request.id,
-                                    prefix_len,
-                                    suffix_len = suffix_tokens.len(),
-                                    "Prefix cache MISS — cached for future reuse"
-                                );
-                            }
-                        }
-
-                        let tensor = candle_core::Tensor::from_vec(
-                            suffix_tokens.clone(),
-                            &[1, suffix_tokens.len()],
-                            &candle_core::Device::Cpu,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?;
-                        (tensor, prefix_len)
-                    }
-                } else {
-                    // No prefix-cacheable system prompt — normal path
-                    let tensor = candle_core::Tensor::from_vec(
-                        all_tokens.clone(),
-                        &[1, all_tokens.len()],
-                        &candle_core::Device::Cpu,
-                    )
-                    .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?;
-                    (tensor, index_pos)
-                }
-            } else {
-                // Decode step: activation_bytes contains a single i64 token ID (8 bytes LE)
-                let token_id = if activation_bytes.len() >= 8 {
-                    i64::from_le_bytes(activation_bytes[..8].try_into().unwrap())
-                } else {
-                    0i64
-                };
-                let tensor = candle_core::Tensor::from_vec(
-                    vec![token_id],
-                    &[1, 1],
-                    &candle_core::Device::Cpu,
-                )
-                .map_err(|e| SwarmError::Internal(format!("Tensor creation failed: {e}")))?;
-                (tensor, index_pos)
-            }
-        } else {
-            // Non-first segment: input is hidden states from previous segment
-            (split::bytes_to_tensor(activation_bytes)?, index_pos)
+        // Build a LayerForward and route to the worker subprocess
+        let layer_forward = crate::types::LayerForward {
+            request_id: self.request.id,
+            sequence_num,
+            index_pos: index_pos as u32,
+            activations: activation_bytes.to_vec(),
+            format: crate::types::TensorFormat::FP16,
+            model_id: model_id.clone(),
+            layer_range: (layer_start as u32, layer_end as u32),
+            tp_meta: None,
+            vision_embeddings: precomputed_vision_bytes.map(|b| b.to_vec()),
+            sender_peer_bytes: None,
+            requester_node_id: None,
+            pre_embedded,
         };
+        let layer_result = self
+            .shared_state
+            .model_process_pool
+            .forward(layer_forward)
+            .await?;
 
-        // Look up LoRA adapter if requested
-        let lora_adapter = self
-            .request
-            .lora_adapter
-            .as_ref()
-            .and_then(|id| self.shared_state.adapter_registry.get(id));
-
-        // T16: VLM vision embeddings — use pre-computed if available, fall back to local encoding
-        let all_images: Vec<&crate::types::ImageData> =
-            crate::inference::vision::collect_images(&self.request.messages);
-        let vision_embeddings = if is_first && sequence_num == 0 && !all_images.is_empty() {
-            if let Some(compressed_bytes) = precomputed_vision_bytes {
-                // Decompress pre-computed embeddings from wire format (zstd FP16)
-                match self.decompress_vision_embeddings(compressed_bytes) {
-                    Ok(tensor) => {
-                        tracing::info!(
-                            request_id = %self.request.id,
-                            shape = ?tensor.dims(),
-                            "Using pre-computed vision embeddings"
-                        );
-                        Some(tensor)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            request_id = %self.request.id,
-                            error = %e,
-                            "Failed to decompress pre-computed vision embeddings, falling back to local"
-                        );
-                        None
-                    }
-                }
-            } else {
-                // Fall back to local encoding (original behavior)
-                let model_id = &segment.shard_id.model_id;
-                let vision_mod = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
-                    Some(vm.value().clone())
-                } else {
-                    let shard_store = crate::model::shard::ShardStore::new(
-                        &self.shared_state.config.node.data_dir,
-                    );
-                    let model_dir = shard_store.models_dir().join(&model_id.0);
-                    let mmproj_path = model_dir.join("mmproj.gguf");
-                    if mmproj_path.exists() {
-                        let device = split_model.device().clone();
-                        match crate::inference::vision::load_from_mmproj_gguf(&mmproj_path, &device)
-                        {
-                            Ok(vm) => {
-                                let vm = std::sync::Arc::new(vm);
-                                self.shared_state
-                                    .vision_modules
-                                    .insert(model_id.clone(), vm.clone());
-                                tracing::info!(model = %model_id, "Loaded VLM vision module from mmproj.gguf");
-                                Some(vm)
-                            }
-                            Err(e) => {
-                                tracing::warn!(model = %model_id, error = %e, "Failed to load mmproj.gguf");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                };
-                if let Some(vm) = vision_mod {
-                    let owned_images: Vec<crate::types::ImageData> =
-                        all_images.iter().map(|img| (*img).clone()).collect();
-                    let embeddings =
-                        tokio::task::block_in_place(|| vm.encode_images(&owned_images))?;
-                    tracing::info!(
-                        request_id = %self.request.id,
-                        image_count = owned_images.len(),
-                        embedding_shape = ?embeddings.dims(),
-                        "VLM: encoded images for multimodal forward (local fallback)"
-                    );
-                    Some(embeddings)
-                } else {
-                    tracing::warn!(
-                        request_id = %self.request.id,
-                        "Request has images but no VLM module available — ignoring images"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Run the forward pass with per-request KV-cache isolation.
-        // CRITICAL: block_in_place() tells Tokio to move other tasks off this thread
-        // before the CPU-bound forward pass (~700-1000ms). Without this, the blocked
-        // thread starves yamux, preventing outbound substream opens for tensor forwards.
-        let output = tokio::task::block_in_place(|| {
-            if pre_embedded {
-                split_model.forward_pre_embedded(
-                    &input_tensor,
-                    effective_index_pos,
-                    &self.shared_state.kv_cache_store,
-                    &request_id_str,
-                )
-            } else if let Some(ref vis_emb) = vision_embeddings {
-                split_model.forward_multimodal(
-                    &input_tensor,
-                    effective_index_pos,
-                    &self.shared_state.kv_cache_store,
-                    &request_id_str,
-                    Some(vis_emb),
-                )
-            } else {
-                split_model.forward_with_lora(
-                    &input_tensor,
-                    effective_index_pos,
-                    &self.shared_state.kv_cache_store,
-                    &request_id_str,
-                    lora_adapter.as_deref(),
-                )
-            }
-        })?;
-
-        // Track stats (credit persistence is batched at end of request)
+        // Track stats
         if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
             stats.forwards_served += 1;
         }
 
-        if is_last {
-            // Last segment: output is logits → sample token
-            // Debug: log top-5 logits for VLM diagnostics
-            if vision_embeddings.is_some() || sequence_num == 0 {
-                if let Ok(logits_1d) = output.flatten_all() {
-                    let logits_vec: Vec<f32> = logits_1d.to_vec1().unwrap_or_default();
-                    if logits_vec.len() > 10 {
-                        let mut indexed: Vec<(usize, f32)> =
-                            logits_vec.iter().copied().enumerate().collect();
-                        indexed.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        let top5: Vec<String> = indexed
-                            .iter()
-                            .take(5)
-                            .map(|(i, v)| format!("{i}:{v:.2}"))
-                            .collect();
-                        tracing::info!(
-                            request_id = %self.request.id,
-                            top5 = %top5.join(", "),
-                            vocab_size = logits_vec.len(),
-                            "DIAG: VLM top logits before sampling"
-                        );
-                    }
-                }
-            }
-            let (token_id, logprob_info) = if self.request.sampling_params.logprobs {
-                crate::inference::tensor_util::sample_token_with_params_and_logprobs(
-                    &output,
-                    &self.request.sampling_params,
-                )?
-            } else {
-                (
-                    split::sample_token_with_params(&output, &self.request.sampling_params)?,
-                    None,
-                )
-            };
-
-            if let Some(top) = logprob_info {
-                if let Ok(mut lp) = self.collected_logprobs.lock() {
-                    lp.push(TokenLogProbEntry {
-                        token: format!("{token_id}"),
-                        logprob: top.first().map(|t| t.1).unwrap_or(-9999.0),
-                        top_logprobs: top
-                            .iter()
-                            .map(|(tid, lp)| (format!("{tid}"), *lp))
-                            .collect(),
-                    });
-                }
-            }
-
-            // EOS detection: use tokens loaded from GGUF metadata
-            let eos_tokens = split_model.eos_tokens();
-            let finish = if eos_tokens.contains(&token_id) {
-                Some(NetworkFinishReason::Stop)
-            } else {
-                None
-            };
-
-            Ok(LayerResult {
-                request_id: self.request.id,
-                token_ids: vec![token_id],
-                finish_reason: finish,
-                activations: vec![],
-                sealed_token_ids: None,
-            })
-        } else {
-            // Intermediate segment: return hidden states for next segment
-            let activation_bytes = split::tensor_to_bytes(&output)?;
-            Ok(LayerResult {
-                request_id: self.request.id,
-                token_ids: vec![],
-                finish_reason: None,
-                activations: activation_bytes,
-                sealed_token_ids: None,
-            })
-        }
+        Ok(layer_result)
     }
 
     /// Try to identify a prefix-cacheable system prompt in the request.
     ///
     /// Returns `Some((blake3_hash, prefix_token_count))` if the request has system
     /// messages whose tokens align with the start of the full prompt tokens.
+    #[allow(dead_code)]
     fn try_prefix_lookup(
         &self,
         model: &crate::inference::split::SplitModel,
@@ -2636,8 +2022,7 @@ impl PipelineExecutor {
             "Starting tensor-parallel segment execution"
         );
 
-        // Ensure split model is loaded for this layer range.
-        // Reuse the same loading logic as process_local_segment.
+        // Ensure split model metadata entry exists (lightweight — no GPU loading)
         let split_key = (model_id.clone(), layer_start, layer_end);
         if !self.shared_state.split_models.contains_key(&split_key) {
             let shard_store =
@@ -2671,87 +2056,85 @@ impl PipelineExecutor {
             let is_first = layer_start == 0 && has_first_shard;
             let is_last_segment = layer_end >= total_layers && has_last_shard;
 
-            // Load via the standard shard loading path
-            let params = crate::daemon::ShardLoadParams {
-                model_dir: &model_dir,
-                shard_store: &shard_store,
-                model_id,
+            // Read metadata from GGUF header (no model loading)
+            let header_path = model_dir.join("gguf_header.bin");
+            let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
+                &model_dir,
+                layer_start,
+                layer_end,
+                total_layers,
+            );
+            let new_entry = split::SplitModelEntry::from_header(
+                &header_path,
                 layer_start,
                 layer_end,
                 is_first,
-                is_last: is_last_segment,
-                manifest: &manifest,
-            };
-            let split_model = crate::daemon::try_load_from_shards(&params)?;
-            let new_entry = split::SplitModelEntry::new(split_model);
+                is_last_segment,
+                vram_estimate,
+            );
+
+            let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
+                .or(self.shared_state.config.inference.max_split_model_memory_mb);
+            if let Some(budget_mb) = vram_budget {
+                split::evict_split_models_lru(
+                    &self.shared_state.split_models,
+                    &self.shared_state.active_pipelines,
+                    budget_mb,
+                    new_entry.estimated_vram_mb,
+                );
+            }
             self.shared_state
                 .split_models
                 .entry(split_key.clone())
                 .or_insert(new_entry);
         }
 
-        // Get model reference
-        let model_arc = self
-            .shared_state
-            .split_models
-            .get(&split_key)
-            .ok_or_else(|| SwarmError::Internal("Split model not loaded after insert".into()))?
-            .model
-            .clone();
+        // Touch the metadata entry
+        if let Some(entry) = self.shared_state.split_models.get(&split_key) {
+            entry.value().touch();
+        }
 
-        // Parse input activations
-        let kv_cache_store = &self.shared_state.kv_cache_store;
-        let req_id_str = request_id.to_string();
+        // TP execution: layer-by-layer with AllReduce coordination in main process.
+        // Each layer's partial computation is routed to the worker subprocess via
+        // LayerForward with tp_meta set. AllReduce network communication stays here.
+        if let Some(tp_rank) = local_tp_rank {
+            // We are in the TP group — per-layer partial computation via subprocess + AllReduce
+            let mut current_activations_bytes = activation_bytes.to_vec();
 
-        // Build the initial hidden states tensor
-        let mut current_activations = if sequence_num == 0 {
-            // First token: input is the prompt (text bytes)
-            let model = model_arc.lock().await;
-            let prompt = String::from_utf8_lossy(activation_bytes);
-            let input = model
-                .tokenize_and_embed(&prompt)
-                .map_err(|e| SwarmError::Internal(format!("Tokenize+embed: {e}")))?;
-            input
-        } else {
-            // Subsequent tokens: input is last token ID as i64 LE bytes
-            let model = model_arc.lock().await;
-            let token_id = if activation_bytes.len() >= 8 {
-                i64::from_le_bytes(activation_bytes[..8].try_into().unwrap()) as u32
-            } else {
-                0u32
-            };
-            model
-                .embed_token(token_id)
-                .map_err(|e| SwarmError::Internal(format!("Embed token: {e}")))?
-        };
-
-        // Layer-by-layer tensor-parallel execution
-        for abs_layer in layer_start..layer_end {
-            let residual = current_activations.clone();
-
-            if let Some(tp_rank) = local_tp_rank {
-                // We are in the TP group — compute our partial result
-                let partial = {
-                    let mut model = model_arc.lock().await;
-                    tokio::task::block_in_place(|| {
-                        model.forward_tp_layer(
-                            &current_activations,
-                            abs_layer,
-                            index_pos,
-                            tp_rank,
-                            tp_size,
-                            kv_cache_store,
-                            &req_id_str,
-                        )
-                    })?
+            for abs_layer in layer_start..layer_end {
+                // Send this single layer to the worker subprocess with TP metadata
+                let layer_forward = crate::types::LayerForward {
+                    request_id,
+                    sequence_num,
+                    index_pos: index_pos as u32,
+                    activations: current_activations_bytes.clone(),
+                    format: crate::types::TensorFormat::FP16,
+                    model_id: model_id.clone(),
+                    layer_range: (layer_start as u32, layer_end as u32),
+                    tp_meta: Some(crate::types::TensorParallelMeta {
+                        tp_rank: tp_rank as u8,
+                        tp_size: tp_size as u8,
+                        single_layer: abs_layer as u32,
+                    }),
+                    vision_embeddings: None,
+                    sender_peer_bytes: None,
+                    requester_node_id: None,
+                    pre_embedded: false,
                 };
+                let partial_result = self
+                    .shared_state
+                    .model_process_pool
+                    .forward(layer_forward)
+                    .await?;
 
                 // Compress partial tensor for AllReduce
-                let partial_bytes = split::tensor_to_bytes(&partial)
-                    .map_err(|e| SwarmError::Internal(format!("Serialize TP partial: {e}")))?;
-                let shape: Vec<u32> = partial.dims().iter().map(|&d| d as u32).collect();
-                let compressed = zstd::encode_all(std::io::Cursor::new(&partial_bytes), 1)
-                    .map_err(|e| SwarmError::Internal(format!("Compress TP partial: {e}")))?;
+                let compressed =
+                    zstd::encode_all(std::io::Cursor::new(&partial_result.activations), 1)
+                        .map_err(|e| SwarmError::Internal(format!("Compress TP partial: {e}")))?;
+                // Infer shape from the result — the worker returns raw FP16 tensor bytes
+                let partial_tensor = split::bytes_to_tensor(&partial_result.activations)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize TP partial: {e}")))?;
+                let shape: Vec<u32> = partial_tensor.dims().iter().map(|&d| d as u32).collect();
 
                 // AllReduce: send partial to coordinator, wait for reduced result
                 let resp = crate::inference::allreduce::allreduce_sum(
@@ -2767,46 +2150,62 @@ impl PipelineExecutor {
                 )
                 .await?;
 
-                // Decompress reduced tensor
-                let reduced_bytes = zstd::decode_all(std::io::Cursor::new(&resp.reduced_data))
-                    .map_err(|e| SwarmError::Internal(format!("Decompress AllReduce: {e}")))?;
-                let reduced = split::bytes_to_tensor(&reduced_bytes)
-                    .map_err(|e| SwarmError::Internal(format!("Deserialize AllReduce: {e}")))?;
-
-                // Add residual connection
-                current_activations = (reduced + &residual)
-                    .map_err(|e| SwarmError::Internal(format!("Residual add: {e}")))?;
-            } else {
-                // We're not in the TP group — run full (non-TP) layer
-                let mut model = model_arc.lock().await;
-                let result = tokio::task::block_in_place(|| {
-                    model.forward(&current_activations, index_pos, kv_cache_store, &req_id_str)
-                })?;
-                current_activations = result;
-                // Skip remaining layers since full forward processes all of them
-                break;
+                // Decompress reduced tensor — this becomes input for next layer
+                current_activations_bytes =
+                    zstd::decode_all(std::io::Cursor::new(&resp.reduced_data))
+                        .map_err(|e| SwarmError::Internal(format!("Decompress AllReduce: {e}")))?;
             }
-        }
 
-        if _is_last {
-            // Last segment: sample a token from the output activations
-            let token_id = split::sample_token_with_params(
-                &current_activations,
-                &self.request.sampling_params,
-            )?;
-            // Return the token ID as i64 LE bytes (same format as decode-step activations)
-            // with a 1-byte prefix tag (0x01) to signal "this is a sampled token, not raw activations"
-            let mut result = vec![0x01];
-            result.extend_from_slice(&(token_id as i64).to_le_bytes());
-            Ok(result)
+            if _is_last {
+                // Last segment: the final activations need token sampling
+                let final_tensor = split::bytes_to_tensor(&current_activations_bytes)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize TP output: {e}")))?;
+                let token_id =
+                    split::sample_token_with_params(&final_tensor, &self.request.sampling_params)?;
+                let mut result = vec![0x01];
+                result.extend_from_slice(&(token_id as i64).to_le_bytes());
+                Ok(result)
+            } else {
+                // Intermediate segment: prefix raw activations with 0x00 tag
+                let mut result = vec![0x00];
+                result.extend(current_activations_bytes);
+                Ok(result)
+            }
         } else {
-            // Intermediate segment: serialize raw activations
-            let result_bytes = split::tensor_to_bytes(&current_activations)
-                .map_err(|e| SwarmError::Internal(format!("Serialize TP output: {e}")))?;
-            // Prefix with 0x00 tag to signal raw activations
-            let mut result = vec![0x00];
-            result.extend(result_bytes);
-            Ok(result)
+            // Not in TP group — run full forward via subprocess (non-TP path)
+            let layer_forward = crate::types::LayerForward {
+                request_id,
+                sequence_num,
+                index_pos: index_pos as u32,
+                activations: activation_bytes.to_vec(),
+                format: crate::types::TensorFormat::FP16,
+                model_id: model_id.clone(),
+                layer_range: (layer_start as u32, layer_end as u32),
+                tp_meta: None,
+                vision_embeddings: None,
+                sender_peer_bytes: None,
+                requester_node_id: None,
+                pre_embedded: false,
+            };
+            let layer_result = self
+                .shared_state
+                .model_process_pool
+                .forward(layer_forward)
+                .await?;
+
+            if _is_last {
+                let final_tensor = split::bytes_to_tensor(&layer_result.activations)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize output: {e}")))?;
+                let token_id =
+                    split::sample_token_with_params(&final_tensor, &self.request.sampling_params)?;
+                let mut result = vec![0x01];
+                result.extend_from_slice(&(token_id as i64).to_le_bytes());
+                Ok(result)
+            } else {
+                let mut result = vec![0x00];
+                result.extend(layer_result.activations);
+                Ok(result)
+            }
         }
     }
 }

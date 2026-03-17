@@ -2505,7 +2505,7 @@ pub async fn check_and_load_model(
         "DIAG: check_and_load_model"
     );
 
-    let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+    let _shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let mut any_loaded = false;
 
     // TOCTOU guard: use loading_models to prevent concurrent duplicate loads.
@@ -2596,151 +2596,61 @@ pub async fn check_and_load_model(
         let is_first = layer_start == 0 && has_shard_0;
         let is_last = layer_end >= manifest.num_layers as usize && has_last_shard;
 
-        // Try loading: model.gguf → source_path → shard files
-        let gguf_path = model_dir.join("model.gguf");
-        let source_path_file = model_dir.join("source_path");
+        // Create metadata entry from GGUF header (no GPU loading in main process).
+        // The worker subprocess will load the model on first inference request.
+        let header_path = model_dir.join("gguf_header.bin");
+        let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
+            &model_dir,
+            layer_start,
+            layer_end,
+            manifest.num_layers as usize,
+        );
+        let new_entry = crate::inference::split::SplitModelEntry::from_header(
+            &header_path,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            vram_estimate,
+        );
 
-        let load_result = if gguf_path.exists() {
-            tracing::info!(
-                model = %model_id,
-                layers = format!("[{layer_start}..{layer_end})"),
-                "Loading split model from reconstructed GGUF"
+        // Update loaded_model_info from the entry metadata
+        let eos_tokens = new_entry.eos_tokens.clone();
+        let chat_template = new_entry.cached_chat_template.clone();
+        let bos_token = new_entry.bos_token.clone();
+        let eos_token = new_entry.eos_token_str.clone();
+
+        // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
+        let eviction_budget = vram_budget_mb.or(shared.config.inference.max_split_model_memory_mb);
+        if let Some(budget) = eviction_budget {
+            crate::inference::split::evict_split_models_lru(
+                &shared.split_models,
+                &shared.active_pipelines,
+                budget,
+                new_entry.estimated_vram_mb,
             );
-            crate::inference::split::SplitModel::load_from_gguf(
-                &gguf_path,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-            )
-        } else if source_path_file.exists() {
-            match std::fs::read_to_string(&source_path_file) {
-                Ok(p) => {
-                    let p = std::path::PathBuf::from(p.trim());
-                    // SEC: Containment check — source_path must be within the data directory
-                    // to prevent path traversal via attacker-controlled source_path files.
-                    let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
-                    let data_models = shard_store.models_dir();
-                    if !canonical.starts_with(&data_models) {
-                        tracing::warn!(
-                            model = %model_id,
-                            path = %p.display(),
-                            "source_path outside data directory — ignoring"
-                        );
-                        crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
-                            model_dir: &model_dir,
-                            shard_store: &shard_store,
-                            model_id,
-                            layer_start,
-                            layer_end,
-                            is_first,
-                            is_last,
-                            manifest: &manifest,
-                        })
-                    } else if p.exists() {
-                        tracing::info!(
-                            model = %model_id,
-                            layers = format!("[{layer_start}..{layer_end})"),
-                            "Loading split model from source GGUF"
-                        );
-                        crate::inference::split::SplitModel::load_from_gguf(
-                            &p,
-                            layer_start,
-                            layer_end,
-                            is_first,
-                            is_last,
-                        )
-                    } else {
-                        crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
-                            model_dir: &model_dir,
-                            shard_store: &shard_store,
-                            model_id,
-                            layer_start,
-                            layer_end,
-                            is_first,
-                            is_last,
-                            manifest: &manifest,
-                        })
-                    }
-                }
-                Err(e) => Err(crate::error::SwarmError::Io(e)),
-            }
-        } else {
-            crate::daemon::try_load_from_shards(&crate::daemon::ShardLoadParams {
-                model_dir: &model_dir,
-                shard_store: &shard_store,
-                model_id,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-                manifest: &manifest,
-            })
-        };
-
-        match load_result {
-            Ok(split_model) => {
-                let eos_tokens = split_model.eos_tokens().to_vec();
-                let chat_template = split_model.chat_template().map(|s| s.to_string());
-                let bos_token = split_model.bos_token().to_string();
-                let eos_token = split_model.eos_token_str().to_string();
-                // VRAM-aware eviction before inserting new model
-                let max_batch = shared.config.inference.max_batch_size as usize;
-                let batch_timeout =
-                    std::time::Duration::from_millis(shared.config.inference.batch_timeout_ms);
-                let new_entry = if max_batch > 1 {
-                    crate::inference::split::SplitModelEntry::new_with_batching(
-                        split_model,
-                        shared.kv_cache_store.clone(),
-                        max_batch,
-                        batch_timeout,
-                    )
-                } else {
-                    crate::inference::split::SplitModelEntry::new(split_model)
-                };
-                // Safety-net eviction: use VRAM budget (falls back to max_split_model_memory_mb)
-                let eviction_budget =
-                    vram_budget_mb.or(shared.config.inference.max_split_model_memory_mb);
-                if let Some(budget) = eviction_budget {
-                    crate::inference::split::evict_split_models_lru(
-                        &shared.split_models,
-                        &shared.active_pipelines,
-                        budget,
-                        new_entry.estimated_vram_mb,
-                    );
-                }
-                shared.split_models.insert(split_key, new_entry);
-
-                // Update loaded_model_info so the API knows the model is available
-                if !any_loaded {
-                    *shared.loaded_model_info.write().await =
-                        Some(crate::daemon::LoadedModelInfo {
-                            name: manifest.name.clone(),
-                            size_bytes: manifest.total_size_bytes,
-                            eos_tokens,
-                            chat_template,
-                            bos_token,
-                            eos_token,
-                        });
-                }
-                any_loaded = true;
-
-                tracing::info!(
-                    model = %model_id,
-                    name = %manifest.name,
-                    layers = format!("[{}..{})", layer_start, layer_end),
-                    "Auto-manage: model segment loaded and ready for inference"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    model = %model_id,
-                    layers = format!("[{}..{})", layer_start, layer_end),
-                    error = %e,
-                    "Auto-manage: failed to load model segment from shards"
-                );
-            }
         }
+        shared.split_models.insert(split_key, new_entry);
+
+        // Update loaded_model_info so the API knows the model is available
+        if !any_loaded {
+            *shared.loaded_model_info.write().await = Some(crate::daemon::LoadedModelInfo {
+                name: manifest.name.clone(),
+                size_bytes: manifest.total_size_bytes,
+                eos_tokens,
+                chat_template,
+                bos_token,
+                eos_token,
+            });
+        }
+        any_loaded = true;
+
+        tracing::info!(
+            model = %model_id,
+            name = %manifest.name,
+            layers = format!("[{}..{})", layer_start, layer_end),
+            "Auto-manage: model metadata loaded (subprocess will load on first inference)"
+        );
     }
 }
 

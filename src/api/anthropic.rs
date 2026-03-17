@@ -1071,78 +1071,62 @@ async fn anthropic_split_non_stream(
     request_id: String,
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
-    use crate::inference::split::sample_token;
-
     let requested_mid = crate::types::ModelId(model.clone());
     let model_entry = state
         .shared_state
         .split_models
         .iter()
         .find(|e| e.key().0 == requested_mid);
-    let model_ref = match model_entry {
-        Some(entry) => entry,
+    let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
+        Some(entry) => {
+            let e = entry.value();
+            (
+                e.cached_chat_template.clone(),
+                e.bos_token.clone(),
+                e.eos_token_str.clone(),
+                (e.layer_start as u32, e.layer_end as u32),
+            )
+        }
         None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
     };
-    let entry = model_ref.value();
-    let kv_store = state.shared_state.kv_cache_store.clone();
-    let mut split_model = entry.model.lock().await;
 
-    // Build prompt using the model's own chat template (not global loaded_model_info)
-    let prompt = chat_template::build_prompt(
-        messages,
-        split_model.chat_template(),
-        split_model.bos_token(),
-        split_model.eos_token_str(),
-    );
+    let prompt = chat_template::build_prompt(messages, chat_tmpl.as_deref(), &bos, &eos_str);
 
-    // Tokenize the prompt — forward() handles embedding internally
-    let (input, prompt_tokens) = split_model.tokenize(&prompt)?;
+    let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let output = state
+        .shared_state
+        .model_process_pool
+        .generate(
+            &requested_mid,
+            layer_range,
+            prompt,
+            params.clone(),
+            rid,
+            None,
+            None,
+        )
+        .await
+        .map_err(ApiError)?;
 
-    // First forward pass (prefill) — process entire prompt at once.
-    // block_in_place: CPU-bound inference must not starve async runtime.
-    let logits =
-        tokio::task::block_in_place(|| split_model.forward(&input, 0, &kv_store, &request_id))?;
-    // logits shape: (1, vocab) — forward() already extracts the last token
-    let mut next_token = sample_token(&logits, params.temperature, params.top_p)?;
-
-    let eos = split_model.eos_tokens().to_vec();
-    let mut generated: Vec<u32> = Vec::new();
-    let mut index_pos = prompt_tokens;
-
-    for _ in 0..params.max_tokens {
-        if eos.contains(&next_token) {
-            break;
-        }
-        generated.push(next_token);
-
-        // Create single-token tensor — forward() handles embedding
-        let input = split_model.token_tensor(next_token)?;
-        let logits = tokio::task::block_in_place(|| {
-            split_model.forward(&input, index_pos, &kv_store, &request_id)
-        })?;
-        next_token = sample_token(&logits, params.temperature, params.top_p)?;
-        index_pos += 1;
-    }
-
-    let stop_reason = if eos.contains(&next_token) {
+    let stop_reason = if output.finish_reason == "stop" {
         "end_turn"
     } else {
         "max_tokens"
     };
 
-    let content = crate::api::openai::decode_split_tokens(&split_model, &generated);
-
     let response = MessagesResponse {
         id: request_id,
         response_type: "message",
         role: "assistant",
-        content: vec![ResponseContentBlock::Text { text: content }],
+        content: vec![ResponseContentBlock::Text {
+            text: output.content,
+        }],
         model,
         stop_reason: Some(stop_reason.into()),
         stop_sequence: None,
         usage: AnthropicUsage {
-            input_tokens: prompt_tokens as u32,
-            output_tokens: generated.len() as u32,
+            input_tokens: output.prompt_tokens,
+            output_tokens: output.completion_tokens,
         },
     };
 
@@ -1160,8 +1144,6 @@ async fn anthropic_split_stream(
     request_id: String,
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
-    use crate::inference::split::sample_token;
-
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
     let state_clone = state.clone();
@@ -1189,8 +1171,16 @@ async fn anthropic_split_stream(
             .split_models
             .iter()
             .find(|e| e.key().0 == requested_mid);
-        let model_ref = match model_entry {
-            Some(entry) => entry,
+        let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
+            Some(entry) => {
+                let e = entry.value();
+                (
+                    e.cached_chat_template.clone(),
+                    e.bos_token.clone(),
+                    e.eos_token_str.clone(),
+                    (e.layer_start as u32, e.layer_end as u32),
+                )
+            }
             None => {
                 let _ = sse_tx
                     .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
@@ -1205,92 +1195,56 @@ async fn anthropic_split_stream(
                 return;
             }
         };
-        let entry = model_ref.value();
-        let kv_store = state_clone.shared_state.kv_cache_store.clone();
-        let mut split_model = entry.model.lock().await;
 
-        // Build prompt using the model's own chat template
-        let prompt = chat_template::build_prompt(
-            &messages,
-            split_model.chat_template(),
-            split_model.bos_token(),
-            split_model.eos_token_str(),
-        );
+        // Build prompt using cached metadata
+        let prompt = chat_template::build_prompt(&messages, chat_tmpl.as_deref(), &bos, &eos_str);
 
-        // Tokenize — forward() handles embedding internally
-        let (input, prompt_tokens) = match split_model.tokenize(&prompt) {
-            Ok(r) => r,
-            Err(_) => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                return;
-            }
-        };
+        let gen_rid = uuid::Uuid::parse_str(&rid).unwrap_or_else(|_| uuid::Uuid::new_v4());
 
-        // Prefill — block_in_place for CPU-bound inference
-        let logits =
-            match tokio::task::block_in_place(|| split_model.forward(&input, 0, &kv_store, &rid)) {
-                Ok(l) => l,
-                Err(_) => {
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                        .await;
-                    let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                    return;
-                }
-            };
-        // logits shape: (1, vocab) — forward() already extracts the last token
-        let mut next_token = match sample_token(&logits, params.temperature, params.top_p) {
-            Ok(t) => t,
-            Err(_) => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                return;
-            }
-        };
+        // Stream tokens via worker subprocess
+        let (token_tx, mut token_rx) =
+            tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
 
-        let eos = split_model.eos_tokens().to_vec();
-        let mut index_pos = prompt_tokens;
+        let pool = state_clone.shared_state.model_process_pool.clone();
+        let mid_clone = requested_mid.clone();
+        let params_clone = params.clone();
+        tokio::spawn(async move {
+            let _ = pool
+                .generate(
+                    &mid_clone,
+                    layer_range,
+                    prompt,
+                    params_clone,
+                    gen_rid,
+                    None,
+                    Some(token_tx),
+                )
+                .await;
+        });
+
         let mut total_output_tokens = 0u32;
         let mut stop_reason = "max_tokens".to_string();
 
-        for _ in 0..params.max_tokens {
-            if eos.contains(&next_token) {
-                stop_reason = "end_turn".to_string();
+        while let Some(event) = token_rx.recv().await {
+            if let Some(fr) = &event.finish_reason {
+                stop_reason = if fr == "stop" {
+                    "end_turn".to_string()
+                } else {
+                    fr.clone()
+                };
                 break;
             }
-
             total_output_tokens += 1;
-            let text = crate::api::openai::decode_split_tokens(&split_model, &[next_token]);
-
             if sse_tx
-                .send(AnthropicSseEvent::ContentBlockDelta { index: 0, text })
+                .send(AnthropicSseEvent::ContentBlockDelta {
+                    index: 0,
+                    text: event.text,
+                })
                 .await
                 .is_err()
             {
                 return; // Client disconnected
             }
-
-            // Create single-token tensor — forward() handles embedding
-            let input = match split_model.token_tensor(next_token) {
-                Ok(h) => h,
-                Err(_) => break,
-            };
-            let logits = match tokio::task::block_in_place(|| {
-                split_model.forward(&input, index_pos, &kv_store, &rid)
-            }) {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            next_token = match sample_token(&logits, params.temperature, params.top_p) {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-            index_pos += 1;
         }
 
         // content_block_stop + message_delta + message_stop

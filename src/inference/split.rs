@@ -160,20 +160,18 @@ impl KvCacheStore {
 /// Key type for split_models DashMap: (model_id, layer_start, layer_end).
 pub type SplitModelKey = (crate::types::ModelId, usize, usize);
 
-/// Wrapper around a SplitModel that tracks last-used time for LRU eviction.
+/// Metadata entry for a loaded model segment.
+///
+/// GPU memory lives in a worker subprocess managed by `ModelProcessPool`.
+/// This struct holds only lightweight metadata for routing and token decoding.
 pub struct SplitModelEntry {
-    pub model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
     pub last_used: std::sync::atomic::AtomicU64,
     /// Estimated VRAM usage in MB for this model segment.
     pub estimated_vram_mb: u64,
-    /// Optional batch forwarder for this model segment.
-    pub batch_forwarder: Option<std::sync::Arc<BatchForwarder>>,
     /// True if this entry has both embedding (first) and output head (last) — i.e., all layers.
-    /// Set at construction time so the fast path can check without locking the model mutex.
     pub is_complete: bool,
-    /// Cached EOS token IDs for lock-free sampling after batched forward passes.
+    /// Cached EOS token IDs for lock-free sampling.
     pub eos_tokens: Vec<u32>,
-    // ── Cached metadata for subprocess-isolated inference (no GPU tensors) ──
     /// EOS token string (e.g., "<|endoftext|>").
     pub eos_token_str: String,
     /// BOS token string (e.g., "<s>").
@@ -182,6 +180,9 @@ pub struct SplitModelEntry {
     pub cached_chat_template: Option<String>,
     /// Full vocabulary for lock-free token decoding.
     pub vocab: Option<Vec<String>>,
+    /// Layer range this entry covers.
+    pub layer_start: usize,
+    pub layer_end: usize,
 }
 
 impl SplitModelEntry {
@@ -192,96 +193,105 @@ impl SplitModelEntry {
             .as_secs()
     }
 
-    /// Build common fields from a SplitModel reference, returning a partially-initialized entry.
-    /// Caller sets `model`, `batch_forwarder`, and `last_used` after this.
-    #[allow(clippy::type_complexity)]
-    fn common_fields(
-        model: &SplitModel,
-    ) -> (
-        u64,
-        bool,
-        Vec<u32>,
-        String,
-        String,
-        Option<String>,
-        Option<Vec<String>>,
-    ) {
-        (
-            model.estimate_vram_mb(),
-            model.is_first() && model.is_last(),
-            model.eos_tokens().to_vec(),
-            model.eos_token_str().to_string(),
-            model.bos_token().to_string(),
-            model.chat_template().map(|s| s.to_string()),
-            model.vocab().cloned(),
-        )
-    }
-
-    /// Create a new entry wrapping a split model.
-    #[allow(clippy::type_complexity)]
-    pub fn new(model: SplitModel) -> Self {
-        let (
-            estimated_vram_mb,
-            is_complete,
-            eos_tokens,
-            eos_token_str,
-            bos_token,
-            chat_tmpl,
-            vocab,
-        ) = Self::common_fields(&model);
+    /// Extract metadata from a `SplitModel` reference, then drop the model.
+    /// GPU memory will live in the worker subprocess instead.
+    pub fn new(model: SplitModel, layer_start: usize, layer_end: usize) -> Self {
+        let estimated_vram_mb = model.estimate_vram_mb();
+        let is_complete = model.is_first() && model.is_last();
+        let eos_tokens = model.eos_tokens().to_vec();
+        let eos_token_str = model.eos_token_str().to_string();
+        let bos_token = model.bos_token().to_string();
+        let cached_chat_template = model.chat_template().map(|s| s.to_string());
+        let vocab = model.vocab().cloned();
+        // model is dropped here — its memory will be in the subprocess
+        drop(model);
         Self {
-            model: std::sync::Arc::new(tokio::sync::Mutex::new(model)),
             last_used: std::sync::atomic::AtomicU64::new(Self::now_secs()),
             estimated_vram_mb,
-            batch_forwarder: None,
             is_complete,
             eos_tokens,
             eos_token_str,
             bos_token,
-            cached_chat_template: chat_tmpl,
+            cached_chat_template,
             vocab,
+            layer_start,
+            layer_end,
         }
     }
 
-    /// Create a new entry with batching enabled.
-    #[allow(clippy::type_complexity)]
-    pub fn new_with_batching(
-        model: SplitModel,
-        kv_cache_store: std::sync::Arc<KvCacheStore>,
-        max_batch_size: usize,
-        batch_timeout: std::time::Duration,
+    /// Build a metadata entry from a GGUF header file on disk, without loading model weights.
+    /// Used when routing inference to worker subprocesses.
+    pub fn from_header(
+        header_path: &std::path::Path,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+        vram_estimate_mb: u64,
     ) -> Self {
-        let (
-            estimated_vram_mb,
-            is_complete,
-            eos_tokens,
-            eos_token_str,
-            bos_token,
-            chat_tmpl,
-            vocab,
-        ) = Self::common_fields(&model);
-        let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
-        let batch_forwarder = if max_batch_size > 1 {
-            Some(std::sync::Arc::new(BatchForwarder::new(
-                model_arc.clone(),
-                kv_cache_store,
-                max_batch_size,
-                batch_timeout,
-            )))
-        } else {
-            None
-        };
+        use candle_core::quantized::gguf_file;
+
+        let (vocab, bos_token, eos_token_str, eos_tokens, chat_template) =
+            if let Ok(bytes) = std::fs::read(header_path) {
+                let mut cursor = std::io::Cursor::new(&bytes);
+                if let Ok(ct) = gguf_file::Content::read(&mut cursor) {
+                    let vocab: Vec<String> = ct
+                        .metadata
+                        .get("tokenizer.ggml.tokens")
+                        .and_then(|v| v.to_vec().ok())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.to_string().ok().cloned())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let eos_id = ct
+                        .metadata
+                        .get("tokenizer.ggml.eos_token_id")
+                        .and_then(|v| v.to_u32().ok())
+                        .unwrap_or(2);
+                    let bos_id = ct
+                        .metadata
+                        .get("tokenizer.ggml.bos_token_id")
+                        .and_then(|v| v.to_u32().ok())
+                        .unwrap_or(1);
+                    let eos_tokens_extra: Vec<u32> = ct
+                        .metadata
+                        .get("tokenizer.ggml.eos_token_ids")
+                        .and_then(|v| v.to_vec().ok())
+                        .map(|arr| arr.iter().filter_map(|v| v.to_u32().ok()).collect())
+                        .unwrap_or_default();
+                    let mut eos_tok = vec![eos_id];
+                    for t in eos_tokens_extra {
+                        if t != eos_id {
+                            eos_tok.push(t);
+                        }
+                    }
+                    let bos = vocab.get(bos_id as usize).cloned().unwrap_or_default();
+                    let eos_str = vocab.get(eos_id as usize).cloned().unwrap_or_default();
+                    let tmpl = ct
+                        .metadata
+                        .get("tokenizer.chat_template")
+                        .and_then(|v| v.to_string().ok().cloned());
+                    (vocab, bos, eos_str, eos_tok, tmpl)
+                } else {
+                    (vec![], String::new(), String::new(), vec![2], None)
+                }
+            } else {
+                (vec![], String::new(), String::new(), vec![2], None)
+            };
+
         Self {
-            model: model_arc,
             last_used: std::sync::atomic::AtomicU64::new(Self::now_secs()),
-            estimated_vram_mb,
-            batch_forwarder,
-            is_complete,
+            estimated_vram_mb: vram_estimate_mb,
+            is_complete: is_first && is_last,
             eos_tokens,
             eos_token_str,
             bos_token,
-            cached_chat_template: chat_tmpl,
-            vocab,
+            cached_chat_template: chat_template,
+            vocab: if vocab.is_empty() { None } else { Some(vocab) },
+            layer_start,
+            layer_end,
         }
     }
 
@@ -302,7 +312,7 @@ impl SplitModelEntry {
     }
 }
 
-/// A single item in a batched forward pass.
+/// A single item in a batched forward pass (used internally by SplitModel::forward_batch).
 pub struct BatchItem<'a> {
     /// Input tensor for this request.
     pub input: &'a Tensor,
@@ -377,135 +387,7 @@ pub fn evict_split_models_lru(
     evicted
 }
 
-// ── Batch forwarder ──
-
-/// A pending forward request waiting to be batched.
-struct PendingForward {
-    input: Tensor,
-    index_pos: usize,
-    request_id: String,
-    result_tx: tokio::sync::oneshot::Sender<Result<Tensor, SwarmError>>,
-}
-
-/// Collects concurrent forward requests for the same model and processes them
-/// as a single batched forward pass.  Each `BatchForwarder` is tied to one
-/// `SplitModelEntry` (i.e. one loaded model segment).
-///
-/// Callers submit work via `submit()` which returns a oneshot receiver.
-/// A background drain loop (or the first waiter) acquires the model lock,
-/// collects all pending items, and calls `forward_batch`.
-pub struct BatchForwarder {
-    queue: tokio::sync::Mutex<Vec<PendingForward>>,
-    notify: tokio::sync::Notify,
-    model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
-    kv_cache_store: std::sync::Arc<KvCacheStore>,
-    /// Maximum batch size (from config). 1 = no batching.
-    max_batch_size: usize,
-    /// How long to wait for additional requests before dispatching a partial batch.
-    batch_timeout: std::time::Duration,
-}
-
-impl BatchForwarder {
-    /// Create a new batch forwarder for a split model.
-    pub fn new(
-        model: std::sync::Arc<tokio::sync::Mutex<SplitModel>>,
-        kv_cache_store: std::sync::Arc<KvCacheStore>,
-        max_batch_size: usize,
-        batch_timeout: std::time::Duration,
-    ) -> Self {
-        Self {
-            queue: tokio::sync::Mutex::new(Vec::new()),
-            notify: tokio::sync::Notify::new(),
-            model,
-            kv_cache_store,
-            max_batch_size: max_batch_size.max(1),
-            batch_timeout,
-        }
-    }
-
-    /// Submit a forward request and wait for the result.
-    ///
-    /// The request will be batched with other concurrent requests for the same
-    /// model.  Returns the output tensor for this request.
-    pub async fn submit(
-        &self,
-        input: Tensor,
-        index_pos: usize,
-        request_id: String,
-    ) -> Result<Tensor, SwarmError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        {
-            let mut q = self.queue.lock().await;
-            q.push(PendingForward {
-                input,
-                index_pos,
-                request_id,
-                result_tx: tx,
-            });
-        }
-        self.notify.notify_one();
-
-        // Try to become the batch processor.  If we can acquire the model lock,
-        // drain the queue and process the batch.  If another task already holds
-        // the lock (processing a previous batch), we just wait on our oneshot.
-        if let Ok(mut model_guard) = self.model.try_lock() {
-            // Wait briefly for more requests to accumulate (if timeout configured)
-            if !self.batch_timeout.is_zero() {
-                let q_len = self.queue.lock().await.len();
-                if q_len < self.max_batch_size {
-                    let _ = tokio::time::timeout(self.batch_timeout, self.notify.notified()).await;
-                }
-            }
-            self.drain_and_process(&mut model_guard).await;
-        }
-
-        rx.await
-            .map_err(|_| SwarmError::Internal("Batch forwarder dropped".into()))?
-    }
-
-    /// Drain the pending queue and run a batched forward pass.
-    async fn drain_and_process(&self, model: &mut SplitModel) {
-        let pending: Vec<PendingForward> = {
-            let mut q = self.queue.lock().await;
-            if q.is_empty() {
-                return;
-            }
-            let take = q.len().min(self.max_batch_size);
-            q.drain(..take).collect()
-        };
-
-        if pending.is_empty() {
-            return;
-        }
-
-        let items: Vec<BatchItem<'_>> = pending
-            .iter()
-            .map(|p| BatchItem {
-                input: &p.input,
-                index_pos: p.index_pos,
-                request_id: &p.request_id,
-            })
-            .collect();
-
-        let results = model.forward_batch(&items, &self.kv_cache_store);
-
-        match results {
-            Ok(outputs) => {
-                for (pending_item, output) in pending.into_iter().zip(outputs) {
-                    let _ = pending_item.result_tx.send(Ok(output));
-                }
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                for pending_item in pending {
-                    let _ = pending_item
-                        .result_tx
-                        .send(Err(SwarmError::Internal(msg.clone())));
-                }
-            }
-        }
-    }
-}
+// BatchForwarder removed — batching is handled inside worker subprocesses now.
 
 // ── Split model: loads only a range of layers from a GGUF ──
 
@@ -5360,41 +5242,18 @@ mod tests {
     // ── LRU eviction tests ──
 
     fn make_dummy_entry(vram_mb: u64) -> SplitModelEntry {
-        // Construct a minimal valid SplitModel for eviction tests.
-        // We never call forward() on it — only use it for LRU tracking.
-        let dummy_model = SplitModel {
-            tok_embeddings: None,
-            layers: Vec::new(),
-            norm: None,
-            output: None,
-            masks: None,
-            layer_start: 0,
-            layer_end: 0,
-            total_layers: 0,
-            hidden_dim: 0,
-            arch: ModelArch::Llama,
-            device: candle_core::Device::Cpu,
-            vocabulary: None,
-            tokenizer: None,
-            eos_tokens: Vec::new(),
-            chat_template: None,
-            bos_token: String::new(),
-            eos_token: String::new(),
-            max_seq_len: DEFAULT_MAX_SEQ_LEN,
-            kv_model_key: String::from("0-0-0"),
-            final_logit_softcap: None,
-        };
+        // Construct a minimal metadata-only SplitModelEntry for eviction tests.
         SplitModelEntry {
-            model: std::sync::Arc::new(tokio::sync::Mutex::new(dummy_model)),
             last_used: std::sync::atomic::AtomicU64::new(0),
             estimated_vram_mb: vram_mb,
-            batch_forwarder: None,
             is_complete: false,
             eos_tokens: vec![],
             eos_token_str: String::new(),
             bos_token: String::new(),
             cached_chat_template: None,
             vocab: None,
+            layer_start: 0,
+            layer_end: 0,
         }
     }
 
@@ -5718,37 +5577,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[tokio::test]
-    async fn batch_forwarder_collects_concurrent_requests() {
-        let hidden_dim = 128;
-        let model = make_test_split_model(1, hidden_dim);
-        let kv_store = std::sync::Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
-        let model_arc = std::sync::Arc::new(tokio::sync::Mutex::new(model));
-        let forwarder = std::sync::Arc::new(BatchForwarder::new(
-            model_arc,
-            kv_store,
-            4,                         // max batch size
-            std::time::Duration::ZERO, // no timeout in test
-        ));
-
-        // Spawn 3 concurrent forward requests
-        let mut handles = Vec::new();
-        for i in 0..3 {
-            let forwarder = forwarder.clone();
-            let input = Tensor::randn(0f32, 1.0, (1, 1, hidden_dim), &Device::Cpu).unwrap();
-            handles.push(tokio::spawn(async move {
-                forwarder.submit(input, 0, format!("req-{i}")).await
-            }));
-        }
-
-        // All should complete successfully
-        for handle in handles {
-            let result = handle.await.unwrap();
-            assert!(result.is_ok(), "Batch forward failed: {:?}", result.err());
-            let output = result.unwrap();
-            assert_eq!(output.dims()[2], hidden_dim);
-        }
-    }
+    // BatchForwarder test removed — batching now handled in worker subprocess
 
     #[test]
     fn flash_attn_cpu_vs_standard_attention() {

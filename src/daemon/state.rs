@@ -262,7 +262,7 @@ pub struct SharedState {
     /// Active relay circuits: maps (src_peer, dst_peer) to start time.
     pub active_relay_circuits: DashMap<(libp2p::PeerId, libp2p::PeerId), std::time::Instant>,
     /// Model process pool: one subprocess per loaded model for GPU memory isolation.
-    pub model_process_pool: crate::inference::process_pool::ModelProcessPool,
+    pub model_process_pool: Arc<crate::inference::process_pool::ModelProcessPool>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -722,9 +722,9 @@ impl SharedState {
             shard_bytes_served: AtomicU64::new(0),
             relay_seconds_served: AtomicU64::new(0),
             active_relay_circuits: DashMap::new(),
-            model_process_pool: crate::inference::process_pool::ModelProcessPool::new(
+            model_process_pool: Arc::new(crate::inference::process_pool::ModelProcessPool::new(
                 config.node.data_dir.clone(),
-            ),
+            )),
             shutdown_tx,
         });
 

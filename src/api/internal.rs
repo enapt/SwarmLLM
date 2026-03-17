@@ -8,11 +8,10 @@
 
 use axum::extract::State;
 use axum::Json;
-use std::collections::HashMap;
 
 use crate::api::server::AppState;
 use crate::error::ApiError;
-use crate::types::{HiddenStateRequest, HiddenStateResponse, HiddenStateTensor};
+use crate::types::{HiddenStateRequest, HiddenStateResponse};
 
 /// Maximum number of layers that can be requested at once.
 const MAX_RETURN_LAYERS: usize = 128;
@@ -100,83 +99,12 @@ pub async fn hidden_states(
         "Hidden states request"
     );
 
-    let capture_set: std::collections::HashSet<usize> = req.return_layers.iter().copied().collect();
-
-    // Run the forward pass with hidden state capture in a blocking task
-    let shared_state = state.shared_state.clone();
-    let prompt = req.prompt.clone();
-    let return_layers = req.return_layers.clone();
-
-    // Get the model entry and lock it
-    let model_entry = shared_state
-        .split_models
-        .get(&split_model_key)
-        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
-    let model_arc = model_entry.model.clone();
-    drop(model_entry); // Release DashMap guard
-
-    let mut model = model_arc.lock().await;
-
-    // Tokenize the prompt
-    let token_ids: Vec<i64> = if let Some(tokenizer) = model.tokenizer() {
-        tokenizer.encode(&prompt)
-    } else {
-        prompt.bytes().map(|b| b as i64).collect()
-    };
-    let tokens_processed = token_ids.len();
-
-    // Build input tensor
-    let input =
-        candle_core::Tensor::from_vec(token_ids, &[1, tokens_processed], &candle_core::Device::Cpu)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "tensor create: {e}"
-                )))
-            })?;
-
-    let kv_store = crate::inference::split::KvCacheStore::new(std::time::Duration::from_secs(60));
-    let request_id = format!("hidden-states-{}", uuid::Uuid::new_v4());
-
-    // Run the forward pass with hidden state capture (CPU-bound, use block_in_place)
-    let (_output, captured) = tokio::task::block_in_place(|| {
-        model.forward_with_hidden_capture(&input, 0, &kv_store, &request_id, &capture_set)
-    })
-    .map_err(ApiError)?;
-
-    // Convert captured tensors to API response format
-    use base64::Engine;
-    let mut hidden_states = HashMap::new();
-    for &layer_idx in &return_layers {
-        if let Some(tensor) = captured.get(&layer_idx) {
-            let shape: Vec<usize> = tensor.dims().to_vec();
-            // Flatten to f32 bytes
-            let flat = tensor
-                .flatten_all()
-                .and_then(|t| t.to_dtype(candle_core::DType::F32))
-                .and_then(|t| t.to_vec1::<f32>())
-                .map_err(|e| {
-                    ApiError(crate::error::SwarmError::Internal(format!(
-                        "tensor serialize: {e}"
-                    )))
-                })?;
-            let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
-            let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-
-            hidden_states.insert(
-                layer_idx,
-                HiddenStateTensor {
-                    shape,
-                    dtype: "f32".to_string(),
-                    data_base64,
-                },
-            );
-        }
-    }
-
-    Ok(Json(HiddenStateResponse {
-        hidden_states,
-        tokens_processed,
-    }))
+    // Hidden state extraction requires in-process model access.
+    // The model now lives in a worker subprocess for GPU memory isolation.
+    // This endpoint is not yet supported with subprocess inference.
+    Err(ApiError(crate::error::SwarmError::Internal(
+        "Hidden states API not yet supported with subprocess inference".into(),
+    )))
 }
 
 #[cfg(test)]

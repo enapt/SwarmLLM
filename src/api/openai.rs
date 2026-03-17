@@ -1263,6 +1263,7 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
 ///
 /// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
 /// encoding, SentencePiece byte fallbacks, etc).
+#[allow(dead_code)]
 pub(crate) fn decode_split_tokens(
     model: &crate::inference::split::SplitModel,
     token_ids: &[u32],
@@ -1814,128 +1815,53 @@ async fn split_non_stream_response(
     params: SamplingParams,
     model_id: crate::types::ModelId,
 ) -> Result<axum::response::Response, ApiError> {
-    use crate::inference::split::sample_token;
-
+    // Get metadata from entry (no model lock needed)
     let model_entry = state
         .shared_state
         .split_models
         .iter()
         .find(|e| e.key().0 == model_id);
-    let model_ref = match model_entry {
-        Some(entry) => entry,
+    let (chat_template, bos_token, eos_token_str, layer_range) = match model_entry {
+        Some(entry) => {
+            let e = entry.value();
+            (
+                e.cached_chat_template.clone(),
+                e.bos_token.clone(),
+                e.eos_token_str.clone(),
+                (e.layer_start as u32, e.layer_end as u32),
+            )
+        }
         None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
     };
-    let entry = model_ref.value();
-    let kv_store = state.shared_state.kv_cache_store.clone();
-    let mut model = entry.model.lock().await;
 
-    // Build prompt using the model's own chat template (not the singleton loaded_model_info)
     let prompt = chat_template::build_prompt(
         &messages,
-        model.chat_template(),
-        model.bos_token(),
-        model.eos_token_str(),
+        chat_template.as_deref(),
+        &bos_token,
+        &eos_token_str,
     );
 
     tracing::debug!(
         request_id = %request_id,
         prompt_len = prompt.len(),
-        "DIAG: non-stream built prompt"
+        "DIAG: non-stream built prompt (subprocess)"
     );
 
-    // Tokenize the prompt — forward() handles embedding internally
-    let (input, prompt_tokens) = model.tokenize(&prompt)?;
-
-    // First forward pass (prefill) — process entire prompt at once.
-    // block_in_place: CPU-bound inference must not starve async runtime.
-    let logits = tokio::task::block_in_place(|| model.forward(&input, 0, &kv_store, &request_id))?;
-    // logits shape: (1, vocab) — forward() already extracts the last token
-    let mut next_token = sample_token(&logits, params.temperature, params.top_p)?;
-
-    let eos = model.eos_tokens().to_vec();
-    let stop_strings = chat_template::extract_stop_strings(model.chat_template());
-    tracing::debug!(
-        request_id = %request_id,
-        first_token = next_token,
-        is_eos = eos.contains(&next_token),
-        eos_tokens = ?eos,
-        prompt_tokens,
-        "DIAG: non-stream first sampled token"
-    );
-    let mut generated: Vec<u32> = Vec::new();
-    let mut index_pos = prompt_tokens;
-    let mut hit_stop_string = false;
-
-    for _ in 0..params.max_tokens {
-        if eos.contains(&next_token) {
-            break;
-        }
-        generated.push(next_token);
-
-        // Check for chat template stop strings in decoded text so far
-        if !stop_strings.is_empty() {
-            let text_so_far = decode_split_tokens(&model, &generated);
-            if let Some(stop) = stop_strings
-                .iter()
-                .find(|s| text_so_far.contains(s.as_str()))
-            {
-                // Truncate generated tokens to before the stop string
-                if let Some(pos) = text_so_far.find(stop.as_str()) {
-                    // Re-tokenize the truncated text to find the right token count
-                    // Simpler: just mark and truncate after the loop
-                    let truncated = &text_so_far[..pos];
-                    // Find how many tokens produce text up to `pos`
-                    let mut token_count = 0;
-                    let mut acc = String::new();
-                    for (i, &_tid) in generated.iter().enumerate() {
-                        acc = decode_split_tokens(&model, &generated[..=i]);
-                        if acc.len() >= truncated.len() {
-                            token_count = i + 1;
-                            break;
-                        }
-                    }
-                    if token_count > 0 && acc.len() > truncated.len() {
-                        // Last token pushed past the stop — drop it
-                        generated.truncate(token_count.saturating_sub(1));
-                    } else {
-                        generated.truncate(token_count);
-                    }
-                }
-                hit_stop_string = true;
-                break;
-            }
-        }
-
-        // Create single-token tensor — forward() handles embedding
-        let input = model.token_tensor(next_token)?;
-        let logits = tokio::task::block_in_place(|| {
-            model.forward(&input, index_pos, &kv_store, &request_id)
-        })?;
-        next_token = sample_token(&logits, params.temperature, params.top_p)?;
-        index_pos += 1;
-    }
-
-    let finish_reason = if hit_stop_string || eos.contains(&next_token) {
-        "stop"
-    } else {
-        "length"
-    };
-
-    // Decode tokens using BPE tokenizer for proper byte handling
-    let mut content = decode_split_tokens(&model, &generated);
-    // Final cleanup: strip trailing partial stop strings and full stop strings
-    for stop in &stop_strings {
-        if let Some(pos) = content.find(stop.as_str()) {
-            content.truncate(pos);
-        }
-        for end_len in (1..stop.len()).rev() {
-            let prefix = &stop[..end_len];
-            if content.ends_with(prefix) {
-                content.truncate(content.len() - end_len);
-                break;
-            }
-        }
-    }
+    let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let output = state
+        .shared_state
+        .model_process_pool
+        .generate(
+            &model_id,
+            layer_range,
+            prompt,
+            params.clone(),
+            rid,
+            None,
+            None,
+        )
+        .await
+        .map_err(ApiError)?;
 
     let response = ChatCompletionResponse {
         id: request_id,
@@ -1946,16 +1872,16 @@ async fn split_non_stream_response(
             index: 0,
             message: ChatMessageResponse {
                 role: "assistant".into(),
-                content: Some(content),
+                content: Some(output.content),
                 tool_calls: None,
             },
-            finish_reason: finish_reason.into(),
+            finish_reason: output.finish_reason.clone(),
             logprobs: None,
         }],
         usage: Usage {
-            prompt_tokens: prompt_tokens as u32,
-            completion_tokens: generated.len() as u32,
-            total_tokens: (prompt_tokens + generated.len()) as u32,
+            prompt_tokens: output.prompt_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: output.prompt_tokens + output.completion_tokens,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         },
@@ -1978,8 +1904,6 @@ async fn split_stream_response(
     params: SamplingParams,
     model_id: crate::types::ModelId,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    use crate::inference::split::sample_token;
-
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
     let request_id_inner = request_id.clone();
 
@@ -2002,97 +1926,66 @@ async fn split_stream_response(
             return;
         }
 
+        // Get metadata from entry (no model lock needed)
         let model_entry = state
             .shared_state
             .split_models
             .iter()
             .find(|e| e.key().0 == model_id);
-        let model_ref = match model_entry {
-            Some(entry) => entry,
+        let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
+            Some(entry) => {
+                let e = entry.value();
+                (
+                    e.cached_chat_template.clone(),
+                    e.bos_token.clone(),
+                    e.eos_token_str.clone(),
+                    (e.layer_start as u32, e.layer_end as u32),
+                )
+            }
             None => {
                 tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
                 let _ = tx.send(StreamEvent::Done).await;
                 return;
             }
         };
-        let entry = model_ref.value();
-        let kv_store = state.shared_state.kv_cache_store.clone();
-        let mut model = entry.model.lock().await;
 
-        // Build prompt using the model's own chat template
-        let prompt = chat_template::build_prompt(
-            &messages,
-            model.chat_template(),
-            model.bos_token(),
-            model.eos_token_str(),
-        );
+        // Build prompt using cached metadata
+        let prompt = chat_template::build_prompt(&messages, chat_tmpl.as_deref(), &bos, &eos_str);
 
-        // Tokenize — forward() handles embedding internally
-        let (input, prompt_tokens) = match model.tokenize(&prompt) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!(model_id = %model_id, "DIAG: split stream tokenize failed: {e}");
-                let _ = tx.send(StreamEvent::Done).await;
-                return;
-            }
-        };
+        let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
 
-        // Prefill — block_in_place for CPU-bound inference
-        let prefill_start = std::time::Instant::now();
-        let logits = match tokio::task::block_in_place(|| {
-            model.forward(&input, 0, &kv_store, &request_id)
-        }) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!(model_id = %model_id, prompt_tokens, "DIAG: split stream prefill failed: {e}");
-                let _ = tx.send(StreamEvent::Done).await;
-                return;
-            }
-        };
-        let prefill_ms = prefill_start.elapsed().as_millis() as u64;
-        tracing::debug!(model_id = %model_id, prompt_tokens, prefill_ms, "DIAG: split stream prefill complete");
+        // Use a streaming token channel to bridge worker tokens to SSE events
+        let (token_tx, mut token_rx) =
+            tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
 
-        // logits shape: (1, vocab) — forward() already extracts the last token
-        let mut next_token = match sample_token(&logits, params.temperature, params.top_p) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("DIAG: split stream initial sample failed: {e}");
-                let _ = tx.send(StreamEvent::Done).await;
-                return;
-            }
-        };
+        let pool = state.shared_state.model_process_pool.clone();
+        let model_id_clone = model_id.clone();
+        let params_clone = params.clone();
+        tokio::spawn(async move {
+            let _ = pool
+                .generate(
+                    &model_id_clone,
+                    layer_range,
+                    prompt,
+                    params_clone,
+                    rid,
+                    None,
+                    Some(token_tx),
+                )
+                .await;
+        });
 
-        let eos = model.eos_tokens().to_vec();
-        let stop_strings = chat_template::extract_stop_strings(model.chat_template());
-        let mut index_pos = prompt_tokens;
+        // Forward streaming tokens from the worker to SSE events
         let mut finish = "length".to_string();
-        let decode_start = std::time::Instant::now();
-        let mut accumulated_text = String::new();
-
-        for _ in 0..params.max_tokens {
-            if eos.contains(&next_token) {
-                finish = "stop".to_string();
+        while let Some(event) = token_rx.recv().await {
+            if let Some(fr) = &event.finish_reason {
+                finish = fr.clone();
                 break;
             }
-
             token_count += 1;
-
-            // Decode and stream token
-            let text = decode_split_tokens(&model, &[next_token]);
-            accumulated_text.push_str(&text);
-
-            // Check for chat template stop strings
-            if let Some(_stop) = stop_strings
-                .iter()
-                .find(|s| accumulated_text.contains(s.as_str()))
-            {
-                finish = "stop".to_string();
-                break;
-            }
-
             if tx
                 .send(StreamEvent::Delta {
-                    content: Some(text),
+                    content: Some(event.text),
                     role: None,
                     finish_reason: None,
                 })
@@ -2104,54 +1997,15 @@ async fn split_stream_response(
                     elapsed_ms = stream_start.elapsed().as_millis() as u64,
                     "DIAG: split stream client disconnected mid-decode"
                 );
-                return; // Client disconnected
+                return;
             }
-
-            // Create single-token tensor — forward() handles embedding
-            let input = match model.token_tensor(next_token) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!(token_count, "DIAG: split stream token_tensor failed: {e}");
-                    break;
-                }
-            };
-            let logits = match tokio::task::block_in_place(|| {
-                model.forward(&input, index_pos, &kv_store, &request_id)
-            }) {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(
-                        token_count,
-                        index_pos,
-                        "DIAG: split stream decode forward failed: {e}"
-                    );
-                    break;
-                }
-            };
-            next_token = match sample_token(&logits, params.temperature, params.top_p) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::error!(token_count, "DIAG: split stream sample failed: {e}");
-                    break;
-                }
-            };
-            index_pos += 1;
         }
 
-        let decode_ms = decode_start.elapsed().as_millis() as u64;
-        let tok_per_sec = if decode_ms > 0 {
-            token_count * 1000 / decode_ms
-        } else {
-            0
-        };
         tracing::info!(
             model_id = %model_id,
             token_count,
-            decode_ms,
-            prefill_ms,
-            tok_per_sec,
             finish = %finish,
-            "DIAG: split stream decode loop complete"
+            "DIAG: split stream decode loop complete (subprocess)"
         );
 
         // Send finish
@@ -2493,7 +2347,7 @@ pub async fn embeddings(
             return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
         }
     };
-    let model_entry = model_ref.value();
+    let _model_entry = model_ref.value();
 
     let inputs = match &req.input {
         EmbeddingInput::Single(s) => vec![s.clone()],
@@ -2506,58 +2360,13 @@ pub async fn embeddings(
         )));
     }
 
-    // Lock the model to compute embeddings
-    let model = model_entry.model.lock().await;
-
-    let mut data = Vec::new();
-    let mut total_tokens = 0usize;
-
-    for (idx, text) in inputs.iter().enumerate() {
-        // tokenize_and_embed returns (1, seq_len, hidden_dim) tensor
-        let embedding = model.tokenize_and_embed(text).map_err(ApiError)?;
-
-        // Count tokens from the embedding's seq dimension
-        let seq_len = embedding.dim(1).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Dim error: {e}"
-            )))
-        })?;
-        total_tokens += seq_len;
-
-        // Mean pool: average across the sequence dimension → (1, hidden_dim)
-        let mean = embedding.mean(1).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Mean pooling failed: {e}"
-            )))
-        })?;
-        let mean = mean.squeeze(0).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Squeeze failed: {e}"
-            )))
-        })?;
-
-        let values: Vec<f32> = mean.to_vec1().map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
-                "Tensor conversion failed: {e}"
-            )))
-        })?;
-
-        data.push(serde_json::json!({
-            "object": "embedding",
-            "index": idx,
-            "embedding": values,
-        }));
-    }
-
-    Ok(Json(serde_json::json!({
-        "object": "list",
-        "data": data,
-        "model": req.model,
-        "usage": {
-            "prompt_tokens": total_tokens,
-            "total_tokens": total_tokens,
-        }
-    })))
+    // Embeddings require in-process model access which is no longer available.
+    // The model now lives in a worker subprocess for GPU memory isolation.
+    drop(model_ref);
+    let _ = inputs;
+    Err(ApiError(crate::error::SwarmError::Internal(
+        "Embeddings API not available with subprocess inference. Use a dedicated embedding model or provider.".into(),
+    )))
 }
 
 /// GET /v1/status — SwarmLLM extension endpoint

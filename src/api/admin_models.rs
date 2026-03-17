@@ -807,6 +807,9 @@ pub async fn delete_model(
     // Remove split models for this model
     shared.split_models.retain(|key, _| key.0 != mid);
 
+    // Kill the worker subprocess to free GPU memory
+    shared.model_process_pool.unload_model(&mid).await;
+
     // Broadcast shard removal via GossipSub
     if let Some(ref ntx) = state.network_tx {
         let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
@@ -839,7 +842,7 @@ pub async fn unload_model(
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
-    // Remove split models for this model (frees VRAM/memory)
+    // Remove split models for this model
     let mut segments_removed = 0u32;
     shared.split_models.retain(|key, _| {
         if key.0 == mid {
@@ -849,6 +852,9 @@ pub async fn unload_model(
             true
         }
     });
+
+    // Kill the worker subprocess to free GPU memory
+    shared.model_process_pool.unload_model(&mid).await;
 
     // Clear loaded model info if it matches this model
     {
@@ -922,6 +928,9 @@ pub async fn delete_shard(
 
     // Evict any cached split model segments that included this shard
     shared.split_models.retain(|key, _| key.0 != mid);
+
+    // Kill the worker subprocess to free GPU memory
+    shared.model_process_pool.unload_model(&mid).await;
 
     // Broadcast updated ShardAnnounce with remaining held shards
     if let Some(ref ntx) = state.network_tx {
