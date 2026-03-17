@@ -367,19 +367,17 @@ impl AutoShardManager {
                 / 2
         };
 
-        // Sum up bytes of shards we already hold
+        // Sum up bytes of shards we already hold (O(local_shards) via reverse index)
+        let local_shards = self
+            .shared_state
+            .model_registry
+            .shards_for_node(local_node_id);
         let mut current_bytes = 0u64;
-        let mut current_shard_count = 0u32;
-        for manifest in self.shared_state.model_registry.models() {
-            for shard in &manifest.shards {
-                let shard_id = ShardId {
-                    model_id: manifest.id.clone(),
-                    index: shard.index,
-                };
-                let holders = self.shared_state.model_registry.shard_holders(&shard_id);
-                if holders.contains(local_node_id) {
-                    current_bytes += shard.size_bytes;
-                    current_shard_count += 1;
+        let current_shard_count = local_shards.len() as u32;
+        for sid in &local_shards {
+            if let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id) {
+                if let Some(si) = manifest.shards.iter().find(|s| s.index == sid.index) {
+                    current_bytes += si.size_bytes;
                 }
             }
         }
@@ -420,6 +418,25 @@ impl AutoShardManager {
         let min_replicas = self.shared_state.config.auto_manage.min_replicas as usize;
         // pool_size = peers + self; used for target_replicas clamping
         let pool_size = self.shared_state.peer_registry.len() + 1;
+
+        // Build consistent hash ring ONCE for the entire evaluation cycle.
+        // Each node gets VIRTUAL_SLOTS positions. Ring is sorted for binary search.
+        const VIRTUAL_SLOTS: u32 = 10;
+        let hash_ring: Vec<(u32, NodeId)> = {
+            let mut ring = Vec::with_capacity((pool_size) * VIRTUAL_SLOTS as usize);
+            for vn in 0..VIRTUAL_SLOTS {
+                let pos = hash_ring_position(&local_node_id.0, vn);
+                ring.push((pos, local_node_id.clone()));
+            }
+            for peer in self.shared_state.peer_registry.iter() {
+                for vn in 0..VIRTUAL_SLOTS {
+                    let pos = hash_ring_position(&peer.key().0, vn);
+                    ring.push((pos, peer.key().clone()));
+                }
+            }
+            ring.sort_by_key(|(pos, _)| *pos);
+            ring
+        };
 
         for manifest in registry.models() {
             // ── Policy gate: skip models excluded from auto-manage ──
@@ -623,35 +640,15 @@ impl AutoShardManager {
                     continue;
                 }
 
-                // Consistent hash ring deduplication: each node has 10 virtual slots
-                // on a u32 ring. On join/leave, only ~1/pool_size of assignments change
-                // (vs 100% with the old modulo approach). This prevents download storms.
+                // Consistent hash ring deduplication: use the pre-built ring to
+                // determine if this node is responsible for downloading this shard.
+                // On join/leave, only ~1/pool_size of assignments change.
                 let peers = self.shared_state.peer_registry.len();
                 if holder_count < target_replicas && peers > 0 && !in_configured_range {
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
 
-                    // Build a ring of all known node IDs (peers + self), each with
-                    // VIRTUAL_SLOTS positions on a u32 ring.
-                    const VIRTUAL_SLOTS: u32 = 10;
-                    let mut ring: Vec<(u32, NodeId)> = Vec::new();
-
-                    // Add self
-                    for vn in 0..VIRTUAL_SLOTS {
-                        let pos = hash_ring_position(&local_node_id.0, vn);
-                        ring.push((pos, local_node_id.clone()));
-                    }
-                    // Add peers
-                    for peer in self.shared_state.peer_registry.iter() {
-                        for vn in 0..VIRTUAL_SLOTS {
-                            let pos = hash_ring_position(&peer.key().0, vn);
-                            ring.push((pos, peer.key().clone()));
-                        }
-                    }
-                    ring.sort_by_key(|(pos, _)| *pos);
-
-                    // For each needed replica, hash the shard+replica_idx to a ring
-                    // position and find the nearest node clockwise.
+                    let ring = &hash_ring;
                     let i_am_assigned = (0..replicas_needed).any(|replica_idx| {
                         let mut hasher = blake3::Hasher::new();
                         hasher.update(manifest.id.0.as_bytes());
@@ -980,12 +977,16 @@ impl AutoShardManager {
     /// After download, register the shard and check if the model is now complete.
     /// Acquires a semaphore permit to limit concurrent downloads.
     async fn trigger_download(&self, candidate: &ShardCandidate) {
-        // Acquire semaphore permit to limit concurrent downloads.
-        // The permit is moved into the spawned task and dropped on completion.
-        let permit = match self.download_semaphore.clone().acquire_owned().await {
+        // Try to acquire a semaphore permit non-blocking. If all download slots
+        // are occupied, defer to next evaluation cycle instead of blocking the loop.
+        let permit = match self.download_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
             Err(_) => {
-                tracing::warn!("Download semaphore closed, skipping download");
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "Download semaphore full, deferring to next cycle"
+                );
                 return;
             }
         };
@@ -1711,6 +1712,30 @@ impl AutoShardManager {
 
                 // Skip locked/pinned shards
                 if self.shared_state.locked_shards.contains_key(&shard_id) {
+                    continue;
+                }
+
+                // Skip shards for models with encrypted pipeline enabled.
+                // E2E encryption requires local first/last segments — pruning
+                // any shard of an encrypted model would break the guarantee.
+                if self
+                    .shared_state
+                    .encrypted_pipeline_models
+                    .get(&manifest.id)
+                    .map(|v| *v)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                // Skip shards for models the user explicitly pinned/trusted
+                if self
+                    .shared_state
+                    .model_trust
+                    .get(&manifest.id)
+                    .map(|t| t.pinned_by_user)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
 
@@ -2541,8 +2566,8 @@ pub async fn rescan_local_shards(
                 continue;
             }
 
-            // Verify shard hash
-            if shard_info.hash.len() == 32 {
+            // Verify shard hash (skip zero-hash placeholders)
+            if shard_info.hash != [0u8; 32] {
                 if let Err(e) = shard_store.verify_shard(&model_id, shard_info) {
                     tracing::warn!(
                         model = %model_id_str,
@@ -2739,7 +2764,6 @@ pub async fn check_and_load_model(
         "DIAG: check_and_load_model"
     );
 
-    let _shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let mut any_loaded = false;
 
     // TOCTOU guard: use loading_models to prevent concurrent duplicate loads.

@@ -256,25 +256,17 @@ impl ShardRebalancer {
     /// Find all shards that are now under-replicated because `departed_peer` left.
     /// Uses the reverse index to only check shards the departed peer held,
     /// making this O(shards_held_by_peer) instead of O(all_shards).
-    fn find_underreplicated_shards(&self, departed_peer: &NodeId) -> Vec<(ShardId, Vec<NodeId>)> {
+    fn find_underreplicated_shards(&self, _departed_peer: &NodeId) -> Vec<(ShardId, Vec<NodeId>)> {
         let mut result = Vec::new();
 
-        // Use reverse index: only check shards the departed peer was holding
-        let departed_shards = self
-            .shared_state
-            .model_registry
-            .shards_for_node(departed_peer);
-
-        if departed_shards.is_empty() {
-            // Fallback: departed peer had no reverse-index entries (possible if it
-            // was removed before we updated). Do a scoped scan by model.
-            return result;
-        }
-
-        for shard_id in departed_shards {
-            let holders = self.shared_state.model_registry.shard_holders(&shard_id);
-            // The departed peer has already been removed from shard_holders
-            // by remove_peer_from_all_shards(), so `holders` is the remaining set.
+        // The departed peer has already been removed from shard_holders by
+        // remove_peer_from_all_shards() in health monitor, so we can't use the
+        // reverse index (it was cleared). Instead, scope the scan to models the
+        // departed peer's node was likely holding — but since we don't know which
+        // models, scan all shards and check for under-replication.
+        // This is O(all_shards) but only fires on peer departure (rare event).
+        for entry in self.shared_state.model_registry.all_shard_entries() {
+            let (shard_id, holders) = entry;
             if holders.len() < MIN_REPLICATION {
                 result.push((shard_id, holders));
             }

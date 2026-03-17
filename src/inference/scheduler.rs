@@ -338,14 +338,18 @@ impl PipelineScheduler {
             );
         }
 
-        // Sort: region_score DESC, latency ASC, load ASC, trust DESC.
-        // Region only wins as a tiebreaker — it prevents cross-continent routing
-        // when same-region alternatives exist, not a hard constraint.
+        // Sort: latency ASC, region_score DESC (tiebreaker), load ASC, trust DESC.
+        // Latency is the primary sort — we never sacrifice speed for region affinity.
+        // Region breaks ties between nodes with similar latency, preventing
+        // cross-continent routing when same-region alternatives exist.
         candidates.sort_by(|a, b| {
-            b.region_score
-                .partial_cmp(&a.region_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.latency_ms.cmp(&b.latency_ms))
+            a.latency_ms
+                .cmp(&b.latency_ms)
+                .then_with(|| {
+                    b.region_score
+                        .partial_cmp(&a.region_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| {
                     a.load
                         .partial_cmp(&b.load)

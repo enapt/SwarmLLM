@@ -1117,6 +1117,22 @@ pub(crate) async fn dispatch_network_messages(
                             }
                             // Regional shard summary gossip (Phase 18)
                             SwarmMessage::RegionShardSummary(summary) => {
+                                // Authenticate sender
+                                match authenticated_sender {
+                                    Some(ref sender) if sender != &summary.publisher => {
+                                        tracing::warn!(sender = %sender, claimed = %summary.publisher, "RegionShardSummary sender mismatch — dropping");
+                                        continue;
+                                    }
+                                    None => {
+                                        tracing::debug!("Dropping unauthenticated RegionShardSummary");
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                                // Validate region string length (prevent unbounded keys)
+                                if summary.region.len() > 8 || summary.shard_counts.len() > 512 {
+                                    continue;
+                                }
                                 // Reject stale summaries (>15min old)
                                 let now_ms = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -1139,6 +1155,14 @@ pub(crate) async fn dispatch_network_messages(
                                     .map(|existing| summary.timestamp_ms > existing.timestamp_ms)
                                     .unwrap_or(true);
                                 if should_update {
+                                    // Cap to prevent unbounded growth from malicious/diverse gossip
+                                    const MAX_REGION_SUMMARIES: usize = 10_000;
+                                    if shared_state.region_shard_summaries.len() >= MAX_REGION_SUMMARIES
+                                        && !shared_state.region_shard_summaries.contains_key(&key)
+                                    {
+                                        tracing::debug!("region_shard_summaries at cap, dropping new entry");
+                                        continue;
+                                    }
                                     tracing::debug!(
                                         region = %summary.region,
                                         model = %summary.model_id,
@@ -1152,6 +1176,22 @@ pub(crate) async fn dispatch_network_messages(
 
                             // Model demand gossip (Phase 18)
                             SwarmMessage::ModelDemandGossip(demand) => {
+                                // Authenticate sender
+                                match authenticated_sender {
+                                    Some(ref sender) if sender != &demand.publisher => {
+                                        tracing::warn!(sender = %sender, claimed = %demand.publisher, "ModelDemandGossip sender mismatch — dropping");
+                                        continue;
+                                    }
+                                    None => {
+                                        tracing::debug!("Dropping unauthenticated ModelDemandGossip");
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                                // Validate region string length
+                                if demand.region.len() > 8 {
+                                    continue;
+                                }
                                 // Reject stale demand (>15min old)
                                 let now_ms = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -1166,6 +1206,13 @@ pub(crate) async fn dispatch_network_messages(
                                     continue;
                                 }
                                 let key = (demand.model_id.clone(), demand.region.clone());
+                                // Cap to prevent unbounded growth
+                                const MAX_DEMAND_ENTRIES: usize = 10_000;
+                                if shared_state.region_demand.len() >= MAX_DEMAND_ENTRIES
+                                    && !shared_state.region_demand.contains_key(&key)
+                                {
+                                    continue;
+                                }
                                 // EMA blend: 0.8 * old + 0.2 * incoming
                                 let new_rate = if let Some(existing) = shared_state.region_demand.get(&key) {
                                     *existing * 0.8 + demand.decayed_rate * 0.2

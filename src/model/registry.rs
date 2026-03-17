@@ -116,9 +116,27 @@ impl ModelRegistry {
     }
 
     /// Remove all shard holder entries for a given model.
+    /// Maintains reverse index: removes affected ShardIds from each holder's node_shards.
     pub fn remove_all_model_shards(&self, model_id: &ModelId) {
+        // Collect affected (shard, holders) before removing from shard_holders
+        let affected: Vec<(ShardId, Vec<NodeId>)> = self
+            .shard_holders
+            .iter()
+            .filter(|e| &e.key().model_id == model_id)
+            .map(|e| (e.key().clone(), e.value().iter().cloned().collect()))
+            .collect();
+
         self.shard_holders
             .retain(|shard_id, _| &shard_id.model_id != model_id);
+
+        // Mirror removal in reverse index
+        for (shard_id, holders) in affected {
+            for node_id in holders {
+                if let Some(mut shards) = self.node_shards.get_mut(&node_id) {
+                    shards.remove(&shard_id);
+                }
+            }
+        }
     }
 
     /// Remove a peer from all shard holder entries (e.g., peer went offline).
