@@ -142,7 +142,7 @@ mod tests {
         assert!(embedded_mode::FRONTEND_DIR
             .get_file("css/style.css")
             .is_some());
-        assert!(embedded_mode::FRONTEND_DIR.get_file("js/app.js").is_some());
+        assert!(embedded_mode::FRONTEND_DIR.get_file("js/init.js").is_some());
     }
 
     #[test]

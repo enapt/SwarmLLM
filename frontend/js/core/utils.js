@@ -1,0 +1,359 @@
+'use strict';
+
+// ============================================================================
+// SwarmLLM — Utility Functions
+// Format helpers, DOM builders, shared pure functions
+// ============================================================================
+
+(function() {
+  var S = App.state;
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
+  function formatUptime(seconds) {
+    if (seconds < 60) return seconds + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    if (h >= 24) { return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'; }
+    return h + 'h ' + m + 'm';
+  }
+
+  function formatMB(mb) {
+    if (!mb || mb === 0) return '\u2014';
+    if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
+    return mb + ' MB';
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '\u2014';
+    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    return Math.round(bytes / 1024) + ' KB';
+  }
+
+  function formatSpeed(bytesPerSec) {
+    if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
+    if (bytesPerSec >= 1024) return Math.round(bytesPerSec / 1024) + ' KB/s';
+    return bytesPerSec + ' B/s';
+  }
+
+  function formatEta(seconds) {
+    var s = Math.round(seconds);
+    if (s >= 3600) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    if (s >= 60) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    return s + 's';
+  }
+
+  function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  function setTierBadge(elementId, tier) {
+    var el = document.getElementById(elementId);
+    if (!el) return;
+    el.textContent = capitalize(tier);
+    el.className = 'tier-badge ' + tier.toLowerCase();
+  }
+
+  function renderSparkline(containerId, data) {
+    var container = document.getElementById(containerId);
+    if (!data || data.length === 0) return;
+    var hasActivity = data.some(function(v) { return v !== 0; });
+    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">Credit activity will appear here</span>'; return; }
+    var min = Math.min.apply(null, data);
+    var max = Math.max.apply(null, data);
+    var range = (max - min) || 1;
+    container.innerHTML = '';
+    data.forEach(function(val) {
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = Math.max(2, ((val - min) / range) * 36) + 'px';
+      container.appendChild(bar);
+    });
+  }
+
+  function getModelSource(modelId) {
+    if (!modelId) return 'local';
+    var match = S._modelDropdownData.find(function(m) { return m.id === modelId; });
+    if (!match) return 'local';
+    if (match.group === 'local') return 'local';
+    if (match.group === 'swarm') return 'swarm';
+    return 'cloud';
+  }
+
+  // Format a raw model ID into a friendly display name
+  function formatModelDisplayName(id, opts) {
+    if (!id) return 'Unknown';
+    var name = id;
+    name = name.replace(/\.gguf$/i, '').replace(/-gguf$/i, '');
+    var parts = name.split(/[_]/);
+    if (parts.length >= 2) {
+      var prefix = parts[0].toLowerCase();
+      var rest = parts.slice(1).join('_').toLowerCase();
+      if (rest.indexOf(prefix) === 0) {
+        name = parts.slice(1).join('_');
+      }
+    }
+    name = name.replace(/(\d)\.(\d)/g, '$1\x00$2');
+    var hideQuant = (opts && opts.hideQuant) || false;
+    return name.split(/[-_.]/).filter(Boolean).map(function(s) {
+      s = s.replace(/\x00/g, '.');
+      if (/^(q\d|iq\d|f16|f32|bf16)/i.test(s)) return hideQuant ? null : s.toUpperCase();
+      if (/^v\d/i.test(s)) return s;
+      if (/^\d+\.?\d*[bBmM]$/.test(s)) return s.toUpperCase();
+      if (hideQuant && /^[kms]$/i.test(s)) return null;
+      return s.charAt(0).toUpperCase() + s.slice(1);
+    }).filter(Boolean).join(' ');
+  }
+
+  function applyMessageGrouping(container) {
+    var msgs = Array.prototype.slice.call(container.querySelectorAll('.chat-msg'));
+    if (!msgs.length) return;
+    var i = 0;
+    while (i < msgs.length) {
+      var role = msgs[i].classList.contains('user') ? 'user' : 'assistant';
+      var j = i;
+      while (j + 1 < msgs.length) {
+        var nextRole = msgs[j + 1].classList.contains('user') ? 'user' : 'assistant';
+        if (nextRole !== role) break;
+        j++;
+      }
+      var size = j - i + 1;
+      for (var k = i; k <= j; k++) {
+        msgs[k].classList.remove('group-solo', 'group-first', 'group-mid', 'group-last');
+        if (size === 1) msgs[k].classList.add('group-solo');
+        else if (k === i) msgs[k].classList.add('group-first');
+        else if (k === j) msgs[k].classList.add('group-last');
+        else msgs[k].classList.add('group-mid');
+      }
+      i = j + 1;
+    }
+  }
+
+  function appendMessageToDOM(role, content, isHtml, opts) {
+    opts = opts || {};
+    var container = document.getElementById('chat-messages');
+    var empty = document.getElementById('chat-empty');
+    if (empty) empty.style.display = 'none';
+
+    var div = document.createElement('div');
+    div.className = 'chat-msg ' + role;
+
+    var sourceHtml = '';
+    if (role === 'assistant') {
+      var session = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId] : null;
+      var modelId = opts.model || (session ? session.model : '') || S.currentModel || '';
+      var source = getModelSource(modelId);
+      div.classList.add('source-' + source);
+      var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Network';
+      sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
+    }
+
+    var avatarEl = document.createElement('div');
+    avatarEl.className = 'msg-avatar';
+    avatarEl.setAttribute('aria-hidden', 'true');
+    if (role === 'assistant') {
+      var _sess = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId] : null;
+      var _mid = opts && opts.model ? opts.model : (_sess ? _sess.model : '') || S.currentModel || '';
+      var _avatarProvider = (_mid && S._modelDropdownData.find(function(m) { return m.id === _mid; }) || {}).group || null;
+      var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(_mid);
+      var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
+      if (_iconUrl) {
+        avatarEl.innerHTML = '<img src="' + _iconUrl + '" width="16" height="16" alt="" class="provider-icon provider-avatar-icon" style="display:block">';
+      } else {
+        avatarEl.textContent = 'AI';
+      }
+    } else {
+      avatarEl.innerHTML = '<img src="/static/icons/swarm.svg" alt="" style="width:16px;height:16px;display:block;">';
+    }
+    div.appendChild(avatarEl);
+
+    var bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    var label = role === 'user' ? 'You' : 'Assistant';
+    var encLock = (opts && opts.encrypted) ? ' <span class="msg-enc-lock" title="Sent with E2E encryption">&#128274;</span>' : '';
+    bubble.innerHTML = '<div class="msg-role">' + label + sourceHtml + encLock + '</div><div class="msg-content"></div>';
+    if (isHtml) {
+      bubble.querySelector('.msg-content').innerHTML = content;
+    } else {
+      bubble.querySelector('.msg-content').textContent = content;
+    }
+
+    if (role === 'assistant') {
+      var actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy this response">Copy</button>' +
+        '<button class="msg-action-btn" data-action="compare" title="Ask other models the same question">Try other models</button>';
+      bubble.appendChild(actions);
+    }
+
+    div.appendChild(bubble);
+    container.appendChild(div);
+    applyMessageGrouping(container);
+    App.chat.scrollToBottom();
+    return div;
+  }
+
+  function createEmptyState() {
+    var div = document.createElement('div');
+    div.className = 'chat-empty';
+    div.id = 'chat-empty';
+
+    var modelName = '';
+    var modelData = null;
+    var item = null;
+    if (S.currentModel) {
+      item = S._modelDropdownData.find(function(m) { return m.id === S.currentModel; });
+      modelName = item ? item.name : S.currentModel;
+      modelData = (window._lastModelsData || []).find(function(m) { return m.id === S.currentModel; });
+    }
+
+    var title = modelName ? 'Chat with ' + escapeHtml(modelName) : 'Chat with AI';
+    var _emIconKey = S.currentModel ? ((item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(S.currentModel)) : null;
+    var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
+    var icon = _emIconUrl
+      ? '<img src="' + _emIconUrl + '" width="48" height="48" alt="" style="opacity:0.55;border-radius:10px;">'
+      : '&#11088;';
+
+    var encHint = '';
+    if (modelData && modelData.encrypted_pipeline && modelData.shard_count > 1) {
+      var isFullLocal = modelData.hosted_shards === modelData.shard_count;
+      if (isFullLocal) {
+        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--green)">' +
+          '&#128274; Running locally \u2014 all shards on this device, prompts never leave</div>';
+      } else {
+        encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
+          '&#128274; Full E2E encryption \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
+          '<br><span style="font-size:0.75rem;color:var(--text-muted)">~2\u20135s extra latency per request.</span></div>';
+      }
+    } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
+      encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--text-muted)">' +
+        '&#127760; Distributed inference \u2014 shards split across peers' +
+        '<br><span style="font-size:0.75rem">Use the \u201cEnable prompt privacy\u201d button in the bar above to encrypt your prompts end-to-end.</span></div>';
+    }
+
+    div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
+      '<div class="chat-empty-title">' + title + '</div>' +
+      encHint +
+      '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
+      '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
+        (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
+        '<kbd>Shift+Enter</kbd> for new line</div>';
+    return div;
+  }
+
+  function autoResizeInput() {
+    if (!S.inputEl) S.inputEl = document.getElementById('chat-input');
+    if (!S.inputEl) return;
+    S.inputEl.style.height = 'auto';
+    S.inputEl.style.height = Math.min(S.inputEl.scrollHeight, 200) + 'px';
+  }
+
+  function updateTokenCounter() {
+    var el = document.getElementById('token-counter');
+    if (!el) return;
+    var input = document.getElementById('chat-input');
+    if (!input) return;
+    var text = input.value;
+    if (!text) { el.textContent = ''; el.className = 'token-counter'; return; }
+    var tokens = Math.ceil(text.length / 4);
+    var words = text.trim().split(/\s+/).length;
+    el.textContent = words + ' words';
+    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = 'Very long message — some models may not handle this length'; }
+    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = 'Long message — response quality may vary'; }
+    else { el.className = 'token-counter'; el.title = 'Message length'; }
+  }
+
+  function updateChatAvailability(hasModels) {
+    var sendBtn = document.getElementById('send-btn');
+    var chatInput = document.getElementById('chat-input');
+    var emptyState = document.querySelector('#chat-messages .chat-empty');
+
+    if (sendBtn) sendBtn.disabled = !hasModels;
+    if (chatInput) {
+      chatInput.disabled = !hasModels;
+      if (hasModels) {
+        chatInput.placeholder = 'Type your message...';
+      } else {
+        var dlInfo = document.getElementById('chat-dl-progress');
+        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 click + above to download one, or add a cloud provider in Settings';
+      }
+    }
+    if (emptyState && !hasModels) {
+      emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
+        '<div class="chat-empty-title" style="font-size:1.1rem">No Models Available</div>' +
+        '<div class="chat-empty-hint" style="margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
+        '<div style="display:flex;gap:8px;margin-top:12px">' +
+          '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
+          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
+        '</div>';
+    }
+  }
+
+  function updateChatDownloadProgress(acquisitions) {
+    var container = document.querySelector('.chat-input-area');
+    if (!container) return;
+    var existing = document.getElementById('chat-dl-progress');
+
+    var chatInput = document.getElementById('chat-input');
+    if (chatInput && !chatInput.disabled) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    if (!acquisitions || acquisitions.length === 0) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    var active = acquisitions.find(function(a) {
+      return typeof a.state === 'string' && (a.state === 'downloading' || a.state === 'awaiting_manifest');
+    });
+    if (!active) {
+      if (existing) existing.remove();
+      return;
+    }
+
+    var pct = 0;
+    if (active.total_bytes > 0) pct = Math.min(100, Math.round((active.downloaded_bytes || 0) / active.total_bytes * 100));
+    var speed = active.speed_bytes_per_sec || 0;
+    var name = formatModelDisplayName(active.model_name || active.model_id || '');
+    var text = 'Downloading ' + name + '... ' + pct + '%';
+    if (speed > 0) text += ' (' + formatSpeed(speed) + ')';
+
+    if (!existing) {
+      existing = document.createElement('div');
+      existing.id = 'chat-dl-progress';
+      existing.className = 'chat-dl-progress';
+      container.insertBefore(existing, container.firstChild);
+    }
+    existing.innerHTML = '<div class="chat-dl-bar"><div class="chat-dl-fill" style="width:' + pct + '%"></div></div>' +
+      '<span class="chat-dl-text">' + escapeHtml(text) + '</span>';
+  }
+
+  // Export utilities
+  App.utils = {
+    escapeHtml: escapeHtml,
+    formatUptime: formatUptime,
+    formatMB: formatMB,
+    formatBytes: formatBytes,
+    formatSpeed: formatSpeed,
+    formatEta: formatEta,
+    capitalize: capitalize,
+    setTierBadge: setTierBadge,
+    renderSparkline: renderSparkline,
+    getModelSource: getModelSource,
+    formatModelDisplayName: formatModelDisplayName,
+    applyMessageGrouping: applyMessageGrouping,
+    appendMessageToDOM: appendMessageToDOM,
+    createEmptyState: createEmptyState,
+    autoResizeInput: autoResizeInput,
+    updateTokenCounter: updateTokenCounter,
+    updateChatAvailability: updateChatAvailability,
+    updateChatDownloadProgress: updateChatDownloadProgress,
+  };
+})();
