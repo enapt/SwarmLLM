@@ -1137,13 +1137,19 @@ Items identified during audits but deferred for future implementation:
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Qwen 3.5 inference forward pass | Weight loading complete, forward returns error | `LayerVariant::Qwen35Attn/Qwen35Ssm` + `DeltaNetWeights` structs ready, `forward_deltanet()` implemented but not wired into split.rs forward loop |
-| Paged attention pool wiring | `paged_kv_pool`/`paged_kv_store` in SharedState always None | Feature-gated behind `paged-attn`, fields exist but never populated in daemon startup |
-| Ring AllReduce network wiring | Local impl complete, not wired to network transport | `choose_allreduce_strategy()` returns Ring for ≥4 ranks but `allreduce_sum_network()` always uses star topology |
+| Paged attention pool wiring | `paged_kv_pool`/`paged_kv_store` in SharedState always None | Feature-gated behind `paged-attn`, needs per-model init (n_kv_heads/head_dim from GGUF, not available at startup). Hot path (model_worker.rs) uses KvCacheStore, not paged blocks. |
+| Ring AllReduce network wiring | Local impl complete, not wired to network transport | Needs new TpRingChunk message types, per-step pending state, dispatch handler, and ring execution loop. Star topology works well for 2-3 node LAN setups. |
 | Starcoder2 / Glm4 layer loading | Arch detection exists, no split.rs loading code | Removed from `supported_list()` — re-add when layer loading is implemented |
+| Qwen 3.5 batched inference | Single-request forward wired, batched returns error | Per-request SSM state splitting needed for batch_size > 1 |
+| LoRA inference wiring | API registers adapters, request carries adapter_id | adapter_registry never queried during inference — model_worker subprocess doesn't load adapters |
+| Speculative decoding in subprocess | Works via llama-cpp executor only | Unreachable for shard-loaded models (Phase 17 subprocess path). IPC protocol lacks speculative support. |
 
 Resolved items (removed from deferred):
-- **Model governance**: Module removed — voting system didn't match product model (users add models from HuggingFace directly)
+- **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split.rs forward loop
+- **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
+- **prefix_cache SharedState field**: Removed — initialized but never read from any production path
+- **SpeculativePair struct**: Removed — scaffolding for a registry that was never built
+- **TOPIC_GOVERNANCE subscription**: Removed — nodes were subscribing to dead bandwidth
 - **Schema version migration**: Auto-upgrades on older DB, warns on downgrade
 - **DiskPressure rebalance**: Enum variant removed (never emitted)
 - **SpmTokenizer::vocab**: Field already removed in prior cleanup
