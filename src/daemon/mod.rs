@@ -401,6 +401,9 @@ impl Daemon {
             }
         }
 
+        // Clean up leftover .tmp files from interrupted downloads
+        shard_store.cleanup_tmp_files();
+
         // Scan local shards and register them + their manifests
         match shard_store.load_all_local() {
             Ok(shards) => {

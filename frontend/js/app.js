@@ -1563,7 +1563,6 @@ var SwarmLLM = (function() {
           };
           if (filterEl) {
             filterEl.addEventListener('input', refreshRows);
-            filterEl.addEventListener('keyup', refreshRows);
             filterEl.addEventListener('paste', function() { setTimeout(refreshRows, 0); });
           }
           if (sortEl) sortEl.addEventListener('change', function() {
@@ -2055,7 +2054,7 @@ var SwarmLLM = (function() {
             '</div>' +
             '<div class="hf-model-actions">' +
             (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +
-            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '">Download</button>' +
+            '<button class="btn btn-sm btn-primary" data-hf-download="' + escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '"' + (variants.length === 1 ? ' data-hf-filename="' + escapeHtml(variants[0].filename) + '"' : '') + '>Download</button>' +
             '</div>';
           results.appendChild(card);
         });
@@ -2588,7 +2587,7 @@ var SwarmLLM = (function() {
             '</div>';
           var provBtn = document.getElementById('setup-add-provider-btn');
           if (provBtn) provBtn.onclick = function() {
-            document.getElementById('setup-wizard').style.display = 'none';
+            document.getElementById('setup-modal').style.display = 'none';
             ui.openSettings();
             var section = document.getElementById('settings-providers-section');
             if (section) { section.open = true; section.scrollIntoView({behavior:'smooth'}); }
@@ -5057,7 +5056,6 @@ var SwarmLLM = (function() {
 
     // Theme toggle (light / dark / system)
     on('btn-theme-toggle', 'click', function() {
-      var THEME_KEY = 'swarmllm_theme';
       var themes = ['dark', 'light', 'system'];
       var icons = { dark: '\u263E', light: '\u2600', system: '\u25D1' };
       var cur = localStorage.getItem(THEME_KEY) || 'dark';

@@ -1302,7 +1302,7 @@ async fn anthropic_to_openai_proxy(
         "model": req.model,
         "messages": openai_messages,
         "max_tokens": req.max_tokens,
-        "stream": false,
+        "stream": req.stream,
     });
     if let Some(t) = req.temperature {
         body["temperature"] = serde_json::json!(t);
@@ -1336,7 +1336,8 @@ async fn anthropic_to_openai_proxy(
         let scrubbed = crate::crypto::scrub_api_keys(&body);
         // Truncate to prevent large error bodies from leaking to API callers
         let truncated = if scrubbed.len() > 512 {
-            format!("{}…[truncated]", &scrubbed[..512])
+            let safe_end: String = scrubbed.chars().take(500).collect();
+            format!("{safe_end}…[truncated]")
         } else {
             scrubbed
         };

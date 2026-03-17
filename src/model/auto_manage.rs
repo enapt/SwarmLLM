@@ -805,7 +805,7 @@ impl AutoShardManager {
                     .node
                     .data_dir
                     .join("models")
-                    .join(&manifest.id.0)
+                    .join(crate::model::shard::sanitize_path_component(&manifest.id.0))
                     .join("mmproj.gguf");
 
                 if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
@@ -1379,12 +1379,20 @@ impl AutoShardManager {
 
                         // Compute BLAKE3 hash of the downloaded shard and update the manifest
                         // so startup verification passes on restart.
-                        // block_in_place: reads up to 1GB shard + CPU-intensive hash
+                        // block_in_place: streaming hash with 64KB buffer (avoids loading full shard into memory)
                         let shard_path = dest.join(format!("shard_{:03}.bin", shard_idx));
                         let hash_result: Option<[u8; 32]> = tokio::task::block_in_place(|| {
-                            std::fs::read(&shard_path)
-                                .ok()
-                                .map(|data| *blake3::hash(&data).as_bytes())
+                            let mut file = std::fs::File::open(&shard_path).ok()?;
+                            let mut hasher = blake3::Hasher::new();
+                            let mut buf = [0u8; 65536];
+                            loop {
+                                let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+                                if n == 0 {
+                                    break;
+                                }
+                                hasher.update(&buf[..n]);
+                            }
+                            Some(*hasher.finalize().as_bytes())
                         });
                         if let Some(hash) = hash_result {
                             if let Some(mut manifest) =
@@ -1560,16 +1568,8 @@ impl AutoShardManager {
 
         tokio::spawn(async move {
             let _permit = permit;
-            let (ptx, _prx) =
-                tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(32);
-
-            match crate::model::huggingface::download_model(
-                &repo_id,
-                &filename,
-                &model_dir,
-                Some(ptx),
-            )
-            .await
+            match crate::model::huggingface::download_model(&repo_id, &filename, &model_dir, None)
+                .await
             {
                 Ok(_path) => {
                     tracing::info!(
@@ -1876,7 +1876,7 @@ impl AutoShardManager {
                         .node
                         .data_dir
                         .join("models")
-                        .join(&manifest.id.0)
+                        .join(crate::model::shard::sanitize_path_component(&manifest.id.0))
                         .join("mmproj.gguf");
                     if mmproj_path.exists() {
                         // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)

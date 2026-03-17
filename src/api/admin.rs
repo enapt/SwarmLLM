@@ -240,10 +240,6 @@ pub async fn reload_config(
     })))
 }
 
-/// GET /api/admin/models — List known models and their status.
-///
-/// Returns all models: locally loaded, from the P2P registry, and discovered
-/// on the network from peer announcements. Each model includes its source,
 /// GET /api/admin/peers — List connected peers.
 pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let timeout = chrono::Duration::seconds(90); // 3 missed pings

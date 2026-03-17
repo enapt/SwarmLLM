@@ -220,26 +220,6 @@ pub async fn rate_limit_middleware(
     next.run(req).await
 }
 
-/// Request logging middleware using tracing.
-pub async fn request_logger(req: Request, next: Next) -> Response {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-    let start = std::time::Instant::now();
-
-    let response = next.run(req).await;
-
-    let elapsed = start.elapsed();
-    tracing::info!(
-        method = %method,
-        path = %path,
-        status = %response.status(),
-        latency_ms = elapsed.as_millis(),
-        "Request handled"
-    );
-
-    response
-}
-
 /// Extract the IP address from a multiaddr string.
 /// Handles both `/ip4/<addr>/...` and `/ip6/<addr>/...` formats.
 fn extract_ip_from_multiaddr(multiaddr: &str) -> Option<String> {
