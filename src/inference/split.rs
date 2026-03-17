@@ -4236,10 +4236,72 @@ impl SplitModel {
                     layer_in =
                         (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
-                LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
-                    return Err(SwarmError::Internal(
-                        "Qwen 3.5 inference is not yet implemented".into(),
-                    ));
+                LayerVariant::Qwen35Attn {
+                    ref weights,
+                    ref ffn,
+                    ref attention_norm,
+                    ref post_attention_norm,
+                } => {
+                    let x = layer_in;
+                    let residual = &x;
+                    let x = attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35_attn_norm: {e}")))?;
+                    let attn = weights
+                        .forward_attn(
+                            &x,
+                            mask.as_ref(),
+                            index_pos,
+                            &mut layer_kv_caches[layer_idx],
+                            max_seq_len,
+                        )
+                        .map_err(|e| SwarmError::Internal(format!("q35_attn: {e}")))?;
+                    let x = (attn + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let residual = &x;
+                    let normed = post_attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35_post_attn_norm: {e}")))?;
+                    let ffn_out = match ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&normed, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35_mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&normed)
+                            .map_err(|e| SwarmError::Internal(format!("q35_moe: {e}")))?,
+                    };
+                    layer_in =
+                        (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                }
+                LayerVariant::Qwen35Ssm {
+                    ref weights,
+                    ref ffn,
+                    ref attention_norm,
+                    ref post_attention_norm,
+                } => {
+                    let x = layer_in;
+                    let residual = &x;
+                    let x = attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35_ssm_norm: {e}")))?;
+                    let ssm_out = weights
+                        .forward_deltanet(&x, &mut layer_ssm_states[layer_idx])
+                        .map_err(|e| SwarmError::Internal(format!("q35_deltanet: {e}")))?;
+                    let x =
+                        (ssm_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                    let residual = &x;
+                    let normed = post_attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35_post_ssm_norm: {e}")))?;
+                    let ffn_out = match ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&normed, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&normed)
+                            .map_err(|e| SwarmError::Internal(format!("q35_ssm_moe: {e}")))?,
+                    };
+                    layer_in =
+                        (ffn_out + residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
             }
             tracing::trace!(
@@ -4805,7 +4867,7 @@ impl SplitModel {
                 }
                 LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
                     return Err(SwarmError::Internal(
-                        "Qwen 3.5 batched inference is not yet implemented".into(),
+                        "Qwen 3.5 batched inference requires per-request SSM state splitting — use batch_size=1".into(),
                     ));
                 }
             }
