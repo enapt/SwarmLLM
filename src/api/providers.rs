@@ -115,67 +115,83 @@ pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderI
         }),
         "openai" => config.openai.as_ref().map(|e| ProviderInfo {
             name: "openai".into(),
-            base_url: provider_base_url("openai").unwrap().into(),
+            base_url: provider_base_url("openai").expect("known provider").into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "deepseek" => config.deepseek.as_ref().map(|e| ProviderInfo {
             name: "deepseek".into(),
-            base_url: provider_base_url("deepseek").unwrap().into(),
+            base_url: provider_base_url("deepseek")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "mistral" => config.mistral.as_ref().map(|e| ProviderInfo {
             name: "mistral".into(),
-            base_url: provider_base_url("mistral").unwrap().into(),
+            base_url: provider_base_url("mistral").expect("known provider").into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "groq" => config.groq.as_ref().map(|e| ProviderInfo {
             name: "groq".into(),
-            base_url: provider_base_url("groq").unwrap().into(),
+            base_url: provider_base_url("groq").expect("known provider").into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "nvidia_nim" | "nvidia" | "nim" => config.nvidia_nim.as_ref().map(|e| ProviderInfo {
             name: "nvidia_nim".into(),
-            base_url: provider_base_url("nvidia_nim").unwrap().into(),
+            base_url: provider_base_url("nvidia_nim")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "cerebras" => config.cerebras.as_ref().map(|e| ProviderInfo {
             name: "cerebras".into(),
-            base_url: provider_base_url("cerebras").unwrap().into(),
+            base_url: provider_base_url("cerebras")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "sambanova" => config.sambanova.as_ref().map(|e| ProviderInfo {
             name: "sambanova".into(),
-            base_url: provider_base_url("sambanova").unwrap().into(),
+            base_url: provider_base_url("sambanova")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "fireworks" => config.fireworks.as_ref().map(|e| ProviderInfo {
             name: "fireworks".into(),
-            base_url: provider_base_url("fireworks").unwrap().into(),
+            base_url: provider_base_url("fireworks")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "together" => config.together.as_ref().map(|e| ProviderInfo {
             name: "together".into(),
-            base_url: provider_base_url("together").unwrap().into(),
+            base_url: provider_base_url("together")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "deepinfra" => config.deepinfra.as_ref().map(|e| ProviderInfo {
             name: "deepinfra".into(),
-            base_url: provider_base_url("deepinfra").unwrap().into(),
+            base_url: provider_base_url("deepinfra")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),
         "moonshot" | "kimi" => config.moonshot.as_ref().map(|e| ProviderInfo {
             name: "moonshot".into(),
-            base_url: provider_base_url("moonshot").unwrap().into(),
+            base_url: provider_base_url("moonshot")
+                .expect("known provider")
+                .into(),
             api_key: e.api_key.clone(),
             is_anthropic: false,
         }),

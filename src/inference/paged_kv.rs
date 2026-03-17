@@ -117,7 +117,7 @@ impl PagedKvPool {
         let mut fset = self.free_set.lock().unwrap_or_else(|e| e.into_inner());
         let mut blocks = Vec::with_capacity(count);
         for _ in 0..count {
-            let b = free.pop_front().unwrap();
+            let b = free.pop_front().expect("length checked above");
             fset.remove(&b);
             blocks.push(b);
         }

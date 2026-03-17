@@ -853,7 +853,7 @@ impl IoRead for ShardReader {
             }
 
             let shard_file_len = self.shards[shard_idx].file_len;
-            let (_, ref mut file) = self.current_shard.as_mut().unwrap();
+            let (_, ref mut file) = self.current_shard.as_mut().expect("shard opened above");
             file.seek(SeekFrom::Start(offset_in_shard))?;
             let available_in_shard = shard_file_len.saturating_sub(offset_in_shard) as usize;
             let to_read = buf.len().min(available_in_shard);

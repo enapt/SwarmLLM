@@ -534,7 +534,7 @@ impl InferenceRouter {
             // For single-request batches, use the original unbatched path
             if batch_size == 1 {
                 let mut batch = batch;
-                let queued = batch.pop().unwrap();
+                let queued = batch.pop().expect("batch_size==1 guarantees non-empty");
                 self.dispatch_single(queued);
                 continue;
             }

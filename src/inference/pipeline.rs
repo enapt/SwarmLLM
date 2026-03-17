@@ -641,7 +641,12 @@ impl PipelineExecutor {
                     (bytes, true)
                 }
             } else if seq_num == 0 {
-                (prompt_bytes_opt.take().unwrap(), false)
+                (
+                    prompt_bytes_opt
+                        .take()
+                        .expect("seq_num==0 implies prompt_bytes set"),
+                    false,
+                )
             } else {
                 // For subsequent tokens, encode the last generated token ID as i64 LE bytes
                 // so the first segment can embed it directly.
