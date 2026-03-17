@@ -22,6 +22,33 @@ use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
 
+/// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
+/// Used for PEX filtering to prevent leaking internal topology.
+fn is_non_public_addr(addr_str: &str) -> bool {
+    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+        addr.iter().any(|proto| match proto {
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_unspecified()
+                    // RFC 6598 CGN / Tailscale 100.64.0.0/10
+                    || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+                    // link-local metadata
+                    || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                ip.is_loopback()
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local
+                    || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local (fd/fc)
+            }
+            _ => false,
+        })
+    } else {
+        true // unparseable addresses are not public
+    }
+}
+
 /// NetworkManager owns the libp2p Swarm and is the sole interface to the P2P network.
 pub struct NetworkManager {
     shared_state: Arc<SharedState>,
@@ -1259,39 +1286,7 @@ impl NetworkManager {
                             .iter()
                             .filter(|entry| entry.key() != local_node_id)
                             .flat_map(|entry| entry.addresses.clone())
-                            .filter(|addr| {
-                                // Filter out private/loopback/link-local addresses to prevent
-                                // leaking internal network topology to arbitrary peers
-                                !addr.contains("/ip4/10.")
-                                    && !addr.contains("/ip4/172.16.")
-                                    && !addr.contains("/ip4/172.17.")
-                                    && !addr.contains("/ip4/172.18.")
-                                    && !addr.contains("/ip4/172.19.")
-                                    && !addr.contains("/ip4/172.2")
-                                    && !addr.contains("/ip4/172.3")
-                                    && !addr.contains("/ip4/192.168.")
-                                    && !addr.contains("/ip4/127.")
-                                    && !addr.contains("/ip6/::1/")
-                                    && !addr.contains("/ip4/0.0.0.0")
-                                    && !addr.contains("/ip4/169.254.")
-                                    // RFC 6598 CGN / Tailscale range
-                                    && !addr.contains("/ip4/100.64.")
-                                    && !addr.contains("/ip4/100.65.")
-                                    && !addr.contains("/ip4/100.66.")
-                                    && !addr.contains("/ip4/100.67.")
-                                    && !addr.contains("/ip4/100.68.")
-                                    && !addr.contains("/ip4/100.69.")
-                                    && !addr.contains("/ip4/100.7")
-                                    && !addr.contains("/ip4/100.8")
-                                    && !addr.contains("/ip4/100.9")
-                                    && !addr.contains("/ip4/100.10")
-                                    && !addr.contains("/ip4/100.11")
-                                    && !addr.contains("/ip4/100.12")
-                                    // IPv6 ULA and link-local
-                                    && !addr.contains("/ip6/fd")
-                                    && !addr.contains("/ip6/fc")
-                                    && !addr.contains("/ip6/fe80")
-                            })
+                            .filter(|addr| !is_non_public_addr(addr))
                             .take(20)
                             .collect();
                         let pex_resp = SwarmMessage::PeerExchangeResponse(
@@ -2450,25 +2445,8 @@ impl NetworkManager {
                 break;
             }
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                // SEC: Filter out private/link-local/loopback IPs to prevent SSRF
-                // via malicious PEX responses pointing at internal network addresses.
-                let has_private_ip = addr.iter().any(|proto| {
-                    match proto {
-                        libp2p::multiaddr::Protocol::Ip4(ip) => {
-                            ip.is_private()
-                                || ip.is_loopback()
-                                || ip.is_link_local()
-                                || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
-                        }
-                        libp2p::multiaddr::Protocol::Ip6(ip) => {
-                            ip.is_loopback()
-                                || (ip.segments()[0] & 0xffc0) == 0xfe80 // link-local
-                                || (ip.segments()[0] & 0xfe00) == 0xfc00 // unique local
-                        }
-                        _ => false,
-                    }
-                });
-                if has_private_ip {
+                // SEC: Filter out private/link-local/loopback/CGN IPs to prevent SSRF
+                if is_non_public_addr(addr_str) {
                     tracing::debug!(addr = %addr_str, "PEX: skipping private/loopback address");
                     continue;
                 }
