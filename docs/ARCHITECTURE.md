@@ -522,7 +522,7 @@ Tiers (enforced per-request in InferenceRouter):
 **Tier enforcement flow**: On each `handle_submit()`, the router computes the network percentile
 from `peer_credit_balances` (populated via credit gossip), calls `calculate_tier()`, and sets the
 request priority. In `drain_queue()`, `max_concurrent_for_tier()` limits how many concurrent
-execution slots each tier can use. Higher tiers dequeue first via `tier_weight()` ordering.
+execution slots each tier can use. Higher tiers dequeue first via `PriorityTier` enum ordering (Platinum > Gold > Silver > Bronze).
 
 **Relay credits**: NetworkManager tracks active relay circuits via `active_relay_circuits` DashMap.
 On `CircuitReqAccepted`, records start time. On `CircuitClosed`, computes duration and adds to

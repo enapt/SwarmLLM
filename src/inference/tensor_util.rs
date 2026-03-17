@@ -253,3 +253,31 @@ pub fn sample_token_with_params(
 
     Ok(subset[subset.len() - 1] as u32)
 }
+
+/// Sample a token from logits with optional logprob collection.
+/// When `params.logprobs` is true, returns `(token_id, Some(logprob))`.
+pub fn sample_token_with_logprob(
+    logits: &Tensor,
+    params: &crate::types::SamplingParams,
+) -> Result<(u32, Option<f32>), SwarmError> {
+    if !params.logprobs {
+        return sample_token_with_params(logits, params).map(|t| (t, None));
+    }
+    let logits_squeezed = logits
+        .squeeze(0)
+        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let logits_f32 = logits_squeezed
+        .to_dtype(DType::F32)
+        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    let mut logits_vec = logits_f32
+        .to_vec1::<f32>()
+        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+    if logits_vec.is_empty() {
+        return Err(SwarmError::Internal("Empty logits".into()));
+    }
+    let mut ctx = crate::inference::sampling::SamplingContext::new(logits_vec.len());
+    let (token_id, info) =
+        crate::inference::sampling::sample_token_with_logprobs(&mut logits_vec, params, &mut ctx);
+    let logprob = info.map(|i| i.logprob);
+    Ok((token_id, logprob))
+}

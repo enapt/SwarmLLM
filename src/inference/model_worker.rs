@@ -435,8 +435,9 @@ async fn handle_generate(
     // Prefill — block_in_place for CPU-bound inference
     let logits = tokio::task::block_in_place(|| model.forward(&input, 0, kv_store, &req_id_str))?;
 
-    let mut next_token =
-        split::sample_token(&logits, gen.sampling.temperature, gen.sampling.top_p)?;
+    let use_logprobs = gen.sampling.logprobs;
+    let (mut next_token, mut token_logprob) =
+        crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
 
     let eos = model.eos_tokens().to_vec();
     let mut generated: Vec<u32> = Vec::new();
@@ -451,10 +452,8 @@ async fn handle_generate(
 
         generated.push(next_token);
 
-        // Decode token text for streaming
         let text = decode_token(model, next_token);
 
-        // Send token to daemon
         send_worker(
             writer,
             &WorkerMsg::Token {
@@ -462,19 +461,21 @@ async fn handle_generate(
                 token_id: next_token,
                 text,
                 is_eos: false,
-                logprob: None,
+                logprob: if use_logprobs { token_logprob } else { None },
             },
             &[],
         )
         .await
         .map_err(|e| SwarmError::Internal(format!("send Token: {e}")))?;
 
-        // Create single-token tensor — forward() handles embedding
         let input = model.token_tensor(next_token)?;
         let logits = tokio::task::block_in_place(|| {
             model.forward(&input, index_pos, kv_store, &req_id_str)
         })?;
-        next_token = split::sample_token(&logits, gen.sampling.temperature, gen.sampling.top_p)?;
+        let (tok, lp) =
+            crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
+        next_token = tok;
+        token_logprob = lp;
         index_pos += 1;
     }
 

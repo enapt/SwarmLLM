@@ -27,7 +27,7 @@ Tiers are calculated from your credit balance relative to the network:
 | Silver | Positive balance | 5-15s | ½ base max |
 | Bronze | Zero or negative | 30s+ | ¼ base max |
 
-**How it works:** On each inference request, the router computes your network percentile from peer credit gossip data and calls `calculate_tier()`. The tier determines both queue ordering (higher tiers dequeue first via `tier_weight()`) and concurrent execution slots (via `max_concurrent_for_tier()`). Bronze nodes are never blocked — they get deprioritized but always served.
+**How it works:** On each inference request, the router computes your network percentile from peer credit gossip data and calls `calculate_tier()`. The tier determines both queue ordering (higher tiers dequeue first via `PriorityTier` ordering) and concurrent execution slots (via `max_concurrent_for_tier()`). Bronze nodes are never blocked — they get deprioritized but always served.
 
 Local inference (single-node) never costs credits.
 
