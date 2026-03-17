@@ -176,7 +176,7 @@ impl Daemon {
                     .map(|d| d.is_cuda())
                     .unwrap_or(false);
                 if cuda_ok {
-                    let (name, vram_mb) = crate::api::admin::detect_gpu_nvidia_smi_pub();
+                    let (name, vram_mb) = crate::api::admin::detect_gpu_nvidia_smi();
                     Some(crate::inference::executor::GpuInfo {
                         name: name.unwrap_or_else(|| "NVIDIA GPU".to_string()),
                         vram_total_mb: vram_mb.unwrap_or(0),

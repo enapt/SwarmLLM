@@ -1214,6 +1214,11 @@ var SwarmLLM = (function() {
               label = '\u2713';
               if (missingCount > 0) missingCount--;
               if (peerCount > 0 && !s.local) peerCount--;
+            } else if (s.download && (s.download.state === 'Queued' || s.download.state === 'pending')) {
+              cls = 'queued'; queuedCount++;
+              label = '\u2022';
+              if (missingCount > 0) missingCount--;
+              if (peerCount > 0 && !s.local) peerCount--;
             }
 
             if (s.peer_downloads && s.peer_downloads.length > 0) {
