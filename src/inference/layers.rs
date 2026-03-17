@@ -1,4 +1,8 @@
 //! Transformer layer weight structures and forward pass implementations.
+//!
+//! Includes Qwen 3.5 hybrid SSM+attention (Gated Delta Networks) layer types.
+//! These are fully implemented but not yet wired into the forward pass —
+//! see `docs/ARCHITECTURE.md` § "Deferred Items" for status.
 
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Result as CandleResult, Tensor};
