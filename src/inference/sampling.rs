@@ -97,23 +97,11 @@ pub fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContex
     }
 }
 
-/// Apply top-p (nucleus) sampling: keep the smallest set of tokens whose
-/// cumulative probability exceeds p.
-///
-/// Allocates temporary buffers. For hot-path usage, prefer `apply_top_p_with_ctx`.
-pub fn apply_top_p(logits: &mut [f32], p: f32) {
-    if p >= 1.0 {
-        return;
-    }
-    let mut ctx = SamplingContext::new(logits.len());
-    apply_top_p_with_ctx(logits, p, &mut ctx);
-}
-
 /// Apply top-p (nucleus) sampling using pre-allocated scratch buffers.
 ///
 /// Uses a bitmap instead of HashSet for the keep set, and partial sort
 /// (select_nth_unstable_by) to avoid full O(V log V) sort.
-pub fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
+fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContext) {
     if p >= 1.0 {
         return;
     }
@@ -398,11 +386,12 @@ mod tests {
         let logits_orig = vec![1.0, 5.0, 3.0, 0.5, 4.0];
 
         let mut logits_a = logits_orig.clone();
-        apply_top_p(&mut logits_a, 0.8);
+        let mut ctx_a = SamplingContext::new(logits_a.len());
+        apply_top_p_with_ctx(&mut logits_a, 0.8, &mut ctx_a);
 
         let mut logits_b = logits_orig.clone();
-        let mut ctx = SamplingContext::new(logits_b.len());
-        apply_top_p_with_ctx(&mut logits_b, 0.8, &mut ctx);
+        let mut ctx_b = SamplingContext::new(logits_b.len());
+        apply_top_p_with_ctx(&mut logits_b, 0.8, &mut ctx_b);
 
         for (a, b) in logits_a.iter().zip(logits_b.iter()) {
             assert!((a - b).abs() < f32::EPSILON || (a.is_infinite() && b.is_infinite()));

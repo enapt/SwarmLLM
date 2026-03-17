@@ -135,7 +135,8 @@ impl PrefixCache {
 }
 
 /// Compute the BLAKE3 hash of a token ID sequence for use as a prefix cache key.
-pub fn hash_token_ids(tokens: &[i64]) -> [u8; 32] {
+#[cfg(test)]
+fn hash_token_ids(tokens: &[i64]) -> [u8; 32] {
     let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
     *blake3::hash(&bytes).as_bytes()
 }
@@ -144,7 +145,8 @@ pub fn hash_token_ids(tokens: &[i64]) -> [u8; 32] {
 /// trailing assistant tag) for prefix matching against the full prompt.
 ///
 /// Returns `None` if there are no system messages.
-pub fn build_system_prefix(messages: &[crate::types::ChatMessage]) -> Option<String> {
+#[cfg(test)]
+fn build_system_prefix(messages: &[crate::types::ChatMessage]) -> Option<String> {
     let has_system = messages
         .iter()
         .any(|m| matches!(m.role, crate::types::Role::System));

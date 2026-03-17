@@ -13,7 +13,7 @@ pub fn select_rarest_shards(manifest: &ModelManifest, registry: &ModelRegistry) 
 }
 
 /// Select the rarest shards, optionally excluding already-held shard indices.
-pub fn select_rarest_shards_excluding(
+fn select_rarest_shards_excluding(
     manifest: &ModelManifest,
     registry: &ModelRegistry,
     local_shards: Option<&[u32]>,

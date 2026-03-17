@@ -45,26 +45,6 @@ impl PriorityCalculator {
     }
 }
 
-/// Queue weight multiplier for each tier.
-/// Higher tiers get their requests processed sooner.
-pub fn tier_weight(tier: PriorityTier) -> u32 {
-    match tier {
-        PriorityTier::Bronze => 1,
-        PriorityTier::Silver => 2,
-        PriorityTier::Gold => 4,
-        PriorityTier::Platinum => 8,
-    }
-}
-
-/// Check whether a node with the given tier can submit requests.
-///
-/// Always returns `true` — all tiers can submit (spec says "never block on credit errors").
-/// Bronze tier gets lowest priority via `tier_weight` and `max_concurrent_for_tier`.
-pub fn can_submit_request(_tier: PriorityTier) -> bool {
-    // Per spec: credit errors degrade priority tier, never block
-    true
-}
-
 /// Calculate the maximum concurrent requests allowed for a tier.
 pub fn max_concurrent_for_tier(tier: PriorityTier, base_max: usize) -> usize {
     match tier {
@@ -112,17 +92,17 @@ mod tests {
 
     #[test]
     fn tier_weights_increase() {
+        fn tier_weight(tier: PriorityTier) -> u32 {
+            match tier {
+                PriorityTier::Bronze => 1,
+                PriorityTier::Silver => 2,
+                PriorityTier::Gold => 4,
+                PriorityTier::Platinum => 8,
+            }
+        }
         assert!(tier_weight(PriorityTier::Platinum) > tier_weight(PriorityTier::Gold));
         assert!(tier_weight(PriorityTier::Gold) > tier_weight(PriorityTier::Silver));
         assert!(tier_weight(PriorityTier::Silver) > tier_weight(PriorityTier::Bronze));
-    }
-
-    #[test]
-    fn all_tiers_can_submit() {
-        assert!(can_submit_request(PriorityTier::Bronze));
-        assert!(can_submit_request(PriorityTier::Silver));
-        assert!(can_submit_request(PriorityTier::Gold));
-        assert!(can_submit_request(PriorityTier::Platinum));
     }
 
     #[test]
