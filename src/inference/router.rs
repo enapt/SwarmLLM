@@ -284,20 +284,21 @@ impl InferenceRouter {
             }
         };
 
-        // Compute network percentile from peer credit balances
+        // Compute network percentile from peer credit balances.
+        // O(n) scan instead of O(n log n) sort — we only need the rank.
         let network_percentile = {
-            let mut balances: Vec<i64> = self
-                .shared_state
-                .peer_credit_balances
-                .iter()
-                .map(|e| *e.value())
-                .collect();
-            if balances.is_empty() {
+            let mut count = 0u32;
+            let mut below = 0u32;
+            for entry in self.shared_state.peer_credit_balances.iter() {
+                count += 1;
+                if *entry.value() < balance {
+                    below += 1;
+                }
+            }
+            if count == 0 {
                 0.5 // No peers known, default to median
             } else {
-                balances.sort();
-                let rank = balances.partition_point(|&b| b < balance);
-                rank as f32 / balances.len() as f32
+                below as f32 / count as f32
             }
         };
 
