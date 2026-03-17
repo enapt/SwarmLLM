@@ -146,7 +146,6 @@ fn track_forward_participation(
 /// Inference-related messages (InferenceRequest, LayerForward, LayerResult,
 /// InferenceError, PipelineAssignment) are routed to the InferenceRouter.
 /// CreditGossip messages are used to update the peer balance distribution.
-/// ModelVote messages are routed to the governance processor.
 /// Other messages (health, discovery) are handled by their respective
 /// subsystems directly via SharedState or are already handled by NetworkManager.
 pub(crate) async fn dispatch_network_messages(
@@ -437,33 +436,8 @@ pub(crate) async fn dispatch_network_messages(
                                     );
                                 }
                             }
-                            SwarmMessage::ModelVote(vote) => {
-                                if authenticated_sender.is_none() {
-                                    tracing::warn!("ModelVote without authenticated sender — dropping");
-                                    continue;
-                                }
-                                tracing::info!(
-                                    voter = %vote.voter,
-                                    manifest_hash = hex::encode(&vote.model_manifest_hash[..8]),
-                                    vote = vote.vote,
-                                    "Received model vote"
-                                );
-                                match crate::model::governance::process_vote(
-                                    &shared_state.model_vote_tallies,
-                                    vote.clone(),
-                                ) {
-                                    Ok(Some(verdict)) => {
-                                        tracing::info!(
-                                            ?verdict,
-                                            manifest_hash = hex::encode(&vote.model_manifest_hash[..8]),
-                                            "Model vote concluded"
-                                        );
-                                    }
-                                    Ok(None) => {} // Still pending
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "Failed to process model vote");
-                                    }
-                                }
+                            SwarmMessage::ModelVote(_) => {
+                                // Model governance voting is not enforced — users add models directly.
                             }
                             SwarmMessage::CreditTransaction(tx) => {
                                 tracing::debug!(

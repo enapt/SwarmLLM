@@ -62,8 +62,6 @@ pub struct SharedState {
     pub loaded_model_info: RwLock<Option<LoadedModelInfo>>,
     /// Detected GPU info (set once at startup).
     pub gpu_info: Option<crate::inference::executor::GpuInfo>,
-    /// Model governance vote tallies.
-    pub model_vote_tallies: DashMap<crate::types::Blake3Hash, crate::model::governance::VoteTally>,
     /// Live acquisition progress — written by AcquisitionManager, read by API/WebSocket.
     pub acquisition_progress:
         DashMap<crate::types::ModelId, crate::model::acquisition::AcquisitionStatus>,
@@ -598,7 +596,6 @@ impl SharedState {
             )),
             loaded_model_info: RwLock::new(None),
             gpu_info,
-            model_vote_tallies: DashMap::new(),
             acquisition_progress: DashMap::new(),
             pending_layer_results: DashMap::new(),
             split_models: DashMap::new(),

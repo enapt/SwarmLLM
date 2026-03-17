@@ -65,7 +65,6 @@ impl HealthMonitor {
                     self.check_peer_health().await;
                     self.cleanup_acquisition_progress();
                     self.cleanup_stale_channels();
-                    self.cleanup_model_vote_tallies();
                     self.cleanup_stale_peer_id_map();
                     // Cleanup expired anti-gaming rate limit entries
                     self.shared_state.anti_gaming.lock().await.cleanup();
@@ -468,30 +467,6 @@ impl HealthMonitor {
             );
             for key in stale_stream {
                 self.shared_state.streaming_token_txs.remove(&key);
-            }
-        }
-    }
-
-    /// Periodic cleanup for model_vote_tallies — remove closed entries older than 24 hours (DAE-M11).
-    fn cleanup_model_vote_tallies(&self) {
-        let to_remove: Vec<_> = self
-            .shared_state
-            .model_vote_tallies
-            .iter()
-            .filter(|entry| {
-                let tally = entry.value();
-                let age = chrono::Utc::now() - tally.opened_at;
-                tally.closed && age > chrono::Duration::hours(24)
-            })
-            .map(|entry| *entry.key())
-            .collect();
-        if !to_remove.is_empty() {
-            tracing::debug!(
-                count = to_remove.len(),
-                "Cleaning up old model vote tallies"
-            );
-            for key in to_remove {
-                self.shared_state.model_vote_tallies.remove(&key);
             }
         }
     }
