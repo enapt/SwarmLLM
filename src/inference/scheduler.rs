@@ -233,8 +233,6 @@ impl PipelineScheduler {
             }
         }
 
-        let _shard_size = self.shared_state.config.model.shard_size_bytes();
-
         let mut candidates = Vec::new();
 
         for (node_id, mut shard_indices) in node_shards {

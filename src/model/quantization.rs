@@ -1,4 +1,4 @@
-use crate::types::{ModelArchitecture, ModelManifest, Quantization};
+use crate::types::Quantization;
 
 // ---- GGUF Quantization Types ----
 
@@ -96,57 +96,6 @@ pub fn dequantize_q8_0_block(block: &[u8; 34]) -> [f32; 32] {
     output
 }
 
-/// Dequantize a Q4_K_M block (144 bytes) into 256 f32 values.
-///
-/// Q4_K_M uses super-blocks of 256 values with sub-block scales and minimums.
-/// Format per super-block: 12 bytes scales/mins metadata + 4 bytes d/dmin + 128 bytes quants.
-pub fn dequantize_q4km_block(block: &[u8; 144]) -> [f32; 256] {
-    // Q4_K_M block layout:
-    //   d:  f16 (2 bytes) — super-block scale
-    //   dmin: f16 (2 bytes) — super-block minimum scale
-    //   scales: [u8; 12] — packed sub-block scales and minimums
-    //   qs: [u8; 128] — packed 4-bit quantized values (256 values, 2 per byte)
-    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
-    let dmin = half::f16::from_le_bytes([block[2], block[3]]).to_f32();
-
-    // Extract sub-block scales and minimums from the 12-byte packed representation
-    let scales_raw = &block[4..16];
-    let qs = &block[16..144];
-
-    let mut sc = [0u8; 8];
-    let mut m = [0u8; 8];
-
-    // Unpack the 6-bit scales and minimums from 12 bytes
-    for i in 0..4 {
-        sc[i] = scales_raw[i] & 0x3F;
-        m[i] = scales_raw[i + 4] & 0x3F;
-    }
-    for i in 4..8 {
-        let idx = i - 4;
-        sc[i] = ((scales_raw[idx] >> 6) & 0x03) | ((scales_raw[idx + 8] & 0x0F) << 2);
-        m[i] = ((scales_raw[idx + 4] >> 6) & 0x03) | ((scales_raw[idx + 8] >> 4) << 2);
-    }
-
-    let mut output = [0.0f32; 256];
-
-    for j in 0..8 {
-        let scale = d * sc[j] as f32;
-        let min = dmin * m[j] as f32;
-        let base_idx = j * 32;
-        let qs_offset = j * 16;
-
-        for l in 0..16 {
-            let byte = qs[qs_offset + l];
-            let lo = (byte & 0x0F) as f32;
-            let hi = ((byte >> 4) & 0x0F) as f32;
-            output[base_idx + l] = lo * scale - min;
-            output[base_idx + 16 + l] = hi * scale - min;
-        }
-    }
-
-    output
-}
-
 // ---- FP16 Conversion Utilities ----
 
 /// Convert a slice of f32 values to FP16 bytes (little-endian).
@@ -225,42 +174,6 @@ impl MoeShardStrategy {
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
         indexed.into_iter().map(|(idx, _)| idx).collect()
     }
-}
-
-/// Compute minimum VRAM (MB) needed to host one layer's expert FFN block
-/// for an MoE model.
-///
-/// Separates attention (~30% of layer) from FFN (~70% of layer) for more
-/// accurate estimates. In MoE models, attention is shared but FFN is split
-/// across experts.
-pub fn moe_min_vram_mb(manifest: &ModelManifest) -> u64 {
-    let (num_experts, _experts_per_token) = match &manifest.architecture {
-        ModelArchitecture::Mixtral {
-            num_experts,
-            experts_per_token,
-        } => (*num_experts, *experts_per_token),
-        ModelArchitecture::DeepSeek {
-            num_experts,
-            experts_per_token,
-        } => (*num_experts, *experts_per_token),
-        _ => return 0,
-    };
-
-    if manifest.num_layers == 0 || num_experts == 0 {
-        return 0;
-    }
-
-    // Per-layer size from total model size
-    let per_layer_bytes = manifest.total_size_bytes / manifest.num_layers as u64;
-
-    // In transformer layers, attention is ~30% and FFN is ~70% of parameters.
-    // For MoE: attention weights are shared, FFN weights are split across experts.
-    let attention_bytes = per_layer_bytes * 30 / 100; // shared attention block
-    let ffn_total_bytes = per_layer_bytes * 70 / 100; // total FFN across all experts
-    let per_expert_ffn_bytes = ffn_total_bytes / num_experts as u64;
-
-    // Minimum VRAM = attention (always needed) + one expert FFN block
-    (attention_bytes + per_expert_ffn_bytes) / (1024 * 1024)
 }
 
 #[cfg(test)]

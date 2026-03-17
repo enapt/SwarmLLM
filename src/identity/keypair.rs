@@ -95,15 +95,6 @@ impl Identity {
         }
     }
 
-    /// Create identity from an existing signing key.
-    pub fn from_signing_key(signing_key: SigningKey) -> Self {
-        let node_id = NodeId(signing_key.verifying_key().to_bytes());
-        Self {
-            signing_key,
-            node_id,
-        }
-    }
-
     /// Sign a message with this node's private key.
     pub fn sign(&self, msg: &[u8]) -> Vec<u8> {
         self.signing_key.sign(msg).to_bytes().to_vec()
@@ -122,16 +113,6 @@ impl Identity {
     /// Get the raw signing key bytes (for libp2p keypair conversion).
     pub(crate) fn signing_key_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
-    }
-
-    /// Derive an X25519 static secret from this identity's Ed25519 signing key.
-    pub fn x25519_static_secret(&self) -> x25519_dalek::StaticSecret {
-        crate::crypto::session::ed25519_to_x25519_secret(&self.signing_key.to_bytes())
-    }
-
-    /// Derive the X25519 public key for this identity.
-    pub fn x25519_public_key(&self) -> x25519_dalek::PublicKey {
-        x25519_dalek::PublicKey::from(&self.x25519_static_secret())
     }
 }
 

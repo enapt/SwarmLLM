@@ -165,25 +165,6 @@ pub fn apply_top_p_with_ctx(logits: &mut [f32], p: f32, ctx: &mut SamplingContex
     }
 }
 
-/// Apply frequency and presence penalties to logits based on token occurrence counts.
-pub fn apply_repetition_penalties(
-    logits: &mut [f32],
-    token_counts: &[u32],
-    params: &SamplingParams,
-) {
-    if params.frequency_penalty == 0.0 && params.presence_penalty == 0.0 {
-        return;
-    }
-    for (i, logit) in logits.iter_mut().enumerate() {
-        if let Some(&count) = token_counts.get(i) {
-            if count > 0 {
-                *logit -= params.frequency_penalty * count as f32;
-                *logit -= params.presence_penalty;
-            }
-        }
-    }
-}
-
 /// Sample a token index from logits using the given parameters.
 ///
 /// Applies temperature, top-k, top-p in order, then samples from the

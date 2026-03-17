@@ -2306,39 +2306,13 @@ fn default_encoding_format() -> String {
 
 /// POST /v1/embeddings — OpenAI-compatible embeddings endpoint.
 ///
-/// Returns mean-pooled token embeddings from the loaded model's embedding layer.
-/// This is a best-effort embedding — dedicated embedding models (e.g. text-embedding-3)
-/// will produce better results for retrieval tasks.
+/// Not available with subprocess inference (Phase 17) — models run in isolated
+/// worker processes without in-process tensor access. Use a dedicated embedding
+/// model or cloud provider instead.
 pub async fn embeddings(
-    State(state): State<AppState>,
-    crate::api::server::JsonBody(req): crate::api::server::JsonBody<EmbeddingRequest>,
+    State(_state): State<AppState>,
+    crate::api::server::JsonBody(_req): crate::api::server::JsonBody<EmbeddingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Check if we have a loaded split model with tok_embeddings
-    let model_entry = state.shared_state.split_models.iter().next();
-
-    let model_ref = match model_entry {
-        Some(entry) => entry,
-        None => {
-            return Err(ApiError(crate::error::SwarmError::NoModelLoaded));
-        }
-    };
-    let _model_entry = model_ref.value();
-
-    let inputs = match &req.input {
-        EmbeddingInput::Single(s) => vec![s.clone()],
-        EmbeddingInput::Batch(v) => v.clone(),
-    };
-
-    if inputs.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Config(
-            "Input must not be empty".into(),
-        )));
-    }
-
-    // Embeddings require in-process model access which is no longer available.
-    // The model now lives in a worker subprocess for GPU memory isolation.
-    drop(model_ref);
-    let _ = inputs;
     Err(ApiError(crate::error::SwarmError::Internal(
         "Embeddings API not available with subprocess inference. Use a dedicated embedding model or provider.".into(),
     )))

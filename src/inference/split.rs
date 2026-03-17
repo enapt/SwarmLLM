@@ -1821,11 +1821,6 @@ impl SplitModel {
                         .tensor(&mut file, &format!("{prefix}.ffn_up_exps.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
 
-                    let _n_experts = ct
-                        .metadata
-                        .get(&format!("{arch}.expert_count"))
-                        .and_then(|v| v.to_u32().ok())
-                        .unwrap_or(8) as usize;
                     let n_experts_used = ct
                         .metadata
                         .get(&format!("{arch}.expert_used_count"))

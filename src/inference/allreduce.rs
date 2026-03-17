@@ -353,11 +353,9 @@ pub async fn allreduce_sum(
     let coordinator = &tp_group.nodes[0];
     let is_coordinator = local_rank == 0;
 
-    // Note: ring strategy selection for future network-level ring implementation:
-    // let _strategy = choose_allreduce_strategy(tp_size, elem_count);
-    // Currently always uses star topology over the network.
-    // The ring algorithm is available via ring_allreduce_sum_local() for local use
-    // and will be wired to network chunk messaging in a future update.
+    // Uses star topology over the network. Ring allreduce is available locally
+    // via ring_allreduce_sum_local() and will be wired for network use when
+    // the chunk-messaging protocol is implemented.
 
     // Register to receive the reduced result
     let rx = allreduce_registry.register(request_id, layer_idx);
