@@ -239,6 +239,23 @@ impl AutoShardManager {
         let config = &self.shared_state.config.auto_manage;
         let local_node_id = self.shared_state.identity.node_id().clone();
 
+        // Clean up stale peer_shard_downloads: if a peer is now a registered
+        // shard holder, remove its in-flight download entry. This handles the
+        // case where the Complete gossip message was lost or delayed.
+        self.shared_state
+            .peer_shard_downloads
+            .retain(|shard_id, downloaders| {
+                downloaders.retain(|(node_id, _pct)| {
+                    // Keep entry only if the peer is NOT yet a registered holder
+                    !self
+                        .shared_state
+                        .model_registry
+                        .shard_holders(shard_id)
+                        .contains(node_id)
+                });
+                !downloaders.is_empty()
+            });
+
         // Peer warmup grace period: if we have zero peers and just started,
         // wait for peer discovery before evaluating. Prevents a fresh node
         // from immediately downloading everything from HF before it learns
@@ -373,6 +390,9 @@ impl AutoShardManager {
             .shared_state
             .auto_manage_default_model_cap
             .load(std::sync::atomic::Ordering::Relaxed);
+        let min_replicas = self.shared_state.config.auto_manage.min_replicas as usize;
+        // pool_size = peers + self; used for target_replicas clamping
+        let pool_size = self.shared_state.peer_registry.len() + 1;
 
         for manifest in registry.models() {
             // ── Policy gate: skip models excluded from auto-manage ──
@@ -557,38 +577,34 @@ impl AutoShardManager {
                     None => false,
                 };
 
-                // Skip shards already held by peers — distributed inference handles
-                // cross-node shards. Only download from HF to seed the network
-                // (holder_count == 0) or to fill our configured --shards range.
-                if holder_count > 0 && !in_configured_range {
+                // Compute how many replicas this shard should have.
+                // base = min_replicas (2 by default), clamped to pool size.
+                let target_replicas = min_replicas.min(pool_size).max(1);
+
+                // Skip shards that already meet the replica target.
+                // Using >= target_replicas (not > 0) ensures min_replicas drives
+                // replication: each shard is spread across target_replicas nodes.
+                if holder_count >= target_replicas && !in_configured_range {
                     tracing::debug!(
                         model = %manifest.id,
                         shard = shard.index,
                         holders = holder_count,
-                        "Skipping shard — already held by peers"
+                        target = target_replicas,
+                        "Skipping shard — replica target met"
                     );
                     continue;
                 }
 
                 // Small-network deduplication: when there are peers online, use a
                 // deterministic assignment so multiple nodes don't all race to download
-                // the same unheld shard. Each node "owns" a subset of shard indices
-                // based on hash(node_id || model_id || shard_index).
+                // the same under-replicated shard. Each node "owns" a slot based on
+                // hash(node_id || model_id) % pool_size. Shard slots are assigned via
+                // hash(model_id || shard_index || replica_idx) % pool_size.
                 let peers = self.shared_state.peer_registry.len();
-                if holder_count == 0 && peers > 0 && !in_configured_range {
-                    let node_count = (peers + 1) as u32; // include self
-                                                         // Use hash to assign this shard to a specific node slot
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update(manifest.id.0.as_bytes());
-                    hasher.update(&shard.index.to_le_bytes());
-                    let hash = hasher.finalize();
-                    let assigned_slot = u32::from_le_bytes([
-                        hash.as_bytes()[0],
-                        hash.as_bytes()[1],
-                        hash.as_bytes()[2],
-                        hash.as_bytes()[3],
-                    ]) % node_count;
-                    // Our slot: hash(node_id || model_id) % node_count
+                if holder_count < target_replicas && peers > 0 && !in_configured_range {
+                    let node_count = pool_size as u32;
+                    // Use hash to assign this shard to a specific node slot
+                    // My stable slot: hash(node_id || model_id) % node_count
                     let mut my_hasher = blake3::Hasher::new();
                     my_hasher.update(&local_node_id.0);
                     my_hasher.update(manifest.id.0.as_bytes());
@@ -599,14 +615,35 @@ impl AutoShardManager {
                         my_hash.as_bytes()[2],
                         my_hash.as_bytes()[3],
                     ]) % node_count;
-                    if assigned_slot != my_slot {
+
+                    // We need (target_replicas - holder_count) more replicas for this shard.
+                    // Assign each needed replica to a deterministic node slot via
+                    // hash(model_id || shard_index || replica_idx) % node_count.
+                    // If our slot matches any of those, we are responsible.
+                    let replicas_needed =
+                        (target_replicas as u32).saturating_sub(holder_count as u32);
+                    let i_am_assigned = (0..replicas_needed).any(|replica_idx| {
+                        let mut hasher = blake3::Hasher::new();
+                        hasher.update(manifest.id.0.as_bytes());
+                        hasher.update(&shard.index.to_le_bytes());
+                        hasher.update(&replica_idx.to_le_bytes());
+                        let hash = hasher.finalize();
+                        let slot = u32::from_le_bytes([
+                            hash.as_bytes()[0],
+                            hash.as_bytes()[1],
+                            hash.as_bytes()[2],
+                            hash.as_bytes()[3],
+                        ]) % node_count;
+                        slot == my_slot
+                    });
+                    if !i_am_assigned {
                         tracing::debug!(
                             model = %manifest.id,
                             shard = shard.index,
-                            assigned_slot,
                             my_slot,
                             node_count,
-                            "Skipping shard — assigned to different node slot"
+                            replicas_needed,
+                            "Skipping shard — not assigned to this node slot"
                         );
                         continue;
                     }
