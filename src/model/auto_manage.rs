@@ -2373,10 +2373,15 @@ impl AutoShardManager {
                 .entry(manifest.id.clone())
                 .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
 
-            // Promote to NetworkPopular if >= 3 unique holder nodes
-            if holder_nodes.len() >= 3
+            // Promote to NetworkPopular if enough unique nodes hold shards.
+            // Threshold scales with pool size: min(3, pool_size-1) so a 3-node
+            // cluster can promote at 2 holders, while large networks still need 3.
+            // No DemandVerified prerequisite — if peers already hold shards,
+            // the model is clearly legitimate and new nodes should be able to adopt it.
+            let pool_size = self.shared_state.peer_registry.len() + 1;
+            let popular_threshold = 3usize.min(pool_size.saturating_sub(1)).max(1);
+            if holder_nodes.len() >= popular_threshold
                 && trust.trust_level < crate::types::ModelTrustLevel::NetworkPopular
-                && trust.trust_level >= crate::types::ModelTrustLevel::DemandVerified
             {
                 trust.trust_level = crate::types::ModelTrustLevel::NetworkPopular;
                 tracing::info!(
