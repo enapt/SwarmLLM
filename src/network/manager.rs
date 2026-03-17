@@ -1907,8 +1907,8 @@ impl NetworkManager {
             .behaviour()
             .request_response
             .is_connected(&peer_id);
-        // Count connections to this peer for diagnostic purposes
-        let peer_conn_count = self
+        // Count total established connections (all peers) for diagnostics
+        let total_conn_count = self
             .swarm
             .network_info()
             .connection_counters()
@@ -1991,7 +1991,7 @@ impl NetworkManager {
             encrypted = use_encryption,
             payload_len,
             is_connected,
-            total_connections = peer_conn_count,
+            total_connections = total_conn_count,
             peer_established_count,
             is_rr_pending,
             pending_tensor_count = self.pending_tensor_outbound.len(),

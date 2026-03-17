@@ -549,7 +549,7 @@ impl SharedState {
         let default_model_shard_cap = config.auto_manage.default_model_shard_cap;
         let kv_cache_ttl_secs = config.inference.kv_cache_ttl_secs.unwrap_or(600);
         let initial_ops = crate::config::OperationalParams::from_config(&config);
-        let (config_watch_tx, _config_watch_rx) = watch::channel(initial_ops);
+        let (config_watch_tx, _) = watch::channel(initial_ops);
         let trust_manager = crate::credit::trust::TrustManager::new(db.clone());
         let escrow_manager = Arc::new(crate::credit::escrow::EscrowManager::new(
             db.clone(),
