@@ -124,8 +124,6 @@ impl AntiGaming {
 
     /// Report a spot-check failure — peer claimed work they didn't do.
     pub fn report_spot_check_failure(&mut self, _node: &NodeId) -> PenaltyAction {
-        // For now, return a trust score reduction
-        // In Phase 6, this integrates with the trust system
         PenaltyAction::ReduceTrust { amount: 0.1 }
     }
 

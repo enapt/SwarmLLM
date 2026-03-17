@@ -411,7 +411,8 @@ impl InferenceRouter {
         self.queue_notify.notify_one();
     }
 
-    /// Handle network messages (LayerResult, InferenceError, etc.)
+    /// Log network messages routed to the inference router.
+    /// Actual dispatch (LayerForward, pipeline execution) is handled in `dispatch.rs`.
     async fn handle_network_message(&mut self, msg: SwarmMessage) {
         match msg {
             SwarmMessage::LayerResult(result) => {
@@ -420,8 +421,6 @@ impl InferenceRouter {
                     tokens = result.token_ids.len(),
                     "Received layer result from network"
                 );
-                // Pipeline executor handles this via its own channels
-                // Store in active_pipelines for monitoring
             }
             SwarmMessage::InferenceError(err) => {
                 tracing::warn!(
@@ -432,16 +431,19 @@ impl InferenceRouter {
                 );
             }
             SwarmMessage::InferenceRequest(req) => {
-                tracing::info!(
+                tracing::debug!(
                     request_id = %req.id,
                     requester = %req.requester,
                     model = %req.model_id,
-                    "Received remote inference request"
+                    "Received remote inference request via router"
                 );
-                // Remote requests get queued with a result that routes back over network
-                // For now, log and skip (full cross-node routing in wiring step)
             }
-            _ => {}
+            other => {
+                tracing::trace!(
+                    "Router ignoring unhandled network message: {:?}",
+                    std::mem::discriminant(&other)
+                );
+            }
         }
     }
 

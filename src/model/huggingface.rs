@@ -547,7 +547,8 @@ pub async fn download_tied_output_weight(
         return Ok(None); // Not weight-tied, or no embedding — nothing to do
     }
 
-    let embd_loc = embd.unwrap();
+    // Safety: guarded by `embd.is_none()` return above
+    let embd_loc = embd.expect("embd checked non-None above");
     let abs_offset = tensor_meta.tensor_data_offset + embd_loc.offset;
     let size = embd_loc.size;
 
@@ -681,7 +682,8 @@ pub fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u6
 
     let mut merged = vec![sorted[0]];
     for &(start, end) in &sorted[1..] {
-        let last = merged.last_mut().unwrap();
+        // Safety: merged always has at least one element (seeded above)
+        let last = merged.last_mut().expect("merged is non-empty");
         if start <= last.1 + max_gap {
             last.1 = last.1.max(end);
         } else {

@@ -488,7 +488,9 @@ async fn test_split_inference(
     // Generate remaining tokens
     let mut index_pos = token_ids.len();
     for _ in 1..max_tokens {
-        let last_token = *generated.last().unwrap() as i64;
+        let last_token = *generated
+            .last()
+            .expect("generated tokens must be non-empty") as i64;
         let input =
             candle_core::Tensor::from_vec(vec![last_token], &[1, 1], &candle_core::Device::Cpu)?;
 

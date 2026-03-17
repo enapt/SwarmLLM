@@ -807,7 +807,9 @@ impl ModelExecutor {
                     // at position target_pos - 1. Since we cleared KV after target_keep = target_pos,
                     // the bonus is still in KV. We need logits at that position.
                     // The simplest approach: re-decode the bonus token to regenerate logits.
-                    let bonus = spec_result.bonus_token.unwrap();
+                    let bonus = spec_result
+                        .bonus_token
+                        .expect("speculative result always has bonus token after accept");
                     target_batch.clear();
                     target_batch
                         .add(

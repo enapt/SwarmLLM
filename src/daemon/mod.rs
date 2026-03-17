@@ -206,10 +206,8 @@ impl Daemon {
             gpu_info,
         );
 
-        // Set the cached model info (lock-free for admin reads)
         *shared_state.loaded_model_info.write().await = cached_info;
 
-        // Set the model_loaded atomic for the llama-cpp executor path.
         // Not set in shard/split mode — those nodes use split_models instead.
         if model_info.is_some() && self.config.inference.shard_range.is_none() {
             shared_state
@@ -783,7 +781,6 @@ impl Daemon {
             ("NetworkManager", SubsystemCriticality::Critical, result)
         });
 
-        // Spawn InferenceRouter
         let inference_router = InferenceRouter::new(
             shared_state.clone(),
             router_cmd_rx,
@@ -817,7 +814,6 @@ impl Daemon {
             ("MessageDispatcher", SubsystemCriticality::Critical, Ok(()))
         });
 
-        // Spawn HealthMonitor
         let health_monitor = HealthMonitor::new(
             shared_state.clone(),
             network_tx.clone(),
@@ -830,7 +826,6 @@ impl Daemon {
             ("HealthMonitor", SubsystemCriticality::NonCritical, result)
         });
 
-        // Spawn ShardRebalancer
         let shard_rebalancer = ShardRebalancer::new(
             shared_state.clone(),
             rebalance_rx,
@@ -861,7 +856,6 @@ impl Daemon {
             ("CreditLedger", SubsystemCriticality::NonCritical, result)
         });
 
-        // Spawn AcquisitionManager
         let acquisition_manager = AcquisitionManager::new(
             shared_state.clone(),
             network_tx.clone(),
@@ -878,7 +872,6 @@ impl Daemon {
             )
         });
 
-        // Spawn PoolManager (9th subsystem task)
         let (pool_cmd_tx, pool_cmd_rx) = mpsc::channel::<crate::pool::types::PoolCommand>(64);
         {
             *shared_state.pool_tx.write().await = Some(pool_cmd_tx);
@@ -894,7 +887,6 @@ impl Daemon {
             ("PoolManager", SubsystemCriticality::NonCritical, result)
         });
 
-        // Spawn AutoShardManager (10th subsystem task — optional, runs only if enabled)
         let auto_manage = crate::model::auto_manage::AutoShardManager::new(
             shared_state.clone(),
             network_tx.clone(),

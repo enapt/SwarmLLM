@@ -15,6 +15,8 @@ const MAX_CONCURRENT_FORWARDS: usize = 64;
 const MAX_FORWARDS_PER_PEER: usize = 8;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
+/// Maximum age (ms) for regional gossip messages before they're considered stale.
+const GOSSIP_STALENESS_MS: u64 = 15 * 60 * 1000;
 
 /// Pipeline sealing: encrypt the token IDs in a LayerResult for the requester's X25519 key.
 /// If `requester_node_id` is present, seals `token_ids` into `sealed_token_ids` and clears
@@ -1140,8 +1142,8 @@ pub(crate) async fn dispatch_network_messages(
                             // Regional shard summary gossip (Phase 18)
                             SwarmMessage::RegionShardSummary(summary) => {
                                 // Authenticate sender
-                                match authenticated_sender {
-                                    Some(ref sender) if sender != &summary.publisher => {
+                                match &authenticated_sender {
+                                    Some(sender) if *sender != summary.publisher => {
                                         tracing::warn!(sender = %sender, claimed = %summary.publisher, "RegionShardSummary sender mismatch — dropping");
                                         continue;
                                     }
@@ -1149,18 +1151,17 @@ pub(crate) async fn dispatch_network_messages(
                                         tracing::debug!("Dropping unauthenticated RegionShardSummary");
                                         continue;
                                     }
-                                    _ => {}
+                                    Some(_) => {} // Sender matches publisher — proceed
                                 }
-                                // Validate region string length (prevent unbounded keys)
                                 if summary.region.len() > 8 || summary.shard_counts.len() > 512 {
                                     continue;
                                 }
-                                // Reject stale summaries (>15min old)
+                                // Reject stale summaries
                                 let now_ms = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis() as u64;
-                                if now_ms.saturating_sub(summary.timestamp_ms) > 15 * 60 * 1000 {
+                                if now_ms.saturating_sub(summary.timestamp_ms) > GOSSIP_STALENESS_MS {
                                     tracing::debug!(
                                         region = %summary.region,
                                         model = %summary.model_id,
@@ -1199,8 +1200,8 @@ pub(crate) async fn dispatch_network_messages(
                             // Model demand gossip (Phase 18)
                             SwarmMessage::ModelDemandGossip(demand) => {
                                 // Authenticate sender
-                                match authenticated_sender {
-                                    Some(ref sender) if sender != &demand.publisher => {
+                                match &authenticated_sender {
+                                    Some(sender) if *sender != demand.publisher => {
                                         tracing::warn!(sender = %sender, claimed = %demand.publisher, "ModelDemandGossip sender mismatch — dropping");
                                         continue;
                                     }
@@ -1208,18 +1209,17 @@ pub(crate) async fn dispatch_network_messages(
                                         tracing::debug!("Dropping unauthenticated ModelDemandGossip");
                                         continue;
                                     }
-                                    _ => {}
+                                    Some(_) => {} // Sender matches publisher — proceed
                                 }
-                                // Validate region string length
                                 if demand.region.len() > 8 {
                                     continue;
                                 }
-                                // Reject stale demand (>15min old)
+                                // Reject stale demand
                                 let now_ms = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis() as u64;
-                                if now_ms.saturating_sub(demand.timestamp_ms) > 15 * 60 * 1000 {
+                                if now_ms.saturating_sub(demand.timestamp_ms) > GOSSIP_STALENESS_MS {
                                     tracing::debug!(
                                         model = %demand.model_id,
                                         region = %demand.region,
