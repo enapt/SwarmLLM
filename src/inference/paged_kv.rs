@@ -33,8 +33,10 @@ pub struct PagedKvPool {
     pub key_cache: Tensor,
     /// Value cache: `[num_blocks, n_kv_heads, head_dim, BLOCK_SIZE]`
     pub value_cache: Tensor,
-    /// Free block indices.
+    /// Free block indices (queue for FIFO allocation).
     free_blocks: Mutex<VecDeque<i32>>,
+    /// Set of currently-free block IDs for O(1) double-free detection.
+    free_set: Mutex<HashSet<i32>>,
     /// Total number of blocks in the pool.
     pub num_blocks: usize,
     /// Number of KV heads.
@@ -87,11 +89,13 @@ impl PagedKvPool {
         )?;
 
         let free_blocks: VecDeque<i32> = (0..num_blocks as i32).collect();
+        let free_set: HashSet<i32> = (0..num_blocks as i32).collect();
 
         Ok(Self {
             key_cache,
             value_cache,
             free_blocks: Mutex::new(free_blocks),
+            free_set: Mutex::new(free_set),
             num_blocks,
             n_kv_heads,
             head_dim,
@@ -110,9 +114,12 @@ impl PagedKvPool {
             );
             return None;
         }
+        let mut fset = self.free_set.lock().unwrap_or_else(|e| e.into_inner());
         let mut blocks = Vec::with_capacity(count);
         for _ in 0..count {
-            blocks.push(free.pop_front().unwrap());
+            let b = free.pop_front().unwrap();
+            fset.remove(&b);
+            blocks.push(b);
         }
         tracing::debug!(
             blocks_allocated = count,
@@ -125,10 +132,10 @@ impl PagedKvPool {
     /// Return blocks to the free list.
     pub fn free(&self, blocks: &[i32]) {
         let mut free = self.free_blocks.lock().unwrap_or_else(|e| e.into_inner());
-        // O(n) dedup: build a temporary set of currently-free blocks
-        let free_set: HashSet<i32> = free.iter().copied().collect();
+        let mut fset = self.free_set.lock().unwrap_or_else(|e| e.into_inner());
         for &b in blocks {
-            if !free_set.contains(&b) {
+            if fset.insert(b) {
+                // Only push if not already free (O(1) double-free detection)
                 free.push_back(b);
             }
         }

@@ -519,6 +519,7 @@ impl HealthMonitor {
             self.shared_state.peer_id_map.remove(&nid);
         }
         // Second pass: if still over target, evict oldest (arbitrary order from DashMap)
+        let mut removed2 = 0;
         if self.shared_state.peer_id_map.len() > EVICT_TO {
             let excess = self.shared_state.peer_id_map.len() - EVICT_TO;
             let to_evict: Vec<_> = self
@@ -529,13 +530,15 @@ impl HealthMonitor {
                 .take(excess)
                 .map(|entry| entry.key().clone())
                 .collect();
+            removed2 = to_evict.len();
             for nid in &to_evict {
                 self.shared_state.peer_id_map.remove(nid);
             }
         }
-        if removed > 0 {
+        let total_removed = removed + removed2;
+        if total_removed > 0 {
             tracing::debug!(
-                removed,
+                removed = total_removed,
                 remaining = self.shared_state.peer_id_map.len(),
                 "Cleaned stale peer_id_map entries"
             );
