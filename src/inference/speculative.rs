@@ -63,14 +63,6 @@ pub fn is_valid_draft_pair(draft: &ModelManifest, target: &ModelManifest) -> boo
     draft.num_params_billions * 10.0 <= target.num_params_billions
 }
 
-/// A registered draft-target model pair available for speculative decoding.
-#[derive(Debug, Clone)]
-pub struct SpeculativePair {
-    pub draft_model_id: ModelId,
-    pub target_model_id: ModelId,
-    pub gamma: u32,
-}
-
 /// Result of the speculative accept/reject step.
 ///
 /// After the draft model proposes `gamma` tokens and the target model verifies

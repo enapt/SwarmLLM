@@ -183,8 +183,6 @@ pub struct SharedState {
     pub adapter_registry: Arc<crate::model::lora::AdapterRegistry>,
     /// Cross-request prefix cache for sharing KV state across requests with
     /// identical system prompts. Protected by std::sync::Mutex since operations
-    /// are fast (hash lookup, tensor clone) and never held across await points.
-    pub prefix_cache: std::sync::Mutex<crate::inference::prefix_cache::PrefixCache>,
     /// Per-channel backpressure metrics (capacity, sent, dropped).
     pub channel_metrics: ChannelMetricsSet,
     /// Number of peers discovered via mDNS (LAN peers).
@@ -671,9 +669,6 @@ impl SharedState {
             loading_models: DashMap::new(),
             adapter_registry: Arc::new(crate::model::lora::AdapterRegistry::new(
                 &config.node.data_dir,
-            )),
-            prefix_cache: std::sync::Mutex::new(crate::inference::prefix_cache::PrefixCache::new(
-                config.inference.prefix_cache_max_entries,
             )),
             channel_metrics: ChannelMetricsSet::new(),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),

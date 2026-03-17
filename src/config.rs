@@ -247,11 +247,6 @@ pub struct InferenceConfig {
     #[serde(default)]
     pub max_split_model_memory_mb: Option<u64>,
     /// Maximum number of prefix cache entries for cross-request KV state sharing.
-    /// When multiple requests share the same system prompt, the KV-cache state
-    /// for the prefix is computed once and reused. Set to 0 to disable.
-    /// Default: 32.
-    #[serde(default = "default_prefix_cache_entries")]
-    pub prefix_cache_max_entries: usize,
     /// When true, KV-cache multi-turn sessions do NOT persist the `cached_prompt`
     /// field to the database — prompts stay in-memory only and are lost on restart.
     /// This prevents user prompts from being written to disk. Default: false.
@@ -986,10 +981,6 @@ fn default_batch_timeout_ms() -> u64 {
     50
 }
 
-fn default_prefix_cache_entries() -> usize {
-    32
-}
-
 fn default_relay_circuit_duration() -> u64 {
     3600
 }
@@ -1111,7 +1102,6 @@ impl Default for InferenceConfig {
             max_batch_size: default_max_batch_size(),
             batch_timeout_ms: default_batch_timeout_ms(),
             max_split_model_memory_mb: None,
-            prefix_cache_max_entries: default_prefix_cache_entries(),
             privacy_mode: false,
             local_embedding_privacy: false,
             encrypted_pipeline: false,
