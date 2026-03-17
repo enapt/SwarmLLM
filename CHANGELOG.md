@@ -50,7 +50,7 @@ All notable changes to SwarmLLM are documented here.
 - **Package distribution**: Homebrew formula, AUR PKGBUILD, deb/rpm packages, systemd service file
 - **macOS CI**: Re-enabled on macos-15 runner
 - **Docker**: Fixed Dockerfiles for workspace build
-- 675 tests passing (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### UX & Internationalization
 - **i18n** — 20 languages (Arabic, Chinese, Czech, Dutch, English, French, German, Hindi, Indonesian, Italian, Japanese, Korean, Polish, Portuguese, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian, Vietnamese)
@@ -65,7 +65,7 @@ All notable changes to SwarmLLM are documented here.
 ### Codebase Quality
 - **Refactored**: `daemon.rs` (4015 lines → module directory), `admin.rs` (4225 lines → 4 modules), `split.rs` (10K lines → 6 modules)
 - **Extracted**: `swarmllm-frontend` crate with dev mode for instant UI changes without full rebuild
-- 675 tests passing (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
+- 674 tests passing (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E)
 
 ### Model Trust & On-Demand Loading (Phase 14)
 - **Model Trust System** — demand-driven trust prevents trash models from auto-propagating

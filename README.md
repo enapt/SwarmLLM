@@ -273,7 +273,7 @@ Key source directories:
 - `src/pool/` — device pool management, crypto, credit forwarding
 - `frontend/` — vanilla HTML/CSS/JS dashboard with 20 language translations
 
-677 tests (608 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E + 1 new), all passing, clippy clean.
+674 tests (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -610,7 +610,7 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 675 tests
+cargo test                # 674 tests
 cargo clippy -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```
