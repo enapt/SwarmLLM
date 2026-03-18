@@ -396,12 +396,23 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     let gpu_inference = shared_state.gpu_info.is_some();
     let inference_backend = shared_state.gpu_info.as_ref().map(|g| g.backend.clone());
 
+    let (memory_bandwidth_gbps, est_tokens_per_sec_7b) = match &shared_state.gpu_info {
+        Some(gpu) => {
+            let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&gpu.name);
+            let tps = crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true);
+            (Some(bw), Some(tps))
+        }
+        None => (None, None),
+    };
+
     serde_json::json!({
         "gpu_name": gpu_name,
         "gpu_vram_mb": gpu_vram_mb,
         "gpu_vram_used_mb": gpu_vram_used_mb,
         "gpu_inference": gpu_inference,
         "inference_backend": inference_backend,
+        "memory_bandwidth_gbps": memory_bandwidth_gbps,
+        "est_tokens_per_sec_7b": est_tokens_per_sec_7b,
         "total_ram_mb": total_ram_mb,
         "used_ram_mb": used_ram_mb,
         "available_disk_mb": available_disk_mb,

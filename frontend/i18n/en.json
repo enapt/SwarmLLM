@@ -67,6 +67,11 @@
   "model_browser.quality_high": "High (Q5 — balanced)",
   "model_browser.quality_very_high": "Very High (Q6 — slower, better quality)",
   "model_browser.quality_maximum": "Maximum (Q8 — slowest, best quality)",
+  "model_browser.sort_title": "Sort search results",
+  "model_browser.sort_score": "Best for you",
+  "model_browser.sort_downloads": "Most downloaded",
+  "model_browser.sort_size_asc": "Smallest first",
+  "model_browser.sort_size_desc": "Largest first",
 
   "compare.title": "Model Compare",
   "compare.subtitle": "Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.",

@@ -105,6 +105,9 @@ enum Commands {
         /// Data directory
         #[arg(long)]
         data_dir: PathBuf,
+        /// Comma-separated shard indices to load (e.g. "0,1,7"). If omitted, loads all on-disk shards.
+        #[arg(long)]
+        shard_window: Option<String>,
     },
     /// Run inference benchmarks against a running daemon
     Bench {
@@ -196,8 +199,13 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = resolve_data_dir(&cli.data_dir);
             query_peers(port, &data_dir, json).await
         }
-        Commands::ModelWorker { socket, data_dir } => {
-            swarmllm::inference::model_worker::run_worker(socket, data_dir).await;
+        Commands::ModelWorker { socket, data_dir, shard_window } => {
+            let window: Option<Vec<u32>> = shard_window.map(|s| {
+                s.split(',')
+                    .filter_map(|x| x.trim().parse::<u32>().ok())
+                    .collect()
+            });
+            swarmllm::inference::model_worker::run_worker(socket, data_dir, window).await;
             Ok(())
         }
         Commands::Update { check_only } => run_update_command(check_only).await,

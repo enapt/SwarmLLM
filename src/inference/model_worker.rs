@@ -18,7 +18,8 @@ use crate::types::NetworkFinishReason;
 
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
-pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf) {
+/// `shard_window`: if Some, only load these shard indices (VRAM-saving mode).
+pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf, shard_window: Option<Vec<u32>>) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
@@ -42,6 +43,10 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf) {
     let mut models: HashMap<(usize, usize), SplitModel> = HashMap::new();
     let kv_store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
 
+    if let Some(ref w) = shard_window {
+        tracing::info!(window = ?w, "model-worker: shard window active — only loading specified shards");
+    }
+
     loop {
         let (msg, payload) = match recv_daemon(&mut reader).await {
             Ok(m) => m,
@@ -54,7 +59,7 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf) {
         match msg {
             DaemonMsg::Forward(fwd) => {
                 let request_id = fwd.request_id;
-                match handle_forward(&mut writer, &mut models, &kv_store, &data_dir, fwd, payload)
+                match handle_forward(&mut writer, &mut models, &kv_store, &data_dir, fwd, payload, &shard_window)
                     .await
                 {
                     Ok(()) => {}
@@ -73,7 +78,7 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf) {
             }
             DaemonMsg::Generate(gen) => {
                 let request_id = gen.request_id;
-                match handle_generate(&mut writer, &mut models, &kv_store, &data_dir, gen).await {
+                match handle_generate(&mut writer, &mut models, &kv_store, &data_dir, gen, &shard_window).await {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = send_worker(
@@ -108,12 +113,14 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf) {
 }
 
 /// Ensure a SplitModel is loaded for the given model_id and layer range.
+/// `shard_window`: if Some, only load shards in this set (VRAM-saving mode).
 fn ensure_model_loaded(
     models: &mut HashMap<(usize, usize), SplitModel>,
     data_dir: &std::path::Path,
     model_id: &crate::types::ModelId,
     layer_start: usize,
     layer_end: usize,
+    shard_window: &Option<Vec<u32>>,
 ) -> Result<(), SwarmError> {
     let key = (layer_start, layer_end);
     if models.contains_key(&key) {
@@ -136,6 +143,21 @@ fn ensure_model_loaded(
         let path = shard_store.shard_path(model_id, i);
         if path.exists() {
             local_shard_indices.push(i);
+        }
+    }
+
+    // Filter by shard window if active — only load allowed shards into VRAM
+    if let Some(window) = shard_window {
+        let before = local_shard_indices.len();
+        local_shard_indices.retain(|i| window.contains(i));
+        if local_shard_indices.len() < before {
+            tracing::info!(
+                model = %model_id,
+                before_count = before,
+                after_count = local_shard_indices.len(),
+                window = ?window,
+                "Shard window active — loading subset of on-disk shards"
+            );
         }
     }
 
@@ -221,13 +243,14 @@ async fn handle_forward(
     data_dir: &std::path::Path,
     fwd: IpcForward,
     activation_bytes: Vec<u8>,
+    shard_window: &Option<Vec<u32>>,
 ) -> Result<(), SwarmError> {
     let request_id = fwd.request_id;
     let model_id = fwd.model_id.clone();
     let (layer_start, layer_end) = (fwd.layer_range.0 as usize, fwd.layer_range.1 as usize);
 
     // Ensure model is loaded
-    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end)?;
+    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end, shard_window)?;
 
     let model = models
         .get_mut(&(layer_start, layer_end))
@@ -415,13 +438,14 @@ async fn handle_generate(
     kv_store: &Arc<KvCacheStore>,
     data_dir: &std::path::Path,
     gen: IpcGenerate,
+    shard_window: &Option<Vec<u32>>,
 ) -> Result<(), SwarmError> {
     let request_id = gen.request_id;
     let model_id = gen.model_id.clone();
     let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
 
     // Ensure model is loaded
-    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end)?;
+    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end, shard_window)?;
 
     let model = models
         .get_mut(&(layer_start, layer_end))

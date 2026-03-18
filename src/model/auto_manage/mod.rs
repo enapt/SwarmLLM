@@ -7,7 +7,7 @@
 mod download;
 mod prune;
 mod scoring;
-mod vram;
+pub mod vram;
 
 pub mod manager;
 pub mod scan;

@@ -348,6 +348,10 @@ pub struct NodeCapability {
     /// Voluntary ISO 3166-1 alpha-2 country code (e.g. "US", "DE").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Estimated tokens/s for a 7B Q4 model based on GPU memory bandwidth.
+    /// Used by the scheduler as a speed tie-breaker.
+    #[serde(default)]
+    pub est_tokens_per_sec_7b: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -356,6 +360,9 @@ pub struct GpuInfo {
     pub vram_total_mb: u64,
     pub vram_available_mb: u64,
     pub compute_capability: Option<(u32, u32)>,
+    /// Memory bandwidth in GB/s, looked up from GPU name.
+    #[serde(default)]
+    pub memory_bandwidth_gbps: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

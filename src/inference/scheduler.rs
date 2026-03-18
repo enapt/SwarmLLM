@@ -33,6 +33,8 @@ struct NodeCandidate {
     can_be_last: bool,
     /// Region proximity score: 1.0 same region, 0.5 adjacent, 0.2 distant, 0.7 unknown.
     region_score: f32,
+    /// Estimated tokens/s for a 7B Q4 model (from NodeCapability). 0 = unknown.
+    est_tokens_per_sec: f32,
 }
 
 /// Static adjacency table for adjacent regions (0.5 score).
@@ -311,6 +313,19 @@ impl PipelineScheduler {
                 self.compute_region_score(&node_id, local_node_id)
             };
 
+            // Look up speed estimation from capability gossip
+            let est_tokens_per_sec = if &node_id == local_node_id {
+                // Local: compute directly from our GPU info
+                self.shared_state.gpu_info.as_ref().map(|g| {
+                    let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
+                    crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
+                }).unwrap_or(0.0)
+            } else {
+                self.shared_state.peer_registry.get(&node_id)
+                    .map(|p| p.capability.as_ref().map(|c| c.est_tokens_per_sec_7b).unwrap_or(0.0))
+                    .unwrap_or(0.0)
+            };
+
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -321,6 +336,7 @@ impl PipelineScheduler {
                 can_be_first,
                 can_be_last,
                 region_score,
+                est_tokens_per_sec,
             });
         }
 
@@ -356,6 +372,12 @@ impl PipelineScheduler {
                 .then_with(|| {
                     b.trust_score
                         .partial_cmp(&a.trust_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    // Speed tie-breaker: faster nodes (higher tokens/s) preferred
+                    b.est_tokens_per_sec
+                        .partial_cmp(&a.est_tokens_per_sec)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
@@ -1061,6 +1083,7 @@ mod tests {
                 can_be_first: true,
                 can_be_last: true,
                 region_score: 1.0,
+                est_tokens_per_sec: 0.0,
             },
             NodeCandidate {
                 node_id: NodeId([2u8; 32]),
@@ -1075,6 +1098,7 @@ mod tests {
                 can_be_first: false,
                 can_be_last: false,
                 region_score: 0.7,
+                est_tokens_per_sec: 0.0,
             },
         ];
 

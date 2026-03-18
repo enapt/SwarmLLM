@@ -48,6 +48,9 @@ pub struct ModelProcessPool {
     /// callers both miss the DashMap lookup and each spawn a subprocess.
     spawn_lock: Mutex<()>,
     data_dir: PathBuf,
+    /// Active shard windows: which shards each model worker should load.
+    /// If absent, the worker loads all on-disk shards (default behavior).
+    active_shard_windows: DashMap<ModelId, Vec<u32>>,
 }
 
 impl ModelProcessPool {
@@ -56,6 +59,7 @@ impl ModelProcessPool {
             workers: DashMap::new(),
             spawn_lock: Mutex::new(()),
             data_dir,
+            active_shard_windows: DashMap::new(),
         }
     }
 
@@ -77,7 +81,7 @@ impl ModelProcessPool {
         Ok(handle)
     }
 
-    async fn spawn_worker(&self, _model_id: &ModelId) -> Result<WorkerHandle, SwarmError> {
+    async fn spawn_worker(&self, model_id: &ModelId) -> Result<WorkerHandle, SwarmError> {
         // Create a unique socket path
         let socket_name = format!("swarmllm-worker-{}.sock", uuid::Uuid::new_v4());
         let socket_path = std::env::temp_dir().join(&socket_name);
@@ -89,14 +93,23 @@ impl ModelProcessPool {
         // Spawn the worker subprocess (same binary, model-worker subcommand)
         let exe = std::env::current_exe()
             .map_err(|e| SwarmError::Internal(format!("current_exe: {e}")))?;
+        let mut args = vec![
+            "model-worker".to_string(),
+            "--socket".to_string(),
+            socket_path.to_str().unwrap_or("").to_string(),
+            "--data-dir".to_string(),
+            self.data_dir.to_str().unwrap_or("").to_string(),
+        ];
+
+        // If a shard window is set for this model, pass it to the worker
+        if let Some(window) = self.active_shard_windows.get(model_id) {
+            let window_str = window.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            args.push("--shard-window".to_string());
+            args.push(window_str);
+        }
+
         let child = tokio::process::Command::new(&exe)
-            .args([
-                "model-worker",
-                "--socket",
-                socket_path.to_str().unwrap_or(""),
-                "--data-dir",
-                self.data_dir.to_str().unwrap_or(""),
-            ])
+            .args(&args)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| SwarmError::Internal(format!("spawn worker: {e}")))?;
@@ -327,5 +340,29 @@ impl ModelProcessPool {
     /// List all currently loaded model IDs.
     pub fn loaded_model_ids(&self) -> Vec<ModelId> {
         self.workers.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Restart a model's worker with a new shard window.
+    /// Kills the current worker → OS/CUDA frees VRAM → next inference request
+    /// triggers `get_or_spawn` which reads the new window.
+    pub async fn restart_with_window(&self, model_id: &ModelId, window: Vec<u32>) {
+        tracing::info!(
+            model_id = %model_id,
+            window = ?window,
+            "Restarting worker with narrower shard window"
+        );
+        self.active_shard_windows.insert(model_id.clone(), window);
+        // Kill the existing worker — next request will re-spawn with new window
+        self.unload_model(model_id).await;
+    }
+
+    /// Clear a shard window (revert to loading all on-disk shards).
+    pub fn clear_shard_window(&self, model_id: &ModelId) {
+        self.active_shard_windows.remove(model_id);
+    }
+
+    /// Get the current shard window for a model, if any.
+    pub fn get_shard_window(&self, model_id: &ModelId) -> Option<Vec<u32>> {
+        self.active_shard_windows.get(model_id).map(|v| v.clone())
     }
 }

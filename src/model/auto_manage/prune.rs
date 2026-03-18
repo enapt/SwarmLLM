@@ -29,6 +29,14 @@ impl AutoShardManager {
             "DIAG: evaluate_and_prune starting"
         );
 
+        // ── Phase 0: VRAM soft-unload ──
+        // When VRAM pressure is 0.7-0.95, try narrowing the shard window for loaded
+        // models instead of deleting files. This frees VRAM while keeping shards on
+        // disk for the network.
+        if resource_pressure > 0.7 && !pressure_urgent {
+            self.try_vram_soft_unload(resource_pressure).await;
+        }
+
         // Check if we're in reduced hours
         let schedule_pressure = self.schedule_pressure_bonus().await;
 
@@ -642,6 +650,68 @@ impl AutoShardManager {
                     .unwrap_or(false)
         });
         peer_holders
+    }
+
+    /// Try to free VRAM by narrowing shard windows on loaded models.
+    /// Keeps shards on disk (advertised to the network) but reduces what's in GPU memory.
+    async fn try_vram_soft_unload(&self, pressure: f64) {
+        let vram_budget_mb = super::vram::compute_vram_budget(&self.shared_state);
+        let Some(budget) = vram_budget_mb else {
+            return; // No GPU or no budget configured
+        };
+
+        // Scale budget by pressure: at 0.7 use 90% of budget, at 0.95 use 60%
+        let scale = 1.0 - (pressure - 0.5).clamp(0.0, 0.5);
+        let effective_budget = (budget as f64 * scale) as u64;
+
+        let registry = &self.shared_state.model_registry;
+        let pool = &self.shared_state.model_process_pool;
+
+        for model_id in pool.loaded_model_ids() {
+            // Skip if already has a window (don't narrow twice per cycle)
+            if pool.get_shard_window(&model_id).is_some() {
+                continue;
+            }
+
+            let Some(manifest) = registry.get_manifest(&model_id) else {
+                continue;
+            };
+
+            if manifest.shard_count <= 2 {
+                continue; // Can't narrow below 2 shards
+            }
+
+            let model_vram = super::vram::estimate_model_vram_mb_arch(
+                manifest.total_size_bytes,
+                &manifest.architecture,
+            );
+            let shard_vram_each = model_vram / manifest.shard_count as u64;
+
+            if shard_vram_each == 0 {
+                continue;
+            }
+
+            let window = super::vram::compute_optimal_shard_window(
+                manifest.shard_count,
+                shard_vram_each,
+                effective_budget,
+            );
+
+            if let Some(ref w) = window {
+                if w.len() < manifest.shard_count as usize {
+                    tracing::info!(
+                        model = %model_id,
+                        total_shards = manifest.shard_count,
+                        window_shards = w.len(),
+                        pressure = format!("{:.2}", pressure),
+                        "VRAM soft-unload: narrowing shard window (shards stay on disk)"
+                    );
+                    pool.restart_with_window(&model_id, w.clone()).await;
+                    // Only do one model per cycle to avoid thundering restart
+                    break;
+                }
+            }
+        }
     }
 
     /// Get last prune time for a model from prune history.

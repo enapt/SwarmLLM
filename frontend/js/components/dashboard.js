@@ -335,7 +335,8 @@
             var label = '' + s.index;
             var dlPct = 0;
 
-            if (s.local) { cls = 'local'; localCount++; }
+            if (s.local && s.in_vram) { cls = 'local vram'; localCount++; }
+            else if (s.local) { cls = 'local'; localCount++; }
             else if (s.holders > 0) { cls = 'peer'; peerCount++; }
             else { missingCount++; }
 
@@ -368,7 +369,8 @@
             }
 
             var title = 'Shard ' + s.index + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
-            if (cls === 'local') title += ' \u2014 Stored locally';
+            if (cls === 'local vram') title += ' \u2014 Loaded in GPU VRAM';
+            else if (cls === 'local') title += ' \u2014 On disk (not in VRAM)';
             else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
             else if (cls === 'verifying') title += ' \u2014 Verifying (BLAKE3)';

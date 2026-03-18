@@ -41,6 +41,30 @@
           return;
         }
 
+        // Store data for re-sorting
+        App.hf._lastData = data;
+        App.hf._renderResults(data);
+      } catch (e) {
+        loading.classList.add('hidden');
+        results.innerHTML = '<div class="empty-state"><p>Search failed: ' + U.escapeHtml(e.message) + '</p></div>';
+      }
+    },
+
+    _lastData: null,
+
+    sortResults: function() {
+      if (!App.hf._lastData) return;
+      var sortBy = (document.getElementById('hf-sort') || {}).value || 'score';
+      var data = App.hf._lastData.slice();
+      if (sortBy === 'downloads') data.sort(function(a,b) { return (b.downloads||0) - (a.downloads||0); });
+      else if (sortBy === 'size_asc') data.sort(function(a,b) { return (a.est_shard_size||0) - (b.est_shard_size||0); });
+      else if (sortBy === 'size_desc') data.sort(function(a,b) { return (b.est_shard_size||0) - (a.est_shard_size||0); });
+      else data.sort(function(a,b) { return (b.composite_score||0) - (a.composite_score||0); });
+      App.hf._renderResults(data);
+    },
+
+    _renderResults: function(data) {
+        var results = document.getElementById('hf-results');
         results.innerHTML = '';
         var hfTmpl = document.getElementById('tmpl-hf-result-card');
         data.forEach(function(repo) {
@@ -64,6 +88,11 @@
             statsHtml += '<span><span style="color:var(--cyan)" title="Individual shards fit VRAM (~' + shardSizeStr + '/shard)">&#128279; Can host shards</span></span>';
           } else if (repo.fits_vram === false && variants.length > 0) {
             statsHtml += '<span><span style="color:var(--orange)" title="Even individual shards may exceed your available VRAM">&#9888; Exceeds VRAM</span></span>';
+          }
+          // Composite score badge
+          if (repo.composite_score != null) {
+            var scoreColor = repo.composite_score >= 60 ? 'var(--green)' : repo.composite_score >= 30 ? 'var(--yellow)' : 'var(--text-muted)';
+            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="Fit score: quality=' + ((repo.score_breakdown||{}).quality||0) + '% fit=' + ((repo.score_breakdown||{}).fit||0) + '% demand=' + ((repo.score_breakdown||{}).demand||0) + '% size=' + ((repo.score_breakdown||{}).size||0) + '%">' + repo.composite_score + ' pts</span>';
           }
           card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
 
@@ -102,10 +131,6 @@
 
           results.appendChild(card);
         });
-      } catch (e) {
-        loading.classList.add('hidden');
-        results.innerHTML = '<div class="empty-state"><p>Search failed: ' + U.escapeHtml(e.message) + '</p></div>';
-      }
     },
 
     download: async function(repoId, variantKey) {

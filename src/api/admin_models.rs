@@ -53,11 +53,23 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 let holders = state.shared_state.model_registry.shard_holders(&shard_id);
                 let local = holders.contains(&local_node_id);
 
+                // Check if this shard is currently loaded in VRAM (vs just on disk)
+                let in_vram = if local {
+                    let window = state.shared_state.model_process_pool.get_shard_window(&m.id);
+                    match window {
+                        Some(w) => w.contains(&s.index),
+                        None => state.shared_state.model_process_pool.is_loaded(&m.id),
+                    }
+                } else {
+                    false
+                };
+
                 let mut shard_json = serde_json::json!({
                     "index": s.index,
                     "size_bytes": s.size_bytes,
                     "local": local,
                     "holders": holders.len(),
+                    "in_vram": in_vram,
                 });
 
                 // Attach per-shard download state if downloading

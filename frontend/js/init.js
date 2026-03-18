@@ -217,6 +217,7 @@
     on('btn-close-model-browser', 'click', function() { App.ui.closeModelBrowser(); });
     on('btn-hf-search', 'click', function() { App.hf.search(); });
     on('hf-search-input', 'keydown', function(e) { if (e.key === 'Enter') App.hf.search(); });
+    on('hf-sort', 'change', function() { App.hf.sortResults(); });
     on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
     on('link-browse-hf', 'click', function(e) { e.preventDefault(); App.ui.openModelBrowser(); });
