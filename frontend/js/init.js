@@ -73,7 +73,7 @@
           status.innerHTML = '<span style="color:var(--red)">Key saved but provider not responding</span>';
           App.setup._savedProvider = provider;
         }
-      } catch (e) { status.innerHTML = '<span style="color:var(--red)">Error: ' + e.message + '</span>'; }
+      } catch (e) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
     });
     // Wizard step indicators
     document.querySelectorAll('.wizard-step[data-step]').forEach(function(stepBtn) {

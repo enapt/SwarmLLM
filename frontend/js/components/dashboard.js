@@ -788,7 +788,7 @@
               }
             }
           } else if (!progressEl && acq.total_bytes > 0 && acq.downloaded_bytes > 0) {
-            var card = document.querySelector('[data-model-id="' + modelId + '"]');
+            var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
             if (card && !card.querySelector('.dl-progress')) {
               var dlBytes2 = Math.min(acq.downloaded_bytes, acq.total_bytes);
               var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
@@ -1006,7 +1006,7 @@
       if (!status) return;
       if (!S.activeAcquisitions[modelId]) return;
       var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
-      var card = document.querySelector('[data-model-id="' + modelId + '"]');
+      var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
       if (!card) {
         App.models.load();
         App.dashboard.loadInitial();

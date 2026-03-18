@@ -19,6 +19,17 @@
       .replace(/'/g, '&#39;');
   }
 
+  // SEC: CSS-escape a string for safe use in querySelector attribute selectors.
+  // Prevents CSS selector injection via model IDs containing " [ ] etc.
+  function cssSafeAttr(str) {
+    return (str || '').replace(/(["\\\[\](){}|^$*+?.#>~=!:,;])/g, '\\$1');
+  }
+
+  // SEC: Safe DOM ID from arbitrary string (for element IDs derived from model IDs etc.)
+  function safeId(str) {
+    return (str || '').replace(/[^a-zA-Z0-9]/g, '_');
+  }
+
   function formatUptime(seconds) {
     if (seconds < 60) return seconds + 's';
     if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
@@ -357,6 +368,8 @@
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
+    cssSafeAttr: cssSafeAttr,
+    safeId: safeId,
     formatUptime: formatUptime,
     formatMB: formatMB,
     formatBytes: formatBytes,

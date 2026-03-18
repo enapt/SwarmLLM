@@ -441,7 +441,7 @@
         if (resp.ok) {
           App.ui.showBanner('success', 'Download cancelled');
           var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
-          var card = document.querySelector('[data-model-id="' + modelId + '"]');
+          var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) {
             var progress = card.querySelector('.dl-progress');
             if (progress) progress.remove();
@@ -470,7 +470,7 @@
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
         if (resp.ok) {
           App.ui.showBanner('success', 'Model removed: ' + modelId);
-          var card = document.querySelector('[data-model-id="' + modelId + '"]');
+          var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) card.remove();
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
         } else {
@@ -498,7 +498,7 @@
     },
 
     toggleAutoManage: async function(modelId) {
-      var card = document.querySelector('[data-model-id="' + modelId + '"]');
+      var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
       if (!card) return;
 
       var existing = card.querySelector('.auto-manage-panel');
@@ -529,19 +529,19 @@
       panel.className = 'auto-manage-panel';
       panel.innerHTML =
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-enabled-' + U.escapeHtml(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> Auto-manage enabled</label>' +
+          '<label><input type="checkbox" id="am-enabled-' + U.safeId(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> Auto-manage enabled</label>' +
         '</div>' +
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-prune-' + U.escapeHtml(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> Auto-prune enabled</label>' +
+          '<label><input type="checkbox" id="am-prune-' + U.safeId(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> Auto-prune enabled</label>' +
         '</div>' +
         '<div class="am-row">' +
           '<label>Max shards:</label>' +
-          '<input type="number" id="am-max-' + U.escapeHtml(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
+          '<input type="number" id="am-max-' + U.safeId(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
           '<span class="text-muted" style="font-size:0.7rem">0 = unlimited</span>' +
         '</div>' +
         '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
-          '<label><input type="checkbox" id="am-encrypted-' + U.escapeHtml(modelId) + '"' +
+          '<label><input type="checkbox" id="am-encrypted-' + U.safeId(modelId) + '"' +
             (encStatus.encrypted_pipeline ? ' checked' : '') + encDisabled +
             '> &#128274; Encrypted pipeline</label>' +
           '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
@@ -554,11 +554,11 @@
     },
 
     saveAutoManage: async function(modelId) {
-      var safeId = U.escapeHtml(modelId);
-      var enabledEl = document.getElementById('am-enabled-' + safeId);
-      var maxEl = document.getElementById('am-max-' + safeId);
-      var pruneEl = document.getElementById('am-prune-' + safeId);
-      var encryptedEl = document.getElementById('am-encrypted-' + safeId);
+      var sid = U.safeId(modelId);
+      var enabledEl = document.getElementById('am-enabled-' + sid);
+      var maxEl = document.getElementById('am-max-' + sid);
+      var pruneEl = document.getElementById('am-prune-' + sid);
+      var encryptedEl = document.getElementById('am-encrypted-' + sid);
       if (!enabledEl || !maxEl) return;
 
       try {
@@ -587,7 +587,7 @@
 
         if (amResp.ok && !encErr) {
           App.ui.showBanner('success', 'Model policy saved');
-          var card = document.querySelector('[data-model-id="' + modelId + '"]');
+          var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           var panel = card ? card.querySelector('.auto-manage-panel') : null;
           if (panel) panel.remove();
         } else {
@@ -604,7 +604,7 @@
     },
 
     toggleMetadata: async function(modelId) {
-      var panel = document.querySelector('[data-meta-panel="' + modelId + '"]');
+      var panel = document.querySelector('[data-meta-panel="' + U.cssSafeAttr(modelId) + '"]');
       if (!panel) return;
       if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
       panel.classList.remove('hidden');

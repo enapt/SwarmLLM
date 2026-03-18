@@ -274,7 +274,7 @@
           badge.addEventListener('click', function() {
             App.ui.switchTab('dashboard');
             setTimeout(function() {
-              var card = document.querySelector('.cloud-model[data-provider="' + providerKey + '"]');
+              var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(providerKey) + '"]');
               if (card) {
                 card.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 card.classList.add('provider-highlight');
@@ -295,7 +295,7 @@
         var h = S.providerHealth[p];
         var badge = document.getElementById('health-badge-' + p);
         if (!badge) {
-          var card = document.querySelector('.cloud-model[data-provider="' + p + '"]');
+          var card = document.querySelector('.cloud-model[data-provider="' + U.cssSafeAttr(p) + '"]');
           if (!card) return;
           var header = card.querySelector('.model-header');
           if (!header) return;
@@ -378,7 +378,7 @@
       if (!s) return '';
       if (s.status === 'up') {
         var cls = s.latency_ms < 1000 ? 'health-fast' : s.latency_ms < 3000 ? 'health-ok' : 'health-slow';
-        return '<span class="model-status-badge ' + cls + '" title="Responded in ' + s.latency_ms + 'ms">' + s.latency_ms + 'ms</span>';
+        return '<span class="model-status-badge ' + cls + '" title="Responded in ' + U.escapeHtml(String(s.latency_ms)) + 'ms">' + U.escapeHtml(String(s.latency_ms)) + 'ms</span>';
       }
       if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="Model timed out (5s)">Slow</span>';
       if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="Model unavailable (503)">Down</span>';

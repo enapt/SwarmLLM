@@ -145,7 +145,7 @@
 
       var count = document.getElementById('download-queue-count');
       acquisitions.forEach(function(acq) {
-        var existing = list.querySelector('[data-dl-model="' + acq.model_id + '"]');
+        var existing = list.querySelector('[data-dl-model="' + U.cssSafeAttr(acq.model_id) + '"]');
 
         if (!existing) {
           if (acq.state === 'downloading' || acq.state === 'awaiting_manifest') {

@@ -817,6 +817,39 @@ pub(crate) async fn dispatch_network_messages(
                                     );
                                     continue;
                                 }
+                                // SEC: Validate repo_id format (owner/repo) and filename to prevent
+                                // URL injection when constructing HuggingFace download URLs
+                                let repo_valid = {
+                                    let parts: Vec<&str> = gossip.repo_id.splitn(2, '/').collect();
+                                    parts.len() == 2
+                                        && parts.iter().all(|p| {
+                                            !p.is_empty()
+                                                && p.chars().all(|c| {
+                                                    c.is_alphanumeric()
+                                                        || c == '-'
+                                                        || c == '_'
+                                                        || c == '.'
+                                                })
+                                        })
+                                };
+                                let filename_valid = !gossip.filename.is_empty()
+                                    && !gossip.filename.contains('/')
+                                    && !gossip.filename.contains('\\')
+                                    && !gossip.filename.contains('\0')
+                                    && gossip.filename.chars().all(|c| {
+                                        c.is_alphanumeric()
+                                            || c == '-'
+                                            || c == '_'
+                                            || c == '.'
+                                    });
+                                if !repo_valid || !filename_valid {
+                                    tracing::warn!(
+                                        repo = %gossip.repo_id,
+                                        filename = %gossip.filename,
+                                        "HfSourceGossip invalid repo_id/filename format — dropping"
+                                    );
+                                    continue;
+                                }
                                 let mid = gossip.model_id.clone();
                                 if !shared_state.hf_sources.contains_key(&mid) {
                                     tracing::info!(
@@ -1334,7 +1367,9 @@ async fn handle_layer_forward(
     let split_key = (model_id.clone(), layer_start, layer_end);
     if !shared_state.split_models.contains_key(&split_key) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
-        let model_dir = shard_store.models_dir().join(&model_id.0);
+        let model_dir = shard_store
+            .models_dir()
+            .join(crate::model::shard::sanitize_path_component(&model_id.0));
 
         // Estimate VRAM from shard file sizes on disk (no model loading)
         let vram_estimate_mb =
@@ -1453,7 +1488,7 @@ async fn handle_vision_encode_request(
             .node
             .data_dir
             .join("models")
-            .join(&model_id.0);
+            .join(crate::model::shard::sanitize_path_component(&model_id.0));
         let mmproj_path = model_dir.join("mmproj.gguf");
         if !mmproj_path.exists() {
             tracing::warn!(
