@@ -213,9 +213,14 @@ libp2p Swarm
 
 ### Split Inference Engine
 
-The split inference engine (`src/inference/split.rs`) enables true distributed inference
+The split inference engine (`src/inference/split/`) enables true distributed inference
 using candle for direct tensor computation with quantized GGUF weights. Each node loads
 only the transformer layers it owns, forwarding hidden-state activations between nodes.
+
+The module is split into focused subfiles: `model.rs` (SplitModel struct + load + forward),
+`kv_cache.rs` (per-request KV-cache store), `entry.rs` (model entry + LRU eviction),
+`gguf_meta.rs` (GGUF header parsing), `shard_reader.rs` (multi-shard virtual reader),
+`rope.rs` (RoPE precomputation).
 
 ```
 Client → API Server → InferenceRouter → Pipeline Assembly
@@ -627,8 +632,12 @@ Storage backend is **redb** (pure-Rust, ACID, single-file). The legacy **sled** 
 
 ## Auto-Manage Shards
 
-The **AutoShardManager** (`src/model/auto_manage.rs`) is a background subsystem that
+The **AutoShardManager** (`src/model/auto_manage/`) is a background subsystem that
 automatically acquires missing shards based on a VRAM-aware scoring algorithm.
+The module is split into: `manager.rs` (struct + run loop + housekeeping),
+`scoring.rs` (candidate ranking), `download.rs` (download orchestration),
+`prune.rs` (shard pruning logic), `scan.rs` (local shard scanning + model loading),
+`vram.rs` (VRAM budget utilities).
 
 ### Scoring Formula
 
@@ -925,7 +934,7 @@ without needing the full multi-GB GGUF file:
 └── ...
 ```
 
-`ShardReader` in `split.rs` constructs a virtual GGUF from header + shard files,
+`ShardReader` in `split/shard_reader.rs` constructs a virtual GGUF from header + shard files,
 allowing candle to parse the full tensor index while only loading assigned layers.
 
 ## HTTP API Routes
@@ -1157,13 +1166,13 @@ Items identified during audits but deferred for future implementation:
 |------|--------|-------|
 | Paged attention pool wiring | `paged_kv_pool`/`paged_kv_store` in SharedState always None | Feature-gated behind `paged-attn`, needs per-model init (n_kv_heads/head_dim from GGUF, not available at startup). Hot path (model_worker.rs) uses KvCacheStore, not paged blocks. |
 | Ring AllReduce network wiring | Local impl complete, not wired to network transport | Needs new TpRingChunk message types, per-step pending state, dispatch handler, and ring execution loop. Star topology works well for 2-3 node LAN setups. |
-| Starcoder2 / Glm4 layer loading | Arch detection exists, no split.rs loading code | Removed from `supported_list()` — re-add when layer loading is implemented |
+| Starcoder2 / Glm4 layer loading | Arch detection exists, no split/model.rs loading code | Removed from `supported_list()` — re-add when layer loading is implemented |
 | Qwen 3.5 batched inference | Single-request forward wired, batched returns error | Per-request SSM state splitting needed for batch_size > 1 |
 | LoRA inference wiring | API registers adapters, request carries adapter_id | adapter_registry never queried during inference — model_worker subprocess doesn't load adapters |
 | Speculative decoding in subprocess | Works via llama-cpp executor only | Unreachable for shard-loaded models (Phase 17 subprocess path). IPC protocol lacks speculative support. |
 
 Resolved items (removed from deferred):
-- **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split.rs forward loop
+- **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split/model.rs forward loop
 - **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
 - **prefix_cache SharedState field**: Removed — initialized but never read from any production path
 - **SpeculativePair struct**: Removed — scaffolding for a registry that was never built

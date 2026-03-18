@@ -46,7 +46,7 @@ cargo run -- run -vv 2>&1 | grep "request_id=<UUID>"
 9. **Inbound dispatch** → `DIAG: inbound TensorPayload request` → `DIAG: stored ResponseChannel` (manager.rs)
 10. **Dispatcher** → `DIAG: dispatcher received LayerForward` with `seq`, `layer_range`, `activation_bytes` (daemon/dispatch.rs)
 11. **Local execution** → `DIAG: processing LayerForward locally` with `elapsed_ms` (daemon/dispatch.rs)
-12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split.rs)
+12. **Split model forward** → `DIAG: SplitModel forward pass complete` with `forward_ms`, `seq_len`, `num_layers` (split/model.rs)
 13. **Result send** → `DIAG: LayerForward processed, sending result back` (daemon/dispatch.rs)
 14. **Response write** → `DIAG: codec write_response start/done` with `frame_len` (protocol.rs)
 15. **ResponseSent event** → `DIAG: ResponseSent event — response written to wire` (manager.rs)
@@ -220,18 +220,18 @@ If `pending_tensor_forwards > 0` when a connection closes, those requests will g
 | INFO  | `DIAG: KV-cache MISS — prompt prefix mismatch` — `cached_prompt_len`, `new_prompt_len` | kv_cache.rs |
 | INFO  | `DIAG: KV-cache HIT — skipping prefill` — `start_pos`, `cached_tokens`, `cache_holders` | kv_cache.rs |
 
-### Per-Request KV-Cache Store (split.rs)
+### Per-Request KV-Cache Store (split/kv_cache.rs)
 
 | Level | What | Where |
 |-------|------|-------|
-| INFO  | `DIAG: KV-cache store cleanup — expired entries removed` — `removed`, `remaining` | split.rs |
+| INFO  | `DIAG: KV-cache store cleanup — expired entries removed` — `removed`, `remaining` | split/kv_cache.rs |
 
 ## Split Model Forward Pass Diagnostics
 
 | Level | What | Where |
 |-------|------|-------|
-| TRACE | `DIAG: layer forward complete` — `layer`, `layer_ms` (per-layer timing) | split.rs |
-| DEBUG | `DIAG: SplitModel forward pass complete` — `forward_ms`, `seq_len`, `num_layers`, `is_first`, `is_last`, `kv_offset` | split.rs |
+| TRACE | `DIAG: layer forward complete` — `layer`, `layer_ms` (per-layer timing) | split/model.rs |
+| DEBUG | `DIAG: SplitModel forward pass complete` — `forward_ms`, `seq_len`, `num_layers`, `is_first`, `is_last`, `kv_offset` | split/model.rs |
 
 For per-token decode analysis, combine the forward pass timing with the decode loop timing from `DIAG: split stream decode loop complete` which reports `tok_per_sec`. Use `-vvv` (trace) to see per-layer timing.
 
@@ -445,7 +445,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | INFO  | `DIAG: handle_acquire` | `model`, `needed_shards` |
 | DEBUG | `DIAG: select_best_peer` | `eligible_peers`, `selected_peer` |
 
-### Auto-Manage (auto_manage.rs)
+### Auto-Manage (auto_manage/)
 
 | Level | What | Fields |
 |-------|------|--------|
@@ -629,7 +629,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/network/peer_cache.rs` | Peer cache save count |
 | `src/inference/pipeline.rs` | Segment timing (local + remote), pipeline total timing, failover details, wait_for_result context |
 | `src/inference/router.rs` | Pipeline schedule vs execute timing breakdown, result channel delivery, streaming done event |
-| `src/inference/split.rs` | Per-forward-pass timing with seq_len/layer/kv_offset context, KV-cache cleanup logging |
+| `src/inference/split/` | Per-forward-pass timing (model.rs), KV-cache cleanup (kv_cache.rs) |
 | `src/inference/kv_cache.rs` | KV-cache hit/miss with detailed miss reasons (expired, degraded, prefix mismatch, evicted) |
 | `src/inference/scheduler.rs` | Pipeline assembly timing, candidate counts, standby counts |
 | `src/inference/executor.rs` | Model load timing with backend type, generate_stream params |
@@ -644,7 +644,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/model/manifest.rs` | Manifest load with schema version and shard count |
 | `src/model/lora.rs` | Adapter load with rank, alpha, target modules |
 | `src/model/acquisition.rs` | Acquisition requests, peer selection |
-| `src/model/auto_manage.rs` | Prune evaluation, shard registration, model readiness |
+| `src/model/auto_manage/` | Prune evaluation (prune.rs), shard registration (download.rs), model readiness (scan.rs) |
 | `src/api/server.rs` | Server startup with bind address |
 | `src/api/openai.rs` | All 3 streaming paths with per-token timing, client disconnect detection, fallback path logging |
 | `src/api/admin.rs` | HF shard download initiation |

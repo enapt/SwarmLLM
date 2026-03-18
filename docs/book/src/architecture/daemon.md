@@ -27,7 +27,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **AcquisitionManager** | `src/model/acquisition.rs` | BLAKE3-verified model downloads from peers and HuggingFace |
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI API + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager.rs` | Device pool management, credit forwarding |
-| **AutoShardManager** | `src/model/auto_manage.rs` | VRAM-aware shard acquisition + smart pruning |
+| **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
 
 ## Channel Layout
 
