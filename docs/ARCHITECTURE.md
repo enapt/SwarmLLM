@@ -56,6 +56,7 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ModelId, ModelTrustInfo> — model trust      │  │
 │  │  DashMap<ModelId, Notify>       — loading models    │  │
 │  │  DashMap<ModelId, bool>         — encrypted pipeline │  │
+│  │  mpsc::Sender<ModelId>          — DHT query (S5)    │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -183,6 +184,20 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 
 peer_registry capped at 200 entries. On overflow, evicts highest-latency non-LAN non-pipeline peer.
 Memory bounded at O(1) instead of O(N). LAN peers and pipeline-active peers are never evicted.
+
+### DHT-Based Shard Holder Resolution (S5)
+
+Two-tier shard holder discovery for 50K+ node scaling:
+
+- **Tier 1 — Bounded in-memory cache**: `ModelRegistry.shard_holders` uses `HashMap<NodeId, Instant>` (not `HashSet<NodeId>`) with max 50 holders per shard. LRU eviction when at capacity. Local node never evicted. Populated by GossipSub `ShardAnnounce` + DHT query results. Sync `shard_holders()` API unchanged — scheduler hot path stays fast.
+
+- **Tier 2 — Kademlia provider records**: Each node calls `kademlia.start_providing()` for its shards (key: `/swarm/provide/<model_id>/<shard_index>`). Provider records TTL 1 hour, republished every 20 minutes. `get_providers()` results are resolved from PeerId → NodeId (same Ed25519 key, bidirectional conversion in `transport.rs`) and merged into the bounded cache.
+
+- **Pre-warm**: Router fires `dht_query_tx.try_send(model_id)` before pipeline assembly. NetworkManager issues `get_providers()` for all model shards, merging results into registry asynchronously. First request may miss cache; subsequent requests benefit.
+
+- **Lifecycle wiring**: `NetworkCommand::StartProviding` on shard acquisition (startup scan, rescan, download complete). `NetworkCommand::StopProviding` on shard deletion (prune, admin API).
+
+Memory: O(shards × 50) bounded regardless of network size (was O(shards × nodes) unbounded).
 
 ## Networking Stack
 
@@ -864,6 +879,12 @@ Kademlia DHT records for capability and shard announcements are Ed25519-signed:
 - Functions: `sign_dht_value()` / `verify_dht_value()` in `src/network/discovery.rs`
 - Records expire after 1 hour with automatic re-publication
 
+Kademlia provider records (S5) track shard holders at scale:
+- Key: `/swarm/provide/<model_id>/<shard_index>` per shard
+- Functions: `start_providing_shards()` / `stop_providing_shards()` / `query_shard_providers()`
+- Provider TTL: 1 hour, republication: 20 minutes
+- PeerId↔NodeId conversion via `node_id_to_peer_id()` / `peer_id_to_node_id()` in `transport.rs`
+
 ## Identity & Nicknames
 
 - Ed25519-signed nickname records with timestamp-wins conflict resolution
@@ -1183,9 +1204,9 @@ Items identified during audits but deferred for future implementation:
 
 | Torrent-style parallel P2P download | Single-source P2P per shard | chunk_offset/chunk_size support exists but multi-source coordination not built |
 | Download resume | HF downloads restart from scratch on interrupt | Needs HTTP Range header from last byte on resume |
-| DHT-based shard holder resolution (S5) | All holders tracked in memory | Bounded by S3 peer_registry cap (200). Convert to DHT queries if 50K+ nodes needed |
 
 Resolved items (removed from deferred):
+- **DHT-based shard holder resolution (S5)**: COMPLETE — Kademlia provider records + bounded cache (max 50/shard LRU). Two-tier resolution: sync cache for hot path, async DHT for cold lookups. Scales to 50K+ nodes.
 - **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split/model.rs forward loop
 - **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
 - **prefix_cache SharedState field**: Removed — initialized but never read from any production path
