@@ -44,6 +44,42 @@ chmod +x swarmllm
 ./swarmllm run
 ```
 
+### Docker
+
+The fastest way to get running on any Linux server:
+
+```bash
+# 1. Get the compose file and example env
+curl -LO https://raw.githubusercontent.com/enapt/SwarmLLM/main/docker-compose.yml
+curl -LO https://raw.githubusercontent.com/enapt/SwarmLLM/main/.env.example
+
+# 2. Configure (add API keys, change ports, etc.)
+cp .env.example .env
+nano .env
+
+# 3. Start
+docker compose up -d
+```
+
+For NVIDIA GPU support (requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)):
+
+```bash
+docker compose --profile gpu up -d
+```
+
+Pre-built images on GHCR:
+
+| Image | Description |
+|---|---|
+| `ghcr.io/enapt/swarmllm:latest` | CPU-only |
+| `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4) |
+| `ghcr.io/enapt/swarmllm:0.1.0` | Pinned version (CPU) |
+| `ghcr.io/enapt/swarmllm:0.1.0-cuda` | Pinned version (GPU) |
+
+Data is persisted in Docker volumes. Model shards are stored in the `swarmllm-models` volume (or bind-mount a host directory via `SWARMLLM_MODELS_DIR` in `.env`).
+
+View logs with `docker compose logs -f`. The API key is printed on first startup.
+
 ### Cargo Install
 
 Requires Rust 1.80+:

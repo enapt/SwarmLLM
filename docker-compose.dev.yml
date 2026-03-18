@@ -1,0 +1,76 @@
+# ============================================================================
+# SwarmLLM — 3-Node Local Test Cluster (DEVELOPMENT/TESTING ONLY)
+# ============================================================================
+# This compose file spins up a 3-node cluster on localhost for development
+# and testing. It is NOT intended for production use — in production, each
+# node runs on a separate machine.
+#
+# For single-node production use, just run:
+#   docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
+#
+# Start:   docker-compose -f docker-compose.dev.yml up
+# Stop:    docker-compose -f docker-compose.dev.yml down
+# Rebuild: docker-compose -f docker-compose.dev.yml up --build
+#
+# Nodes:
+#   node1 — bootstrap node at http://localhost:8800
+#   node2 — peer node at http://localhost:8801
+#   node3 — peer node at http://localhost:8802
+#
+# Each node gets its own persistent data volume.
+# For GPU support, also pass the CUDA override:
+#   docker-compose -f docker-compose.dev.yml -f docker-compose.cuda.dev.yml up
+# ============================================================================
+
+services:
+  node1:
+    build: .
+    container_name: swarmllm-node1
+    ports:
+      - "8800:8800/tcp"
+      - "8800:8800/udp"
+    volumes:
+      - node1-data:/data
+    environment:
+      - SWARMLLM_NODE_LISTEN_PORT=8800
+      - SWARMLLM_LOGGING_LEVEL=info
+    restart: unless-stopped
+
+  node2:
+    build: .
+    container_name: swarmllm-node2
+    ports:
+      - "8801:8800/tcp"
+      - "8801:8800/udp"
+    volumes:
+      - node2-data:/data
+    environment:
+      - SWARMLLM_NODE_LISTEN_PORT=8800
+      - SWARMLLM_LOGGING_LEVEL=info
+    depends_on:
+      node1:
+        condition: service_healthy
+    command: ["run", "--data-dir", "/data", "--bootstrap", "/ip4/swarmllm-node1/udp/8800/quic-v1"]
+    restart: unless-stopped
+
+  node3:
+    build: .
+    container_name: swarmllm-node3
+    ports:
+      - "8802:8800/tcp"
+      - "8802:8800/udp"
+    volumes:
+      - node3-data:/data
+    environment:
+      - SWARMLLM_NODE_LISTEN_PORT=8800
+      - SWARMLLM_LOGGING_LEVEL=info
+    depends_on:
+      node1:
+        condition: service_healthy
+    command: ["run", "--data-dir", "/data", "--bootstrap", "/ip4/swarmllm-node1/udp/8800/quic-v1"]
+    restart: unless-stopped
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

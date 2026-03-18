@@ -79,17 +79,31 @@ sudo systemctl enable --now swarmllm
 
 ## Docker
 
-Build the image locally:
+### Quick Start (Recommended)
 
 ```bash
-# CPU-only
-docker build -t swarmllm .
+# Download compose file and env template
+curl -LO https://raw.githubusercontent.com/enapt/SwarmLLM/main/docker-compose.yml
+curl -LO https://raw.githubusercontent.com/enapt/SwarmLLM/main/.env.example
+cp .env.example .env
 
-# With CUDA GPU support
-docker build --build-arg FEATURES="candle-cuda" -t swarmllm:cuda .
+# CPU
+docker compose up -d
+
+# GPU (requires NVIDIA Container Toolkit)
+docker compose --profile gpu up -d
 ```
 
-Run:
+### Pre-built Images
+
+| Image | Description |
+|---|---|
+| `ghcr.io/enapt/swarmllm:latest` | CPU-only (Debian bookworm-slim) |
+| `ghcr.io/enapt/swarmllm:latest-cuda` | NVIDIA GPU (CUDA 12.4 runtime) |
+
+Versioned tags follow semver: `0.1.0`, `0.1.0-cuda`, `0.1`, `0.1-cuda`.
+
+### Manual Docker Run
 
 ```bash
 # CPU
@@ -100,9 +114,11 @@ docker run -d \
   -p 8810:8810/tcp \
   -p 8800:8800/udp \
   -v swarmllm-data:/data \
-  swarmllm
+  -v /path/to/models:/data/models \
+  --env-file .env \
+  ghcr.io/enapt/swarmllm:latest
 
-# With NVIDIA GPU
+# GPU
 docker run -d \
   --gpus all \
   --name swarmllm \
@@ -111,7 +127,33 @@ docker run -d \
   -p 8810:8810/tcp \
   -p 8800:8800/udp \
   -v swarmllm-data:/data \
-  swarmllm:cuda
+  -v /path/to/models:/data/models \
+  --env-file .env \
+  ghcr.io/enapt/swarmllm:latest-cuda
+```
+
+### Build from Source
+
+```bash
+# CPU
+docker build -t swarmllm .
+
+# CUDA
+docker build -f Dockerfile.cuda -t swarmllm:cuda .
+```
+
+### Multi-Node Dev Cluster
+
+For development and testing, a 3-node compose file is available:
+
+```bash
+docker compose -f docker-compose.dev.yml up
+```
+
+Nodes are at `localhost:8800`, `localhost:8801`, `localhost:8802`. Add GPU support:
+
+```bash
+docker compose -f docker-compose.dev.yml -f docker-compose.cuda.dev.yml up
 ```
 
 ## Multi-Node Cluster
