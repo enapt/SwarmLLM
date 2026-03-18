@@ -96,7 +96,7 @@ Key directories:
 - `src/inference/` — router, pipeline, executor, split inference
 - `src/api/` — HTTP server, OpenAI/Anthropic endpoints, admin dashboard
 - `src/credit/` — credit system, transactions, anti-gaming
-- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step)
+- `frontend/` — vanilla HTML/CSS/JS dashboard (no build step): `js/core/` (state, utils, data), `js/components/` (8 UI modules), `js/init.js`, 12 HTML `<template>` elements
 
 ## Security Issues
 

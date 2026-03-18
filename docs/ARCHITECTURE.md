@@ -1038,6 +1038,24 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `/health` — Health check endpoint
 - `/` → redirect to `/admin`
 
+### Frontend Architecture
+- **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
+- **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
+  - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
+  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`)
+  - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
+  - `frontend/js/components/ui.js` — tab switching, sidebar, modals, mode indicator
+  - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
+  - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
+  - `frontend/js/components/models.js` — model dropdown, HF search/download, shard context menu, auto-manage, metadata panel
+  - `frontend/js/components/settings.js` — settings panel + setup wizard
+  - `frontend/js/components/downloads.js` — download queue, prune history, resource schedule
+  - `frontend/js/components/network.js` — SVG network map, identity/leaderboard, model compare, network invite code
+  - `frontend/js/components/notifications.js` — toasts, WebSocket connection, REST polling, provider health probing
+  - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
+- **HTML templates**: 12 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
+- Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
+
 ### Frontend Features
 - **i18n**: 20 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.

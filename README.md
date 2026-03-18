@@ -271,7 +271,7 @@ Key source directories:
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
 - `src/pool/` — device pool management, crypto, credit forwarding
-- `frontend/` — vanilla HTML/CSS/JS dashboard with 20 language translations
+- `frontend/` — vanilla HTML/CSS/JS dashboard (12 component JS files, 12 HTML templates, 20 language translations)
 
 674 tests (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
