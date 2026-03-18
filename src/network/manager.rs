@@ -1471,10 +1471,30 @@ impl NetworkManager {
                 // Extract path info from self (sync), then do blocking I/O
                 // via spawn_blocking without holding &self across the await.
                 let prepared = self.prepare_shard_read(&shard_req);
+                let bw_limit = self.shared_state.config.resources.max_bandwidth_mbps;
                 let response = match prepared {
                     Some((path, offset, chunk_size, model_id, shard_index)) => {
-                        read_shard_chunk_async(path, offset, chunk_size, model_id, shard_index)
-                            .await
+                        let resp =
+                            read_shard_chunk_async(path, offset, chunk_size, model_id, shard_index)
+                                .await;
+                        // Enforce upload bandwidth cap: delay proportional to chunk size.
+                        // 0 = unlimited (default). Only throttles shard serving, not tensor forwards.
+                        if bw_limit > 0 {
+                            if let SwarmResponse::ShardData(ref sr) = resp {
+                                if !sr.data.is_empty() {
+                                    let bytes = sr.data.len() as u64;
+                                    let limit_bytes_per_sec = bw_limit * 125_000; // Mbps → bytes/s
+                                    let delay_ms = (bytes * 1000) / limit_bytes_per_sec;
+                                    if delay_ms > 0 {
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            delay_ms,
+                                        ))
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                        resp
                     }
                     None => SwarmResponse::ShardData(crate::types::ShardResponse {
                         data: vec![],
