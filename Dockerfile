@@ -9,7 +9,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder
 # ---------------------------------------------------------------------------
-FROM rust:1.80-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 
 # Install system dependencies required for compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \

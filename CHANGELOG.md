@@ -2,7 +2,7 @@
 
 All notable changes to SwarmLLM are documented here.
 
-## [Unreleased]
+## [0.1.0] - 2026-03-18
 
 ### Local Embedding Privacy
 - **Config**: `local_embedding_privacy: true` in `[inference]` — requesting node embeds tokens locally, sends hidden-state activations (not raw token IDs) to remote first-segment nodes

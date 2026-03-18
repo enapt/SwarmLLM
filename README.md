@@ -3,6 +3,7 @@
 [![CI](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/enapt/SwarmLLM/actions/workflows/ci.yml)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust 1.80+](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/enapt/swarmllm)
 [![Release](https://img.shields.io/github/v/release/enapt/SwarmLLM?include_prereleases&label=release)](https://github.com/enapt/SwarmLLM/releases)
 
 Decentralized peer-to-peer LLM inference network. A single Rust binary that shards large language models across a network of contributing nodes, enabling access to 70B+ parameter models without expensive hardware or paid API tokens.
@@ -370,23 +371,24 @@ sudo rpm -i swarmllm-0.1.0-1.x86_64.rpm
 ### Docker
 
 ```bash
-# CPU image
-docker build -t swarmllm .
-docker run -p 8800:8800 -v swarmllm-data:/data swarmllm
+# Pre-built images (recommended)
+docker run -p 8800:8800 -v swarmllm-data:/data ghcr.io/enapt/swarmllm:latest
 
-# CUDA GPU image
-docker build -f Dockerfile.cuda -t swarmllm:cuda .
-docker run --gpus all -p 8800:8800 -v swarmllm-data:/data swarmllm:cuda
+# GPU (requires NVIDIA Container Toolkit)
+docker run --gpus all -p 8800:8800 -v swarmllm-data:/data ghcr.io/enapt/swarmllm:latest-cuda
 
-# 3-node test cluster
-docker compose up
+# Or use docker compose (see docker-compose.yml)
+cp .env.example .env && docker compose up -d
+
+# 3-node dev cluster
+docker compose -f docker-compose.dev.yml up
 ```
 
 ### Cargo Install
 
 ```bash
 # Requires Rust 1.80+
-cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0-alpha.1
+cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0
 swarmllm run
 ```
 

@@ -85,7 +85,7 @@ View logs with `docker compose logs -f`. The API key is printed on first startup
 Requires Rust 1.80+:
 
 ```bash
-cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0-alpha.1
+cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0
 swarmllm run
 ```
 
