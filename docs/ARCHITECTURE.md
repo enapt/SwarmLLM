@@ -110,7 +110,8 @@ The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that route
 7.  Build Daemon { config, identity, db }
 8.  Initialize ModelExecutor (load GGUF model if --model provided)
 9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)
-10. Scan local shards → register in model_registry (with disk existence verification)
+10. Scan local shards → register in model_registry (with disk existence verification).
+    Claims manifest publisher as our node_id + recomputes BLAKE3 hash (allows gossiping copied shards).
 11. Create mpsc channels (network, router, rebalance, acquisition, pool)
 12. Spawn all tasks (10 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
@@ -174,7 +175,14 @@ SwarmLLM uses a 5-layer zero-config discovery stack. Each layer is independent �
 7. PEX fires on each ConnectionEstablished (exchanges peer lists)
 8. Periodic: Kademlia re-bootstrap every 60s, peer cache save every 5min
 9. On shutdown: save peer cache
+10. mDNS race recovery: if simultaneous-dial kills both connections (max_per_peer=1),
+    pending_redial queue schedules re-dial with hash-based jitter (2-5s)
 ```
+
+### Peer Registry Scaling (S3)
+
+peer_registry capped at 200 entries. On overflow, evicts highest-latency non-LAN non-pipeline peer.
+Memory bounded at O(1) instead of O(N). LAN peers and pipeline-active peers are never evicted.
 
 ## Networking Stack
 
@@ -662,6 +670,8 @@ score = model_popularity × rarity_bonus × configured_bonus × vram_fitness
 - **nvidia-smi fallback**: If `gpu_info` is None, falls back to `nvidia-smi` for local VRAM
 - **Budget limits**: max_storage_mb, max_shards_per_cycle (2), skips in-progress acquisitions
 - **mmproj support**: Vision encoder (mmproj.gguf) treated as download candidate with 5x priority bonus; full-file HF download (not byte-range); higher pruning floor (min 3 replicas), only pruned under extreme pressure (>0.95)
+- **Download priority**: HuggingFace CDN first (fast, doesn't burden peers). If no HF source available but peers hold the shard, falls back to P2P `ShardRequest` to a random holder. P2P is single-source per shard (future: multi-source parallel download)
+- **Upload bandwidth cap**: `max_bandwidth_mbps` config enforced on shard serving via proportional delay after chunk reads. Tensor forwards exempt (latency-critical). Default 0 = unlimited
 - **Config**: `[auto_manage]` section — `enabled`, `max_storage_mb`, `interval_minutes`, `max_shards`, `prune_enabled`, `min_replicas`, `prune_cooldown_secs`, `max_holder_load_for_prune`
 
 ### Smart Shard Pruning
