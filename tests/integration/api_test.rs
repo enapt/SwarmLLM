@@ -17,7 +17,7 @@ async fn spawn_test_server() -> (String, String) {
         swarmllm::inference::executor::ModelExecutor::new(),
     ));
 
-    let (shared_state, _shutdown_rx) = swarmllm::daemon::SharedState::new(
+    let (shared_state, _shutdown_rx, _dht_rx) = swarmllm::daemon::SharedState::new(
         config.clone(),
         identity,
         db.clone(),

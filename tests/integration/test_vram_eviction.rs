@@ -22,7 +22,7 @@ async fn spawn_test_server() -> (String, String) {
     let db = Database::open_temp().expect("temp db");
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
 
-    let (shared_state, _shutdown_rx) =
+    let (shared_state, _shutdown_rx, _dht_rx) =
         SharedState::new(config.clone(), identity, db.clone(), executor.clone(), None);
 
     let api_key = shared_state.api_key.clone();

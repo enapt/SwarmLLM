@@ -266,6 +266,11 @@ pub struct SharedState {
     /// Per-(model, region) EMA-decayed request rate from demand gossip.
     /// Updated by ModelDemandGossip dispatch + local popularity decay tick.
     pub region_demand: DashMap<(crate::types::ModelId, String), f64>,
+    /// S5: Channel for requesting DHT shard provider queries.
+    /// Subsystems (scheduler, auto-manage) send ModelId here to trigger
+    /// `kademlia.get_providers()` for all shards of that model. Results
+    /// are merged into `model_registry.shard_holders` automatically.
+    pub dht_query_tx: mpsc::Sender<crate::types::ModelId>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -492,12 +497,20 @@ impl SharedState {
         db: Database,
         executor: SharedExecutor,
         gpu_info: Option<crate::inference::executor::GpuInfo>,
-    ) -> (Arc<Self>, watch::Receiver<bool>) {
+    ) -> (
+        Arc<Self>,
+        watch::Receiver<bool>,
+        mpsc::Receiver<crate::types::ModelId>,
+    ) {
         // Resolve API key: config > persisted in DB > generate new
         let api_key = resolve_api_key(&config, &db);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // S5: DHT shard provider query channel — subsystems send ModelId,
+        // NetworkManager issues kademlia.get_providers() and merges results.
+        let (dht_query_tx, dht_query_rx) = mpsc::channel::<crate::types::ModelId>(64);
 
-        let model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
+        let mut model_registry = ModelRegistry::load_from_db(&db).unwrap_or_default();
+        model_registry.set_local_node_id(identity.node_id().clone());
 
         // Hydrate nickname registry from DB
         let nickname_registry = DashMap::new();
@@ -726,10 +739,11 @@ impl SharedState {
             )),
             region_shard_summaries: DashMap::new(),
             region_demand: DashMap::new(),
+            dht_query_tx,
             shutdown_tx,
         });
 
-        (state, shutdown_rx)
+        (state, shutdown_rx, dht_query_rx)
     }
 
     /// Signal all tasks to shut down.

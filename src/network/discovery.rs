@@ -342,9 +342,92 @@ pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
     }
 }
 
+// ── DHT Provider Records (S5: DHT-based shard holder resolution) ──
+
+/// Generate the Kademlia provider key for a specific shard.
+/// Format: `/swarm/provide/<model_id>/<shard_index>`
+pub fn shard_provider_key(shard_id: &ShardId) -> RecordKey {
+    RecordKey::new(&format!(
+        "/swarm/provide/{}/{}",
+        shard_id.model_id, shard_id.index
+    ))
+}
+
+/// Register this node as a Kademlia provider for the given shards.
+///
+/// Provider records are automatically republished and expired by Kademlia.
+/// This is used alongside GossipSub ShardAnnounce for scalable shard
+/// discovery: gossip for nearby/active peers, DHT providers for cold lookups.
+pub fn start_providing_shards(
+    swarm: &mut Swarm<SwarmBehaviour>,
+    shards: &[ShardId],
+) -> Result<(), SwarmError> {
+    let mut provided = 0;
+    for shard_id in shards {
+        let key = shard_provider_key(shard_id);
+        match swarm.behaviour_mut().kademlia.start_providing(key) {
+            Ok(_query_id) => {
+                provided += 1;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    shard = ?shard_id,
+                    error = %e,
+                    "Failed to start providing shard (no Kademlia peers?)"
+                );
+            }
+        }
+    }
+    if provided > 0 {
+        tracing::info!(
+            count = provided,
+            total = shards.len(),
+            "Registered as DHT provider for shards"
+        );
+    }
+    Ok(())
+}
+
+/// Stop providing specific shards via Kademlia (e.g., after shard deletion).
+pub fn stop_providing_shards(swarm: &mut Swarm<SwarmBehaviour>, shards: &[ShardId]) {
+    for shard_id in shards {
+        let key = shard_provider_key(shard_id);
+        swarm.behaviour_mut().kademlia.stop_providing(&key);
+    }
+    if !shards.is_empty() {
+        tracing::info!(count = shards.len(), "Stopped providing shards via DHT");
+    }
+}
+
+/// Query DHT for providers of a specific shard.
+///
+/// Returns the Kademlia query ID. Results arrive asynchronously via
+/// `KademliaEvent::OutboundQueryProgressed { result: GetProviders(..) }`.
+pub fn query_shard_providers(
+    swarm: &mut Swarm<SwarmBehaviour>,
+    shard_id: &ShardId,
+) -> Result<kad::QueryId, SwarmError> {
+    let key = shard_provider_key(shard_id);
+    Ok(swarm.behaviour_mut().kademlia.get_providers(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_provider_key_format() {
+        let sid = ShardId {
+            model_id: crate::types::ModelId("test-model".into()),
+            index: 3,
+        };
+        let key = shard_provider_key(&sid);
+        // Key should contain model ID and shard index
+        let key_bytes = key.as_ref();
+        let key_str = std::str::from_utf8(key_bytes).unwrap();
+        assert!(key_str.contains("test-model"));
+        assert!(key_str.contains("/3"));
+    }
 
     #[test]
     fn encode_decode_roundtrip() {

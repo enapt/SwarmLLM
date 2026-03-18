@@ -64,7 +64,14 @@ pub fn build_behaviour(
 
     // Kademlia DHT for peer and shard discovery
     let store = MemoryStore::new(local_peer_id);
-    let mut kademlia = kad::Behaviour::new(local_peer_id, store);
+    let mut kad_config = kad::Config::new(StreamProtocol::new("/swarmllm/kad/1.0.0"));
+    // S5: Set provider record TTL to 1 hour (republished automatically).
+    // Provider records track which nodes hold which shards for DHT-based
+    // shard holder resolution at scale (50K+ nodes).
+    kad_config.set_provider_record_ttl(Some(Duration::from_secs(3600)));
+    // Provider publication interval — republish every 20 minutes to keep records fresh.
+    kad_config.set_provider_publication_interval(Some(Duration::from_secs(1200)));
+    let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
     // Use Server mode so nodes accept each other's DHT queries.
     // Client mode rejects inbound queries — when BOTH nodes are Client, rejected
     // substream negotiations flood the connection event channel (capacity 7),

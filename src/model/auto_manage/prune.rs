@@ -324,6 +324,12 @@ impl AutoShardManager {
                 index: candidate.shard_index,
             };
             registry.remove_shard_holder(&shard_id, &local_node_id);
+            // S5: Stop providing this shard via DHT
+            let _ = self
+                .network_tx
+                .try_send(crate::types::NetworkCommand::StopProviding(vec![
+                    shard_id.clone()
+                ]));
 
             // Count remaining local shards for this model
             let remaining_local = registry

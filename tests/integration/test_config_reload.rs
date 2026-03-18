@@ -93,7 +93,7 @@ async fn test_config_reload_notifies_subscribers() {
     let db = Database::open_temp().unwrap();
     let executor = Arc::new(Mutex::new(ModelExecutor::new()));
 
-    let (shared_state, _shutdown_rx) =
+    let (shared_state, _shutdown_rx, _dht_rx) =
         SharedState::new(config.clone(), identity, db, executor, None);
 
     // Subscribe to config changes

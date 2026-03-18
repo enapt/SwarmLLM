@@ -488,6 +488,11 @@ impl AutoShardManager {
 
                         // Now that the shard is on disk, announce it to the network
                         // so peers register us as a holder.
+                        // S5: Register as DHT provider for the new shard
+                        let _ =
+                            net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![
+                                sid.clone(),
+                            ]));
                         let announce = crate::types::SwarmMessage::ShardAnnounce(
                             crate::types::ShardAnnounce {
                                 node_id,
@@ -686,10 +691,13 @@ impl AutoShardManager {
                     let announce =
                         crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
                             node_id,
-                            shards: vec![sid],
+                            shards: vec![sid.clone()],
                             timestamp: chrono::Utc::now(),
                         });
                     let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
+                    // S5: Register as DHT provider
+                    let _ =
+                        net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![sid]));
 
                     // Notify dashboard
                     let _ = shared.models_changed_tx.send(());

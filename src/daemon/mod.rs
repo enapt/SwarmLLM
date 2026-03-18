@@ -198,7 +198,7 @@ impl Daemon {
         let executor = Arc::new(tokio::sync::Mutex::new(executor));
 
         // Create shared state
-        let (shared_state, mut shutdown_rx) = SharedState::new(
+        let (shared_state, mut shutdown_rx, dht_query_rx) = SharedState::new(
             self.config.clone(),
             self.identity.clone(),
             self.db.clone(),
@@ -782,6 +782,7 @@ impl Daemon {
             network_out_tx,
             shutdown_rx.clone(),
             Some(acquisition_tx.clone()),
+            dht_query_rx,
         )?;
 
         subsystems.spawn(async move {
@@ -1008,6 +1009,11 @@ impl Daemon {
                 }
 
                 if !hosted_shards.is_empty() {
+                    // S5: Register as DHT provider for local shards
+                    let _ = announce_tx
+                        .send(NetworkCommand::StartProviding(hosted_shards.clone()))
+                        .await;
+
                     let announce = crate::types::ShardAnnounce {
                         node_id: node_id.clone(),
                         shards: hosted_shards,

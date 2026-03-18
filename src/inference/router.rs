@@ -1357,6 +1357,11 @@ async fn execute_request(
         }
     }
 
+    // S5: Fire-and-forget DHT provider query to pre-warm the shard holder cache.
+    // Results arrive asynchronously and are merged into model_registry by NetworkManager.
+    // First request for a model may miss the cache, but subsequent ones benefit.
+    let _ = shared_state.dht_query_tx.try_send(model_id.clone());
+
     let schedule_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request.id,
@@ -1699,7 +1704,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (net_tx, _net_rx) = mpsc::channel(64);
@@ -1749,7 +1754,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
 
         let (_cmd_tx, cmd_rx) = mpsc::channel(64);
         let (net_tx, _net_rx) = mpsc::channel(64);
@@ -1789,7 +1794,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
 
         let (_cmd_tx, cmd_rx) = mpsc::channel(64);
         let (net_tx, _net_rx) = mpsc::channel(64);
@@ -1828,7 +1833,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::open(temp.path()).unwrap();
         let executor = Arc::new(Mutex::new(ModelExecutor::new()));
-        let (shared_state, _) = SharedState::new(config, identity, db, executor, None);
+        let (shared_state, _, _) = SharedState::new(config, identity, db, executor, None);
 
         let (_cmd_tx, cmd_rx) = mpsc::channel(64);
         let (net_tx, _net_rx) = mpsc::channel(64);

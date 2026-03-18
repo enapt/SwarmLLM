@@ -101,10 +101,15 @@ pub struct NetworkManager {
     /// Peers to re-dial after a short delay (e.g., mDNS simultaneous-dial race).
     /// Stores (peer_id, address, scheduled_time). Checked every second in the event loop.
     pending_redial: Vec<(libp2p::PeerId, Multiaddr, std::time::Instant)>,
+    /// S5: Receives model IDs for DHT provider queries from scheduler/auto-manage.
+    dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
+    /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
+    pending_provider_queries: HashMap<libp2p::kad::QueryId, crate::types::ShardId>,
 }
 
 impl NetworkManager {
     /// Create a new NetworkManager and initialize the libp2p Swarm.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared_state: Arc<SharedState>,
         identity: &Identity,
@@ -113,6 +118,7 @@ impl NetworkManager {
         outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
         shutdown_rx: watch::Receiver<bool>,
         acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
+        dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     ) -> Result<Self, SwarmError> {
         let keypair = transport::ed25519_to_libp2p_keypair(identity.signing_key_bytes())?;
         let peer_id = keypair.public().to_peer_id();
@@ -206,6 +212,8 @@ impl NetworkManager {
             ping_sent_times: HashMap::new(),
             shutdown_rx,
             pending_redial: Vec::new(),
+            dht_query_rx,
+            pending_provider_queries: HashMap::new(),
         })
     }
 
@@ -511,6 +519,10 @@ impl NetworkManager {
                             self.pending_redial.truncate(50);
                         }
                     }
+                }
+                // S5: DHT provider queries from scheduler/auto-manage
+                Some(model_id) = self.dht_query_rx.recv() => {
+                    self.handle_dht_provider_query(&model_id);
                 }
                 // Outbound commands from other daemon tasks
                 cmd = self.inbound_rx.recv() => {
@@ -1073,7 +1085,7 @@ impl NetworkManager {
 
             // ── Kademlia ──
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
-                libp2p::kad::Event::OutboundQueryProgressed { result, .. },
+                libp2p::kad::Event::OutboundQueryProgressed { id, result, .. },
             )) => {
                 use libp2p::kad::QueryResult;
                 match result {
@@ -1097,6 +1109,19 @@ impl NetworkManager {
                                 );
                             }
                         }
+                    }
+                    // S5: DHT provider query results — merge discovered holders
+                    // into the bounded shard_holders cache.
+                    QueryResult::GetProviders(Ok(
+                        libp2p::kad::GetProvidersOk::FoundProviders { providers, .. },
+                    )) => {
+                        self.handle_dht_providers_found(id, &providers);
+                    }
+                    QueryResult::GetProviders(Ok(
+                        libp2p::kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. },
+                    )) => {
+                        // Query finished — clean up tracking
+                        self.pending_provider_queries.remove(&id);
                     }
                     _ => {
                         tracing::debug!(?result, "Kademlia query progressed");
@@ -1789,6 +1814,8 @@ impl NetworkManager {
             NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
             NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
             NetworkCommand::DialAddress(_) => "DialAddress",
+            NetworkCommand::StartProviding(_) => "StartProviding",
+            NetworkCommand::StopProviding(_) => "StopProviding",
         };
         tracing::debug!(cmd = cmd_name, "DIAG: handling outbound command");
         match cmd {
@@ -1880,6 +1907,12 @@ impl NetworkManager {
                         tracing::warn!(addr = %addr_str, error = %e, "Invalid multiaddr in DialAddress");
                     }
                 }
+            }
+            NetworkCommand::StartProviding(shards) => {
+                let _ = crate::network::discovery::start_providing_shards(&mut self.swarm, &shards);
+            }
+            NetworkCommand::StopProviding(shards) => {
+                crate::network::discovery::stop_providing_shards(&mut self.swarm, &shards);
             }
         }
     }
@@ -2628,6 +2661,96 @@ impl NetworkManager {
         }
         if dialed > 0 {
             tracing::info!(count = dialed, "PEX: dialed new peers");
+        }
+    }
+
+    // ── S5: DHT-based shard holder resolution ──
+
+    /// Issue DHT provider queries for all shards of a model.
+    /// Results arrive asynchronously via GetProviders events and are merged
+    /// into the model_registry's bounded shard_holders cache.
+    fn handle_dht_provider_query(&mut self, model_id: &crate::types::ModelId) {
+        let manifest = match self.shared_state.model_registry.get_manifest(model_id) {
+            Some(m) => m,
+            None => {
+                tracing::debug!(model = %model_id, "DHT query skipped — manifest not found");
+                return;
+            }
+        };
+
+        let mut queried = 0;
+        for shard_info in &manifest.shards {
+            let shard_id = crate::types::ShardId {
+                model_id: model_id.clone(),
+                index: shard_info.index,
+            };
+            match crate::network::discovery::query_shard_providers(&mut self.swarm, &shard_id) {
+                Ok(query_id) => {
+                    self.pending_provider_queries.insert(query_id, shard_id);
+                    queried += 1;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "DHT provider query failed");
+                }
+            }
+        }
+
+        if queried > 0 {
+            tracing::info!(
+                model = %model_id,
+                shards_queried = queried,
+                "Issued DHT provider queries for shard holders"
+            );
+        }
+
+        // Cap pending queries to prevent unbounded growth
+        if self.pending_provider_queries.len() > 500 {
+            // Drain oldest entries (HashMap iteration order is arbitrary, which is fine)
+            let excess = self.pending_provider_queries.len() - 500;
+            let keys: Vec<_> = self
+                .pending_provider_queries
+                .keys()
+                .take(excess)
+                .cloned()
+                .collect();
+            for k in keys {
+                self.pending_provider_queries.remove(&k);
+            }
+        }
+    }
+
+    /// Handle DHT provider results — convert PeerIds to NodeIds and merge
+    /// into the model_registry's bounded shard_holders cache.
+    fn handle_dht_providers_found(
+        &mut self,
+        query_id: libp2p::kad::QueryId,
+        providers: &std::collections::HashSet<libp2p::PeerId>,
+    ) {
+        let shard_id = match self.pending_provider_queries.get(&query_id) {
+            Some(sid) => sid.clone(),
+            None => return, // Unknown query, ignore
+        };
+
+        let mut resolved = Vec::new();
+        for peer_id in providers {
+            // Try local reverse map first (fast)
+            if let Some(node_id) = self.peer_to_node_id(peer_id) {
+                resolved.push(node_id);
+            } else if let Some(node_id) = crate::network::transport::peer_id_to_node_id(peer_id) {
+                // Derive from PeerId directly (works for Ed25519 identity-hashed PeerIds)
+                resolved.push(node_id);
+            }
+        }
+
+        if !resolved.is_empty() {
+            tracing::debug!(
+                shard = ?shard_id,
+                providers = resolved.len(),
+                "Merging DHT providers into shard holders cache"
+            );
+            self.shared_state
+                .model_registry
+                .merge_dht_providers(&shard_id, &resolved);
         }
     }
 }

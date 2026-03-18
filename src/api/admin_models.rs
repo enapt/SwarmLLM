@@ -791,9 +791,24 @@ pub async fn delete_model(
     // Remove HF source from DB
     let _ = shared.db.remove("hf_sources", &model_id);
 
+    // S5: Collect local shards before removal for DHT stop_providing
+    let local_shards: Vec<_> = shared
+        .model_registry
+        .shards_for_node(&node_id)
+        .into_iter()
+        .filter(|s| s.model_id == mid)
+        .collect();
+
     // Remove from SharedState registries
     shared.model_registry.remove_manifest(&mid);
     shared.model_registry.remove_all_model_shards(&mid);
+
+    // S5: Stop providing deleted shards via DHT
+    if !local_shards.is_empty() {
+        if let Some(ref ntx) = state.network_tx {
+            let _ = ntx.try_send(crate::types::NetworkCommand::StopProviding(local_shards));
+        }
+    }
 
     // Remove from acquisition_progress
     shared.acquisition_progress.remove(&mid);
@@ -925,6 +940,12 @@ pub async fn delete_shard(
     shared
         .model_registry
         .remove_shard_holder(&shard_id, &local_node_id);
+    // S5: Stop providing this shard via DHT
+    if let Some(ref ntx) = state.network_tx {
+        let _ = ntx.try_send(crate::types::NetworkCommand::StopProviding(vec![
+            shard_id.clone()
+        ]));
+    }
 
     // Evict any cached split model segments that included this shard
     shared.split_models.retain(|key, _| key.0 != mid);

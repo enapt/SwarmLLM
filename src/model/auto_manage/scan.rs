@@ -141,6 +141,10 @@ pub async fn rescan_local_shards(
                 }
             }
             if !hosted_shards.is_empty() {
+                // S5: Register as DHT provider for rescanned shards
+                let _ = tx
+                    .send(NetworkCommand::StartProviding(hosted_shards.clone()))
+                    .await;
                 let announce = crate::types::ShardAnnounce {
                     node_id: local_node_id,
                     shards: hosted_shards,

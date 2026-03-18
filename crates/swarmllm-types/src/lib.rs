@@ -1114,6 +1114,12 @@ pub enum NetworkCommand {
     },
     /// Dial a multiaddr to connect to a new peer.
     DialAddress(String),
+    /// S5: Register as a Kademlia provider for the given shards.
+    /// Called on shard acquisition (download complete, startup scan).
+    StartProviding(Vec<ShardId>),
+    /// S5: Stop providing the given shards via Kademlia.
+    /// Called on shard deletion.
+    StopProviding(Vec<ShardId>),
 }
 
 // ---- Rebalancing ----
