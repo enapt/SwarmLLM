@@ -1,0 +1,621 @@
+use std::time::Duration;
+
+use chrono::Timelike;
+
+use crate::types::{ModelId, NodeId, ShardId};
+
+use super::manager::{AutoShardManager, PruneCandidate};
+use super::vram::query_gpu_vram_used;
+
+impl AutoShardManager {
+    /// Evaluate and prune over-replicated shards. Called after downloads in each cycle.
+    pub(super) async fn evaluate_and_prune(&self) {
+        let config = &self.shared_state.config.auto_manage;
+        if !config.prune_enabled {
+            return;
+        }
+
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let registry = &self.shared_state.model_registry;
+        let shard_store =
+            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+
+        // Compute resource pressure
+        let resource_pressure = self.compute_resource_pressure();
+        let pressure_urgent = resource_pressure > 0.95;
+        tracing::info!(
+            resource_pressure = format!("{:.2}", resource_pressure),
+            pressure_urgent,
+            "DIAG: evaluate_and_prune starting"
+        );
+
+        // Check if we're in reduced hours
+        let schedule_pressure = self.schedule_pressure_bonus().await;
+
+        let pool_size = self.shared_state.peer_registry.len() + 1; // +1 for us
+
+        // Track how many shards pruned per model in this cycle
+        let mut pruned_per_model: std::collections::HashMap<ModelId, u32> =
+            std::collections::HashMap::new();
+
+        // Collect prune candidates across all models
+        let mut prune_candidates: Vec<PruneCandidate> = Vec::new();
+
+        for manifest in registry.models() {
+            // Check per-model prune policy
+            if let Some(policy) = self
+                .shared_state
+                .model_auto_manage_policies
+                .get(&manifest.id)
+            {
+                if !policy.prune_enabled {
+                    continue;
+                }
+            }
+
+            // Check cooldown
+            if let Some(last_prune) = self.last_prune_time(&manifest.id) {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(last_prune)
+                    .num_seconds()
+                    .max(0) as u64;
+                if elapsed < config.prune_cooldown_secs {
+                    continue;
+                }
+            }
+
+            // Compute target replicas for this model (unified with download path)
+            let target = self.geo_target_replicas(&manifest.id, config.min_replicas, pool_size);
+
+            // Adjust target for resource pressure
+            let adjusted_target =
+                self.pressure_adjusted_target(target, resource_pressure, config.min_replicas);
+
+            for shard in &manifest.shards {
+                let shard_id = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: shard.index,
+                };
+
+                // Only consider shards we hold locally
+                let holders = registry.shard_holders(&shard_id);
+                if !holders.contains(&local_node_id) {
+                    continue;
+                }
+
+                // Skip locked/pinned shards
+                if self.shared_state.locked_shards.contains_key(&shard_id) {
+                    continue;
+                }
+
+                // Skip shards for models with encrypted pipeline enabled.
+                // E2E encryption requires local first/last segments -- pruning
+                // any shard of an encrypted model would break the guarantee.
+                if self
+                    .shared_state
+                    .encrypted_pipeline_models
+                    .get(&manifest.id)
+                    .map(|v| *v)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                // Skip shards for models the user explicitly pinned/trusted
+                if self
+                    .shared_state
+                    .model_trust
+                    .get(&manifest.id)
+                    .map(|t| t.pinned_by_user)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                // Skip if in configured --shards range
+                if let Some((start, end)) = self.shared_state.config.inference.shard_range {
+                    if shard.index >= start && shard.index <= end {
+                        continue;
+                    }
+                }
+
+                let holder_count = holders.len();
+
+                // Skip if at or below target
+                if holder_count <= adjusted_target as usize {
+                    continue;
+                }
+
+                // Region-aware: block if we'd eliminate last holder in our region
+                if self.would_eliminate_region(&shard_id, &local_node_id, &holders) {
+                    continue;
+                }
+
+                // Load-aware: block if remaining holders are busy
+                if self.remaining_holders_busy(
+                    &holders,
+                    &local_node_id,
+                    config.max_holder_load_for_prune,
+                ) {
+                    continue;
+                }
+
+                // Skip if model actively loaded and used recently (unless pressure-urgent)
+                if !pressure_urgent && self.shard_recently_used(&manifest.id) {
+                    continue;
+                }
+
+                // Re-acquisition check: can we get it back?
+                if !self.can_reacquire(&manifest.id, &shard_id, &holders, &local_node_id) {
+                    continue;
+                }
+
+                // Compute prune score (higher = more prunable)
+                let redundancy_ratio = holder_count as f64 / adjusted_target.max(1) as f64;
+                let mut score = redundancy_ratio;
+
+                // Cold shard bonus (not loaded in VRAM)
+                let is_loaded = self
+                    .shared_state
+                    .split_models
+                    .iter()
+                    .any(|entry| entry.key().0 == manifest.id);
+                if !is_loaded {
+                    score += 1.0;
+                }
+
+                // Resource pressure bonus
+                score += 0.5 * (resource_pressure + schedule_pressure);
+
+                // Pipeline completeness penalty
+                if shard.index == 0 || shard.index == manifest.shard_count.saturating_sub(1) {
+                    score -= 0.5;
+                }
+
+                // Rarest shard penalty
+                let min_holders = manifest
+                    .shards
+                    .iter()
+                    .map(|s| {
+                        let sid = ShardId {
+                            model_id: manifest.id.clone(),
+                            index: s.index,
+                        };
+                        registry.shard_holders(&sid).len()
+                    })
+                    .min()
+                    .unwrap_or(0);
+                if holder_count == min_holders {
+                    score -= 0.3;
+                }
+
+                // Recently acquired penalty (< 30 min)
+                // Use file modified time as proxy
+                let shard_path = shard_store.shard_path(&manifest.id, shard.index);
+                if let Ok(meta) = std::fs::metadata(&shard_path) {
+                    if let Ok(modified) = meta.modified() {
+                        let age = modified.elapsed().unwrap_or_default();
+                        if age < Duration::from_secs(1800) {
+                            score -= 0.2;
+                        }
+                    }
+                }
+
+                // Regional demand penalty: protect shards for models with active
+                // demand in our region. Higher demand -> harder to prune.
+                {
+                    let our_region = self.our_region().unwrap_or_default();
+                    if !our_region.is_empty() {
+                        let demand_key = (manifest.id.clone(), our_region);
+                        let ema_rate = self
+                            .shared_state
+                            .region_demand
+                            .get(&demand_key)
+                            .map(|v| *v)
+                            .unwrap_or(0.0);
+                        if ema_rate > 10.0 {
+                            score -= 1.0; // High demand -- strongly resist pruning
+                        } else if ema_rate > 1.0 {
+                            score -= 0.5; // Moderate demand
+                        } else if ema_rate > 0.1 {
+                            score -= 0.2; // Low but non-zero demand
+                        }
+                    }
+                }
+
+                prune_candidates.push(PruneCandidate {
+                    model_id: manifest.id.clone(),
+                    model_name: manifest.name.clone(),
+                    shard_index: shard.index,
+                    shard_size_bytes: shard.size_bytes,
+                    holder_count,
+                    target_replicas: adjusted_target,
+                    score,
+                });
+            }
+
+            // -- T9: mmproj pruning with higher min_replicas floor --
+            // mmproj needs wider availability for VLM requests, so use a higher floor.
+            if manifest.mmproj.is_some() {
+                let mmproj_shard_id = ShardId {
+                    model_id: manifest.id.clone(),
+                    index: crate::types::MMPROJ_SHARD_INDEX,
+                };
+                let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
+                if mmproj_holders.contains(&local_node_id) {
+                    let mmproj_path = self
+                        .shared_state
+                        .config
+                        .node
+                        .data_dir
+                        .join("models")
+                        .join(crate::model::shard::sanitize_path_component(&manifest.id.0))
+                        .join("mmproj.gguf");
+                    if mmproj_path.exists() {
+                        // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
+                        let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
+                        let mmproj_holder_count = mmproj_holders.len();
+                        if mmproj_holder_count > mmproj_min as usize && pressure_urgent {
+                            let mmproj_size =
+                                manifest.mmproj.as_ref().map(|m| m.size_bytes).unwrap_or(0);
+                            prune_candidates.push(PruneCandidate {
+                                model_id: manifest.id.clone(),
+                                model_name: manifest.name.clone(),
+                                shard_index: crate::types::MMPROJ_SHARD_INDEX,
+                                shard_size_bytes: mmproj_size,
+                                holder_count: mmproj_holder_count,
+                                target_replicas: mmproj_min,
+                                score: 0.1, // Very low score -- only prune under extreme pressure
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by score descending (most prunable first)
+        prune_candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Execute pruning with per-model limits
+        let max_per_model = if pressure_urgent { 2u32 } else { 1u32 };
+
+        for candidate in &prune_candidates {
+            let count = pruned_per_model
+                .get(&candidate.model_id)
+                .copied()
+                .unwrap_or(0);
+            if count >= max_per_model {
+                continue;
+            }
+
+            // Actually delete the shard file (or mmproj.gguf for sentinel)
+            let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
+                self.shared_state
+                    .config
+                    .node
+                    .data_dir
+                    .join("models")
+                    .join(crate::model::shard::sanitize_path_component(
+                        &candidate.model_id.0,
+                    ))
+                    .join("mmproj.gguf")
+            } else {
+                shard_store.shard_path(&candidate.model_id, candidate.shard_index)
+            };
+            if shard_path.exists() {
+                if let Err(e) = std::fs::remove_file(&shard_path) {
+                    tracing::warn!(
+                        model = %candidate.model_id,
+                        shard = candidate.shard_index,
+                        error = %e,
+                        "Failed to delete shard file during pruning"
+                    );
+                    continue;
+                }
+            }
+
+            // Unregister from shard registry
+            let shard_id = ShardId {
+                model_id: candidate.model_id.clone(),
+                index: candidate.shard_index,
+            };
+            registry.remove_shard_holder(&shard_id, &local_node_id);
+
+            // Count remaining local shards for this model
+            let remaining_local = registry
+                .models()
+                .iter()
+                .find(|m| m.id == candidate.model_id)
+                .map(|m| {
+                    m.shards
+                        .iter()
+                        .filter(|s| {
+                            let sid = ShardId {
+                                model_id: m.id.clone(),
+                                index: s.index,
+                            };
+                            registry.shard_holders(&sid).contains(&local_node_id)
+                        })
+                        .count() as u32
+                })
+                .unwrap_or(0);
+
+            let event = crate::types::PruneEvent {
+                model_id: candidate.model_id.clone(),
+                model_name: candidate.model_name.clone(),
+                shard_index: candidate.shard_index,
+                reason: format!(
+                    "Over-replicated ({} holders, target {})",
+                    candidate.holder_count, candidate.target_replicas
+                ),
+                freed_bytes: candidate.shard_size_bytes,
+                remaining_local_shards: remaining_local,
+                holder_count_before: candidate.holder_count,
+                holder_count_after: candidate.holder_count.saturating_sub(1),
+                timestamp: chrono::Utc::now(),
+            };
+
+            tracing::info!(
+                model = %candidate.model_id,
+                shard = candidate.shard_index,
+                holders = candidate.holder_count,
+                target = candidate.target_replicas,
+                freed_mb = candidate.shard_size_bytes / (1024 * 1024),
+                "Pruning over-replicated shard"
+            );
+
+            // Emit prune event
+            let _ = self.shared_state.prune_events_tx.send(event.clone());
+            let _ = self.shared_state.models_changed_tx.send(());
+
+            // Add to history
+            {
+                let mut history = self.shared_state.prune_history.write().await;
+                if history.len() >= 100 {
+                    history.pop_front();
+                }
+                history.push_back(event);
+            }
+
+            *pruned_per_model
+                .entry(candidate.model_id.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Adjust target based on resource pressure.
+    pub(super) fn pressure_adjusted_target(
+        &self,
+        target: u32,
+        pressure: f64,
+        min_replicas: u32,
+    ) -> u32 {
+        if pressure < 0.5 {
+            // Relaxed: keep extras
+            target.saturating_add(1)
+        } else if pressure < 0.8 {
+            target
+        } else if pressure < 0.95 {
+            // Eager
+            target.saturating_sub(1).max(min_replicas)
+        } else {
+            // Urgent
+            target.saturating_sub(2).max(min_replicas)
+        }
+    }
+
+    /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
+    fn compute_resource_pressure(&self) -> f64 {
+        let config = &self.shared_state.config;
+        let local_node_id = self.shared_state.identity.node_id().clone();
+
+        // Disk pressure
+        let budget_mb = if config.auto_manage.max_storage_mb > 0 {
+            config.auto_manage.max_storage_mb
+        } else {
+            config.resources.max_disk_mb / 2
+        };
+        // Use reverse index for O(local_shards) instead of O(all_shards)
+        let mut local_bytes = 0u64;
+        let local_shards = self
+            .shared_state
+            .model_registry
+            .shards_for_node(&local_node_id);
+        for sid in &local_shards {
+            if let Some(manifest) = self.shared_state.model_registry.get_manifest(&sid.model_id) {
+                if let Some(shard_info) = manifest.shards.iter().find(|s| s.index == sid.index) {
+                    local_bytes += shard_info.size_bytes;
+                }
+            }
+        }
+        let disk_pressure = if budget_mb > 0 {
+            local_bytes as f64 / (budget_mb as f64 * 1024.0 * 1024.0)
+        } else {
+            0.0
+        };
+
+        // VRAM pressure -- prefer live nvidia-smi data over internal model tracking
+        let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
+            if gpu.vram_total_mb > 0 {
+                let used_mb = query_gpu_vram_used().unwrap_or_else(|| {
+                    // Fallback: sum estimated VRAM of loaded models
+                    self.shared_state
+                        .split_models
+                        .iter()
+                        .map(|e| e.value().estimated_vram_mb)
+                        .sum()
+                });
+                used_mb as f64 / gpu.vram_total_mb as f64
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        disk_pressure.max(vram_pressure).min(1.0)
+    }
+
+    /// Compute schedule-based pressure bonus during reduced hours.
+    async fn schedule_pressure_bonus(&self) -> f64 {
+        let schedule = self.shared_state.resource_schedule.read().await;
+        if !schedule.enabled {
+            return 0.0;
+        }
+
+        let now_hour = chrono::Utc::now().hour();
+        let in_reduced = if schedule.reduced_hours_start <= schedule.reduced_hours_end {
+            now_hour >= schedule.reduced_hours_start && now_hour < schedule.reduced_hours_end
+        } else {
+            // Wraps midnight (e.g., 22-8)
+            now_hour >= schedule.reduced_hours_start || now_hour < schedule.reduced_hours_end
+        };
+
+        if !in_reduced {
+            return 0.0;
+        }
+
+        match schedule.prune_aggressiveness.as_str() {
+            "aggressive" => 0.3,
+            "normal" => 0.15,
+            _ => 0.0, // "conservative"
+        }
+    }
+
+    /// Check if removing us as holder would eliminate the last holder in our region.
+    fn would_eliminate_region(
+        &self,
+        _shard_id: &ShardId,
+        local_node_id: &NodeId,
+        holders: &[NodeId],
+    ) -> bool {
+        let our_region = self.our_region().unwrap_or_default();
+
+        if our_region.is_empty() {
+            // No region data -- fallback: ensure at least 2 holders with low latency
+            let low_latency_remaining = holders
+                .iter()
+                .filter(|h| {
+                    *h != local_node_id
+                        && self
+                            .shared_state
+                            .peer_registry
+                            .get(*h)
+                            .map(|p| p.latency_ms.unwrap_or(9999) < 200)
+                            .unwrap_or(false)
+                })
+                .count();
+            return low_latency_remaining < 2;
+        }
+
+        // Count remaining holders in our region (excluding us)
+        let same_region_remaining = holders
+            .iter()
+            .filter(|h| {
+                if *h == local_node_id {
+                    return false;
+                }
+                if let Some(peer) = self.shared_state.peer_registry.get(*h) {
+                    peer.capability
+                        .as_ref()
+                        .and_then(|c| c.region.as_deref())
+                        .map(|r| r.eq_ignore_ascii_case(&our_region))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            })
+            .count();
+
+        same_region_remaining == 0
+    }
+
+    /// Check if remaining holders (excluding us) are too busy.
+    fn remaining_holders_busy(
+        &self,
+        holders: &[NodeId],
+        local_node_id: &NodeId,
+        max_load: u32,
+    ) -> bool {
+        let remaining: Vec<u32> = holders
+            .iter()
+            .filter_map(|h| {
+                if h == local_node_id {
+                    return None;
+                }
+                self.shared_state
+                    .peer_registry
+                    .get(h)
+                    .map(|p| p.active_request_count)
+            })
+            .collect();
+
+        if remaining.is_empty() {
+            return true; // No peers to offload to
+        }
+
+        let avg_load = remaining.iter().sum::<u32>() as f64 / remaining.len() as f64;
+        avg_load > max_load as f64
+    }
+
+    /// Check if this model's shards were used recently (last 5 min).
+    fn shard_recently_used(&self, model_id: &ModelId) -> bool {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.shared_state.split_models.iter().any(|entry| {
+            if entry.key().0 != *model_id {
+                return false;
+            }
+            let last = entry.value().last_used_secs();
+            now_secs.saturating_sub(last) < 300
+        })
+    }
+
+    /// Check if we can re-acquire this shard if needed later.
+    fn can_reacquire(
+        &self,
+        model_id: &ModelId,
+        _shard_id: &ShardId,
+        holders: &[NodeId],
+        local_node_id: &NodeId,
+    ) -> bool {
+        // Check HF source
+        if self.shared_state.hf_sources.contains_key(model_id) {
+            return true;
+        }
+
+        // Check if healthy peers hold it (excluding us)
+        let peer_holders = holders.iter().any(|h| {
+            h != local_node_id
+                && self
+                    .shared_state
+                    .peer_registry
+                    .get(h)
+                    .map(|p| p.latency_ms.unwrap_or(9999) < 5000)
+                    .unwrap_or(false)
+        });
+        peer_holders
+    }
+
+    /// Get last prune time for a model from prune history.
+    fn last_prune_time(&self, model_id: &ModelId) -> Option<chrono::DateTime<chrono::Utc>> {
+        // Check prune history (we need a sync read, so try_read)
+        if let Ok(history) = self.shared_state.prune_history.try_read() {
+            history.iter().rev().find_map(|e| {
+                if e.model_id == *model_id {
+                    Some(e.timestamp)
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
+    }
+}
