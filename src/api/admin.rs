@@ -697,7 +697,8 @@ pub async fn join_network(
             "Invite code too long (max 4096 chars)".into(),
         )));
     }
-    let addr_str = crate::network::discovery::decode_network_code(&body.code).map_err(ApiError)?;
+    let addr_str = crate::network::discovery::decode_network_code(&body.code)
+        .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;
 
     // Validate the multiaddr
     let _addr: libp2p::Multiaddr = addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
