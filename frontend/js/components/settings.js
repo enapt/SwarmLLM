@@ -366,8 +366,10 @@
   // ========================================================================
   App.setup = {
     currentStep: 1,
+    totalSteps: 3,
     hwData: null,
     _savedProvider: null,
+    _joinedPeer: false,
 
     init: function() {
       if (localStorage.getItem(App.SETUP_DONE_KEY) === 'true') return;
@@ -385,6 +387,12 @@
         document.getElementById('contribution-label').textContent = levels[val];
         document.getElementById('contribution-desc').textContent = descs[val];
       });
+
+      // Invite code join button
+      var joinBtn = document.getElementById('setup-invite-join');
+      if (joinBtn) {
+        joinBtn.addEventListener('click', function() { App.setup.joinInvite(); });
+      }
     },
 
     detectHardware: async function() {
@@ -392,10 +400,25 @@
         var resp = await fetch('/api/admin/stats');
         var data = await resp.json();
         App.setup.hwData = data.hardware || {};
-        document.getElementById('hw-gpu').textContent = App.setup.hwData.gpu_name || 'No GPU (CPU mode)';
-        document.getElementById('hw-vram').textContent = App.setup.hwData.gpu_vram_mb ? U.formatMB(App.setup.hwData.gpu_vram_mb) : 'N/A';
-        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0);
-        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0);
+        var gpuName = App.setup.hwData.gpu_name || 'No GPU (CPU mode)';
+        var vramMb = App.setup.hwData.gpu_vram_mb || 0;
+        document.getElementById('hw-gpu').textContent = gpuName;
+        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' VRAM' : '';
+        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' RAM';
+        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' disk';
+        // Hardware-aware model recommendation
+        var rec = document.getElementById('hw-recommendation');
+        if (rec) {
+          if (vramMb >= 8000) {
+            rec.textContent = 'Your GPU can run 7B models locally (Qwen 7B, Phi-3.5, Gemma 2B)';
+          } else if (vramMb >= 4000) {
+            rec.textContent = 'Your GPU can run smaller models locally (TinyLlama, Gemma 2B)';
+          } else if (vramMb > 0) {
+            rec.textContent = 'Limited VRAM — best with CPU inference or cloud providers';
+          } else {
+            rec.textContent = 'No GPU detected — CPU inference works, or add a cloud provider for speed';
+          }
+        }
       } catch (e) {
         document.getElementById('hw-gpu').textContent = 'Detection failed';
         App.setup.hwData = {};
@@ -404,15 +427,41 @@
       document.getElementById('hw-results').classList.remove('hidden');
     },
 
+    joinInvite: async function() {
+      var code = (document.getElementById('setup-invite-code').value || '').trim();
+      var status = document.getElementById('setup-invite-status');
+      if (!code) { status.textContent = 'Paste an invite code first'; status.style.color = 'var(--text-muted)'; return; }
+      status.textContent = 'Connecting...'; status.style.color = 'var(--text-muted)';
+      try {
+        var resp = await App.authFetch('/api/admin/join-network', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code }),
+        });
+        var result = await resp.json();
+        if (resp.ok) {
+          status.textContent = 'Connected! Peer added.';
+          status.style.color = 'var(--green)';
+          App.setup._joinedPeer = true;
+          document.getElementById('setup-invite-code').value = '';
+        } else {
+          status.textContent = result.error ? result.error.message : 'Failed to connect';
+          status.style.color = 'var(--red)';
+        }
+      } catch (e) {
+        status.textContent = 'Connection error: ' + (e.message || 'network error');
+        status.style.color = 'var(--red)';
+      }
+    },
+
     nextStep: function() {
-      if (App.setup.currentStep === 4) {
+      if (App.setup.currentStep === App.setup.totalSteps) {
         App.setup.submit();
         return;
       }
       App.setup.currentStep++;
       App.setup.updateUI();
-      if (App.setup.currentStep === 3) App.setup.loadModelSelection();
-      if (App.setup.currentStep === 4) App.setup.populateSummary();
+      if (App.setup.currentStep === App.setup.totalSteps) App.setup.populateSummary();
     },
 
     prevStep: function() {
@@ -423,7 +472,7 @@
     },
 
     updateUI: function() {
-      for (var i = 1; i <= 4; i++) {
+      for (var i = 1; i <= App.setup.totalSteps; i++) {
         var body = document.getElementById('step-' + i);
         var indicator = document.querySelector('[data-step="' + i + '"]');
         if (i === App.setup.currentStep) {
@@ -445,48 +494,7 @@
       var connectors = document.querySelectorAll('.wizard-connector');
       connectors.forEach(function(c, idx) { c.classList.toggle('done', idx + 1 < App.setup.currentStep); });
       document.getElementById('btn-prev').classList.toggle('hidden', App.setup.currentStep === 1);
-      document.getElementById('btn-next').textContent = App.setup.currentStep === 4 ? 'Start SwarmLLM' : 'Continue';
-    },
-
-    loadModelSelection: async function() {
-      var list = document.getElementById('setup-model-list');
-      list.innerHTML = '<p class="text-muted">Loading available models...</p>';
-      try {
-        var resp = await fetch('/api/admin/models');
-        var models = await resp.json();
-        if (!models || models.length === 0) {
-          list.innerHTML = '<div class="empty-state" style="padding:20px 0">' +
-            '<p style="margin-bottom:8px">No models on this node yet.</p>' +
-            '<p class="text-muted" style="font-size:0.85rem"><strong>Three ways to get started:</strong><br>' +
-            '1. Download models from HuggingFace using <strong>Browse Models</strong> on the dashboard<br>' +
-            '2. Connect with others using Network Code to share AI models<br>' +
-            '3. Add a cloud provider API key for instant access</p>' +
-            '<button class="btn btn-sm" id="setup-add-provider-btn" style="margin-top:10px;font-size:0.8rem">Add Cloud Provider Key (optional)</button>' +
-            '</div>';
-          var provBtn = document.getElementById('setup-add-provider-btn');
-          if (provBtn) provBtn.onclick = function() {
-            document.getElementById('setup-modal').style.display = 'none';
-            App.ui.openSettings();
-            var section = document.getElementById('settings-providers-section');
-            if (section) { section.open = true; section.scrollIntoView({behavior:'smooth'}); }
-          };
-        } else {
-          list.innerHTML = '';
-          models.forEach(function(m) {
-            var div = document.createElement('div');
-            div.style.cssText = 'padding:8px 10px;margin-bottom:6px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)';
-            var name = m.name || m.id;
-            if (name.length > 50) name = name.substring(0, 50) + '...';
-            var size = m.total_size_bytes ? U.formatBytes(m.total_size_bytes) : '';
-            var status = m.status === 'loaded' ? '<span class="text-green" style="font-size:0.8rem">Loaded</span>' : '<span class="text-muted" style="font-size:0.8rem">' + (m.status || 'available') + '</span>';
-            div.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center"><strong style="font-size:0.9rem">' + U.escapeHtml(name) + '</strong>' + status + '</div>' +
-              (size ? '<div class="text-muted" style="font-size:0.8rem">' + size + '</div>' : '');
-            list.appendChild(div);
-          });
-        }
-      } catch (e) {
-        list.innerHTML = '<div class="empty-state"><p>Could not load models. You can browse models after setup.</p></div>';
-      }
+      document.getElementById('btn-next').textContent = App.setup.currentStep === App.setup.totalSteps ? 'Start SwarmLLM' : 'Continue';
     },
 
     populateSummary: function() {
@@ -495,14 +503,29 @@
       var levels = ['minimal', 'moderate', 'maximum'];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
       document.getElementById('summary-contribution').textContent = U.capitalize(levels[val]);
-      document.getElementById('summary-gpu').textContent = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : 'CPU only';
-      document.getElementById('summary-ram').textContent = U.formatMB(App.setup.hwData ? App.setup.hwData.total_ram_mb || 0 : 0);
-      document.getElementById('summary-disk').textContent = U.formatMB(App.setup.hwData ? App.setup.hwData.available_disk_mb || 0 : 0);
+      var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : 'CPU only';
+      document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
       document.getElementById('summary-auto-manage').textContent = autoManage ? 'Enabled' : 'Disabled';
+
+      // Only show invite/provider rows if configured
+      var inviteRow = document.getElementById('summary-invite-row');
+      if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = 'Connected'; }
+      var provRow = document.getElementById('summary-provider-row');
       var provNames = {openai:'OpenAI',deepseek:'DeepSeek',groq:'Groq',nvidia_nim:'NVIDIA NIM',cerebras:'Cerebras',sambanova:'SambaNova',anthropic:'Anthropic',mistral:'Mistral',fireworks:'Fireworks',together:'Together',deepinfra:'DeepInfra'};
-      document.getElementById('summary-provider').textContent = App.setup._savedProvider ? provNames[App.setup._savedProvider] || App.setup._savedProvider : 'None (can add later)';
-      document.getElementById('summary-models').textContent = 'Default configuration';
+      if (App.setup._savedProvider) {
+        provRow.classList.remove('hidden');
+        document.getElementById('summary-provider').textContent = provNames[App.setup._savedProvider] || App.setup._savedProvider;
+      }
+
+      // Dynamic next steps
+      var steps = [];
+      if (autoManage) steps.push('Your node will automatically download AI models that fit your hardware.');
+      if (App.setup._joinedPeer) steps.push('Connected to a peer — you\'ll share models with them.');
+      if (App.setup._savedProvider) steps.push('Cloud provider ready — you can chat immediately.');
+      if (!App.setup._savedProvider && !autoManage) steps.push('Browse Models on the dashboard to download one, or add a cloud provider in Settings.');
+      steps.push('Nodes on your local network will find each other automatically.');
+      document.getElementById('summary-next-list').innerHTML = steps.map(function(s) { return '<p style="margin:4px 0">\u2022 ' + s + '</p>'; }).join('');
     },
 
     submit: async function() {
@@ -537,13 +560,6 @@
         } catch (e) {}
       }
       localStorage.setItem(App.SETUP_DONE_KEY, 'true');
-      try {
-        await App.authFetch('/api/admin/config', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ setup_done: true }),
-        });
-      } catch (e) {}
       document.getElementById('setup-modal').classList.add('hidden');
       App.ui.showBanner('success', 'Setup complete! Welcome to SwarmLLM.');
     },

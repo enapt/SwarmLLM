@@ -46,40 +46,35 @@
         <span class="text-muted" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</span>
       </div>
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
-        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: Your Computer">1</button>
+        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: About You">1</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Preferences">2</button>
+        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Connect">2</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Getting Started">3</button>
-        <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="4" role="tab" aria-selected="false" aria-label="Step 4: Review">4</button>
+        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Ready">3</button>
       </div>
+      <!-- Step 1: About You (hardware + preferences merged) -->
       <div class="wizard-body" id="step-1">
-        <h3 data-i18n="setup.step1">Your Computer</h3>
-        <p class="text-muted mb-2">Here's what your system can handle.</p>
-        <div id="hw-loading" class="flex gap-1" style="align-items:center">
+        <h3>About You</h3>
+        <div id="hw-loading" class="flex gap-1" style="align-items:center;margin-bottom:8px">
           <div class="spinner"></div>
           <span class="text-muted">Detecting hardware...</span>
         </div>
-        <div id="hw-results" class="hidden">
-          <div class="grid grid-2 mt-1">
-            <div><label>GPU</label><div class="mono" id="hw-gpu">---</div></div>
-            <div><label data-i18n="setup.gpu_memory">GPU Memory</label><div class="mono" id="hw-vram">---</div></div>
-            <div><label data-i18n="setup.system_ram">System RAM</label><div class="mono" id="hw-ram">---</div></div>
-            <div><label data-i18n="setup.disk_available">Disk Available</label><div class="mono" id="hw-disk">---</div></div>
+        <div id="hw-results" class="hidden" style="padding:8px 12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:12px">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.82rem">
+            <span><strong id="hw-gpu">---</strong></span>
+            <span class="text-muted" id="hw-vram">---</span>
+            <span class="text-muted" id="hw-ram">---</span>
+            <span class="text-muted" id="hw-disk">---</span>
           </div>
+          <div id="hw-recommendation" class="text-muted" style="font-size:0.78rem;margin-top:4px"></div>
         </div>
-      </div>
-      <div class="wizard-body hidden" id="step-2">
-        <h3>Preferences</h3>
-        <div class="form-group mt-1">
+        <div class="form-group">
           <label style="font-size:0.85rem;font-weight:600">Nickname <span class="text-muted" style="font-weight:normal">(optional)</span></label>
           <input type="text" id="setup-nickname" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
-          <span class="text-muted" style="font-size:0.72rem">Visible to peers if you choose. Letters, numbers, dash, underscore.</span>
         </div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="font-size:0.85rem;font-weight:600">Resource Contribution</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Let others use some of your computer's power to help run AI. You earn credits in return.</p>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Let others use your compute to help run AI. You earn credits in return.</p>
           <div class="flex-between mb-1">
             <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
             <span class="mono" id="contribution-label">Minimal</span>
@@ -90,19 +85,31 @@
         <div class="text-muted" style="font-size:0.78rem" id="contribution-desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-            <input type="checkbox" id="setup-auto-manage" style="width:18px;height:18px">
+            <input type="checkbox" id="setup-auto-manage" checked style="width:18px;height:18px">
             <span>Auto-download AI models</span>
           </label>
-          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically download pieces of popular AI models so the network can run them. May use several GB of disk space and bandwidth. You can set a storage limit in Settings.</span>
+          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
         </div>
       </div>
-      <div class="wizard-body hidden" id="step-3">
-        <h3>Getting Started</h3>
-        <p class="text-muted mb-2">Choose how you want to use SwarmLLM. You can do any or all of these.</p>
-        <div id="setup-model-list"><p class="text-muted">Loading available models...</p></div>
-        <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+      <!-- Step 2: Connect (invite code + cloud provider) -->
+      <div class="wizard-body hidden" id="step-2">
+        <h3>Connect</h3>
+        <p class="text-muted mb-2">Choose one or both. You can also skip this and configure later.</p>
+        <!-- Invite code section -->
+        <div style="margin-bottom:16px">
+          <label style="font-size:0.85rem;font-weight:600">Join a friend's network</label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Paste an invite code from someone already running SwarmLLM.</p>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="setup-invite-code" placeholder="swarm://..." style="flex:1;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono)">
+            <button class="btn btn-sm" id="setup-invite-join">Join</button>
+          </div>
+          <div id="setup-invite-status" style="font-size:0.78rem;margin-top:4px"></div>
+          <p class="text-muted" style="font-size:0.75rem;margin-top:6px">No code? No problem — nodes on the same network find each other automatically.</p>
+        </div>
+        <!-- Cloud provider section -->
+        <div style="border-top:1px solid var(--border);padding-top:12px">
           <label style="font-size:0.85rem;font-weight:600">Cloud AI Service <span class="text-muted" style="font-weight:normal">(optional — chat instantly)</span></label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Connect an AI service like OpenAI or DeepSeek to start chatting right away. Most offer free tiers.</p>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Add an API key to start chatting right away while local models download.</p>
           <select id="setup-provider-select" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-bottom:6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
             <option value="">Select a provider...</option>
             <option value="openai">OpenAI</option>
@@ -127,18 +134,20 @@
           </div>
         </div>
       </div>
-      <div class="wizard-body hidden" id="step-4">
-        <h3>Ready to Start</h3>
-        <p class="text-muted mb-2">Review your configuration:</p>
+      <!-- Step 3: Ready (dynamic summary) -->
+      <div class="wizard-body hidden" id="step-3">
+        <h3>Ready to Go</h3>
         <div class="mt-1">
+          <div class="flex-between mb-1"><span class="text-muted">Hardware</span><span class="mono" id="summary-gpu">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">GPU</span><span class="mono" id="summary-gpu">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">System RAM</span><span class="mono" id="summary-ram">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Disk Available</span><span class="mono" id="summary-disk">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Models</span><span class="mono" id="summary-models">---</span></div>
+          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted">Peer</span><span class="mono" id="summary-invite">---</span></div>
+          <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
+        </div>
+        <div id="summary-next-steps" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
+          <p style="font-size:0.85rem;font-weight:600;margin-bottom:4px">What happens next:</p>
+          <div id="summary-next-list" class="text-muted" style="font-size:0.8rem"></div>
         </div>
       </div>
       <div class="wizard-footer">
