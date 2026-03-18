@@ -227,8 +227,13 @@ pub fn build_router(state: AppState) -> Router {
         // Health check
         .route("/health", get(health))
         .route("/health/ready", get(metrics::health_ready))
-        // MCP (Model Context Protocol) server
-        .route("/mcp", post(mcp::handle_mcp))
+        // MCP (Model Context Protocol) server — Streamable HTTP transport
+        .route(
+            "/mcp",
+            post(mcp::handle_mcp)
+                .get(mcp::handle_mcp_get)
+                .delete(mcp::handle_mcp_delete),
+        )
         // Prometheus metrics
         .route("/metrics", get(metrics::metrics))
         // Middleware (layers run bottom-to-top: timeout, CORS, security headers, rate limit, auth, body limit, handler)

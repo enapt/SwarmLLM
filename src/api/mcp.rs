@@ -1,9 +1,16 @@
-//! MCP (Model Context Protocol) server — JSON-RPC 2.0 over HTTP POST.
+//! MCP (Model Context Protocol) server — Streamable HTTP transport.
+//!
+//! Implements the MCP 2025-11-25 specification over Streamable HTTP:
+//! - POST for client→server JSON-RPC requests and notifications
+//! - Notifications (no `id`) return HTTP 202 with no body
+//! - GET for server→client SSE stream (returns 405 — not needed for tool-only servers)
+//! - DELETE for session termination (returns 200)
 //!
 //! Exposes SwarmLLM as an MCP server so Claude Code, Cursor, VS Code Copilot,
 //! and other MCP clients can use local/swarm models directly.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -11,9 +18,20 @@ use serde_json::{json, Value};
 
 use crate::api::server::AppState;
 
-const MCP_PROTOCOL_VERSION: &str = "2025-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Server instructions for MCP Tool Search discovery.
+/// Claude Code reads this to know when to load our tools.
+const SERVER_INSTRUCTIONS: &str = "SwarmLLM is a decentralized LLM inference network. \
+Use these tools when you need to: run inference on local/network models, \
+compare multiple models side-by-side, fan out research questions to many models in parallel, \
+execute batch prompts across different models concurrently, or check node status. \
+The 'research' tool is especially useful for getting diverse perspectives from multiple \
+models without using expensive API tokens. The 'batch_prompts' tool lets you offload \
+independent subtasks to specific models in parallel (e.g., summarize with one model, \
+translate with another, review code with a third).";
 
 // ---- JSON-RPC 2.0 types ----
 
@@ -75,28 +93,45 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
-// ---- MCP handler ----
+// ---- MCP handlers ----
 
+/// POST /mcp — handles JSON-RPC requests and notifications.
+/// Per Streamable HTTP spec: notifications (no `id`) get HTTP 202 with no body.
 pub async fn handle_mcp(
     State(state): State<AppState>,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     if req.jsonrpc != "2.0" {
-        return Json(JsonRpcResponse::error(
-            req.id,
-            PARSE_ERROR,
-            "Invalid JSON-RPC version",
-        ));
+        return (
+            StatusCode::OK,
+            Json(Some(JsonRpcResponse::error(
+                req.id,
+                PARSE_ERROR,
+                "Invalid JSON-RPC version",
+            ))),
+        );
     }
+
+    // JSON-RPC notifications have no `id` — per MCP spec, return HTTP 202 with no body
+    let is_notification = req.id.is_none();
 
     let response = match req.method.as_str() {
         "initialize" => handle_initialize(req.id),
-        "notifications/initialized" => JsonRpcResponse::success(req.id, json!({})),
+        "notifications/initialized" | "notifications/cancelled" => {
+            if is_notification {
+                return (StatusCode::ACCEPTED, Json(None));
+            }
+            JsonRpcResponse::success(req.id, json!({}))
+        }
         "tools/list" => handle_tools_list(req.id),
         "tools/call" => handle_tools_call(&state, req.id, req.params).await,
         "resources/list" => handle_resources_list(req.id),
         "resources/read" => handle_resources_read(&state, req.id, req.params).await,
         "ping" => JsonRpcResponse::success(req.id, json!({})),
+        _ if is_notification => {
+            // Unknown notification — silently accept per spec
+            return (StatusCode::ACCEPTED, Json(None));
+        }
         _ => JsonRpcResponse::error(
             req.id,
             METHOD_NOT_FOUND,
@@ -104,7 +139,19 @@ pub async fn handle_mcp(
         ),
     };
 
-    Json(response)
+    (StatusCode::OK, Json(Some(response)))
+}
+
+/// GET /mcp — SSE stream for server-initiated messages.
+/// We don't initiate server→client messages, so return 405.
+pub async fn handle_mcp_get() -> impl IntoResponse {
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
+/// DELETE /mcp — session termination.
+/// We're stateless per-request, so just acknowledge.
+pub async fn handle_mcp_delete() -> impl IntoResponse {
+    StatusCode::OK
 }
 
 // ---- Protocol handlers ----
@@ -119,9 +166,10 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
                 "version": SERVER_VERSION,
             },
             "capabilities": {
-                "tools": {},
-                "resources": {},
+                "tools": { "listChanged": false },
+                "resources": { "listChanged": false },
             },
+            "instructions": SERVER_INSTRUCTIONS,
         }),
     )
 }
@@ -315,6 +363,40 @@ fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
                     }
                 },
                 {
+                    "name": "delegate",
+                    "description": "Offload a task to the most appropriate model based on a tier preference. Tiers: 'fast' picks the lowest-latency local model, 'cheap' picks a small/free model, 'smart' picks the most capable available model (may use cloud). Saves your subscription tokens by routing routine work to local/cheap models automatically.",
+                    "annotations": {
+                        "title": "Delegate Task",
+                        "readOnlyHint": true,
+                        "destructiveHint": false,
+                        "idempotentHint": false,
+                        "openWorldHint": true
+                    },
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "The task/prompt to delegate"
+                            },
+                            "tier": {
+                                "type": "string",
+                                "enum": ["fast", "cheap", "smart"],
+                                "description": "Model selection strategy: 'fast' = lowest latency, 'cheap' = smallest/free model, 'smart' = most capable"
+                            },
+                            "system": {
+                                "type": "string",
+                                "description": "Optional system prompt"
+                            },
+                            "max_tokens": {
+                                "type": "integer",
+                                "description": "Maximum tokens to generate (default 1024)"
+                            }
+                        },
+                        "required": ["prompt", "tier"]
+                    }
+                },
+                {
                     "name": "node_info",
                     "description": "Get detailed information about this SwarmLLM node: loaded models, connected peers, VRAM/disk usage, credit balance, available cloud providers, and network status.",
                     "annotations": {
@@ -344,6 +426,7 @@ async fn handle_tools_call(state: &AppState, id: Option<Value>, params: Value) -
         "compare" => tool_compare(state, id, arguments).await,
         "research" => tool_research(state, id, arguments).await,
         "batch_prompts" => tool_batch_prompts(state, id, arguments).await,
+        "delegate" => tool_delegate(state, id, arguments).await,
         "node_info" => tool_node_info(state, id).await,
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown tool: {tool_name}")),
     }
@@ -358,6 +441,18 @@ fn handle_resources_list(id: Option<Value>) -> JsonRpcResponse {
                     "uri": "swarmllm://status",
                     "name": "Node Status",
                     "description": "Current SwarmLLM node status including loaded models and peer count",
+                    "mimeType": "application/json"
+                },
+                {
+                    "uri": "swarmllm://models",
+                    "name": "Available Models",
+                    "description": "All models available for inference: local, network, and cloud providers with capabilities and status",
+                    "mimeType": "application/json"
+                },
+                {
+                    "uri": "swarmllm://peers",
+                    "name": "Connected Peers",
+                    "description": "Currently connected P2P peers with latency, trust, load, and shard info",
                     "mimeType": "application/json"
                 }
             ]
@@ -374,6 +469,8 @@ async fn handle_resources_read(
 
     match uri {
         "swarmllm://status" => resource_status(state, id).await,
+        "swarmllm://models" => resource_models(state, id).await,
+        "swarmllm://peers" => resource_peers(state, id).await,
         _ => JsonRpcResponse::error(id, INVALID_PARAMS, format!("Unknown resource: {uri}")),
     }
 }
@@ -1103,6 +1200,206 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
     )
 }
 
+/// Delegate tool: auto-select a model by tier and run inference.
+/// Tiers: fast (lowest latency local), cheap (smallest/free), smart (most capable).
+async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
+    let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
+        }
+    };
+    let tier = match args.get("tier").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: tier");
+        }
+    };
+    let system = args
+        .get("system")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let max_tokens = args
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1024)
+        .min(32768) as u32;
+
+    // Collect available models with metadata for tier selection
+    let mut candidates: Vec<(String, &str, u64)> = Vec::new(); // (model_id, source, size_hint)
+
+    // Local loaded model — always fastest
+    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        let slug = info
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        candidates.push((slug, "local", info.size_bytes));
+    }
+
+    // Network models from split_models
+    for entry in state.shared_state.split_models.iter() {
+        let model_id = &entry.key().0;
+        if !candidates.iter().any(|(id, _, _)| id == &model_id.0) {
+            candidates.push((model_id.0.clone(), "network", 0));
+        }
+    }
+
+    // Cloud models (only for "smart" tier — avoid surprise costs)
+    if tier == "smart" {
+        // Prefer known-capable cloud models
+        let smart_prefixes = ["claude", "gpt-4", "o1", "o3", "gemini-2"];
+        for entry in state.shared_state.provider_model_map.iter() {
+            let model_id = entry.key().clone();
+            let is_smart = smart_prefixes
+                .iter()
+                .any(|p| model_id.to_lowercase().contains(p));
+            if is_smart && !candidates.iter().any(|(id, _, _)| id == &model_id) {
+                candidates.push((model_id, "cloud", u64::MAX));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return JsonRpcResponse::error(id, INTERNAL_ERROR, "No models available for delegation");
+    }
+
+    // Select based on tier
+    let selected = match tier.as_str() {
+        "fast" => {
+            // Prefer local, then network (smallest = fastest)
+            candidates
+                .iter()
+                .find(|(_, src, _)| *src == "local")
+                .or_else(|| candidates.iter().find(|(_, src, _)| *src == "network"))
+                .or(candidates.first())
+                .cloned()
+        }
+        "cheap" => {
+            // Prefer smallest local model, then network, avoid cloud
+            let mut non_cloud: Vec<_> = candidates
+                .iter()
+                .filter(|(_, src, _)| *src != "cloud")
+                .cloned()
+                .collect();
+            // Sort by size ascending (0 = unknown, sort last)
+            non_cloud.sort_by_key(|(_, _, size)| if *size == 0 { u64::MAX } else { *size });
+            non_cloud.first().cloned().or(candidates.first().cloned())
+        }
+        "smart" => {
+            // Prefer cloud > largest local > network
+            candidates
+                .iter()
+                .find(|(_, src, _)| *src == "cloud")
+                .or_else(|| {
+                    // Largest local model
+                    candidates
+                        .iter()
+                        .filter(|(_, src, _)| *src == "local" || *src == "network")
+                        .max_by_key(|(_, _, size)| *size)
+                })
+                .or(candidates.first())
+                .cloned()
+        }
+        _ => {
+            return JsonRpcResponse::error(
+                id,
+                INVALID_PARAMS,
+                "Invalid tier: must be 'fast', 'cheap', or 'smart'",
+            );
+        }
+    };
+
+    let (model_id, source, _) = match selected {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(id, INTERNAL_ERROR, "No suitable model found for tier");
+        }
+    };
+
+    // Route through our own /v1/messages endpoint
+    let client = crate::api::providers::get_provider_client();
+    let port = state.config.node.listen_port;
+    let url = format!("http://127.0.0.1:{port}/v1/messages");
+    let api_key = state.shared_state.api_key.clone();
+    let start = std::time::Instant::now();
+
+    let mut body = json!({
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+    });
+    if let Some(sys) = system {
+        body["system"] = json!(sys);
+    }
+
+    let result = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            let resp_body: Value = resp
+                .json()
+                .await
+                .unwrap_or(json!({"error": "parse failed"}));
+            let content = resp_body["content"]
+                .as_array()
+                .and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .next()
+                })
+                .unwrap_or("")
+                .to_string();
+            let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+            let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+            let result = json!({
+                "model": model_id,
+                "source": source,
+                "tier": tier,
+                "content": content,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": elapsed_ms,
+            });
+
+            JsonRpcResponse::success(
+                id,
+                json!({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                        }
+                    ]
+                }),
+            )
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let scrubbed = crate::crypto::scrub_api_keys(&body);
+            JsonRpcResponse::error(
+                id,
+                INTERNAL_ERROR,
+                format!("Delegate failed (HTTP {status}): {scrubbed}"),
+            )
+        }
+        Err(e) => JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Delegate failed: {e}")),
+    }
+}
+
 /// Node info tool: detailed node status, models, peers, resources.
 async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
     // Loaded model
@@ -1230,6 +1527,98 @@ async fn resource_status(state: &AppState, id: Option<Value>) -> JsonRpcResponse
     )
 }
 
+async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    let mut models = Vec::new();
+
+    // Local loaded model
+    if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
+        let slug = info
+            .name
+            .to_lowercase()
+            .replace(' ', "-")
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        models.push(json!({
+            "id": slug,
+            "name": info.name,
+            "source": "local",
+            "size_bytes": info.size_bytes,
+            "status": "loaded",
+        }));
+    }
+
+    // Registry models
+    for manifest in state.shared_state.model_registry.models() {
+        models.push(json!({
+            "id": manifest.id.0,
+            "name": manifest.name,
+            "source": "network",
+            "shards": manifest.shards.len(),
+            "architecture": format!("{:?}", manifest.architecture),
+        }));
+    }
+
+    // Cloud provider models
+    let mut cloud: Vec<String> = state
+        .shared_state
+        .provider_model_map
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    cloud.sort();
+    for model_id in cloud {
+        models.push(json!({
+            "id": model_id,
+            "source": "cloud",
+        }));
+    }
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "contents": [
+                {
+                    "uri": "swarmllm://models",
+                    "mimeType": "application/json",
+                    "text": serde_json::to_string_pretty(&models).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
+async fn resource_peers(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
+    let mut peers = Vec::new();
+    for entry in state.shared_state.peer_registry.iter() {
+        let peer = entry.value();
+        let region = peer
+            .capability
+            .as_ref()
+            .and_then(|c| c.region.as_deref())
+            .unwrap_or("unknown");
+        peers.push(json!({
+            "node_id_short": entry.key().to_string(),
+            "latency_ms": peer.latency_ms,
+            "is_lan": peer.is_lan_peer,
+            "trust_score": peer.trust_score,
+            "active_requests": peer.active_request_count,
+            "region": region,
+        }));
+    }
+
+    JsonRpcResponse::success(
+        id,
+        json!({
+            "contents": [
+                {
+                    "uri": "swarmllm://peers",
+                    "mimeType": "application/json",
+                    "text": serde_json::to_string_pretty(&peers).unwrap_or_default()
+                }
+            ]
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1284,6 +1673,11 @@ mod tests {
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert!(result["capabilities"]["tools"].is_object());
         assert!(result["capabilities"]["resources"].is_object());
+        // Server instructions for Tool Search
+        assert!(result["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("SwarmLLM"));
     }
 
     #[test]
@@ -1291,7 +1685,7 @@ mod tests {
         let resp = handle_tools_list(Some(Value::Number(1.into())));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7); // chat, models, compare, research, batch_prompts, delegate, node_info
 
         let chat_tool = &tools[0];
         assert_eq!(chat_tool["name"], "chat");
@@ -1315,7 +1709,11 @@ mod tests {
         assert_eq!(batch_tool["name"], "batch_prompts");
         assert!(batch_tool["inputSchema"]["properties"]["tasks"].is_object());
 
-        let node_info_tool = &tools[5];
+        let delegate_tool = &tools[5];
+        assert_eq!(delegate_tool["name"], "delegate");
+        assert!(delegate_tool["inputSchema"]["properties"]["tier"].is_object());
+
+        let node_info_tool = &tools[6];
         assert_eq!(node_info_tool["name"], "node_info");
     }
 
@@ -1324,7 +1722,9 @@ mod tests {
         let resp = handle_resources_list(Some(Value::Number(1.into())));
         let result = resp.result.unwrap();
         let resources = result["resources"].as_array().unwrap();
-        assert_eq!(resources.len(), 1);
+        assert_eq!(resources.len(), 3); // status, models, peers
         assert_eq!(resources[0]["uri"], "swarmllm://status");
+        assert_eq!(resources[1]["uri"], "swarmllm://models");
+        assert_eq!(resources[2]["uri"], "swarmllm://peers");
     }
 }
