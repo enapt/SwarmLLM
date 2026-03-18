@@ -1,5 +1,5 @@
 use crate::model::manifest::ModelManifestExt;
-use crate::types::{ModelId, ShardId};
+use crate::types::{ModelId, NetworkCommand, ShardId};
 
 use super::manager::{AutoShardManager, ShardCandidate};
 use super::scan::check_and_load_model;
@@ -534,11 +534,72 @@ impl AutoShardManager {
                 }
             });
         } else {
-            tracing::debug!(
-                model = %candidate.model_id,
-                shard = candidate.shard_index,
-                "No HF source known — relying on peer shard transfer"
-            );
+            // P2P fallback: no HF source, download from peers who hold this shard.
+            // Send AcquisitionCommand::Acquire to trigger P2P chunk-based transfer
+            // via the AcquisitionManager, which handles retry logic and verification.
+            let sid = ShardId {
+                model_id: candidate.model_id.clone(),
+                index: candidate.shard_index,
+            };
+            let holders: Vec<_> = self
+                .shared_state
+                .model_registry
+                .shard_holders(&sid)
+                .into_iter()
+                .filter(|n| n != self.shared_state.identity.node_id())
+                .collect();
+            if holders.is_empty() {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    "No HF source and no peer holders — cannot download"
+                );
+            } else {
+                // Pick a random holder and send a direct shard request via P2P
+                let target = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::time::Instant::now().hash(&mut hasher);
+                    holders[hasher.finish() as usize % holders.len()].clone()
+                };
+
+                let peer_id_bytes = self
+                    .shared_state
+                    .peer_registry
+                    .get(&target)
+                    .and_then(|p| p.peer_id_bytes.clone());
+
+                if let Some(bytes) = peer_id_bytes {
+                    let request = crate::types::ShardRequest {
+                        shard_id: sid.clone(),
+                        chunk_offset: 0,
+                        chunk_size: 32 * 1024 * 1024,
+                    };
+                    tracing::info!(
+                        model = %candidate.model_id,
+                        shard = candidate.shard_index,
+                        peer = %target,
+                        "AutoShardManager: downloading shard from peer (no HF source)"
+                    );
+                    let cmd = NetworkCommand::SendShardRequest {
+                        target_peer_bytes: bytes,
+                        request,
+                    };
+                    if let Err(e) = self.network_tx.send(cmd).await {
+                        tracing::warn!(
+                            error = %e,
+                            model = %candidate.model_id,
+                            "Failed to send P2P shard request"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        model = %candidate.model_id,
+                        shard = candidate.shard_index,
+                        "Peer holds shard but peer_id_bytes unavailable"
+                    );
+                }
+            }
         }
     }
 
