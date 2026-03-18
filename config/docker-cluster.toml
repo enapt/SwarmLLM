@@ -1,0 +1,29 @@
+# Docker cluster config — optimized for container networking
+# Used by docker-compose.dev.yml for multi-node testing
+
+[node]
+listen_port = 8800
+contribution = "minimal"
+
+[network]
+listen_address = "0.0.0.0"    # Bind to all interfaces (required in containers)
+enable_quic = false            # QUIC unreliable in Docker bridge networks
+enable_mdns = false            # mDNS doesn't work across Docker containers
+enable_relay = true
+enable_relay_client = true
+enable_autonat = false         # Not useful in Docker
+enable_dcutr = false           # Not useful in Docker
+enable_encryption = true
+max_peers = 50
+
+[inference]
+session_timeout_seconds = 600
+max_concurrent_requests = 10
+gpu_layers = 0
+
+[logging]
+level = "info"
+format = "pretty"
+
+[ui]
+open_browser_on_start = false

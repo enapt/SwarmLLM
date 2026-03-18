@@ -6,7 +6,7 @@
 # node runs on a separate machine.
 #
 # For single-node production use, just run:
-#   docker run -p 8800:8800 -v swarmllm-data:/data swarmllm/swarmllm
+#   docker run -p 8800:8800 -v swarmllm-data:/data ghcr.io/enapt/swarmllm
 #
 # Start:   docker-compose -f docker-compose.dev.yml up
 # Stop:    docker-compose -f docker-compose.dev.yml down
@@ -28,12 +28,17 @@ services:
     container_name: swarmllm-node1
     ports:
       - "8800:8800/tcp"
-      - "8800:8800/udp"
+      - "8810:8810/tcp"
     volumes:
       - node1-data:/data
+      - ./config/docker-cluster.toml:/etc/swarmllm/config.toml:ro
     environment:
       - SWARMLLM_NODE_LISTEN_PORT=8800
       - SWARMLLM_LOGGING_LEVEL=info
+    command: ["run", "--config", "/etc/swarmllm/config.toml"]
+    networks:
+      swarm-net:
+        ipv4_address: 172.28.0.10
     restart: unless-stopped
 
   node2:
@@ -41,16 +46,20 @@ services:
     container_name: swarmllm-node2
     ports:
       - "8801:8800/tcp"
-      - "8801:8800/udp"
+      - "8811:8810/tcp"
     volumes:
       - node2-data:/data
+      - ./config/docker-cluster.toml:/etc/swarmllm/config.toml:ro
     environment:
       - SWARMLLM_NODE_LISTEN_PORT=8800
       - SWARMLLM_LOGGING_LEVEL=info
     depends_on:
       node1:
         condition: service_healthy
-    command: ["run", "--data-dir", "/data", "--bootstrap", "/ip4/swarmllm-node1/udp/8800/quic-v1"]
+    command: ["run", "--config", "/etc/swarmllm/config.toml", "--bootstrap", "/ip4/172.28.0.10/tcp/8810"]
+    networks:
+      swarm-net:
+        ipv4_address: 172.28.0.11
     restart: unless-stopped
 
   node3:
@@ -58,17 +67,28 @@ services:
     container_name: swarmllm-node3
     ports:
       - "8802:8800/tcp"
-      - "8802:8800/udp"
+      - "8812:8810/tcp"
     volumes:
       - node3-data:/data
+      - ./config/docker-cluster.toml:/etc/swarmllm/config.toml:ro
     environment:
       - SWARMLLM_NODE_LISTEN_PORT=8800
       - SWARMLLM_LOGGING_LEVEL=info
     depends_on:
       node1:
         condition: service_healthy
-    command: ["run", "--data-dir", "/data", "--bootstrap", "/ip4/swarmllm-node1/udp/8800/quic-v1"]
+    command: ["run", "--config", "/etc/swarmllm/config.toml", "--bootstrap", "/ip4/172.28.0.10/tcp/8810"]
+    networks:
+      swarm-net:
+        ipv4_address: 172.28.0.12
     restart: unless-stopped
+
+networks:
+  swarm-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   node1-data:
