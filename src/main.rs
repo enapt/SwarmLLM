@@ -199,7 +199,11 @@ async fn main() -> anyhow::Result<()> {
             let data_dir = resolve_data_dir(&cli.data_dir);
             query_peers(port, &data_dir, json).await
         }
-        Commands::ModelWorker { socket, data_dir, shard_window } => {
+        Commands::ModelWorker {
+            socket,
+            data_dir,
+            shard_window,
+        } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
                     .filter_map(|x| x.trim().parse::<u32>().ok())

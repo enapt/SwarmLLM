@@ -103,7 +103,11 @@ impl ModelProcessPool {
 
         // If a shard window is set for this model, pass it to the worker
         if let Some(window) = self.active_shard_windows.get(model_id) {
-            let window_str = window.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            let window_str = window
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             args.push("--shard-window".to_string());
             args.push(window_str);
         }

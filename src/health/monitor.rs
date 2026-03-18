@@ -160,20 +160,16 @@ impl HealthMonitor {
             }
         }
 
-        let gpu_info = self
-            .shared_state
-            .gpu_info
-            .as_ref()
-            .map(|g| {
-                let bandwidth = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
-                crate::types::GpuInfo {
-                    name: g.name.clone(),
-                    vram_total_mb: g.vram_total_mb,
-                    vram_available_mb: g.vram_free_mb,
-                    compute_capability: None,
-                    memory_bandwidth_gbps: bandwidth,
-                }
-            });
+        let gpu_info = self.shared_state.gpu_info.as_ref().map(|g| {
+            let bandwidth = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
+            crate::types::GpuInfo {
+                name: g.name.clone(),
+                vram_total_mb: g.vram_total_mb,
+                vram_available_mb: g.vram_free_mb,
+                compute_capability: None,
+                memory_bandwidth_gbps: bandwidth,
+            }
+        });
 
         // Use real uptime so message content changes each broadcast (avoids GossipSub dedup)
         let uptime_seconds = {
@@ -210,12 +206,18 @@ impl HealthMonitor {
                 (ram_total, ram_avail, disk_avail)
             });
 
-        let est_tokens_per_sec_7b = gpu_info.as_ref().map(|g| {
-            crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(g.memory_bandwidth_gbps, true)
-        }).unwrap_or_else(|| {
-            // CPU-only: assume ~50 GB/s DDR4/5 bandwidth
-            crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(50.0, false)
-        });
+        let est_tokens_per_sec_7b = gpu_info
+            .as_ref()
+            .map(|g| {
+                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(
+                    g.memory_bandwidth_gbps,
+                    true,
+                )
+            })
+            .unwrap_or_else(|| {
+                // CPU-only: assume ~50 GB/s DDR4/5 bandwidth
+                crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(50.0, false)
+            });
 
         let cap = crate::types::NodeCapability {
             node_id: node_id.clone(),

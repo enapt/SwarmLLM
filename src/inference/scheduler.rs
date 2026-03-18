@@ -316,13 +316,25 @@ impl PipelineScheduler {
             // Look up speed estimation from capability gossip
             let est_tokens_per_sec = if &node_id == local_node_id {
                 // Local: compute directly from our GPU info
-                self.shared_state.gpu_info.as_ref().map(|g| {
-                    let bw = crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
-                    crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
-                }).unwrap_or(0.0)
+                self.shared_state
+                    .gpu_info
+                    .as_ref()
+                    .map(|g| {
+                        let bw =
+                            crate::model::auto_manage::vram::gpu_memory_bandwidth_gbps(&g.name);
+                        crate::model::auto_manage::vram::estimate_tokens_per_sec_7b(bw, true)
+                    })
+                    .unwrap_or(0.0)
             } else {
-                self.shared_state.peer_registry.get(&node_id)
-                    .map(|p| p.capability.as_ref().map(|c| c.est_tokens_per_sec_7b).unwrap_or(0.0))
+                self.shared_state
+                    .peer_registry
+                    .get(&node_id)
+                    .map(|p| {
+                        p.capability
+                            .as_ref()
+                            .map(|c| c.est_tokens_per_sec_7b)
+                            .unwrap_or(0.0)
+                    })
                     .unwrap_or(0.0)
             };
 

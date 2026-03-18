@@ -226,7 +226,8 @@ impl AutoShardManager {
             // VRAM fitness: does the global pool have enough VRAM to actually run this model?
             // Don't block downloads, but deprioritize models the pool can't run yet.
             // Use MoE-aware estimation so Mixtral/DeepSeek models get accurate VRAM estimates.
-            let model_vram_needed = estimate_model_vram_mb_arch(manifest.total_size_bytes, &manifest.architecture);
+            let model_vram_needed =
+                estimate_model_vram_mb_arch(manifest.total_size_bytes, &manifest.architecture);
             let vram_fitness = if pool_vram_mb == 0 {
                 0.5 // No GPU info available, neutral score
             } else if model_vram_needed <= pool_vram_mb {

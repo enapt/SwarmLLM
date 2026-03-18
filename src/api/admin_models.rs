@@ -55,7 +55,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
                 // Check if this shard is currently loaded in VRAM (vs just on disk)
                 let in_vram = if local {
-                    let window = state.shared_state.model_process_pool.get_shard_window(&m.id);
+                    let window = state
+                        .shared_state
+                        .model_process_pool
+                        .get_shard_window(&m.id);
                     match window {
                         Some(w) => w.contains(&s.index),
                         None => state.shared_state.model_process_pool.is_loaded(&m.id),

@@ -282,11 +282,17 @@ mod tests {
             },
         );
         // MoE should be significantly less than dense
-        assert!(moe_vram < dense_vram, "MoE={moe_vram} should be < dense={dense_vram}");
+        assert!(
+            moe_vram < dense_vram,
+            "MoE={moe_vram} should be < dense={dense_vram}"
+        );
         // Mixtral 8x7B with 2/8 experts: active_fraction = 0.40 + 0.60*0.25 = 0.55
         // So MoE VRAM should be ~55% of dense
         // active_fraction = 0.40 + 0.60*0.25 = 0.55, so ~55% of dense ≈ 30GB
-        assert!(moe_vram < 31 * 1024, "MoE 8x7B should fit in <31GB, got {moe_vram}MB");
+        assert!(
+            moe_vram < 31 * 1024,
+            "MoE 8x7B should fit in <31GB, got {moe_vram}MB"
+        );
     }
 
     #[test]

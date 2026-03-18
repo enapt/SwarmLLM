@@ -59,8 +59,16 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf, shard_window: O
         match msg {
             DaemonMsg::Forward(fwd) => {
                 let request_id = fwd.request_id;
-                match handle_forward(&mut writer, &mut models, &kv_store, &data_dir, fwd, payload, &shard_window)
-                    .await
+                match handle_forward(
+                    &mut writer,
+                    &mut models,
+                    &kv_store,
+                    &data_dir,
+                    fwd,
+                    payload,
+                    &shard_window,
+                )
+                .await
                 {
                     Ok(()) => {}
                     Err(e) => {
@@ -78,7 +86,16 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf, shard_window: O
             }
             DaemonMsg::Generate(gen) => {
                 let request_id = gen.request_id;
-                match handle_generate(&mut writer, &mut models, &kv_store, &data_dir, gen, &shard_window).await {
+                match handle_generate(
+                    &mut writer,
+                    &mut models,
+                    &kv_store,
+                    &data_dir,
+                    gen,
+                    &shard_window,
+                )
+                .await
+                {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = send_worker(
@@ -250,7 +267,14 @@ async fn handle_forward(
     let (layer_start, layer_end) = (fwd.layer_range.0 as usize, fwd.layer_range.1 as usize);
 
     // Ensure model is loaded
-    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end, shard_window)?;
+    ensure_model_loaded(
+        models,
+        data_dir,
+        &model_id,
+        layer_start,
+        layer_end,
+        shard_window,
+    )?;
 
     let model = models
         .get_mut(&(layer_start, layer_end))
@@ -445,7 +469,14 @@ async fn handle_generate(
     let (layer_start, layer_end) = (gen.layer_range.0 as usize, gen.layer_range.1 as usize);
 
     // Ensure model is loaded
-    ensure_model_loaded(models, data_dir, &model_id, layer_start, layer_end, shard_window)?;
+    ensure_model_loaded(
+        models,
+        data_dir,
+        &model_id,
+        layer_start,
+        layer_end,
+        shard_window,
+    )?;
 
     let model = models
         .get_mut(&(layer_start, layer_end))

@@ -207,9 +207,22 @@ pub async fn hf_search(
 
             // Composite score: surfaces small, popular, scarce, VRAM-fitting models
             let quality = (downloads as f64 + 10.0).log10() / 7.0; // 0-1 popularity proxy
-            let fit = if fits_boomerang { 1.0 } else if fits_shard { 0.6 } else { 0.1 };
-            let demand = if network_replicas == 0 { 1.5 } else if network_replicas < 3 { 1.2 }
-                else if network_replicas < 10 { 1.0 } else { 0.7 };
+            let fit = if fits_boomerang {
+                1.0
+            } else if fits_shard {
+                0.6
+            } else {
+                0.1
+            };
+            let demand = if network_replicas == 0 {
+                1.5
+            } else if network_replicas < 3 {
+                1.2
+            } else if network_replicas < 10 {
+                1.0
+            } else {
+                0.7
+            };
             let shard_gb = rec_size as f64 / (1024.0 * 1024.0 * 1024.0);
             let size_factor = (1.0 - shard_gb / 8.0).clamp(0.1, 1.0);
             let composite_score = (quality * fit * demand * size_factor * 100.0) as u32;
@@ -239,8 +252,14 @@ pub async fn hf_search(
 
     // Sort by composite score descending (best-fit models first)
     values.sort_by(|a, b| {
-        let sa = a.get("composite_score").and_then(|v| v.as_u64()).unwrap_or(0);
-        let sb = b.get("composite_score").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sa = a
+            .get("composite_score")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let sb = b
+            .get("composite_score")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         sb.cmp(&sa)
     });
 
