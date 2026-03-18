@@ -145,7 +145,18 @@ pub struct ModelId(pub String);
 
 impl fmt::Display for ModelId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        // SEC: Sanitize control characters to prevent log injection via network-supplied model IDs.
+        // Newlines, carriage returns, and null bytes are replaced with their escape sequences.
+        for ch in self.0.chars() {
+            match ch {
+                '\n' => write!(f, "\\n")?,
+                '\r' => write!(f, "\\r")?,
+                '\0' => write!(f, "\\0")?,
+                c if c.is_control() => write!(f, "\\x{:02x}", c as u32)?,
+                c => write!(f, "{c}")?,
+            }
+        }
+        Ok(())
     }
 }
 

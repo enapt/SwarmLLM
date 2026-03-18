@@ -626,6 +626,14 @@ pub async fn provider_model_status(
     let futures = probes.into_iter().map(|(model_id, base_url, api_key)| {
         let client = client.clone();
         async move {
+            // SEC: Validate provider URL to prevent SSRF via custom providers
+            if let Err(e) = super::providers::validate_provider_url(&base_url) {
+                return serde_json::json!({
+                    "model": model_id,
+                    "status": "error",
+                    "error": format!("SSRF blocked: {e}"),
+                });
+            }
             let url = format!("{}/chat/completions", base_url);
             let body = serde_json::json!({
                 "model": model_id,

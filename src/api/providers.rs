@@ -278,7 +278,7 @@ pub async fn try_proxy_openai(
 
 /// Validate that a provider base_url uses an allowed scheme and does not target
 /// private/internal IP ranges (SSRF prevention for custom providers).
-fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
+pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
     if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
         return Err(crate::error::SwarmError::Config(
             "Provider base_url must use http or https scheme".into(),

@@ -78,15 +78,23 @@ impl Identity {
                 #[cfg(target_os = "windows")]
                 {
                     if let Ok(username) = std::env::var("USERNAME") {
-                        let path_str = key_path.display().to_string();
-                        let _ = std::process::Command::new("icacls")
-                            .args([
-                                &path_str,
-                                "/inheritance:r",
-                                "/grant:r",
-                                &format!("{username}:F"),
-                            ])
-                            .output();
+                        // SEC: Validate USERNAME to prevent argument injection via crafted env var
+                        let is_safe = !username.is_empty()
+                            && username.len() <= 256
+                            && username.chars().all(|c| {
+                                c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == ' '
+                            });
+                        if is_safe {
+                            let path_str = key_path.display().to_string();
+                            let _ = std::process::Command::new("icacls")
+                                .args([
+                                    &path_str,
+                                    "/inheritance:r",
+                                    "/grant:r",
+                                    &format!("{username}:F"),
+                                ])
+                                .output();
+                        }
                     }
                 }
             }

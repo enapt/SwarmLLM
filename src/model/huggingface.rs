@@ -203,7 +203,10 @@ pub async fn download_model(
     // Create destination directory
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
 
-    // SECURITY: Strip directory components from filename to prevent path traversal
+    // SECURITY: Reject null bytes and strip directory components to prevent path traversal
+    if filename.contains('\0') {
+        return Err("Filename contains null byte".into());
+    }
     let safe_filename = std::path::Path::new(filename)
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("model.gguf"));
