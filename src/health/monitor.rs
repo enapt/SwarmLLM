@@ -17,6 +17,11 @@ pub struct HealthMonitor {
     network_tx: mpsc::Sender<NetworkCommand>,
     rebalance_tx: mpsc::Sender<RebalanceEvent>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Track last broadcast shard set for delta compression.
+    /// Full re-announce only when set changes or every FULL_REANNOUNCE ticks.
+    last_announced_shards: std::collections::HashSet<crate::types::ShardId>,
+    /// Counter for periodic full re-announce (ensures late-joining peers get data).
+    shard_announce_counter: u64,
 }
 
 /// How often to send health pings.
@@ -37,6 +42,26 @@ impl HealthMonitor {
             network_tx,
             rebalance_tx,
             shutdown_rx,
+            last_announced_shards: std::collections::HashSet::new(),
+            shard_announce_counter: 0,
+        }
+    }
+
+    /// Compute how many base ticks (30s each) between heavy gossip broadcasts.
+    /// Scales with log(peer_count) to reduce bandwidth at large network sizes.
+    ///   ≤10 peers:  every tick   (30s)
+    ///   ~100 peers: every 2 ticks (60s)
+    ///   ~1K peers:  every 4 ticks (120s)
+    ///   ~10K peers: every 8 ticks (240s)
+    fn gossip_broadcast_interval(&self) -> u64 {
+        let peer_count = self.shared_state.peer_registry.len();
+        if peer_count <= 10 {
+            1
+        } else {
+            // floor(log2(peer_count / 5)), clamped to [1, 10]
+            let ratio = peer_count / 5;
+            let log2 = (usize::BITS - ratio.leading_zeros()) as u64; // ceil(log2)
+            log2.clamp(1, 10)
         }
     }
 
@@ -58,11 +83,22 @@ impl HealthMonitor {
                 }
                 _ = interval.tick() => {
                     nonce = nonce.wrapping_add(1);
+
+                    // Health pings and peer liveness: always run every 30s (critical)
                     self.send_health_ping(nonce).await;
-                    self.broadcast_capabilities().await;
-                    self.broadcast_manifests().await;
-                    self.broadcast_region_summary().await;
                     self.check_peer_health().await;
+
+                    // Heavy gossip broadcasts: scale frequency with network size.
+                    // At ≤10 peers, every 30s (same as before).
+                    // At 1K+ peers, every ~120s to reduce bandwidth.
+                    let broadcast_every = self.gossip_broadcast_interval();
+                    if nonce % broadcast_every == 0 {
+                        self.broadcast_capabilities().await;
+                        self.broadcast_manifests().await;
+                        self.broadcast_region_summary().await;
+                    }
+
+                    // Cleanup tasks: run every tick (cheap, local-only)
                     self.cleanup_acquisition_progress();
                     self.cleanup_stale_channels();
                     self.cleanup_stale_peer_id_map();
@@ -99,7 +135,7 @@ impl HealthMonitor {
         }
     }
 
-    async fn broadcast_capabilities(&self) {
+    async fn broadcast_capabilities(&mut self) {
         let node_id = self.shared_state.identity.node_id().clone();
 
         // Gather hosted shards from model_registry (which respects --shards range).
@@ -188,17 +224,30 @@ impl HealthMonitor {
             tracing::debug!(error = %e, "DIAG: failed to broadcast capability update");
         }
 
-        // Also broadcast shard announcements for our hosted models
+        // Delta-compressed shard announcements: only broadcast when shard set
+        // changes, or every 10 broadcast cycles as a full re-announce (ensures
+        // late-joining peers get the full picture). At 10K peers with scaled
+        // gossip interval (~240s), full re-announce happens every ~40 min.
         if !hosted_shards.is_empty() {
-            let shard_count = hosted_shards.len();
-            let announce = crate::types::ShardAnnounce {
-                node_id,
-                shards: hosted_shards,
-                timestamp: chrono::Utc::now(),
-            };
-            let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-            if let Err(e) = self.network_tx.send(msg).await {
-                tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
+            let current_set: std::collections::HashSet<_> = hosted_shards.iter().cloned().collect();
+            let shards_changed = current_set != self.last_announced_shards;
+            self.shard_announce_counter += 1;
+            // Full re-announce every 10 broadcast cycles so late-joining peers
+            // eventually discover our shards even if nothing changed.
+            let periodic_reannounce = self.shard_announce_counter % 10 == 0;
+
+            if shards_changed || periodic_reannounce {
+                let shard_count = hosted_shards.len();
+                let announce = crate::types::ShardAnnounce {
+                    node_id,
+                    shards: hosted_shards,
+                    timestamp: chrono::Utc::now(),
+                };
+                let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
+                if let Err(e) = self.network_tx.send(msg).await {
+                    tracing::debug!(error = %e, shard_count, "DIAG: failed to broadcast shard announce");
+                }
+                self.last_announced_shards = current_set;
             }
         }
     }
