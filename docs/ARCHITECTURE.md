@@ -1236,3 +1236,33 @@ Tested up to 5 nodes on real hardware (Proxmox). Estimated capacity: ~10K nodes.
 - GossipSub message volume (linear with models × publishers)
 - May need topic sharding (per-model-family topics instead of single `swarm/models`)
 - mDNS doesn't scale beyond LAN — bootstrap peers or DHT-only discovery needed
+
+## Smart VRAM Management (Phase 20)
+
+Four features for intelligent VRAM and model management:
+
+### Shard Windows (Smart VRAM Unload)
+Workers load only a subset of on-disk shards into GPU memory. Shards stay on disk (still advertised to the network) but VRAM is freed by killing and restarting the worker with a narrower window.
+
+- `ModelProcessPool.active_shard_windows`: per-model `Vec<u32>` of allowed shard indices
+- `--shard-window 0,1,7` CLI arg passed to `model-worker` subprocess
+- Auto-triggered by prune at VRAM pressure 0.7–0.95 (before hard-delete at 0.95+)
+- `compute_optimal_shard_window()` always prefers shard 0 (embeddings) and last shard (output head) for boomerang inference
+- API: `in_vram` field per shard in model detail; frontend shows V/D badges
+
+### Bandwidth-Based Speed Estimation
+- `gpu_memory_bandwidth_gbps()`: 30-GPU lookup table (RTX 20/30/40, A100, H100, Apple M-series, AMD)
+- `estimate_tokens_per_sec_7b()`: `bandwidth / 4.4GB * efficiency` (0.30 GPU, 0.15 CPU)
+- Gossiped via `NodeCapability.est_tokens_per_sec_7b`
+- Used as scheduler tie-breaker (after latency, region, load, trust)
+
+### MoE-Aware VRAM Accounting
+- `estimate_model_vram_mb_arch()`: `active_fraction = 0.40 + 0.60 * (experts_per_token / num_experts)`
+- Supports Mixtral, DeepSeek, Llama4, Qwen35Moe architectures
+- Used in auto-manage scoring for accurate VRAM fitness
+
+### Pre-Scored HF Model Browsing
+- `composite_score = quality × fit × demand × size × 100` (0–150 range)
+- `quality = log10(downloads + 10) / 7.0`; `fit` = boomerang:1.0, shard:0.6, none:0.1
+- Server-side default sort by score; client-side sort dropdown (score/downloads/size)
+- Score badge with color coding; `score_breakdown` in API response
