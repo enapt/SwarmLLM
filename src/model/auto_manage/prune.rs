@@ -392,6 +392,23 @@ impl AutoShardManager {
                 "Pruning over-replicated shard"
             );
 
+            // If no local shards remain, kill the worker subprocess to free VRAM
+            if remaining_local == 0
+                && self
+                    .shared_state
+                    .model_process_pool
+                    .is_loaded(&candidate.model_id)
+            {
+                tracing::info!(
+                    model = %candidate.model_id,
+                    "No local shards remain after pruning — unloading model worker to free VRAM"
+                );
+                self.shared_state
+                    .model_process_pool
+                    .unload_model(&candidate.model_id)
+                    .await;
+            }
+
             // Emit prune event
             let _ = self.shared_state.prune_events_tx.send(event.clone());
             let _ = self.shared_state.models_changed_tx.send(());
