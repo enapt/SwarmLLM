@@ -1171,6 +1171,10 @@ Items identified during audits but deferred for future implementation:
 | LoRA inference wiring | API registers adapters, request carries adapter_id | adapter_registry never queried during inference — model_worker subprocess doesn't load adapters |
 | Speculative decoding in subprocess | Works via llama-cpp executor only | Unreachable for shard-loaded models (Phase 17 subprocess path). IPC protocol lacks speculative support. |
 
+| Torrent-style parallel P2P download | Single-source P2P per shard | chunk_offset/chunk_size support exists but multi-source coordination not built |
+| Download resume | HF downloads restart from scratch on interrupt | Needs HTTP Range header from last byte on resume |
+| DHT-based shard holder resolution (S5) | All holders tracked in memory | Bounded by S3 peer_registry cap (200). Convert to DHT queries if 50K+ nodes needed |
+
 Resolved items (removed from deferred):
 - **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split/model.rs forward loop
 - **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
@@ -1181,3 +1185,23 @@ Resolved items (removed from deferred):
 - **DiskPressure rebalance**: Enum variant removed (never emitted)
 - **SpmTokenizer::vocab**: Field already removed in prior cleanup
 - **Legacy single-GGUF**: `model_path` config still valid for Phase 1 llama-cpp executor
+
+## Scalability (Phase 19)
+
+Tested up to 5 nodes on real hardware (Proxmox). Estimated capacity: ~10K nodes.
+
+| Mechanism | Description | Impact |
+|---|---|---|
+| Gossip frequency scaling (S4) | Broadcast interval = `log(peer_count)` × 30s | ~8× less gossip at 10K nodes |
+| Shard announce delta compression (S1) | Only broadcasts when shard set changes + periodic re-announce | ~90% less shard announce traffic |
+| P2P shard fallback (S2) | Auto-manage tries P2P when no HF source available | Distributes download load |
+| Peer registry cap (S3) | Max 200 peers, evicts highest-latency non-LAN | Memory bounded O(1) not O(N) |
+| Target replicas | `ceil(log2(pool_size))` × demand_factor | 10 replicas at 1K, 14 at 10K |
+| Consistent hash ring | 10 virtual slots per node for shard assignment | Prevents thundering herd |
+| Regional gossip summaries | O(regions × models) not O(nodes × shards) | Scales with regions not nodes |
+| GossipSub mesh auto-scale | mesh_n/mesh_n_high scale with known_peers | Handles 1K+ peers |
+
+### Bottlenecks beyond 10K nodes
+- GossipSub message volume (linear with models × publishers)
+- May need topic sharding (per-model-family topics instead of single `swarm/models`)
+- mDNS doesn't scale beyond LAN — bootstrap peers or DHT-only discovery needed
