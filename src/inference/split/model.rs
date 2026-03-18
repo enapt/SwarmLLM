@@ -3508,6 +3508,9 @@ impl SplitModel {
         let lw = match layer {
             LayerVariant::Dense(lw) => lw,
             LayerVariant::DeepSeek { .. } => {
+                // Restore KV cache before returning to prevent permanent cache loss
+                let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+                entry.layers = layer_kv_caches;
                 return Err(SwarmError::Internal(
                     "Tensor parallelism is not supported for DeepSeek MoE/MLA layers. \
                      Use pipeline parallelism (shard splitting) instead."
@@ -3515,6 +3518,9 @@ impl SplitModel {
                 ));
             }
             LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
+                // Restore KV cache before returning to prevent permanent cache loss
+                let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
+                entry.layers = layer_kv_caches;
                 return Err(SwarmError::Internal(
                     "Tensor parallelism is not supported for Qwen 3.5 layers. \
                      Use pipeline parallelism (shard splitting) instead."

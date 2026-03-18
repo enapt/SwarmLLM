@@ -142,17 +142,13 @@ impl RateLimiter {
         // When full, evict the oldest entry (LRU) instead of denying new clients.
         const MAX_RATE_BUCKETS: usize = 50_000;
         if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
-            // Evict the least-recently-refilled bucket
-            if let Some(oldest_key) = self
-                .buckets
-                .iter()
-                .min_by_key(|entry| entry.value().1)
-                .map(|entry| *entry.key())
-            {
-                self.buckets.remove(&oldest_key);
-            } else {
-                return false;
-            }
+            // SEC: Deny new clients when at capacity instead of O(n) LRU scan.
+            // Previous O(n) DashMap iteration was a DoS amplification vector:
+            // attacker with >50K unique IPs would cause O(n^2) total work.
+            tracing::warn!(
+                "Rate limiter at capacity ({MAX_RATE_BUCKETS} buckets) — denying new client"
+            );
+            return false;
         }
 
         let mut entry = self.buckets.entry(key).or_insert((limit, now));

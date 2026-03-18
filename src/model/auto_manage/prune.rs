@@ -292,6 +292,24 @@ impl AutoShardManager {
                 continue;
             }
 
+            // Re-check holder count before deletion to avoid pruning based on stale data.
+            // Between candidate collection and execution, new holders may have appeared.
+            let shard_id_check = ShardId {
+                model_id: candidate.model_id.clone(),
+                index: candidate.shard_index,
+            };
+            let current_holders = registry.shard_holders(&shard_id_check).len();
+            if current_holders <= candidate.target_replicas as usize {
+                tracing::debug!(
+                    model = %candidate.model_id,
+                    shard = candidate.shard_index,
+                    current_holders,
+                    target = candidate.target_replicas,
+                    "Skipping prune — holder count changed since evaluation"
+                );
+                continue;
+            }
+
             // Actually delete the shard file (or mmproj.gguf for sentinel)
             let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
                 self.shared_state

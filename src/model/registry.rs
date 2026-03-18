@@ -107,12 +107,13 @@ impl ModelRegistry {
         }
 
         holders.insert(node_id.clone(), Instant::now());
-        // Drop the DashMap entry guard before taking another lock
-        drop(entry);
+        // Update reverse index BEFORE dropping shard_holders guard so concurrent
+        // remove_peer_from_all_shards sees a consistent state (no half-update window).
         self.node_shards
             .entry(node_id)
             .or_default()
             .insert(shard_id);
+        drop(entry);
     }
 
     /// Remove a node from shard holders (e.g., node went offline).

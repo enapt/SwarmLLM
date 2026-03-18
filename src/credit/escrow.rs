@@ -285,21 +285,30 @@ impl EscrowManager {
                 }
                 drop(entry);
 
-                // Refund the expired amount (lifetime_spent is monotonic — not decremented)
+                // Refund the expired amount (lifetime_spent is monotonic — not decremented).
+                // Persist balance inside the write lock to ensure crash-safety:
+                // if persist fails, revert in-memory to prevent credits existing only in RAM.
                 {
                     let mut bal = balance.write().await;
+                    let old_balance = bal.balance;
                     bal.balance = bal.balance.saturating_add(amount);
                     bal.last_updated = chrono::Utc::now();
-                    // Persist balance after refund — log error on failure (balance is correct in memory)
                     if let Err(e) = self.db.put_json(
                         crate::credit::ledger::TREE_CREDITS,
                         crate::credit::ledger::KEY_BALANCE,
                         &*bal,
                     ) {
+                        // Revert in-memory balance to match DB state
+                        bal.balance = old_balance;
+                        // Also revert escrow back to Pending so next cleanup retries the refund
+                        if let Some(mut esc) = self.entries.get_mut(&id) {
+                            esc.status = EscrowStatus::Pending;
+                            let _ = self.db.put_json(TREE_ESCROW, &id.to_string(), &*esc);
+                        }
                         tracing::error!(
                             escrow_id = %id,
                             error = %e,
-                            "Failed to persist credit balance after escrow expiry refund — balance correct in memory but will be lost on restart"
+                            "Failed to persist credit balance after escrow expiry — reverted escrow to Pending for retry"
                         );
                     }
                 }

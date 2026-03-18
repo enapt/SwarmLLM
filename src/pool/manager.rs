@@ -455,9 +455,11 @@ impl PoolManager {
             ps.pool_id.clone()
         };
 
-        // Clear our pool state
-        *self.shared_state.pool_state.write().await = None;
+        // Clear pool state — DB first, then memory, to prevent inconsistency on DB failure.
+        // If DB write fails, we return error with in-memory state still intact (correct for retry).
+        // If process crashes after DB clear but before memory clear, restart sees no DB record (correct).
         self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL)?;
+        *self.shared_state.pool_state.write().await = None;
         self.shared_state.pool_registry.remove(&pool_id);
 
         // Broadcast signed member-left notice
@@ -818,6 +820,13 @@ impl PoolManager {
             return;
         }
 
+        // Consume the invitation unconditionally to prevent replay, even if pool_state is None
+        self.pending_invitations.remove(&acceptance.invitation_id);
+        let _ = self
+            .shared_state
+            .db
+            .remove(TREE_POOL_INVITATIONS, &acceptance.invitation_id.to_string());
+
         let mut state = self.shared_state.pool_state.write().await;
         if let Some(ref mut ps) = *state {
             // Check max pool size
@@ -853,13 +862,10 @@ impl PoolManager {
                 members = ps.members.len(),
                 "Pool member joined"
             );
-
-            // Remove used invitation (memory + DB to prevent replay after restart)
-            self.pending_invitations.remove(&acceptance.invitation_id);
-            let _ = self
-                .shared_state
-                .db
-                .remove(TREE_POOL_INVITATIONS, &acceptance.invitation_id.to_string());
+        } else {
+            tracing::warn!(
+                "Acceptance received but no pool state — invitation consumed to prevent replay"
+            );
         }
     }
 

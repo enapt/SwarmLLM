@@ -175,6 +175,11 @@ pub fn sample_token_with_ctx(
     // Greedy decoding when temperature is 0
     if params.temperature <= 0.0 {
         let token = argmax(logits);
+        // Populate probs buffer from raw logits so logprob computation works for greedy
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        ctx.probs.clear();
+        ctx.probs
+            .extend(logits.iter().map(|l| (l - max_logit).exp()));
         tracing::trace!(
             token,
             vocab_size = logits.len(),

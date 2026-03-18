@@ -9,9 +9,14 @@
   var S = App.state;
 
   function escapeHtml(str) {
-    var div = document.createElement('div');
-    div.textContent = str || '';
-    return div.innerHTML;
+    // SEC: Must escape quotes for safe use in HTML attribute values.
+    // The textContent/innerHTML trick only escapes <, >, & — not " or '.
+    return (str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function formatUptime(seconds) {

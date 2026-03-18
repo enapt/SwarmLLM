@@ -656,9 +656,10 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
                         .expect("slice is exactly 4 bytes after bounds check"),
                 ) as usize;
                 pos += 4;
-                let msg = String::from_utf8_lossy(&data[pos..pos + msg_len.min(data.len() - pos)])
-                    .to_string();
-                pos += msg_len.min(data.len() - pos);
+                // SEC: Cap error message to 4KB to prevent 256MB allocation from oversized msg_len
+                let capped_len = msg_len.min(4096).min(data.len() - pos);
+                let msg = String::from_utf8_lossy(&data[pos..pos + capped_len]).to_string();
+                pos += msg_len.min(data.len() - pos); // advance past full message even if truncated
                 Some(NetworkFinishReason::Error(msg))
             } else {
                 Some(NetworkFinishReason::Error(String::new()))

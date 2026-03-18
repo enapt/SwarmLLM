@@ -60,7 +60,8 @@ impl HealthMonitor {
         } else {
             // floor(log2(peer_count / 5)), clamped to [1, 10]
             let ratio = peer_count / 5;
-            let log2 = (usize::BITS - ratio.leading_zeros()) as u64; // ceil(log2)
+            // bit_length - 1 = floor(log2(n)) for n >= 1
+            let log2 = (usize::BITS - 1 - ratio.leading_zeros()) as u64;
             log2.clamp(1, 10)
         }
     }

@@ -439,8 +439,9 @@ impl AutoShardManager {
                                     si.hash = hash;
                                 }
                                 manifest.manifest_hash = manifest.compute_hash();
-                                let model_dir =
-                                    shared.config.node.data_dir.join("models").join(&model_id.0);
+                                let model_dir = shared.config.node.data_dir.join("models").join(
+                                    crate::model::shard::sanitize_path_component(&model_id.0),
+                                );
                                 if let Err(e) = manifest.save_to_dir(&model_dir) {
                                     tracing::warn!(
                                         model = %model_id,

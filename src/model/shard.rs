@@ -326,12 +326,12 @@ impl ShardStore {
     }
 
     /// Atomically finalize a shard download by renaming .tmp → .bin.
+    /// Returns error if the .tmp file is missing (e.g., concurrent cleanup).
     pub fn finalize_shard(&self, model_id: &ModelId, index: u32) -> Result<(), SwarmError> {
         let tmp_path = self.shard_tmp_path(model_id, index);
         let final_path = self.shard_path(model_id, index);
-        if tmp_path.exists() {
-            std::fs::rename(&tmp_path, &final_path).map_err(SwarmError::Io)?;
-        }
+        // No exists() check — let rename fail atomically to avoid TOCTOU race
+        std::fs::rename(&tmp_path, &final_path).map_err(SwarmError::Io)?;
         Ok(())
     }
 

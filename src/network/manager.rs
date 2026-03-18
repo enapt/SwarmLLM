@@ -1050,8 +1050,13 @@ impl NetworkManager {
                     }
                 }
 
-                // NET-C4: Populate reverse PeerId → NodeId lookup
-                self.peer_to_node.insert(peer_id, node_id.clone());
+                // NET-C4: Populate reverse PeerId → NodeId lookup (capped)
+                const MAX_PEER_TO_NODE: usize = 10_000;
+                if self.peer_to_node.len() < MAX_PEER_TO_NODE
+                    || self.peer_to_node.contains_key(&peer_id)
+                {
+                    self.peer_to_node.insert(peer_id, node_id.clone());
+                }
                 // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
                 if self.shared_state.peer_id_map.len() < 10_000
                     || self.shared_state.peer_id_map.contains_key(&node_id)
@@ -1755,22 +1760,34 @@ impl NetworkManager {
                     let new_offset = offset + chunk_len;
                     if new_offset < data.total_size {
                         // More chunks needed — re-register and request next chunk
-                        self.shard_download_progress
-                            .insert(shard_id.clone(), new_offset);
+                        // SEC: enforce cap even for continuation requests to prevent unbounded growth
+                        const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
+                        if self.pending_shard_requests.len() >= MAX_PENDING_SHARD_REQUESTS {
+                            tracing::warn!(
+                                %peer,
+                                model = %shard_id.model_id,
+                                index = shard_id.index,
+                                "Shard download continuation dropped — pending_shard_requests at cap"
+                            );
+                            self.shard_download_progress.remove(&shard_id);
+                        } else {
+                            self.shard_download_progress
+                                .insert(shard_id.clone(), new_offset);
 
-                        let next_req = crate::types::ShardRequest {
-                            shard_id: shard_id.clone(),
-                            chunk_offset: new_offset,
-                            chunk_size: 32 * 1024 * 1024, // 32MB chunks
-                        };
-                        let req = SwarmRequest::ShardTransfer(next_req);
-                        let new_req_id = self
-                            .swarm
-                            .behaviour_mut()
-                            .request_response
-                            .send_request(&peer, req);
-                        self.pending_shard_requests
-                            .insert(new_req_id, (peer, shard_id));
+                            let next_req = crate::types::ShardRequest {
+                                shard_id: shard_id.clone(),
+                                chunk_offset: new_offset,
+                                chunk_size: 32 * 1024 * 1024, // 32MB chunks
+                            };
+                            let req = SwarmRequest::ShardTransfer(next_req);
+                            let new_req_id = self
+                                .swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_request(&peer, req);
+                            self.pending_shard_requests
+                                .insert(new_req_id, (peer, shard_id));
+                        }
                     } else {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
@@ -2670,6 +2687,16 @@ impl NetworkManager {
     /// Results arrive asynchronously via GetProviders events and are merged
     /// into the model_registry's bounded shard_holders cache.
     fn handle_dht_provider_query(&mut self, model_id: &crate::types::ModelId) {
+        // Dedup: skip if we already have pending queries for any shard of this model
+        let already_querying = self
+            .pending_provider_queries
+            .values()
+            .any(|sid| &sid.model_id == model_id);
+        if already_querying {
+            tracing::debug!(model = %model_id, "DHT query skipped — already querying this model");
+            return;
+        }
+
         let manifest = match self.shared_state.model_registry.get_manifest(model_id) {
             Some(m) => m,
             None => {
