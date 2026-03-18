@@ -188,32 +188,49 @@
         return;
       }
       list.innerHTML = '';
+      var tmpl = document.getElementById('tmpl-session-item');
       sorted.forEach(function(s) {
-        var div = document.createElement('div');
-        div.className = 'session-item' + (s.id === S.currentSessionId ? ' active' : '');
+        var div = tmpl.content.cloneNode(true).firstElementChild;
+        if (s.id === S.currentSessionId) div.classList.add('active');
         div.onclick = function() { App.chat.switchSession(s.id); if (S.activeTab !== 'chat') App.ui.switchTab('chat'); };
+
+        // Title
+        var titleEl = div.querySelector('.session-title');
         var title = s.title.length > 28 ? s.title.substring(0, 28) + '...' : s.title;
-        var timeStr = '';
+        titleEl.textContent = title;
+        titleEl.setAttribute('data-rename-session', s.id);
+
+        // Time
+        var timeEl = div.querySelector('.session-time');
         if (s.created) {
-          var d = new Date(s.created);
-          timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+          timeEl.textContent = new Date(s.created).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
         }
+
+        // Model badge
         var modelItem = s.model ? S._modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
-        var source = U.getModelSource(s.model || '');
-        var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
-        var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model || '');
-        var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
-        var isEncrypted = modelItem && modelItem.encrypted;
-        var badgeClass = 'session-model-badge session-source-' + source;
-        var tooltipParts = [U.escapeHtml(s.model || '')];
-        if (source !== 'local') tooltipParts.push(sourceLabel);
-        if (isEncrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
-        var modelBadge = s.model ? '<span class="' + badgeClass + '" title="' + tooltipParts.join(' \u2022 ') + '">' + (sibIconHtml ? sibIconHtml + ' ' : '') + U.escapeHtml(U.formatModelDisplayName(s.model)) + '</span>' : '';
-        var encBadge = isEncrypted ? '<span class="session-enc-lock" title="Encrypted pipeline active">&#128274;</span>' : '';
-        var metaHtml = '<span class="session-meta">' + U.escapeHtml(timeStr) + modelBadge + encBadge + '</span>';
-        var titleSpan = '<span class="session-title" data-rename-session="' + U.escapeHtml(s.id) + '" title="Double-click to rename">' + U.escapeHtml(title) + '</span>';
-        div.innerHTML = '<div class="session-info">' + titleSpan + metaHtml + '</div>' +
-          '<button class="btn btn-ghost btn-sm session-delete" data-delete-session="' + U.escapeHtml(s.id) + '" title="Delete">&times;</button>';
+        var badgeEl = div.querySelector('.session-model-badge');
+        if (s.model) {
+          var source = U.getModelSource(s.model);
+          var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
+          var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model);
+          var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
+          badgeEl.removeAttribute('hidden');
+          badgeEl.className = 'session-model-badge session-source-' + source;
+          var tooltipParts = [s.model];
+          if (source !== 'local') tooltipParts.push(sourceLabel);
+          if (modelItem && modelItem.encrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
+          badgeEl.title = tooltipParts.join(' \u2022 ');
+          badgeEl.innerHTML = (sibIconHtml ? sibIconHtml + ' ' : '') + U.escapeHtml(U.formatModelDisplayName(s.model));
+        }
+
+        // Encryption badge
+        if (modelItem && modelItem.encrypted) {
+          div.querySelector('.session-enc-lock').removeAttribute('hidden');
+        }
+
+        // Delete button
+        div.querySelector('.session-delete').setAttribute('data-delete-session', s.id);
+
         list.appendChild(div);
       });
     },

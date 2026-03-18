@@ -71,18 +71,33 @@
           return;
         }
 
-        var html = '';
+        tbody.innerHTML = '';
+        var rowTmpl = document.getElementById('tmpl-leaderboard-row');
         for (var i = 0; i < entries.length; i++) {
           var e = entries[i];
+          var row = rowTmpl.content.cloneNode(true).firstElementChild;
+          row.querySelector('.lb-rank').textContent = e.rank || i + 1;
+          var nameCell = row.querySelector('.lb-name');
+          if (e.display_name !== e.node_id) {
+            nameCell.textContent = e.display_name;
+            var sub = document.createElement('span');
+            sub.className = 'text-muted mono';
+            sub.style.fontSize = '0.75rem';
+            sub.textContent = ' ' + e.node_id;
+            nameCell.appendChild(sub);
+          } else {
+            var mono = document.createElement('span');
+            mono.className = 'mono';
+            mono.textContent = e.node_id;
+            nameCell.appendChild(mono);
+          }
+          row.querySelector('.lb-credits').textContent = e.credits || 0;
+          var tierEl = row.querySelector('.lb-tier');
           var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
-          html += '<tr>'
-            + '<td class="mono">' + (e.rank || i+1) + '</td>'
-            + '<td>' + (e.display_name !== e.node_id ? U.escapeHtml(e.display_name) + ' <span class="text-muted mono" style="font-size:0.75rem">' + U.escapeHtml(e.node_id) + '</span>' : '<span class="mono">' + U.escapeHtml(e.node_id) + '</span>') + '</td>'
-            + '<td class="mono">' + (e.credits || 0) + '</td>'
-            + '<td><span class="tier-badge ' + tierClass + '">' + U.escapeHtml(e.tier || 'Silver') + '</span></td>'
-            + '</tr>';
+          tierEl.className = 'tier-badge ' + tierClass;
+          tierEl.textContent = e.tier || 'Silver';
+          tbody.appendChild(row);
         }
-        tbody.innerHTML = html;
       } catch (e) {
         tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Error: ' + U.escapeHtml(e.message) + '</td></tr>';
       }
@@ -595,15 +610,16 @@
         }
 
         container.innerHTML = '';
+        var chipTmpl = document.getElementById('tmpl-compare-model-chip');
         App.compare.models.forEach(function(m, idx) {
-          var chip = document.createElement('label');
+          var chip = chipTmpl.content.cloneNode(true).firstElementChild;
           chip.className = 'compare-model-chip type-' + m.type;
           chip.style.animationDelay = (idx * 30) + 'ms';
           var displayName = m.id.length > 35 ? m.id.substring(0, 35) + '...' : m.id;
           var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + Math.round(m.context / 1000) + 'k ctx' : '';
-          chip.innerHTML = '<input type="checkbox" value="' + U.escapeHtml(m.id) + '">' +
-            '<span>' + U.escapeHtml(displayName) + '</span>' +
-            '<span class="chip-type">' + m.type + ctxLabel + '</span>';
+          chip.querySelector('input').value = m.id;
+          chip.querySelector('.chip-name').textContent = displayName;
+          chip.querySelector('.chip-type').textContent = m.type + ctxLabel;
           chip.title = m.id + (ctxLabel ? ' (' + m.context + ' tokens)' : '');
           chip.querySelector('input').addEventListener('change', function() {
             chip.classList.toggle('selected', this.checked);
@@ -665,16 +681,15 @@
       resultsDiv.className = 'compare-results ' + colClass;
 
       resultsDiv.innerHTML = '';
+      var cardTmpl = document.getElementById('tmpl-compare-card');
       App.compare.selected.forEach(function(modelId) {
-        var card = document.createElement('div');
-        card.className = 'compare-card';
+        var card = cardTmpl.content.cloneNode(true).firstElementChild;
         card.id = 'compare-card-' + modelId.replace(/[^a-zA-Z0-9_-]/g, '_');
-        card.innerHTML =
-          '<div class="compare-card-header">' +
-            '<span class="compare-card-model">' + U.escapeHtml(modelId) + '</span>' +
-            '<span class="compare-card-meta"><span class="spinner" style="width:14px;height:14px"></span></span>' +
-          '</div>' +
-          '<div class="compare-card-body"><div class="compare-spinner"><div class="spinner"></div> Waiting for response...</div></div>';
+        card.querySelector('.compare-card-model').textContent = modelId;
+        card.querySelector('.compare-card-model').title = modelId;
+        card.querySelector('.compare-card-status').innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
+        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> Waiting for response...</div>';
+        card.querySelector('.compare-card-actions').style.display = 'none';
         resultsDiv.appendChild(card);
       });
 
@@ -786,11 +801,10 @@
       if (!resultsDiv || !item.results || !item.results.length) return;
 
       resultsDiv.innerHTML = '';
+      var rCardTmpl = document.getElementById('tmpl-compare-card');
       item.results.forEach(function(r) {
-        var card = document.createElement('div');
-        card.className = 'compare-card';
+        var card = rCardTmpl.content.cloneNode(true).firstElementChild;
         card.id = 'compare-card-' + r.model.replace(/[^a-zA-Z0-9_-]/g, '_');
-        card.innerHTML = '<div class="compare-card-body"></div>';
         resultsDiv.appendChild(card);
         App.compare.renderCard({
           model: r.model, ok: r.ok, error: r.error,
@@ -843,25 +857,49 @@
       }
 
       var cardContentId = 'compare-content-' + result.model.replace(/[^a-zA-Z0-9_-]/g, '_');
-      card.innerHTML =
-        '<div class="compare-card-header">' +
-          '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">' +
-            '<span class="compare-card-model" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + U.escapeHtml(result.model) + '">' + U.escapeHtml(result.model) + '</span>' +
-            (isError ? '<span style="color:var(--red);font-size:0.7rem">error</span>' : '<span style="color:var(--green);font-size:0.7rem">' + result.latency_ms + 'ms</span>') +
-          '</div>' +
-          '<div class="compare-card-actions">' +
-            '<button data-copy-compare="' + cardContentId + '" title="Copy response">Copy</button>' +
-          '</div>' +
-        '</div>' +
-        '<div class="compare-card-body' + (isError ? ' error' : '') + '" id="' + cardContentId + '">' + U.escapeHtml(content) + '</div>' +
-        (isError ? '' :
-          '<div class="compare-card-footer">' +
-            '<span>In: ' + inputTokens + '</span>' +
-            '<span>Out: ' + outputTokens + '</span>' +
-            '<span>' + result.latency_ms + 'ms</span>' +
-            (outputTokens > 0 ? '<span>' + (function() { var t = outputTokens / (result.latency_ms / 1000); return t >= 1 ? Math.round(t) : t.toFixed(1); })() + ' tok/s</span>' : '') +
-          '</div>'
-        );
+
+      // Update existing card structure (from template clone during run/restore)
+      var modelEl = card.querySelector('.compare-card-model');
+      modelEl.textContent = result.model;
+      modelEl.title = result.model;
+
+      var statusEl = card.querySelector('.compare-card-status');
+      if (isError) {
+        statusEl.style.color = 'var(--red)';
+        statusEl.style.fontSize = '0.7rem';
+        statusEl.textContent = 'error';
+      } else {
+        statusEl.style.color = 'var(--green)';
+        statusEl.style.fontSize = '0.7rem';
+        statusEl.textContent = result.latency_ms + 'ms';
+      }
+
+      // Actions
+      var actionsEl = card.querySelector('.compare-card-actions');
+      actionsEl.style.display = '';
+      var copyBtn = card.querySelector('.compare-card-copy-btn');
+      if (copyBtn) copyBtn.setAttribute('data-copy-compare', cardContentId);
+
+      // Body
+      var bodyEl = card.querySelector('.compare-card-body');
+      bodyEl.id = cardContentId;
+      bodyEl.textContent = content;
+      if (isError) bodyEl.classList.add('error');
+
+      // Footer
+      if (!isError) {
+        var footerEl = card.querySelector('.compare-card-footer');
+        footerEl.removeAttribute('hidden');
+        footerEl.querySelector('.ccf-in').textContent = 'In: ' + inputTokens;
+        footerEl.querySelector('.ccf-out').textContent = 'Out: ' + outputTokens;
+        footerEl.querySelector('.ccf-latency').textContent = result.latency_ms + 'ms';
+        if (outputTokens > 0) {
+          var tpsEl = footerEl.querySelector('.ccf-tps');
+          tpsEl.removeAttribute('hidden');
+          var t = outputTokens / (result.latency_ms / 1000);
+          tpsEl.textContent = (t >= 1 ? Math.round(t) : t.toFixed(1)) + ' tok/s';
+        }
+      }
     },
   };
 })();

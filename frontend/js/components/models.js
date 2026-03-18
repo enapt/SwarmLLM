@@ -42,61 +42,64 @@
         }
 
         results.innerHTML = '';
+        var hfTmpl = document.getElementById('tmpl-hf-result-card');
         data.forEach(function(repo) {
-          var card = document.createElement('div');
-          card.className = 'hf-model-card';
-          var downloads = repo.downloads ? repo.downloads.toLocaleString() + ' downloads' : '';
-          var likes = repo.likes ? repo.likes.toLocaleString() + ' likes' : '';
+          var card = hfTmpl.content.cloneNode(true).firstElementChild;
           var safeKey = (repo.repo_id || '').replace(/[^a-zA-Z0-9]/g, '_');
           var variants = repo.variants || [];
           var recommended = repo.recommended_variant || '';
 
-          var variantOptions = '';
-          variants.forEach(function(v) {
-            var sizeStr = v.size_bytes ? U.formatBytes(v.size_bytes) : '';
-            var label = v.quant + (sizeStr ? ' \u2014 ' + sizeStr : '');
-            if (v.quant === recommended) label += ' (Recommended)';
-            var selected = v.quant === recommended ? ' selected' : '';
-            variantOptions += '<option value="' + U.escapeHtml(v.filename) + '"' + selected + '>' + U.escapeHtml(label) + '</option>';
-          });
+          // Name
+          card.querySelector('.hf-model-name').textContent = repo.repo_id;
 
-          var fitsTag = '';
+          // Stats meta (downloads, likes, VRAM fit)
+          var statsHtml = '';
+          if (repo.downloads) statsHtml += '<span>' + repo.downloads.toLocaleString() + ' downloads</span>';
+          if (repo.likes) statsHtml += '<span>' + repo.likes.toLocaleString() + ' likes</span>';
           var shardSizeStr = repo.est_shard_size ? U.formatBytes(repo.est_shard_size) : '';
           var boomerangSizeStr = repo.est_boomerang_size ? U.formatBytes(repo.est_boomerang_size) : '';
           if (repo.fits_boomerang) {
-            fitsTag = '<span style="color:var(--green)" title="First+last shard fit VRAM (~' + boomerangSizeStr + ') — can run requests from this node via boomerang routing">&#9989; Run locally</span>';
+            statsHtml += '<span><span style="color:var(--green)" title="First+last shard fit VRAM (~' + boomerangSizeStr + ')">&#9989; Run locally</span></span>';
           } else if (repo.fits_shard) {
-            fitsTag = '<span style="color:var(--cyan)" title="Individual shards fit VRAM (~' + shardSizeStr + '/shard) — can participate in swarm inference for this model">&#128279; Can host shards</span>';
+            statsHtml += '<span><span style="color:var(--cyan)" title="Individual shards fit VRAM (~' + shardSizeStr + '/shard)">&#128279; Can host shards</span></span>';
           } else if (repo.fits_vram === false && variants.length > 0) {
-            fitsTag = '<span style="color:var(--orange)" title="Even individual shards may exceed your available VRAM">&#9888; Exceeds VRAM</span>';
+            statsHtml += '<span><span style="color:var(--orange)" title="Even individual shards may exceed your available VRAM">&#9888; Exceeds VRAM</span></span>';
           }
+          card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
 
+          // Network meta
           var replicas = repo.network_replicas || 0;
-          var networkTag = replicas > 0
+          var networkHtml = replicas > 0
             ? '<span class="badge-swarm" title="' + replicas + ' node(s) already hosting this model on the swarm">On Swarm &mdash; ' + replicas + ' node' + (replicas !== 1 ? 's' : '') + '</span>'
-            : '<span class="badge-new" title="Not yet on the swarm — you will be the first node hosting this model">New to network</span>';
-          var demandTag = '';
-          if (replicas === 0) {
-            demandTag = '<span style="color:var(--green)" title="No replicas yet — high credit earning potential">&#128176; High demand</span>';
-          } else if (replicas <= 2) {
-            demandTag = '<span style="color:var(--yellow)" title="Few replicas — good credit earning potential">&#128176; Medium demand</span>';
+            : '<span class="badge-new" title="Not yet on the swarm">New to network</span>';
+          if (replicas === 0) networkHtml += '<span style="color:var(--green)" title="No replicas yet — high credit earning potential">&#128176; High demand</span>';
+          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)" title="Few replicas — good credit earning potential">&#128176; Medium demand</span>';
+          else networkHtml += '<span style="color:var(--text-muted)" title="Well replicated across the network">&#128176; Well replicated</span>';
+          card.querySelector('.hf-meta-network').innerHTML = networkHtml;
+
+          // Variant selector
+          var selectEl = card.querySelector('.hf-quant-select');
+          if (variants.length > 1) {
+            selectEl.removeAttribute('hidden');
+            selectEl.id = 'quant-' + safeKey;
+            variants.forEach(function(v) {
+              var opt = document.createElement('option');
+              opt.value = v.filename;
+              var label = v.quant + (v.size_bytes ? ' \u2014 ' + U.formatBytes(v.size_bytes) : '');
+              if (v.quant === recommended) { label += ' (Recommended)'; opt.selected = true; }
+              opt.textContent = label;
+              selectEl.appendChild(opt);
+            });
           } else {
-            demandTag = '<span style="color:var(--text-muted)" title="Well replicated across the network">&#128176; Well replicated</span>';
+            selectEl.remove();
           }
 
-          card.innerHTML = '<div class="hf-model-info">' +
-            '<div class="hf-model-name">' + U.escapeHtml(repo.repo_id) + '</div>' +
-            '<div class="hf-model-meta">' +
-            (downloads ? '<span>' + downloads + '</span>' : '') +
-            (likes ? '<span>' + likes + '</span>' : '') +
-            (fitsTag ? '<span>' + fitsTag + '</span>' : '') +
-            '</div>' +
-            '<div class="hf-model-meta">' + networkTag + demandTag + '</div>' +
-            '</div>' +
-            '<div class="hf-model-actions">' +
-            (variants.length > 1 ? '<select class="hf-quant-select" id="quant-' + safeKey + '">' + variantOptions + '</select>' : '') +
-            '<button class="btn btn-sm btn-primary" data-hf-download="' + U.escapeHtml(repo.repo_id) + '" data-hf-variant="' + safeKey + '"' + (variants.length === 1 ? ' data-hf-filename="' + U.escapeHtml(variants[0].filename) + '"' : '') + '>Download</button>' +
-            '</div>';
+          // Download button
+          var dlBtn = card.querySelector('.hf-dl-btn');
+          dlBtn.setAttribute('data-hf-download', repo.repo_id);
+          dlBtn.setAttribute('data-hf-variant', safeKey);
+          if (variants.length === 1) dlBtn.setAttribute('data-hf-filename', variants[0].filename);
+
           results.appendChild(card);
         });
       } catch (e) {

@@ -946,6 +946,123 @@
     </div>
   </template>
 
+  <!-- Chat session item (used by chat.renderSessionList) -->
+  <template id="tmpl-session-item">
+    <div class="session-item">
+      <div class="session-info">
+        <span class="session-title" title="Double-click to rename"></span>
+        <span class="session-meta">
+          <span class="session-time"></span>
+          <span class="session-model-badge" hidden></span>
+          <span class="session-enc-lock" title="Encrypted pipeline active" hidden>&#128274;</span>
+        </span>
+      </div>
+      <button class="btn btn-ghost btn-sm session-delete" title="Delete">&times;</button>
+    </div>
+  </template>
+
+  <!-- Chat message bubble (used by utils.appendMessageToDOM) -->
+  <template id="tmpl-chat-message">
+    <div class="chat-msg">
+      <div class="msg-avatar" aria-hidden="true"></div>
+      <div class="msg-bubble">
+        <div class="msg-role"></div>
+        <div class="msg-content"></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- Toast notification (used by notifications.showToast) -->
+  <template id="tmpl-toast">
+    <div class="toast">
+      <span class="toast-icon"></span>
+      <span class="toast-text"></span>
+      <button class="toast-close">&#215;</button>
+    </div>
+  </template>
+
+  <!-- Provider health badge (used by providerHealth.updateBannerBadges) -->
+  <template id="tmpl-provider-badge">
+    <div class="provider-badge" style="cursor:pointer">
+      <span class="pb-icon"></span>
+      <span class="pb-name"></span>
+      <span class="pb-dot"></span>
+      <span class="pb-latency"></span>
+    </div>
+  </template>
+
+  <!-- Compare card (used by compare.run and compare.renderCard) -->
+  <template id="tmpl-compare-card">
+    <div class="compare-card">
+      <div class="compare-card-header">
+        <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+          <span class="compare-card-model" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          <span class="compare-card-status"></span>
+        </div>
+        <div class="compare-card-actions">
+          <button class="compare-card-copy-btn" title="Copy response">Copy</button>
+        </div>
+      </div>
+      <div class="compare-card-body"></div>
+      <div class="compare-card-footer" hidden>
+        <span class="ccf-in"></span>
+        <span class="ccf-out"></span>
+        <span class="ccf-latency"></span>
+        <span class="ccf-tps" hidden></span>
+      </div>
+    </div>
+  </template>
+
+  <!-- Compare model checkbox chip (used by compare.loadModels) -->
+  <template id="tmpl-compare-model-chip">
+    <label class="compare-model-chip">
+      <input type="checkbox">
+      <span class="chip-name"></span>
+      <span class="chip-type"></span>
+    </label>
+  </template>
+
+  <!-- Leaderboard table row (used by identity.loadLeaderboard) -->
+  <template id="tmpl-leaderboard-row">
+    <tr>
+      <td class="mono lb-rank"></td>
+      <td class="lb-name"></td>
+      <td class="mono lb-credits"></td>
+      <td><span class="tier-badge lb-tier"></span></td>
+    </tr>
+  </template>
+
+  <!-- HuggingFace search result card (used by hf.search) -->
+  <template id="tmpl-hf-result-card">
+    <div class="hf-model-card">
+      <div class="hf-model-info">
+        <div class="hf-model-name"></div>
+        <div class="hf-model-meta hf-meta-stats"></div>
+        <div class="hf-model-meta hf-meta-network"></div>
+      </div>
+      <div class="hf-model-actions">
+        <select class="hf-quant-select" hidden></select>
+        <button class="btn btn-sm btn-primary hf-dl-btn">Download</button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Storage model row (used by settings.loadStorageInfo) -->
+  <template id="tmpl-storage-model-row">
+    <div class="flex-between" style="padding:2px 0">
+      <span class="storage-model-name"></span>
+      <span class="text-muted storage-model-meta"></span>
+    </div>
+  </template>
+
+  <!-- Prune history row (used by pruneSchedule) -->
+  <template id="tmpl-prune-row">
+    <div class="prune-event-row" style="display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem">
+      <span class="prune-left"></span>
+      <span class="text-muted prune-right"></span>
+    </div>
+  </template>
+
   <script src="/static/js/i18n.js"></script>
   <script src="/static/js/neural-bg.js"></script>
   <script src="/static/js/topojson-client.min.js"></script>

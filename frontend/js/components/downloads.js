@@ -211,18 +211,12 @@
   // Prune History + Resource Schedule
   // ========================================================================
   function buildPruneRow(e) {
+    var tmpl = document.getElementById('tmpl-prune-row');
+    var row = tmpl.content.cloneNode(true).firstElementChild;
+    row.querySelector('.prune-left').textContent = (e.model_name || e.model_id) + ' shard ' + e.shard_index;
     var freed = U.formatBytes(e.freed_bytes || 0);
     var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
-    var row = document.createElement('div');
-    row.className = 'prune-event-row';
-    row.style.cssText = 'display:flex;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border,#313244);font-size:0.75rem';
-    var left = document.createElement('span');
-    left.textContent = (e.model_name || e.model_id) + ' shard ' + e.shard_index;
-    var right = document.createElement('span');
-    right.className = 'text-muted';
-    right.textContent = freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts;
-    row.appendChild(left);
-    row.appendChild(right);
+    row.querySelector('.prune-right').textContent = freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts;
     return row;
   }
 

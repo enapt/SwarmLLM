@@ -151,29 +151,26 @@
 
         var modelsDiv = document.getElementById('settings-storage-models');
         modelsDiv.innerHTML = '';
+        var storageTmpl = document.getElementById('tmpl-storage-model-row');
         if (data.models && data.models.length > 0) {
           data.models.forEach(function(m) {
             if (m.local_shards > 0) {
+              var div = storageTmpl.content.cloneNode(true).firstElementChild;
+              div.querySelector('.storage-model-name').textContent = m.name || m.id;
+              var metaText = m.local_shards + '/' + m.shard_count + ' shards \u00b7 ' + U.formatBytes(m.local_bytes);
+              var metaEl = div.querySelector('.storage-model-meta');
+              metaEl.textContent = metaText;
               var vramNeeded = m.estimated_vram_mb || 0;
-              var fits = poolVram > 0 && vramNeeded <= poolVram;
-              var tooLarge = poolVram > 0 && vramNeeded > poolVram;
-              var vramTag = '';
               if (vramNeeded > 0) {
-                var vramStr = U.escapeHtml(U.formatMB(vramNeeded));
-                var poolVramStr = U.escapeHtml(U.formatMB(poolVram));
-                if (fits) {
-                  vramTag = ' <span style="color:var(--green)">' + vramStr + ' VRAM</span>';
-                } else if (tooLarge) {
-                  vramTag = ' <span style="color:var(--red)" title="Exceeds pool VRAM (' + poolVramStr + ')">' + vramStr + ' VRAM</span>';
-                } else {
-                  vramTag = ' <span class="text-muted">' + vramStr + ' VRAM</span>';
-                }
+                var vramSpan = document.createElement('span');
+                vramSpan.textContent = ' ' + U.formatMB(vramNeeded) + ' VRAM';
+                var fits = poolVram > 0 && vramNeeded <= poolVram;
+                var tooLarge = poolVram > 0 && vramNeeded > poolVram;
+                if (fits) vramSpan.style.color = 'var(--green)';
+                else if (tooLarge) { vramSpan.style.color = 'var(--red)'; vramSpan.title = 'Exceeds pool VRAM (' + U.formatMB(poolVram) + ')'; }
+                else vramSpan.className = 'text-muted';
+                metaEl.appendChild(vramSpan);
               }
-              var div = document.createElement('div');
-              div.className = 'flex-between';
-              div.style.cssText = 'padding:2px 0';
-              div.innerHTML = '<span>' + U.escapeHtml(m.name || m.id) + '</span>' +
-                '<span class="text-muted">' + m.local_shards + '/' + m.shard_count + ' shards &middot; ' + U.formatBytes(m.local_bytes) + vramTag + '</span>';
               modelsDiv.appendChild(div);
             }
           });

@@ -20,12 +20,13 @@
       container.className = 'toast-container';
       document.body.appendChild(container);
     }
-    var toast = document.createElement('div');
-    toast.className = 'toast toast-' + type;
     var icons = { success: '\u2713', error: '\u2717', warning: '\u26A0', info: '\u2139' };
-    toast.innerHTML = '<span class="toast-icon">' + (icons[type] || icons.info) + '</span>' +
-      '<span class="toast-text">' + U.escapeHtml(text) + '</span>' +
-      '<button class="toast-close" onclick="this.parentNode.remove()">\u00d7</button>';
+    var tmpl = document.getElementById('tmpl-toast');
+    var toast = tmpl.content.cloneNode(true).firstElementChild;
+    toast.className = 'toast toast-' + type;
+    toast.querySelector('.toast-icon').textContent = icons[type] || icons.info;
+    toast.querySelector('.toast-text').textContent = text;
+    toast.querySelector('.toast-close').addEventListener('click', function() { toast.remove(); });
     container.appendChild(toast);
     requestAnimationFrame(function() { toast.classList.add('toast-show'); });
     var timer = setTimeout(function() {
@@ -246,9 +247,10 @@
       if (configured.length === 0) { strip.classList.add('hidden'); return; }
       strip.classList.remove('hidden');
       strip.innerHTML = '';
+      var badgeTmpl = document.getElementById('tmpl-provider-badge');
       configured.sort().forEach(function(p) {
         var h = S.providerHealth[p];
-        var badge = document.createElement('div');
+        var badge = badgeTmpl.content.cloneNode(true).firstElementChild;
         var isError = (h.status === 'auth_error' || h.status === 'down' || h.status === 'error');
         badge.className = 'provider-badge' + (h.status === 'up' ? ' badge-active' : '') + (isError ? ' badge-error' : '');
         var dotClass = 'dot-down';
@@ -261,14 +263,13 @@
         else if (h.status === 'auth_error') { dotClass = 'dot-error'; latencyText = 'Key Invalid'; }
         else if (h.status === 'overloaded') { dotClass = 'dot-ok'; latencyText = 'Busy'; }
         else { dotClass = 'dot-error'; latencyText = 'Down'; }
-        var iconHtml = providerIconHtml(p, 18);
         var name = PROVIDER_NAMES[p] || p;
-        badge.innerHTML = '<span class="pb-icon">' + iconHtml + '</span>' +
-          '<span class="pb-name">' + U.escapeHtml(name) + '</span>' +
-          '<span class="pb-dot ' + dotClass + '"></span>' +
-          (latencyText ? '<span class="pb-latency">' + U.escapeHtml(latencyText) + '</span>' : '');
+        badge.querySelector('.pb-icon').innerHTML = providerIconHtml(p, 18);
+        badge.querySelector('.pb-name').textContent = name;
+        badge.querySelector('.pb-dot').className = 'pb-dot ' + dotClass;
+        var latencyEl = badge.querySelector('.pb-latency');
+        if (latencyText) { latencyEl.textContent = latencyText; } else { latencyEl.remove(); }
         badge.title = name + ': ' + h.status + (h.detail ? ' — ' + h.detail : '') + (h.latency_ms ? ' (' + h.latency_ms + 'ms)' : '');
-        badge.style.cursor = 'pointer';
         (function(providerKey, errored) {
           badge.addEventListener('click', function() {
             App.ui.switchTab('dashboard');

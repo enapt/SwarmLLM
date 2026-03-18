@@ -139,59 +139,73 @@
     var empty = document.getElementById('chat-empty');
     if (empty) empty.style.display = 'none';
 
-    var div = document.createElement('div');
-    div.className = 'chat-msg ' + role;
+    var tmpl = document.getElementById('tmpl-chat-message');
+    var div = tmpl.content.cloneNode(true).firstElementChild;
+    div.classList.add(role);
 
-    var sourceHtml = '';
-    if (role === 'assistant') {
-      var session = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId] : null;
-      var modelId = opts.model || (session ? session.model : '') || S.currentModel || '';
-      var source = getModelSource(modelId);
-      div.classList.add('source-' + source);
-      var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Network';
-      sourceHtml = '<span class="msg-source-badge source-' + source + '">' + sourceLabel + '</span>';
-    }
-
-    var avatarEl = document.createElement('div');
-    avatarEl.className = 'msg-avatar';
-    avatarEl.setAttribute('aria-hidden', 'true');
+    // Avatar
+    var avatarEl = div.querySelector('.msg-avatar');
     if (role === 'assistant') {
       var _sess = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId] : null;
-      var _mid = opts && opts.model ? opts.model : (_sess ? _sess.model : '') || S.currentModel || '';
-      var _avatarProvider = (_mid && S._modelDropdownData.find(function(m) { return m.id === _mid; }) || {}).group || null;
-      var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(_mid);
+      var modelId = opts.model || (_sess ? _sess.model : '') || S.currentModel || '';
+      var source = getModelSource(modelId);
+      div.classList.add('source-' + source);
+      var _avatarProvider = (modelId && S._modelDropdownData.find(function(m) { return m.id === modelId; }) || {}).group || null;
+      var _iconKey = (_avatarProvider && _ICON_MAP[_avatarProvider]) ? _avatarProvider : modelIconKey(modelId);
       var _iconUrl = _iconKey ? providerIconUrl(_iconKey) : null;
       if (_iconUrl) {
-        avatarEl.innerHTML = '<img src="' + _iconUrl + '" width="16" height="16" alt="" class="provider-icon provider-avatar-icon" style="display:block">';
+        var img = document.createElement('img');
+        img.src = _iconUrl; img.width = 16; img.height = 16; img.alt = '';
+        img.className = 'provider-icon provider-avatar-icon'; img.style.display = 'block';
+        avatarEl.appendChild(img);
       } else {
         avatarEl.textContent = 'AI';
       }
     } else {
-      avatarEl.innerHTML = '<img src="/static/icons/swarm.svg" alt="" style="width:16px;height:16px;display:block;">';
-    }
-    div.appendChild(avatarEl);
-
-    var bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-
-    var label = role === 'user' ? 'You' : 'Assistant';
-    var encLock = (opts && opts.encrypted) ? ' <span class="msg-enc-lock" title="Sent with E2E encryption">&#128274;</span>' : '';
-    bubble.innerHTML = '<div class="msg-role">' + label + sourceHtml + encLock + '</div><div class="msg-content"></div>';
-    if (isHtml) {
-      bubble.querySelector('.msg-content').innerHTML = content;
-    } else {
-      bubble.querySelector('.msg-content').textContent = content;
+      var userImg = document.createElement('img');
+      userImg.src = '/static/icons/swarm.svg'; userImg.alt = '';
+      userImg.style.cssText = 'width:16px;height:16px;display:block';
+      avatarEl.appendChild(userImg);
     }
 
+    // Role label + source badge + encryption lock
+    var roleEl = div.querySelector('.msg-role');
+    roleEl.textContent = role === 'user' ? 'You' : 'Assistant';
+    if (role === 'assistant') {
+      var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Network';
+      var sourceBadge = document.createElement('span');
+      sourceBadge.className = 'msg-source-badge source-' + source;
+      sourceBadge.textContent = sourceLabel;
+      roleEl.appendChild(sourceBadge);
+    }
+    if (opts && opts.encrypted) {
+      var lockSpan = document.createElement('span');
+      lockSpan.className = 'msg-enc-lock';
+      lockSpan.title = 'Sent with E2E encryption';
+      lockSpan.innerHTML = '&#128274;';
+      roleEl.appendChild(lockSpan);
+    }
+
+    // Content
+    var contentEl = div.querySelector('.msg-content');
+    if (isHtml) { contentEl.innerHTML = content; }
+    else { contentEl.textContent = content; }
+
+    // Assistant action buttons
     if (role === 'assistant') {
       var actions = document.createElement('div');
       actions.className = 'msg-actions';
-      actions.innerHTML = '<button class="msg-action-btn" data-action="copy" title="Copy this response">Copy</button>' +
-        '<button class="msg-action-btn" data-action="compare" title="Ask other models the same question">Try other models</button>';
-      bubble.appendChild(actions);
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'msg-action-btn'; copyBtn.dataset.action = 'copy';
+      copyBtn.title = 'Copy this response'; copyBtn.textContent = 'Copy';
+      var compareBtn = document.createElement('button');
+      compareBtn.className = 'msg-action-btn'; compareBtn.dataset.action = 'compare';
+      compareBtn.title = 'Ask other models the same question'; compareBtn.textContent = 'Try other models';
+      actions.appendChild(copyBtn);
+      actions.appendChild(compareBtn);
+      div.querySelector('.msg-bubble').appendChild(actions);
     }
 
-    div.appendChild(bubble);
     container.appendChild(div);
     applyMessageGrouping(container);
     App.chat.scrollToBottom();
