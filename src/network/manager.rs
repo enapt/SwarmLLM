@@ -98,6 +98,9 @@ pub struct NetworkManager {
     /// on the peer's PeerInfo, enabling tensor-parallelism group detection.
     ping_sent_times: HashMap<OutboundRequestId, (libp2p::PeerId, std::time::Instant)>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Peers to re-dial after a short delay (e.g., mDNS simultaneous-dial race).
+    /// Stores (peer_id, address, scheduled_time). Checked every second in the event loop.
+    pending_redial: Vec<(libp2p::PeerId, Multiaddr, std::time::Instant)>,
 }
 
 impl NetworkManager {
@@ -202,6 +205,7 @@ impl NetworkManager {
             connection_addrs: HashMap::new(),
             ping_sent_times: HashMap::new(),
             shutdown_rx,
+            pending_redial: Vec::new(),
         })
     }
 
@@ -299,6 +303,11 @@ impl NetworkManager {
         // by libp2p (no OutboundFailure event) due to stale ConnectionIds or handler starvation.
         let mut stale_tensor_interval = tokio::time::interval(std::time::Duration::from_secs(10));
         stale_tensor_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Periodic redial check — processes pending_redial queue for peers that failed
+        // initial connection (e.g., mDNS simultaneous-dial race).
+        let mut redial_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        redial_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!("NetworkManager running");
 
@@ -461,6 +470,45 @@ impl NetworkManager {
                                 );
                                 let _ = self.swarm.disconnect_peer_id(*peer);
                             }
+                        }
+                    }
+                }
+                // Process pending re-dials (mDNS simultaneous-dial race recovery).
+                // When both sides discover each other via mDNS at the same time, both dial,
+                // and with max_established_per_peer=1, the loser's connection is immediately
+                // closed. We schedule a re-dial with random jitter (2-5s) so one side wins.
+                _ = redial_interval.tick() => {
+                    if !self.pending_redial.is_empty() {
+                        let now = std::time::Instant::now();
+                        let ready: Vec<_> = self.pending_redial
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (_, _, scheduled))| now >= *scheduled)
+                            .map(|(i, (peer_id, addr, _))| (i, *peer_id, addr.clone()))
+                            .collect();
+                        // Remove in reverse order to preserve indices
+                        for (i, peer_id, addr) in ready.iter().rev() {
+                            self.pending_redial.remove(*i);
+                            if !self.swarm.is_connected(peer_id) {
+                                let opts = libp2p::swarm::dial_opts::DialOpts::peer_id(*peer_id)
+                                    .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+                                    .addresses(vec![addr.clone()])
+                                    .build();
+                                match self.swarm.dial(opts) {
+                                    Ok(()) => tracing::info!(
+                                        %peer_id, %addr,
+                                        "Re-dialing peer after connection race"
+                                    ),
+                                    Err(e) => tracing::debug!(
+                                        %peer_id, error = %e,
+                                        "Re-dial skipped"
+                                    ),
+                                }
+                            }
+                        }
+                        // Cap queue to prevent unbounded growth
+                        if self.pending_redial.len() > 50 {
+                            self.pending_redial.truncate(50);
                         }
                     }
                 }
@@ -1139,7 +1187,7 @@ impl NetworkManager {
                 num_established,
                 ..
             } => {
-                self.connection_addrs.remove(&connection_id);
+                let closed_addr = self.connection_addrs.remove(&connection_id);
                 // Check if any in-flight tensor forwards are affected
                 let affected_tensors: Vec<_> = self
                     .pending_tensor_outbound
@@ -1228,6 +1276,30 @@ impl NetworkManager {
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
                             tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                        }
+                    } else {
+                        // Peer was never registered (connection died before Identify).
+                        // This typically happens during mDNS simultaneous-dial race.
+                        // Schedule a re-dial with random jitter to break symmetry.
+                        if let Some(addr) = closed_addr {
+                            // Only re-dial if not already in the queue
+                            let already_queued = self
+                                .pending_redial
+                                .iter()
+                                .any(|(pid, _, _)| *pid == peer_id);
+                            if !already_queued {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                peer_id.hash(&mut hasher);
+                                let jitter_ms = 2000 + (hasher.finish() % 3000); // 2-5s
+                                let scheduled = std::time::Instant::now()
+                                    + std::time::Duration::from_millis(jitter_ms);
+                                tracing::info!(
+                                    %peer_id, %addr, jitter_ms,
+                                    "Scheduling re-dial after connection race"
+                                );
+                                self.pending_redial.push((peer_id, addr, scheduled));
+                            }
                         }
                     }
                 } // end else (num_established == 0)
