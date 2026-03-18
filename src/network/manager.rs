@@ -986,6 +986,58 @@ impl NetworkManager {
                     .peer_registry
                     .insert(node_id.clone(), peer_info);
                 let _ = self.shared_state.peer_list_changed_tx.send(());
+
+                // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
+                // Evict highest-latency non-LAN non-pipeline peer when over limit.
+                const MAX_PEER_REGISTRY: usize = 200;
+                if self.shared_state.peer_registry.len() > MAX_PEER_REGISTRY {
+                    // Find the worst peer to evict: highest latency, not LAN, not in active pipeline
+                    let active_pipeline_nodes: std::collections::HashSet<_> = {
+                        let segments: Vec<_> = self
+                            .shared_state
+                            .active_pipelines
+                            .iter()
+                            .flat_map(|e| {
+                                e.value()
+                                    .segments
+                                    .iter()
+                                    .map(|s| s.node_id.clone())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
+                        segments.into_iter().collect()
+                    };
+                    let evict_candidate = self
+                        .shared_state
+                        .peer_registry
+                        .iter()
+                        .filter(|e| {
+                            !e.is_lan_peer
+                                && !active_pipeline_nodes.contains(e.key())
+                                && *e.key() != node_id
+                        })
+                        .max_by_key(|e| e.latency_ms.unwrap_or(u32::MAX))
+                        .map(|e| e.key().clone());
+                    if let Some(evict_id) = evict_candidate {
+                        self.shared_state.peer_registry.remove(&evict_id);
+                        // Also remove from peer_to_node and disconnect
+                        let evict_peer = self
+                            .peer_to_node
+                            .iter()
+                            .find(|e| *e.value() == evict_id)
+                            .map(|e| *e.key());
+                        if let Some(pid) = evict_peer {
+                            self.peer_to_node.remove(&pid);
+                            let _ = self.swarm.disconnect_peer_id(pid);
+                        }
+                        tracing::debug!(
+                            evicted = %evict_id,
+                            registry_size = self.shared_state.peer_registry.len(),
+                            "Evicted distant peer to stay under registry cap"
+                        );
+                    }
+                }
+
                 // NET-C4: Populate reverse PeerId → NodeId lookup
                 self.peer_to_node.insert(peer_id, node_id.clone());
                 // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
