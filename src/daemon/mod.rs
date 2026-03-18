@@ -435,10 +435,18 @@ impl Daemon {
                             }
                         }
 
-                        let manifest_loaded = if let Ok(manifest) =
+                        let manifest_loaded = if let Ok(mut manifest) =
                             crate::types::ModelManifest::load_from_dir(&model_dir)
                         {
                             if manifest.verify_hash().is_ok() {
+                                // Claim publisher as ourselves so health monitor
+                                // broadcasts this manifest (and its HF source) to peers.
+                                // Without this, copied shard dirs retain the original
+                                // publisher and are never gossiped.
+                                manifest.publisher = shared_state.identity.node_id().clone();
+                                // Recompute manifest hash since publisher is part of it
+                                use crate::model::manifest::ModelManifestExt;
+                                manifest.manifest_hash = manifest.compute_hash();
                                 shared_state
                                     .model_registry
                                     .register_manifest(manifest.clone());
