@@ -16,6 +16,7 @@
           : tab === 'leaderboard' ? '/admin/leaderboard'
           : tab === 'network-map' ? '/admin/network'
           : tab === 'compare' ? '/admin/compare'
+          : tab === 'devices' ? '/admin/devices'
           : '/admin';
         if (window.location.pathname !== path) {
           history.pushState({ tab: tab }, '', path);
@@ -32,6 +33,8 @@
       if (mapView) mapView.style.display = tab === 'network-map' ? '' : 'none';
       var compareView = document.getElementById('view-compare');
       if (compareView) compareView.style.display = tab === 'compare' ? '' : 'none';
+      var devicesView = document.getElementById('view-devices');
+      if (devicesView) devicesView.style.display = tab === 'devices' ? '' : 'none';
       var sidebar = document.getElementById('sidebar');
       var edgeTrigger = document.getElementById('sidebar-edge-trigger');
       if (sidebar) {
@@ -60,6 +63,9 @@
       if (tab === 'compare' && App.compare) {
         App.compare.loadModels();
         App.compare.renderHistory();
+      }
+      if (tab === 'devices' && App.pool) {
+        App.pool.load();
       }
     },
 

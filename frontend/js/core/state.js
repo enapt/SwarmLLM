@@ -25,6 +25,7 @@ window.App = {
       if (p === '/admin/leaderboard') return 'leaderboard';
       if (p === '/admin/network') return 'network-map';
       if (p === '/admin/compare') return 'compare';
+      if (p === '/admin/devices') return 'devices';
       return 'dashboard';
     })(),
     providerHealth: {},

@@ -461,6 +461,7 @@
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
+      <button class="tab-btn" data-tab="devices" data-i18n="nav.devices">Devices</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -917,6 +918,103 @@
           </div>
         </div>
       </div>
+
+      <!-- ═══ Devices (Pool) ═══ -->
+      <div class="view" id="view-devices" style="display:none">
+        <div class="container">
+
+          <!-- No pool state -->
+          <div id="pool-no-pool" class="panel" style="text-align:center;padding:40px 20px">
+            <div class="empty-icon" style="font-size:2.5rem;margin-bottom:12px">&#128279;</div>
+            <h2 style="margin:0 0 8px" data-i18n="pool.title">Device Pool</h2>
+            <p class="text-muted" style="max-width:420px;margin:0 auto 20px" data-i18n="pool.description">Combine your devices into a pool. All credits earned by member devices are forwarded to the owner (master) device.</p>
+
+            <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+              <button class="btn btn-primary" id="pool-create-btn" data-i18n="pool.create_pool">Create Pool</button>
+              <button class="btn btn-outline" id="pool-join-btn" data-i18n="pool.join_pool">Join Pool</button>
+            </div>
+
+            <!-- Join form (hidden until Join Pool clicked) -->
+            <div id="pool-join-form" class="mt-2" style="display:none;max-width:320px;margin:16px auto 0">
+              <div class="form-group">
+                <label data-i18n="pool.enter_code">Enter invite code</label>
+                <input type="text" id="pool-join-code" placeholder="A3F7K2M9" maxlength="8" style="text-align:center;font-size:1.3rem;letter-spacing:3px;text-transform:uppercase;font-family:var(--font-mono)">
+              </div>
+              <button class="btn btn-primary" id="pool-join-submit" style="width:100%" data-i18n="pool.join">Join</button>
+            </div>
+
+            <!-- Create form (hidden until Create Pool clicked) -->
+            <div id="pool-create-form" class="mt-2" style="display:none;max-width:320px;margin:16px auto 0">
+              <div class="form-group">
+                <label data-i18n="pool.pool_name">Pool name</label>
+                <input type="text" id="pool-create-name" placeholder="My Devices" maxlength="64">
+              </div>
+              <button class="btn btn-primary" id="pool-create-submit" style="width:100%" data-i18n="pool.create">Create</button>
+            </div>
+          </div>
+
+          <!-- Active pool state (hidden until in a pool) -->
+          <div id="pool-active" style="display:none">
+            <!-- Pool header -->
+            <div class="panel">
+              <div class="panel-header">
+                <div>
+                  <h2 style="margin:0" id="pool-name">My Devices</h2>
+                  <span class="text-muted" style="font-size:0.8rem" id="pool-role-label"></span>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn btn-sm btn-outline" id="pool-invite-code-btn" data-i18n="pool.generate_code" style="display:none">Generate Invite Code</button>
+                  <button class="btn btn-sm btn-ghost" id="pool-leave-btn" style="color:var(--red)" data-i18n="pool.leave">Leave Pool</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Invite code display (shown after generating) -->
+            <div id="pool-invite-code-display" class="panel mt-1" style="display:none;text-align:center;padding:24px">
+              <p class="text-muted" style="margin:0 0 8px" data-i18n="pool.share_code">Share this code with your other devices:</p>
+              <div id="pool-invite-code-value" style="font-size:2rem;font-weight:700;letter-spacing:6px;font-family:var(--font-mono);color:var(--accent);margin:8px 0"></div>
+              <p class="text-muted" style="font-size:0.78rem;margin:4px 0 12px" data-i18n="pool.code_expires">One-time use. Expires in 24 hours.</p>
+              <button class="btn btn-sm btn-outline" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
+            </div>
+
+            <!-- Stats strip -->
+            <div class="grid grid-2 mt-1">
+              <div class="stat-card">
+                <div class="stat-body">
+                  <div class="stat-value" id="pool-member-count">0</div>
+                  <div class="stat-label" data-i18n="pool.members_label">Members</div>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-body">
+                  <div class="stat-value" id="pool-total-credits">0</div>
+                  <div class="stat-label" data-i18n="pool.total_credits">Total Credits</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Member list -->
+            <div class="panel mt-1">
+              <div class="panel-header">
+                <h3 style="margin:0" data-i18n="pool.member_devices">Member Devices</h3>
+              </div>
+              <div class="panel-body" id="pool-members-list">
+                <div class="empty-state text-muted" data-i18n="pool.no_members">No members yet. Generate an invite code to add devices.</div>
+              </div>
+            </div>
+
+            <!-- Pending invitations (member view) -->
+            <div id="pool-pending-invitations" class="panel mt-1" style="display:none">
+              <div class="panel-header">
+                <h3 style="margin:0" data-i18n="pool.pending_invitations">Pending Invitations</h3>
+              </div>
+              <div class="panel-body" id="pool-invitations-list"></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
     </main>
   </div>
 
@@ -1078,6 +1176,25 @@
     </div>
   </template>
 
+  <template id="tmpl-pool-member-row">
+    <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="pool-member-icon" style="font-size:1.2rem">&#128187;</span>
+        <div>
+          <div class="pool-member-id mono" style="font-size:0.85rem"></div>
+          <div class="pool-member-joined text-muted" style="font-size:0.72rem"></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="text-align:right">
+          <div class="pool-member-credits" style="font-size:0.9rem;font-weight:600;color:var(--green)"></div>
+          <div class="text-muted" style="font-size:0.7rem" data-i18n="pool.credits_contributed">credits</div>
+        </div>
+        <button class="btn btn-sm btn-ghost pool-member-remove-btn" style="color:var(--red);display:none" title="Remove">&times;</button>
+      </div>
+    </div>
+  </template>
+
   <script src="/static/js/i18n.js"></script>
   <script src="/static/js/neural-bg.js"></script>
   <script src="/static/js/topojson-client.min.js"></script>
@@ -1097,6 +1214,7 @@
   <script src="/static/js/components/identity.js"></script>
   <script src="/static/js/components/network-map.js"></script>
   <script src="/static/js/components/compare.js"></script>
+  <script src="/static/js/components/pool.js"></script>
   <!-- Init (must be last — wires everything together) -->
   <script src="/static/js/init.js"></script>
 </body>

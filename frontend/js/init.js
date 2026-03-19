@@ -638,6 +638,7 @@
 
     App.setup.init();
     App.settings.init();
+    if (App.pool) App.pool.init();
     App.settings._apiKeyPromise = App.settings.loadApiKey();
 
     App.ui.switchTab(S.activeTab, true);
