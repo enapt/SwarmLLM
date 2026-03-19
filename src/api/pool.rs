@@ -16,13 +16,35 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
             "in_pool": true,
             "pool_id": format!("{}", ps.pool_id),
             "name": ps.name,
-            "members": ps.members.iter().map(|m| serde_json::json!({
-                "node_id": format!("{}", m.node_id),
-                "credits_contributed": m.credits_contributed,
-                "joined_at": m.joined_at.to_rfc3339(),
-            })).collect::<Vec<_>>(),
+            "members": ps.members.iter().map(|m| {
+                let mut member = serde_json::json!({
+                    "node_id": format!("{}", m.node_id),
+                    "credits_contributed": m.credits_contributed,
+                    "joined_at": m.joined_at.to_rfc3339(),
+                    "online": m.online,
+                });
+                if let Some(ref name) = m.device_name {
+                    member["device_name"] = serde_json::json!(name);
+                }
+                if let Some(ref last) = m.last_seen {
+                    member["last_seen"] = serde_json::json!(last.to_rfc3339());
+                }
+                if let Some(ref stats) = m.device_stats {
+                    member["stats"] = serde_json::json!({
+                        "forwards_served": stats.forwards_served,
+                        "requests_served": stats.requests_served,
+                        "shards_hosted": stats.shards_hosted,
+                        "vram_mb": stats.vram_mb,
+                        "ram_mb": stats.ram_mb,
+                        "uptime_secs": stats.uptime_secs,
+                        "models_hosted": stats.models_hosted,
+                    });
+                }
+                member
+            }).collect::<Vec<_>>(),
             "created_at": ps.created_at.to_rfc3339(),
             "total_lifetime_credits": ps.total_lifetime_credits,
+            "member_credit_split_pct": ps.member_credit_split_pct,
         })),
         None => Json(serde_json::json!({
             "in_pool": false,
@@ -255,6 +277,52 @@ pub async fn pool_leaderboard(
     Ok(Json(values))
 }
 
+/// POST /api/pool/device-name — Set this device's nickname within the pool.
+pub async fn pool_set_device_name(
+    State(state): State<AppState>,
+    Json(body): Json<PoolDeviceNameRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    send_pool_command(
+        &state,
+        PoolCommand::SetDeviceName {
+            name: body.name,
+            reply: tx,
+        },
+    )
+    .await?;
+    match rx.await {
+        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
+        Ok(Err(e)) => Err(ApiError(e)),
+        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+            "Pool manager unavailable".into(),
+        ))),
+    }
+}
+
+/// PUT /api/pool/credit-split — Set credit split percentage (owner only).
+pub async fn pool_set_credit_split(
+    State(state): State<AppState>,
+    Json(body): Json<PoolCreditSplitRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    send_pool_command(
+        &state,
+        PoolCommand::SetCreditSplit {
+            pct: body.pct,
+            reply: tx,
+        },
+    )
+    .await?;
+    match rx.await {
+        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
+        Ok(Err(e)) => Err(ApiError(e)),
+        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+            "Pool manager unavailable".into(),
+        ))),
+    }
+}
+
 /// POST /api/pool/generate-code — Generate a short invite code (owner only).
 pub async fn pool_generate_code(
     State(state): State<AppState>,
@@ -360,6 +428,16 @@ pub struct PoolRemoveRequest {
 #[derive(Debug, Deserialize)]
 pub struct PoolJoinRequest {
     pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolDeviceNameRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolCreditSplitRequest {
+    pub pct: u8,
 }
 
 #[derive(Debug, Deserialize)]

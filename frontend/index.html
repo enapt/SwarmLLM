@@ -461,7 +461,7 @@
       <button class="tab-btn" data-tab="leaderboard" data-i18n="nav.leaderboard">Leaderboard</button>
       <button class="tab-btn" data-tab="network-map" data-i18n="nav.network_map">Network Map</button>
       <button class="tab-btn" data-tab="compare" data-i18n="nav.compare">Compare</button>
-      <button class="tab-btn" data-tab="devices" data-i18n="nav.devices">Devices</button>
+      <button class="tab-btn" data-tab="devices" data-i18n="nav.devices">My Devices</button>
     </div>
     <div class="header-right">
       <div class="model-selector">
@@ -925,9 +925,10 @@
 
           <!-- No pool state -->
           <div id="pool-no-pool" class="panel" style="text-align:center;padding:40px 20px">
-            <div class="empty-icon" style="font-size:2.5rem;margin-bottom:12px">&#128279;</div>
-            <h2 style="margin:0 0 8px" data-i18n="pool.title">Device Pool</h2>
-            <p class="text-muted" style="max-width:420px;margin:0 auto 20px" data-i18n="pool.description">Combine your devices into a pool. All credits earned by member devices are forwarded to the owner (master) device.</p>
+            <div class="empty-icon" style="font-size:2.5rem;margin-bottom:12px">&#128187;</div>
+            <h2 style="margin:0 0 8px" data-i18n="pool.title">My Devices</h2>
+            <p class="text-muted" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.description">Link your personal computers, laptops, and servers together. Credits earned by any of your machines are combined into one balance on your main device.</p>
+            <p class="text-muted" style="max-width:480px;margin:0 auto 20px;font-size:0.78rem" data-i18n="pool.not_network">This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.</p>
 
             <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
               <button class="btn btn-primary" id="pool-create-btn" data-i18n="pool.create_pool">Create Pool</button>
@@ -973,16 +974,32 @@
             <div id="pool-invite-code-display" class="panel mt-1" style="display:none;text-align:center;padding:24px">
               <p class="text-muted" style="margin:0 0 8px" data-i18n="pool.share_code">Share this code with your other devices:</p>
               <div id="pool-invite-code-value" style="font-size:2rem;font-weight:700;letter-spacing:6px;font-family:var(--font-mono);color:var(--accent);margin:8px 0"></div>
+              <div id="pool-qr-code" style="display:none;margin:12px auto"></div>
               <p class="text-muted" style="font-size:0.78rem;margin:4px 0 12px" data-i18n="pool.code_expires">One-time use. Expires in 24 hours.</p>
-              <button class="btn btn-sm btn-outline" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
+              <div style="display:flex;gap:8px;justify-content:center">
+                <button class="btn btn-sm btn-outline" id="pool-copy-code-btn" data-i18n="actions.copy">Copy</button>
+              </div>
+              <p class="text-muted" style="font-size:0.72rem;margin:12px 0 0" data-i18n="pool.how_to_join">On your other device, open the dashboard and go to My Devices → Join, or run: swarmllm pool join CODE</p>
             </div>
 
             <!-- Stats strip -->
-            <div class="grid grid-2 mt-1">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:8px">
               <div class="stat-card">
                 <div class="stat-body">
                   <div class="stat-value" id="pool-member-count">0</div>
-                  <div class="stat-label" data-i18n="pool.members_label">Members</div>
+                  <div class="stat-label" data-i18n="pool.devices_label">Devices</div>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-body">
+                  <div class="stat-value" id="pool-online-count">0/0</div>
+                  <div class="stat-label" data-i18n="pool.online_label">Online</div>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-body">
+                  <div class="stat-value" id="pool-total-vram">—</div>
+                  <div class="stat-label" data-i18n="pool.combined_vram">Combined VRAM</div>
                 </div>
               </div>
               <div class="stat-card">
@@ -993,22 +1010,42 @@
               </div>
             </div>
 
-            <!-- Member list -->
-            <div class="panel mt-1">
-              <div class="panel-header">
-                <h3 style="margin:0" data-i18n="pool.member_devices">Member Devices</h3>
+            <!-- Device name + Credit split (side by side) -->
+            <div class="grid grid-2 mt-1">
+              <!-- My device name -->
+              <div class="panel">
+                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.my_device_name">My Device Name</h3></div>
+                <div class="panel-body" style="padding:12px">
+                  <div style="display:flex;gap:8px">
+                    <input type="text" id="pool-device-name-input" placeholder="e.g., Gaming PC" maxlength="32" style="flex:1">
+                    <button class="btn btn-sm btn-primary" id="pool-save-name-btn" data-i18n="actions.save">Save</button>
+                  </div>
+                  <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.name_hint">Give this device a recognizable name so you can tell your machines apart.</p>
+                </div>
               </div>
-              <div class="panel-body" id="pool-members-list">
-                <div class="empty-state text-muted" data-i18n="pool.no_members">No members yet. Generate an invite code to add devices.</div>
+              <!-- Credit split (owner only) -->
+              <div class="panel" id="pool-split-section" style="display:none">
+                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.credit_split">Credit Split</h3></div>
+                <div class="panel-body" style="padding:12px">
+                  <input type="range" id="pool-split-slider" min="0" max="50" value="0" style="width:100%"
+                    oninput="document.getElementById('pool-split-label').textContent=this.value==0?'All to owner':this.value+'% kept by member, '+(100-this.value)+'% to owner'">
+                  <div style="display:flex;justify-content:space-between;margin-top:4px">
+                    <span id="pool-split-label" class="text-muted" style="font-size:0.78rem">All to owner</span>
+                    <button class="btn btn-sm btn-primary" id="pool-save-split-btn" data-i18n="actions.save">Save</button>
+                  </div>
+                  <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.split_hint">How much of their earnings each member device keeps. The rest goes to the main device.</p>
+                </div>
               </div>
             </div>
 
-            <!-- Pending invitations (member view) -->
-            <div id="pool-pending-invitations" class="panel mt-1" style="display:none">
+            <!-- Member list -->
+            <div class="panel mt-1">
               <div class="panel-header">
-                <h3 style="margin:0" data-i18n="pool.pending_invitations">Pending Invitations</h3>
+                <h3 style="margin:0" data-i18n="pool.member_devices">Linked Devices</h3>
               </div>
-              <div class="panel-body" id="pool-invitations-list"></div>
+              <div class="panel-body" id="pool-members-list">
+                <div class="empty-state text-muted" data-i18n="pool.no_members">No devices linked yet. Generate an invite code to add your other machines.</div>
+              </div>
             </div>
           </div>
 
@@ -1177,12 +1214,14 @@
   </template>
 
   <template id="tmpl-pool-member-row">
-    <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px">
+    <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="pool-member-status" style="font-size:0.7rem" title="Online status"></span>
         <span class="pool-member-icon" style="font-size:1.2rem">&#128187;</span>
         <div>
-          <div class="pool-member-id mono" style="font-size:0.85rem"></div>
+          <div class="pool-member-id" style="font-size:0.88rem;font-weight:500"></div>
           <div class="pool-member-joined text-muted" style="font-size:0.72rem"></div>
+          <div class="pool-member-stats-detail text-muted" style="font-size:0.7rem;display:none"></div>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:12px">

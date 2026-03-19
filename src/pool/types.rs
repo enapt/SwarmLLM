@@ -81,6 +81,16 @@ pub enum PoolCommand {
         code_hash: [u8; 32],
         requester: NodeId,
     },
+    /// Set the device nickname for this node within the pool.
+    SetDeviceName {
+        name: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,
+    },
+    /// Set the credit split percentage (owner only).
+    SetCreditSplit {
+        pct: u8,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,
+    },
     AcceptInvitation {
         invitation: PoolInvitation,
         reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,

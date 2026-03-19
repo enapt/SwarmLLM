@@ -170,6 +170,14 @@ impl PoolManager {
                 self.handle_inbound_member_left(pool_id, node_id, signature)
                     .await;
             }
+            PoolCommand::SetDeviceName { name, reply } => {
+                let result = self.handle_set_device_name(name).await;
+                let _ = reply.send(result);
+            }
+            PoolCommand::SetCreditSplit { pct, reply } => {
+                let result = self.handle_set_credit_split(pct).await;
+                let _ = reply.send(result);
+            }
             PoolCommand::GenerateInviteCode { reply } => {
                 let result = self.handle_generate_invite_code().await;
                 let _ = reply.send(result);
@@ -253,10 +261,15 @@ impl PoolManager {
                 joined_at: now,
                 acceptance_signature: sig.clone(),
                 invitation_id: uuid::Uuid::nil(),
+                device_name: None,
+                last_seen: Some(now),
+                online: true,
+                device_stats: None,
             }],
             created_at: now,
             owner_signature: sig,
             total_lifetime_credits: 0,
+            member_credit_split_pct: 0,
         };
 
         // Persist and update shared state
@@ -378,6 +391,10 @@ impl PoolManager {
             joined_at: chrono::Utc::now(),
             acceptance_signature: acceptance.invitee_signature.clone(),
             invitation_id: invitation.id,
+            device_name: None,
+            last_seen: Some(chrono::Utc::now()),
+            online: true,
+            device_stats: None,
         };
 
         // Create a local pool state representing our membership
@@ -388,6 +405,7 @@ impl PoolManager {
             created_at: chrono::Utc::now(),
             owner_signature: invitation.owner_signature.clone(),
             total_lifetime_credits: 0,
+            member_credit_split_pct: 0,
         };
 
         self.persist_pool_state(&state)?;
@@ -869,6 +887,10 @@ impl PoolManager {
                 joined_at: acceptance.accepted_at,
                 acceptance_signature: acceptance.invitee_signature.clone(),
                 invitation_id: acceptance.invitation_id,
+                device_name: None,
+                last_seen: Some(chrono::Utc::now()),
+                online: true,
+                device_stats: None,
             });
 
             if let Err(e) = self.persist_pool_state(ps) {
@@ -1030,6 +1052,47 @@ impl PoolManager {
         self.shared_state
             .db
             .put_json(TREE_POOL_STATE, KEY_MY_POOL, state)
+    }
+
+    /// Set the device nickname for this node within the pool.
+    async fn handle_set_device_name(&mut self, name: String) -> Result<(), SwarmError> {
+        let name = name.trim().to_string();
+        if name.len() > 32 {
+            return Err(SwarmError::Internal(
+                "Device name must be 32 characters or less".into(),
+            ));
+        }
+        let my_id = self.shared_state.identity.node_id().clone();
+        let mut ps = self.shared_state.pool_state.write().await;
+        let ps = ps
+            .as_mut()
+            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+        if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == my_id) {
+            member.device_name = if name.is_empty() { None } else { Some(name) };
+        }
+        self.persist_pool_state(ps)?;
+        Ok(())
+    }
+
+    /// Set the credit split percentage (owner only). 0 = all to owner, 100 = all to member.
+    async fn handle_set_credit_split(&mut self, pct: u8) -> Result<(), SwarmError> {
+        if pct > 100 {
+            return Err(SwarmError::Internal("Split must be 0-100".into()));
+        }
+        let my_id = self.shared_state.identity.node_id().clone();
+        let mut ps = self.shared_state.pool_state.write().await;
+        let ps = ps
+            .as_mut()
+            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+        if ps.pool_id != my_id {
+            return Err(SwarmError::Internal(
+                "Only the pool owner can change the credit split".into(),
+            ));
+        }
+        ps.member_credit_split_pct = pct;
+        self.persist_pool_state(ps)?;
+        tracing::info!(pct, "Pool credit split updated");
+        Ok(())
     }
 
     // ---- Invite Code Handlers ----

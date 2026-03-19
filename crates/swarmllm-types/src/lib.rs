@@ -57,6 +57,38 @@ pub struct PoolMembership {
     pub joined_at: chrono::DateTime<chrono::Utc>,
     pub acceptance_signature: Vec<u8>,
     pub invitation_id: uuid::Uuid,
+    /// User-chosen device nickname (e.g., "Gaming PC", "Laptop")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// Last time this device was seen on the network (updated via health pings)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the device is currently online (derived from last_seen < 2 min)
+    #[serde(default)]
+    pub online: bool,
+    /// Per-device stats reported via pool state gossip
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_stats: Option<PoolDeviceStats>,
+}
+
+/// Per-device performance stats within a pool.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PoolDeviceStats {
+    /// Forwards served (inference segments processed)
+    pub forwards_served: u64,
+    /// Total inference requests served
+    pub requests_served: u64,
+    /// Number of model shards hosted
+    pub shards_hosted: u32,
+    /// GPU VRAM in MB (0 if CPU-only)
+    pub vram_mb: u64,
+    /// RAM in MB
+    pub ram_mb: u64,
+    /// Node uptime in seconds
+    pub uptime_secs: u64,
+    /// Model IDs currently loaded/hosted
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models_hosted: Vec<String>,
 }
 
 /// State of a device pool — owner + list of members.
@@ -68,6 +100,10 @@ pub struct PoolState {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub owner_signature: Vec<u8>,
     pub total_lifetime_credits: i64,
+    /// Credit split: percentage (0-100) of earnings kept by the member.
+    /// The remainder is forwarded to the owner. Default: 0 (all to owner).
+    #[serde(default)]
+    pub member_credit_split_pct: u8,
 }
 
 /// Invitation to join a pool.
