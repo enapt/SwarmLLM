@@ -36,7 +36,7 @@
   "stats.peers": "Узлы",
   "stats.peers_help": "Другие компьютеры с SwarmLLM, к которым вы подключены",
   "stats.credits": "Кредиты",
-  "stats.credits_help": "Зарабатываются помощью другим, тратятся при использовании сети",
+  "stats.credits_help": "Earn credits by hosting model shards and serving inference for others. Spent when your requests are handled by other users’ nodes. Free within your own device group.",
   "stats.requests": "Запросы",
   "stats.requests_help": "Сообщения, которые вы отправили моделям ИИ",
   "stats.served": "Обслужено",
@@ -169,5 +169,6 @@
   "pool.slave_badge": "LINKED DEVICE",
   "pool.slave_banner_text": "Credits charged to your main device",
   "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
-  "pool.slave_manage": "Manage"
+  "pool.slave_manage": "Manage",
+  "chat.empty_no_model": "No model selected yet. Pick one from the dropdown above — models available on the network can be used instantly."
 }

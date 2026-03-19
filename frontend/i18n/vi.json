@@ -36,7 +36,7 @@
   "stats.peers": "Nút",
   "stats.peers_help": "Các máy tính khác chạy SwarmLLM mà bạn đang kết nối",
   "stats.credits": "Tín dụng",
-  "stats.credits_help": "Kiếm được bằng cách giúp người khác, tiêu khi sử dụng mạng",
+  "stats.credits_help": "Earn credits by hosting model shards and serving inference for others. Spent when your requests are handled by other users’ nodes. Free within your own device group.",
   "stats.requests": "Yêu cầu",
   "stats.requests_help": "Tin nhắn bạn đã gửi đến mô hình AI",
   "stats.served": "Đã phục vụ",
@@ -169,5 +169,6 @@
   "pool.slave_badge": "LINKED DEVICE",
   "pool.slave_banner_text": "Credits charged to your main device",
   "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
-  "pool.slave_manage": "Manage"
+  "pool.slave_manage": "Manage",
+  "chat.empty_no_model": "No model selected yet. Pick one from the dropdown above — models available on the network can be used instantly."
 }

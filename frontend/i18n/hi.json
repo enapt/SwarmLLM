@@ -36,7 +36,7 @@
   "stats.peers": "पीयर",
   "stats.peers_help": "SwarmLLM चलाने वाले अन्य कंप्यूटर जिनसे आप जुड़े हैं",
   "stats.credits": "क्रेडिट",
-  "stats.credits_help": "दूसरों की मदद करके कमाए जाते हैं, नेटवर्क उपयोग में खर्च होते हैं",
+  "stats.credits_help": "Earn credits by hosting model shards and serving inference for others. Spent when your requests are handled by other users’ nodes. Free within your own device group.",
   "stats.requests": "अनुरोध",
   "stats.requests_help": "AI मॉडल को भेजे गए संदेश",
   "stats.served": "सर्व किए",
@@ -169,5 +169,6 @@
   "pool.slave_badge": "LINKED DEVICE",
   "pool.slave_banner_text": "Credits charged to your main device",
   "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
-  "pool.slave_manage": "Manage"
+  "pool.slave_manage": "Manage",
+  "chat.empty_no_model": "No model selected yet. Pick one from the dropdown above — models available on the network can be used instantly."
 }

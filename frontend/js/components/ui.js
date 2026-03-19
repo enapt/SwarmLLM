@@ -206,7 +206,7 @@
       if (parts.length > 0) {
         detailHtml = parts.join('<span class="mode-separator">\u00b7</span>');
       } else {
-        detailHtml = '<span class="mode-action" data-goto-hf="1">Get started \u2014 download a model or add a provider</span>';
+        detailHtml = '<span class="mode-action" data-goto-hf="1">Connect to peers to access models, or add a cloud provider for instant chat</span>';
       }
       detail.innerHTML = detailHtml;
     },

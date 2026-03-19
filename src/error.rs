@@ -236,52 +236,54 @@ impl IntoResponse for ApiError {
 }
 
 /// Return an actionable hint for common error variants.
-/// These help users understand what to do when they encounter an error.
+/// These are user-facing — no curl commands or API paths.
 pub fn error_hint(err: &SwarmError) -> Option<&'static str> {
     match err {
         SwarmError::ModelNotAvailable(_) => Some(
-            "Download shards via the admin dashboard or: \
-             curl -X POST http://localhost:8800/api/admin/hf/download-shards -H 'Authorization: Bearer <key>' \
-             -d '{\"model_id\": \"<model>\"}'",
+            "This model isn't available yet. Open the Models tab in the dashboard to browse \
+             and download models, or wait for auto-manage to acquire it from the network.",
         ),
         SwarmError::NoModelLoaded => Some(
-            "No model is loaded yet. Download model shards via the admin dashboard \
-             or POST /api/admin/hf/download-shards with a model_id.",
+            "No model is loaded yet. Go to the dashboard and select a model to download, \
+             or connect to more peers so models can be served from the network.",
         ),
         SwarmError::InsufficientCredits { .. } => Some(
-            "Earn credits by hosting shards, serving inference, or seeding data to peers. \
-             Check your balance at GET /api/admin/credits.",
+            "Your credit balance is too low. Earn credits by hosting model shards \
+             (happens automatically) or serving inference for other users. \
+             Check your balance on the dashboard.",
         ),
         SwarmError::InsufficientCapacity(_) => Some(
-            "Not enough nodes have the required shards. Wait for more peers to join \
-             or download additional shards locally via POST /api/admin/hf/download-shards.",
+            "Not enough peers have the shards needed for this model. \
+             Try again later as more peers come online, or download the model \
+             shards yourself from the Models tab.",
         ),
         SwarmError::InsufficientDisk { .. } => Some(
-            "Free up disk space or increase max_disk_mb in your config.toml under [resources].",
+            "Not enough disk space. Free up space or increase the storage limit \
+             in Settings → Advanced → max_disk_mb.",
         ),
         SwarmError::Unauthorized(_) => Some(
-            "Include your API key in the Authorization header: \
-             -H 'Authorization: Bearer <your-api-key>'. \
-             Find your key in the daemon startup logs or GET /api/admin/api-key.",
+            "Authentication required. Your API key can be found on the dashboard \
+             Settings page. Include it as a Bearer token in the Authorization header.",
         ),
         SwarmError::PeerNotFound(_) => Some(
-            "The target peer is offline or unreachable. Check your network connection \
-             and ensure bootstrap peers are configured in config.toml.",
+            "That peer is offline or unreachable. Check your internet connection \
+             and try again later.",
         ),
         SwarmError::ShardIntegrity { .. } => Some(
-            "The shard file is corrupted. It will be quarantined and re-downloaded automatically. \
-             You can also manually re-download via POST /api/admin/hf/download-shards.",
+            "A model file was corrupted and will be re-downloaded automatically. \
+             This is usually caused by an interrupted download — try again in a moment.",
         ),
         SwarmError::PipelineError(_) => Some(
-            "Pipeline assembly failed — this often means required shards are missing or \
-             nodes holding them went offline. Try again or download more shards locally.",
+            "Something went wrong assembling the inference pipeline. This usually means \
+             a peer went offline mid-request. Try again — a different route will be used.",
         ),
         SwarmError::InferenceTimeout(_) => Some(
-            "The request took too long. Try a shorter prompt, reduce max_tokens, \
-             or check if serving nodes are overloaded.",
+            "The request took too long. Try a shorter prompt, reduce the max tokens, \
+             or wait for a less busy time.",
         ),
         SwarmError::Config(_) => Some(
-            "Check your config.toml for syntax errors. See config/default.toml for valid options.",
+            "There's a configuration issue. Check Settings in the dashboard \
+             or review your config.toml file.",
         ),
         SwarmError::ProviderError { status, ref body } => {
             let lower = body.to_lowercase();
@@ -324,13 +326,13 @@ mod tests {
     #[test]
     fn hint_for_model_not_available() {
         let err = SwarmError::ModelNotAvailable(ModelId("test-model".into()));
-        assert!(error_hint(&err).unwrap().contains("download-shards"));
+        assert!(error_hint(&err).unwrap().contains("Models tab"));
     }
 
     #[test]
     fn hint_for_no_model_loaded() {
         let err = SwarmError::NoModelLoaded;
-        assert!(error_hint(&err).unwrap().contains("Download model shards"));
+        assert!(error_hint(&err).unwrap().contains("dashboard"));
     }
 
     #[test]

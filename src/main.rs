@@ -1121,12 +1121,24 @@ async fn run_pool_command(
                 );
                 println!();
                 if let Some(members) = body.get("members").and_then(|v| v.as_array()) {
-                    let header = format!("{:<18} {:>12} {}", "DEVICE", "CONTRIBUTED", "JOINED");
+                    let header = format!(
+                        "  {:<20} {:>8} {:>12} {}",
+                        "DEVICE", "CONTRIB", "CREDITS", "JOINED"
+                    );
                     println!("{header}");
-                    println!("{}", "-".repeat(50));
+                    println!("{}", "-".repeat(58));
                     for m in members {
                         let nid = m.get("node_id").and_then(|v| v.as_str()).unwrap_or("?");
-                        let short = if nid.len() > 16 { &nid[..16] } else { nid };
+                        let short_id = if nid.len() > 12 { &nid[..12] } else { nid };
+                        // Prefer device_name over raw node ID
+                        let display = m
+                            .get("device_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(short_id);
+                        let level = m
+                            .get("contribution_level")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(100);
                         let credits = m
                             .get("credits_contributed")
                             .and_then(|v| v.as_i64())
@@ -1136,7 +1148,12 @@ async fn run_pool_command(
                             .and_then(|v| v.as_str())
                             .map(|s| &s[..10])
                             .unwrap_or("?");
-                        println!("{short:<18} {credits:>12} {joined}");
+                        let online = if m.get("online").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            "\x1b[32m●\x1b[0m"
+                        } else {
+                            "\x1b[90m○\x1b[0m"
+                        };
+                        println!("{online} {display:<18} {level:>5}% {credits:>12} {joined}");
                     }
                 }
             } else {

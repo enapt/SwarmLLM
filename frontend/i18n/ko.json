@@ -36,7 +36,7 @@
   "stats.peers": "피어",
   "stats.peers_help": "연결된 다른 SwarmLLM 컴퓨터",
   "stats.credits": "크레딧",
-  "stats.credits_help": "다른 사용자를 도와 획득, 네트워크 이용 시 소비",
+  "stats.credits_help": "Earn credits by hosting model shards and serving inference for others. Spent when your requests are handled by other users’ nodes. Free within your own device group.",
   "stats.requests": "요청",
   "stats.requests_help": "AI 모델에 보낸 메시지 수",
   "stats.served": "처리됨",
@@ -169,5 +169,6 @@
   "pool.slave_badge": "LINKED DEVICE",
   "pool.slave_banner_text": "Credits charged to your main device",
   "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
-  "pool.slave_manage": "Manage"
+  "pool.slave_manage": "Manage",
+  "chat.empty_no_model": "No model selected yet. Pick one from the dropdown above — models available on the network can be used instantly."
 }

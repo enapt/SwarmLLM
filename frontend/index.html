@@ -106,16 +106,16 @@
           <div id="setup-invite-status" style="font-size:0.78rem;margin-top:4px"></div>
           <p class="text-muted" style="font-size:0.75rem;margin-top:6px" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
         </div>
-        <!-- Device group section (link to an existing device group) -->
-        <div style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
-          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.link_device">Link to your other devices <span class="text-muted" style="font-weight:normal">(optional)</span></label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.link_device_desc">If you already have SwarmLLM running on another machine, enter the invite code to link this device. Credits earned here will be combined with your main device.</p>
+        <!-- Device group section (collapsed by default — most first-time users have one device) -->
+        <details style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
+          <summary style="font-size:0.85rem;font-weight:600;cursor:pointer" data-i18n="setup.link_device">Already have SwarmLLM on another device? <span class="text-muted" style="font-weight:normal">(optional)</span></summary>
+          <p class="text-muted" style="font-size:0.78rem;margin:8px 0 8px" data-i18n="setup.link_device_desc">Enter the invite code from your main device to link this machine. Credits earned here will be combined with your main device.</p>
           <div style="display:flex;gap:8px">
             <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" style="flex:1;font-size:1rem;padding:8px 10px;text-align:center;letter-spacing:3px;text-transform:uppercase;font-family:var(--font-mono);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
             <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
           </div>
           <div id="setup-pool-status" style="font-size:0.78rem;margin-top:4px"></div>
-        </div>
+        </details>
 
         <!-- Cloud provider section -->
         <div style="border-top:1px solid var(--border);padding-top:12px">
