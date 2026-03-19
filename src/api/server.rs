@@ -206,6 +206,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pool/leave", post(pool::pool_leave))
         .route("/api/pool/invitations", get(pool::pool_invitations))
         .route("/api/pool/leaderboard", get(pool::pool_leaderboard))
+        .route("/api/pool/generate-code", post(pool::pool_generate_code))
+        .route("/api/pool/join", post(pool::pool_join))
         // Pool credit rates
         .route(
             "/api/admin/pools/:id/rates",

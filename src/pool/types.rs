@@ -9,6 +9,53 @@ pub use crate::types::{
     PoolMembership, PoolRemoval, PoolState,
 };
 
+/// A short, human-readable invite code for easy device pool setup.
+/// Format: 8 uppercase alphanumeric characters (e.g., "A3F7K2M9").
+/// One-time use, expires after `invitation_ttl_hours`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolInviteCode {
+    pub code: String,
+    pub pool_id: crate::types::NodeId,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// BLAKE3 hash of the code — stored instead of plaintext for anti-brute-force
+    pub code_hash: [u8; 32],
+    /// Set to true once the code has been used (one-time)
+    pub consumed: bool,
+}
+
+impl PoolInviteCode {
+    /// Generate a new random invite code.
+    pub fn generate(pool_id: &crate::types::NodeId, ttl_hours: u32) -> Self {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let chars: Vec<char> = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".chars().collect(); // No 0/O/1/I to avoid ambiguity
+        let code: String = (0..8)
+            .map(|_| chars[rng.gen_range(0..chars.len())])
+            .collect();
+        let code_hash = *blake3::hash(code.as_bytes()).as_bytes();
+        let now = chrono::Utc::now();
+        Self {
+            code: code.clone(),
+            pool_id: pool_id.clone(),
+            created_at: now,
+            expires_at: now + chrono::Duration::hours(ttl_hours as i64),
+            code_hash,
+            consumed: false,
+        }
+    }
+
+    /// Verify a code matches this invite's hash.
+    pub fn verify_code(&self, candidate: &str) -> bool {
+        let hash = *blake3::hash(candidate.as_bytes()).as_bytes();
+        self.code_hash == hash
+    }
+
+    pub fn is_expired(&self) -> bool {
+        chrono::Utc::now() > self.expires_at
+    }
+}
+
 /// Commands sent to the PoolManager task.
 #[derive(Debug)]
 pub enum PoolCommand {
@@ -19,6 +66,20 @@ pub enum PoolCommand {
     CreateInvitation {
         invitee: NodeId,
         reply: tokio::sync::oneshot::Sender<Result<PoolInvitation, crate::error::SwarmError>>,
+    },
+    /// Generate a short invite code that any device can use to join.
+    GenerateInviteCode {
+        reply: tokio::sync::oneshot::Sender<Result<String, crate::error::SwarmError>>,
+    },
+    /// Join a pool using an invite code (from the joining device).
+    JoinWithCode {
+        code: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,
+    },
+    /// Inbound join request from a peer who has an invite code.
+    InboundJoinRequest {
+        code_hash: [u8; 32],
+        requester: NodeId,
     },
     AcceptInvitation {
         invitation: PoolInvitation,

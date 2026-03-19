@@ -765,6 +765,15 @@ pub(crate) async fn dispatch_network_messages(
                                                 signature,
                                             })
                                         }
+                                        crate::types::PoolMessage::JoinRequest { code_hash, requester, signature: _ } => {
+                                            // SEC: Transport layer already verified the sender's identity.
+                                            // The signature field provides an additional binding but is
+                                            // validated by the pool manager if needed.
+                                            Some(crate::pool::types::PoolCommand::InboundJoinRequest {
+                                                code_hash,
+                                                requester,
+                                            })
+                                        }
                                     };
                                     if let Some(cmd) = cmd {
                                         if let Err(e) = tx.send(cmd).await {

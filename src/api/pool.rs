@@ -255,6 +255,54 @@ pub async fn pool_leaderboard(
     Ok(Json(values))
 }
 
+/// POST /api/pool/generate-code — Generate a short invite code (owner only).
+pub async fn pool_generate_code(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    send_pool_command(&state, PoolCommand::GenerateInviteCode { reply: tx }).await?;
+
+    match rx.await {
+        Ok(Ok(code)) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "code": code,
+        }))),
+        Ok(Err(e)) => Err(ApiError(e)),
+        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+            "Pool manager unavailable".into(),
+        ))),
+    }
+}
+
+/// POST /api/pool/join — Join a pool using an invite code.
+pub async fn pool_join(
+    State(state): State<AppState>,
+    Json(body): Json<PoolJoinRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let code = body.code.trim().to_uppercase();
+    if code.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Config(
+            "Invite code is required".into(),
+        )));
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    send_pool_command(&state, PoolCommand::JoinWithCode { code, reply: tx }).await?;
+
+    match rx.await {
+        Ok(Ok(())) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "message": "Join request broadcast. You will be added to the pool once the owner's node processes the request.",
+        }))),
+        Ok(Err(e)) => Err(ApiError(e)),
+        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+            "Pool manager unavailable".into(),
+        ))),
+    }
+}
+
 // ---- Helpers ----
 
 async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), ApiError> {
@@ -307,6 +355,11 @@ pub struct PoolAcceptRequest {
 #[derive(Debug, Deserialize)]
 pub struct PoolRemoveRequest {
     pub node_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolJoinRequest {
+    pub code: String,
 }
 
 #[derive(Debug, Deserialize)]

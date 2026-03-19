@@ -1083,6 +1083,14 @@ pub enum PoolMessage {
         node_id: NodeId,
         signature: Vec<u8>,
     },
+    /// Join request from a device that has an invite code.
+    /// The code_hash is BLAKE3(code) — the code itself is never sent over the network.
+    JoinRequest {
+        code_hash: [u8; 32],
+        requester: NodeId,
+        /// Ed25519 signature over BLAKE3("pool_join_request_v1" || code_hash || requester)
+        signature: Vec<u8>,
+    },
 }
 
 // ---- Network Commands ----

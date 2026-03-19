@@ -423,7 +423,7 @@ impl Default for PoolConfig {
 }
 
 fn default_max_pool_size() -> u32 {
-    10
+    20
 }
 
 fn default_invitation_ttl_hours() -> u32 {
@@ -431,7 +431,7 @@ fn default_invitation_ttl_hours() -> u32 {
 }
 
 fn default_pool_rate_limit() -> u32 {
-    3
+    10
 }
 
 fn default_pool_gossip_interval() -> u64 {
