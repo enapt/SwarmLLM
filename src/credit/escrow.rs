@@ -229,11 +229,19 @@ impl EscrowManager {
 
         drop(entry);
 
-        // Return credits to requester (lifetime_spent is monotonic — not decremented)
+        // Return credits to requester (lifetime_spent is monotonic — not decremented).
+        // Persist immediately to prevent credit loss on crash after refund.
         {
             let mut bal = balance.write().await;
             bal.balance = bal.balance.saturating_add(amount);
             bal.last_updated = chrono::Utc::now();
+            if let Err(e) = self.db.put_json(
+                crate::credit::ledger::TREE_CREDITS,
+                crate::credit::ledger::KEY_BALANCE,
+                &*bal,
+            ) {
+                tracing::warn!(error = %e, "Failed to persist refunded balance");
+            }
         }
 
         tracing::info!(

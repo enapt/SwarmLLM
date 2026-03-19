@@ -400,7 +400,8 @@ async fn handle_forward(
 
             if is_last {
                 let token_id =
-                    split::sample_token(&output, 0.7, 0.9).map_err(|e| format!("Sample: {e}"))?;
+                    split::sample_token(&output, fwd.sampling.temperature, fwd.sampling.top_p)
+                        .map_err(|e| format!("Sample: {e}"))?;
                 let eos_tokens = model.eos_tokens();
                 let finish = if eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)

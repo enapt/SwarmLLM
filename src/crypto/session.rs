@@ -305,9 +305,12 @@ impl SessionManager {
     /// Called when all connections to the peer are closed (remaining=0).
     /// Forces a fresh ECDH handshake on reconnection, preventing epoch desync.
     pub fn remove_session(&self, peer: &NodeId) {
-        if self.sessions.remove(peer).is_some() {
-            self.pending_ephemeral.remove(peer);
-            self.pending_ephemeral_pub.remove(peer);
+        let had_session = self.sessions.remove(peer).is_some();
+        // Always clean pending ephemeral state — a peer may disconnect mid-handshake
+        // before a session is established, orphaning these entries until evict_stale.
+        self.pending_ephemeral.remove(peer);
+        self.pending_ephemeral_pub.remove(peer);
+        if had_session {
             tracing::debug!(peer = %peer, "Cleared encryption session (peer disconnected)");
         }
     }

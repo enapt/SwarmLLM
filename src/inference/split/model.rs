@@ -3765,11 +3765,20 @@ impl SplitModel {
                 .to_device(&self.device)
                 .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
             let hidden = if is_first {
-                self.tok_embeddings
+                let mut emb = self
+                    .tok_embeddings
                     .as_ref()
                     .ok_or_else(|| SwarmError::Internal("Missing embedding table".into()))?
                     .forward(&input)
-                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?
+                    .map_err(|e| SwarmError::Internal(format!("Embedding: {e}")))?;
+                // Apply Gemma embedding scale (sqrt(hidden_dim)) — matches forward_inner_impl
+                if self.arch.use_gemma_norm() {
+                    let scale = (self.hidden_dim as f64).sqrt();
+                    emb = emb
+                        .affine(scale, 0.0)
+                        .map_err(|e| SwarmError::Internal(format!("Gemma scale: {e}")))?;
+                }
+                emb
             } else {
                 input
             };
@@ -3806,10 +3815,7 @@ impl SplitModel {
         }
 
         let batch_size = items.len();
-        let model_key = format!(
-            "{}-{}-{}",
-            self.layer_start, self.layer_end, self.total_layers
-        );
+        let model_key = &self.kv_model_key;
         let num_layers = self.layers.len();
 
         // Extract all per-request KV-caches up front (drop DashMap guards immediately).
@@ -3818,7 +3824,7 @@ impl SplitModel {
             .iter()
             .map(|item| {
                 let mut entry =
-                    kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
+                    kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
                 entry.last_accessed = std::time::Instant::now();
                 std::mem::take(&mut entry.layers)
             })
@@ -3950,7 +3956,7 @@ impl SplitModel {
 
         // Write updated KV-caches back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
-            let mut entry = kv_cache_store.get_or_create(&model_key, item.request_id, num_layers);
+            let mut entry = kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
             entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
             entry.last_accessed = std::time::Instant::now();
         }

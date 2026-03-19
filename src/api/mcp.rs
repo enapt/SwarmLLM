@@ -1159,10 +1159,21 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
+                    // SEC: Scrub API keys from error bodies before exposing to MCP client
+                    let scrubbed = crate::crypto::scrub_api_keys(&body);
+                    let truncated = if scrubbed.len() > 512 {
+                        let mut idx = 512;
+                        while !scrubbed.is_char_boundary(idx) {
+                            idx -= 1;
+                        }
+                        format!("{}…[truncated]", &scrubbed[..idx])
+                    } else {
+                        scrubbed
+                    };
                     json!({
                         "task_id": task_id,
                         "model": model_id,
-                        "error": format!("HTTP {status}: {body}"),
+                        "error": format!("HTTP {status}: {truncated}"),
                         "latency_ms": elapsed_ms,
                         "status": "error",
                     })

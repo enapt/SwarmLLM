@@ -874,12 +874,12 @@ impl PipelineExecutor {
         // Strip trailing partial stop strings (e.g. "<|user" when stop is "<|user|>").
         // The token-by-token check above only catches complete matches, so a partial
         // stop string at the very end of generation can leak into the output.
-        for stop in &stop_strings {
+        'stop_trim: for stop in &stop_strings {
             for end_len in (1..stop.len()).rev() {
                 let prefix = &stop[..end_len];
                 if generated_text.ends_with(prefix) {
                     generated_text.truncate(generated_text.len() - end_len);
-                    break;
+                    break 'stop_trim; // Only trim once — don't cascade across stop strings
                 }
             }
         }

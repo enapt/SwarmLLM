@@ -83,9 +83,12 @@ impl GossipSealer {
                 .map_err(|_| SwarmError::DecryptionFailed)?,
         );
 
-        // Reject epoch tags too far from current — prevents indefinite replay of old messages
+        // Reject epoch tags too far from current — prevents indefinite replay of old messages.
+        // Allow 1 epoch ahead (clock skew tolerance) and 2 epochs behind (boundary grace).
         let current_epoch = Self::current_epoch();
-        if epoch_tag > current_epoch || current_epoch.wrapping_sub(epoch_tag) > 2 {
+        let past_diff = current_epoch.saturating_sub(epoch_tag);
+        let future_diff = epoch_tag.saturating_sub(current_epoch);
+        if past_diff > 2 || future_diff > 1 {
             return Err(SwarmError::DecryptionFailed);
         }
 

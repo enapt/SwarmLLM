@@ -161,9 +161,22 @@ async fn send_framed<W: AsyncWriteExt + Unpin, T: Serialize>(
 ) -> std::io::Result<()> {
     let json = serde_json::to_vec(msg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    w.write_all(&(json.len() as u32).to_le_bytes()).await?;
+    // SEC: Validate lengths fit in u32 before casting to prevent silent truncation
+    let json_len = u32::try_from(json.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "IPC header too large for u32",
+        )
+    })?;
+    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "IPC payload too large for u32",
+        )
+    })?;
+    w.write_all(&json_len.to_le_bytes()).await?;
     w.write_all(&json).await?;
-    w.write_all(&(payload.len() as u32).to_le_bytes()).await?;
+    w.write_all(&payload_len.to_le_bytes()).await?;
     if !payload.is_empty() {
         w.write_all(payload).await?;
     }

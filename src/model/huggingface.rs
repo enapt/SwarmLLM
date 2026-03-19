@@ -595,6 +595,9 @@ pub async fn download_tied_output_weight(
         .map_err(|e| e.to_string())?;
 
     let url = download_url(repo_id, filename);
+    if size == 0 {
+        return Err("token_embd.weight has zero size — cannot download tied output weight".into());
+    }
     let range_end = abs_offset + size - 1;
 
     let resp = hf_headers(client.get(&url))

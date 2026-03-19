@@ -663,8 +663,9 @@ impl AcquisitionManager {
             progress_map.insert(model_id.clone(), job.status.clone());
 
             // Check if all shards are done
-            let all_done =
-                job.status.verified_shards + job.status.failed_shards >= job.status.total_shards;
+            // Guard: don't declare completion when total_shards is 0 (dummy/placeholder manifest)
+            let all_done = job.status.total_shards > 0
+                && job.status.verified_shards + job.status.failed_shards >= job.status.total_shards;
             if all_done {
                 if job.status.failed_shards == 0 {
                     job.status.state = AcquisitionState::Complete;

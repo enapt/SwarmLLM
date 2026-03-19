@@ -108,12 +108,23 @@ impl Keystore {
         output.extend_from_slice(&nonce_bytes);
         output.extend_from_slice(&ciphertext);
 
-        std::fs::write(path, &output).map_err(SwarmError::Io)?;
+        // Write encrypted key with restricted permissions from the start (no TOCTOU)
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms).map_err(SwarmError::Io)?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(SwarmError::Io)?;
+            file.write_all(&output).map_err(SwarmError::Io)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, &output).map_err(SwarmError::Io)?;
         }
         Ok(())
     }
