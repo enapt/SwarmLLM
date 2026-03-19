@@ -598,10 +598,16 @@ fn init_tracing(verbose: u8) {
         }
     };
 
+    // Respect NO_COLOR (https://no-color.org/) and also disable ANSI
+    // when stdout is not a terminal (piped/redirected to file)
+    let use_ansi =
+        std::env::var("NO_COLOR").is_err() && std::io::IsTerminal::is_terminal(&std::io::stdout());
+
     tracing_subscriber::fmt()
         .with_env_filter(&filter)
         .with_target(true)
         .with_thread_ids(false)
+        .with_ansi(use_ansi)
         .init();
 }
 
