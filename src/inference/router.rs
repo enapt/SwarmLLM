@@ -887,34 +887,64 @@ async fn finalize_request(
         //   and handle_layer_forward (each node earns for layers it processed)
         // - Here we debit the local API consumer for requesting inference
         // - Skip if escrow was used — escrow already deducted the estimated cost
-        // - Pool members (slave devices) skip local inference charges — they're your
-        //   own machines. All earnings are forwarded to the master; spending credits
-        //   from your own hardware doesn't make sense.
+        // - Pool members (slaves): charge goes to the MASTER's balance via credit forward.
+        //   The slave's dashboard is fully usable; usage is billed to the pool owner.
         let is_pool_member = {
             let ps = shared_state.pool_state.read().await;
             ps.as_ref()
                 .map(|s| s.pool_id != *shared_state.identity.node_id())
                 .unwrap_or(false)
         };
-        if is_local_api_request && escrow_id.is_none() && !is_pool_member {
+        if is_local_api_request && escrow_id.is_none() {
             let total_tokens = result.prompt_tokens + result.completion_tokens;
             let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
-            if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                &shared_state.credit_balance,
-                &shared_state.db,
-                -spent,
-                false,
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "Failed to persist credit spend");
+
+            if is_pool_member {
+                // Slave device: forward the spend to the master's balance.
+                // Use the same credit forward mechanism as earning, but negative.
+                if let Some(ref tx) = *shared_state.pool_tx.read().await {
+                    let my_id = shared_state.identity.node_id();
+                    let pool_id = {
+                        let ps = shared_state.pool_state.read().await;
+                        ps.as_ref().map(|s| s.pool_id.clone())
+                    };
+                    if let Some(pid) = pool_id {
+                        let forward = crate::pool::crypto::create_credit_forward(
+                            &shared_state.identity,
+                            &pid,
+                            my_id,
+                            &pid,
+                            -spent, // negative = spend deduction
+                        );
+                        let _ = tx
+                            .send(crate::pool::types::PoolCommand::ProcessCreditForward { forward })
+                            .await;
+                        tracing::debug!(
+                            spent,
+                            request_id = %request.id,
+                            "Forwarded inference spend to pool owner"
+                        );
+                    }
+                }
+            } else {
+                // Normal node or pool owner: charge locally
+                if let Err(e) = crate::credit::ledger::apply_credit_direct(
+                    &shared_state.credit_balance,
+                    &shared_state.db,
+                    -spent,
+                    false,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Failed to persist credit spend");
+                }
+                tracing::debug!(
+                    spent,
+                    total_tokens,
+                    request_id = %request.id,
+                    "Spent credits for consuming inference"
+                );
             }
-            tracing::debug!(
-                spent,
-                total_tokens,
-                request_id = %request.id,
-                "Spent credits for consuming inference"
-            );
         }
     }
 

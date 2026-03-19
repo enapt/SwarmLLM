@@ -587,58 +587,12 @@
           <div class="cover-msg">Connecting to SwarmLLM…</div>
           <div class="cover-sub">Waiting for the daemon to respond</div>
         </div>
-        <!-- Slave mode FULL OVERLAY — blocks the entire dashboard when this device is linked -->
-        <div class="dashboard-slave-overlay" id="dashboard-slave-overlay">
-          <div class="slave-overlay-content">
-            <div style="font-size:3rem;margin-bottom:12px">&#128187;</div>
-            <h2 style="margin:0 0 4px" data-i18n="pool.slave_title">Linked Device</h2>
-            <div class="text-muted" style="font-size:0.9rem;margin-bottom:20px" data-i18n="pool.slave_subtitle">This machine is working as part of your device group</div>
-
-            <!-- Status card -->
-            <div class="slave-status-card">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-                <div>
-                  <div style="font-size:0.78rem;color:var(--text-muted)" data-i18n="pool.slave_linked_to">Linked to</div>
-                  <div style="font-weight:600" id="slave-owner-name">Main Device</div>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px">
-                  <span style="color:var(--green);font-size:0.7rem">&#9679;</span>
-                  <span style="font-size:0.82rem" data-i18n="pool.slave_active">Active</span>
-                </div>
-              </div>
-
-              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
-                <div>
-                  <div style="font-size:1.2rem;font-weight:700" id="slave-credits-earned">0</div>
-                  <div style="font-size:0.7rem;color:var(--text-muted)" data-i18n="pool.slave_earned">Credits Earned</div>
-                </div>
-                <div>
-                  <div style="font-size:1.2rem;font-weight:700" id="slave-shards-hosted">0</div>
-                  <div style="font-size:0.7rem;color:var(--text-muted)" data-i18n="pool.slave_shards">Shards Hosted</div>
-                </div>
-                <div>
-                  <div style="font-size:1.2rem;font-weight:700" id="slave-forwards">0</div>
-                  <div style="font-size:0.7rem;color:var(--text-muted)" data-i18n="pool.slave_forwards">Forwards</div>
-                </div>
-              </div>
-            </div>
-
-            <p class="text-muted" style="max-width:380px;margin:16px auto;font-size:0.82rem" data-i18n="pool.slave_desc">All credits earned here are forwarded to your main device. Inference across your devices is free. This device runs as a worker — hosting model shards and serving inference for the network.</p>
-
-            <!-- Actions -->
-            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px">
-              <button class="btn btn-sm btn-ghost" style="color:var(--red)" onclick="if(confirm(I18n.t('pool.confirm_leave'))){App.pool.leavePool()}" data-i18n="pool.slave_unlink">Unlink This Device</button>
-            </div>
-
-            <!-- Switch device group -->
-            <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
-              <div class="text-muted" style="font-size:0.78rem;margin-bottom:6px" data-i18n="pool.slave_or_join">Switch to a different device group:</div>
-              <div style="display:flex;gap:6px;max-width:280px;margin:0 auto">
-                <input type="text" id="slave-join-code" placeholder="A3F7K2M9" maxlength="8" style="text-align:center;font-size:1.1rem;letter-spacing:2px;text-transform:uppercase;font-family:var(--font-mono);flex:1">
-                <button class="btn btn-sm btn-primary" id="slave-join-btn" data-i18n="pool.join">Join</button>
-              </div>
-            </div>
-          </div>
+        <!-- Slave mode persistent top banner — shown on every page when device is linked -->
+        <!-- Users can still use the full dashboard; inference charges go to the master -->
+        <div class="slave-top-banner" id="slave-top-banner">
+          <span class="slave-badge" data-i18n="pool.slave_badge">LINKED DEVICE</span>
+          <span class="text-muted" id="slave-banner-text" data-i18n="pool.slave_banner_text">Credits charged to your main device</span>
+          <button class="btn btn-sm btn-ghost" onclick="App.ui.switchTab('devices')" style="padding:2px 8px;font-size:0.78rem" data-i18n="pool.slave_manage">Manage</button>
         </div>
         <div class="container">
           <!-- Status banner -->

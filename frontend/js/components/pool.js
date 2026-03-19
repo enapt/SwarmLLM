@@ -578,37 +578,25 @@
       }
     },
 
-    /// Show/hide the full-page slave overlay — blocks entire dashboard for linked devices
+    /// Show/hide the persistent slave banner at the top of every page.
+    /// The full dashboard remains usable — inference charges go to the master.
     updateSlaveBanner: function (data) {
-      var overlay = document.getElementById('dashboard-slave-overlay');
-      if (!overlay) return;
+      var banner = document.getElementById('slave-top-banner');
+      if (!banner) return;
 
       var isSlave = data && data.in_pool && data.pool_id !== this._myNodeId;
       if (isSlave) {
-        overlay.classList.add('visible');
-
-        // Populate stats from pool state
-        var members = data.members || [];
-        var myMember = members.find(function (m) { return m.node_id === App.pool._myNodeId; });
-
-        // Owner name (first member or pool name)
-        var ownerEl = document.getElementById('slave-owner-name');
-        if (ownerEl) {
+        banner.classList.add('visible');
+        // Update banner text with owner info
+        var textEl = document.getElementById('slave-banner-text');
+        if (textEl) {
+          var members = data.members || [];
           var ownerMember = members.find(function (m) { return m.node_id === data.pool_id; });
-          ownerEl.textContent = (ownerMember && ownerMember.device_name) || data.name || data.pool_id.substring(0, 12) + '...';
+          var ownerName = (ownerMember && ownerMember.device_name) || data.name || 'main device';
+          textEl.textContent = (I18n.t('pool.slave_banner_detail') || 'Linked to {owner} — inference charges go to your main device').replace('{owner}', ownerName);
         }
-
-        // My stats
-        var creditsEl = document.getElementById('slave-credits-earned');
-        if (creditsEl) creditsEl.textContent = (myMember && myMember.credits_contributed || 0).toLocaleString();
-
-        var shardsEl = document.getElementById('slave-shards-hosted');
-        if (shardsEl) shardsEl.textContent = (myMember && myMember.stats && myMember.stats.shards_hosted) || '—';
-
-        var forwardsEl = document.getElementById('slave-forwards');
-        if (forwardsEl) forwardsEl.textContent = (myMember && myMember.stats && myMember.stats.forwards_served) || '—';
       } else {
-        overlay.classList.remove('visible');
+        banner.classList.remove('visible');
       }
     },
 
