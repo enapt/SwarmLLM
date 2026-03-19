@@ -304,6 +304,29 @@ impl InferenceRouter {
 
         let priority = priority::calculate_tier(balance, network_percentile);
 
+        // Enforce minimum balance for inference requests.
+        // Nodes below the floor must contribute (host shards, serve inference) before consuming.
+        // Local API requests use NodeId([0;32]) as sentinel — always allow those from localhost.
+        let is_local = request.requester == crate::types::NodeId([0u8; 32]);
+        if !is_local
+            && crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE != 0
+            && balance < crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE
+        {
+            tracing::warn!(
+                balance,
+                min = crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE,
+                requester = %request.requester,
+                "Inference request rejected — balance below minimum"
+            );
+            let _ = result_tx.send(Err(SwarmError::CreditError(format!(
+                "Insufficient credits: balance {} is below minimum {} required for inference. \
+                 Contribute by hosting model shards or serving inference to earn credits.",
+                balance,
+                crate::credit::ledger::MIN_BALANCE_FOR_INFERENCE
+            ))));
+            return;
+        }
+
         let mut adjusted_request = request;
         adjusted_request.priority = priority;
 

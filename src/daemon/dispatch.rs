@@ -110,35 +110,23 @@ pub fn estimate_vram_from_shard_dir(
 
 fn track_forward_participation(
     shared_state: &SharedState,
-    layer_start: usize,
-    layer_end: usize,
-    max_layers: usize,
+    _layer_start: usize,
+    _layer_end: usize,
+    _max_layers: usize,
 ) {
     if let Ok(mut stats) = shared_state.node_stats.try_write() {
         stats.forwards_served += 1;
     }
-    let layers_processed = (layer_end.saturating_sub(layer_start)).min(max_layers) as i64;
-    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE * layers_processed;
-    match shared_state.credit_balance.try_write() {
-        Ok(mut bal) => {
-            // SEC-I1: saturating arithmetic to prevent overflow (matches apply_credit_direct)
-            bal.balance = bal.balance.saturating_add(earned);
-            bal.lifetime_earned = bal.lifetime_earned.saturating_add(earned.unsigned_abs());
-            bal.last_updated = chrono::Utc::now();
-            // Persist updated balance to redb so credits survive daemon restart
-            let _ = shared_state.db.put_json(
-                crate::credit::ledger::TREE_CREDITS,
-                crate::credit::ledger::KEY_BALANCE,
-                &*bal,
-            );
-        }
-        Err(_) => {
-            tracing::warn!(
-                earned,
-                "Credit balance lock contended — credits deferred to next persist cycle"
-            );
-        }
-    }
+    // Credits are earned per-token (not per-layer) to stay balanced with the
+    // consume side. For the forward path, we earn a fixed per-forward amount
+    // since we don't know the total token count yet (single decode step).
+    // The pipeline orchestrator earns the bulk credit at completion.
+    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE; // 1 token per forward step
+                                                              // Use atomic accumulator to prevent credit loss on lock contention.
+                                                              // The CreditLedger periodic persist (every 60s) will flush this to DB.
+    shared_state
+        .pending_credit_earn
+        .fetch_add(earned, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Dispatch inbound network messages to the appropriate subsystem.
@@ -421,20 +409,13 @@ pub(crate) async fn dispatch_network_messages(
                                     tracing::debug!("Dropping unauthenticated CreditGossip");
                                     continue;
                                 }
+                                // Use peer_credit_balances DashMap for deduplication:
+                                // each peer gets exactly one entry, preventing Sybil stuffing.
                                 crate::credit::ledger::process_balance_gossip(
                                     &credit_peer_balances,
                                     &gossip,
+                                    Some(&shared_state.peer_credit_balances),
                                 ).await;
-                                // Store per-peer balance for leaderboard display (capped at 10k entries)
-                                const MAX_PEER_CREDIT_ENTRIES: usize = 10_000;
-                                if shared_state.peer_credit_balances.len() < MAX_PEER_CREDIT_ENTRIES
-                                    || shared_state.peer_credit_balances.contains_key(&gossip.node_id)
-                                {
-                                    shared_state.peer_credit_balances.insert(
-                                        gossip.node_id.clone(),
-                                        gossip.balance_bucket,
-                                    );
-                                }
                             }
                             SwarmMessage::ModelVote(_) => {
                                 // Model governance voting is not enforced — users add models directly.

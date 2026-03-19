@@ -885,19 +885,16 @@ impl PipelineExecutor {
         }
 
         // Batch credit write — one DB persist for the entire request instead of per-token.
-        // The CreditLedger task also persists periodically, so this is durable enough.
+        // Formula: rate * tokens (no layer multiplier — balanced with consume side).
         let total_tokens = generated_tokens.len() as i64;
         if total_tokens > 0 {
-            let local_layers: i64 = self
+            let has_local_segment = self
                 .assignment
                 .segments
                 .iter()
-                .filter(|s| s.node_id == *self.shared_state.identity.node_id())
-                .map(|s| (s.layer_range.1 - s.layer_range.0) as i64)
-                .sum();
-            let total_earned =
-                crate::credit::ledger::RATE_INFERENCE_SERVE * local_layers * total_tokens;
-            if total_earned > 0 {
+                .any(|s| s.node_id == *self.shared_state.identity.node_id());
+            if has_local_segment {
+                let total_earned = crate::credit::ledger::RATE_INFERENCE_SERVE * total_tokens;
                 if let Err(e) = crate::credit::ledger::apply_credit_direct(
                     &self.shared_state.credit_balance,
                     &self.shared_state.db,

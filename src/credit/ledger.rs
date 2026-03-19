@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::sync::{mpsc, watch, RwLock};
 
@@ -11,14 +12,22 @@ use crate::types::{
 };
 
 /// Earning/spending rates (credits per unit).
-/// SEC-M16 FIX: Rates are balanced (serve == consume) to prevent net credit inflation.
+/// IMPORTANT: Both earn and spend use `rate * tokens` (no layer multiplier) to prevent
+/// credit inflation. A 22-layer model serving 100 tokens earns 10*100=1000 credits,
+/// and the consumer spends 10*100=1000 credits — balanced.
 /// All rates are configurable via `[pool.credit_rates]` in config.toml.
-pub const RATE_INFERENCE_SERVE: i64 = 10; // per layer per token
+pub const RATE_INFERENCE_SERVE: i64 = 10; // per token served (not per layer)
 pub const RATE_SHARD_HOSTING: i64 = 1; // per GB per hour
 pub const RATE_SHARD_SEEDING: i64 = 5; // per GB transferred
 pub const RATE_RELAY_SERVICE: i64 = 2; // per connection hour
-pub const RATE_INFERENCE_CONSUME: i64 = 10; // per layer per token (cost) — balanced with serve
+pub const RATE_INFERENCE_CONSUME: i64 = 10; // per token consumed — balanced with serve
 pub const PENALTY_SERVE_FAILURE: i64 = 50; // per incident
+
+/// Minimum credit balance required to submit inference requests.
+/// Nodes below this floor have their requests rejected (not just deprioritized).
+/// Set to 0 to disable enforcement (permissive mode for small networks).
+/// Nodes can earn credits by hosting shards, serving inference, or seeding data.
+pub const MIN_BALANCE_FOR_INFERENCE: i64 = -1000;
 
 /// Database tree name for credit data.
 pub const TREE_CREDITS: &str = "credits";
@@ -128,24 +137,25 @@ impl CreditLedger {
 
     /// Earn credits for serving inference.
     ///
+    /// Formula: `rate * tokens` — no layer multiplier to stay balanced with the
+    /// spend side (`rate * tokens`). Each node that participates in a distributed
+    /// pipeline earns for the tokens it helped produce, regardless of how many
+    /// layers it processed. This prevents credit inflation on deep models.
+    ///
     /// If this node is a pool member (not owner), forwards credits to the pool owner.
     pub async fn earn_inference(
         &self,
         request_id: uuid::Uuid,
         tokens: u32,
-        layers: u32,
+        _layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
-        let amount = rates
-            .inference_serve
-            .saturating_mul(layers as i64)
-            .saturating_mul(tokens as i64);
+        let amount = rates.inference_serve.saturating_mul(tokens as i64);
         self.apply_credit(amount, true).await?;
 
         tracing::info!(
             amount,
             tokens,
-            layers,
             request_id = %request_id,
             "Earned credits for inference serving"
         );
@@ -175,24 +185,21 @@ impl CreditLedger {
     }
 
     /// Spend credits for consuming inference.
+    /// Formula: `rate * tokens` — balanced with earn side.
     pub async fn spend_inference(
         &self,
         request_id: uuid::Uuid,
         tokens: u32,
-        layers: u32,
+        _layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
-        let amount = rates
-            .inference_consume
-            .saturating_mul(layers as i64)
-            .saturating_mul(tokens as i64);
+        let amount = rates.inference_consume.saturating_mul(tokens as i64);
         self.apply_credit(-amount, false).await?;
         self.persist_balance().await?;
 
         tracing::info!(
             amount,
             tokens,
-            layers,
             request_id = %request_id,
             "Spent credits for inference consumption"
         );
@@ -409,6 +416,25 @@ impl CreditLedger {
                     }
                 }
                 _ = persist_interval.tick() => {
+                    // Flush pending credit earn accumulator from forward participation.
+                    // This prevents credit loss from try_write() contention in the hot path.
+                    if let Some(ref ss) = self.shared_state {
+                        let pending = ss.pending_credit_earn.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        if pending != 0 {
+                            if let Err(e) = apply_credit_direct(
+                                &self.balance,
+                                &self.db,
+                                pending,
+                                pending > 0,
+                            ).await {
+                                tracing::warn!(error = %e, pending, "Failed to flush pending credit earn");
+                                // Put it back so it's not lost
+                                ss.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                tracing::debug!(pending, "Flushed pending forward participation credits");
+                            }
+                        }
+                    }
                     if let Err(e) = self.persist_balance().await {
                         tracing::warn!(error = %e, "Failed to persist credit balance");
                     }
@@ -640,7 +666,15 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
 ///
 /// Only signed reports are accepted. Invalid signatures, unsigned reports,
 /// and stale reports are rejected entirely.
-pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossip: &CreditGossip) {
+///
+/// Deduplicates by node_id: each peer gets exactly one entry in the rolling window.
+/// This prevents a single peer from dominating the percentile distribution by
+/// re-gossiping frequently (Sybil percentile stuffing).
+pub async fn process_balance_gossip(
+    peer_balances: &Arc<RwLock<Vec<i64>>>,
+    gossip: &CreditGossip,
+    peer_balance_map: Option<&DashMap<NodeId, i64>>,
+) {
     // Reject implausible balance buckets
     const MAX_PLAUSIBLE_BALANCE: i64 = 100_000_000;
     if gossip.balance_bucket.abs() > MAX_PLAUSIBLE_BALANCE {
@@ -653,13 +687,27 @@ pub async fn process_balance_gossip(peer_balances: &Arc<RwLock<Vec<i64>>>, gossi
 
     match verify_balance_report(gossip) {
         Ok(()) => {
-            let mut balances = peer_balances.write().await;
-            balances.push(gossip.balance_bucket);
+            // If a peer_balance_map is provided, use it for deduplication.
+            // The Vec is rebuilt from the map's values for percentile calculation.
+            if let Some(map) = peer_balance_map {
+                // Cap the map to prevent unbounded growth from departed peers
+                const MAX_PEERS: usize = 10_000;
+                if map.len() < MAX_PEERS || map.contains_key(&gossip.node_id) {
+                    map.insert(gossip.node_id.clone(), gossip.balance_bucket);
+                }
 
-            // Keep a rolling window of the most recent 1000 observations
-            if balances.len() > 1000 {
-                let excess = balances.len() - 1000;
-                balances.drain(..excess);
+                // Rebuild the Vec from the deduped map
+                let mut balances = peer_balances.write().await;
+                balances.clear();
+                balances.extend(map.iter().map(|e| *e.value()));
+            } else {
+                // Fallback: raw push (used in tests without SharedState)
+                let mut balances = peer_balances.write().await;
+                balances.push(gossip.balance_bucket);
+                if balances.len() > 1000 {
+                    let excess = balances.len() - 1000;
+                    balances.drain(..excess);
+                }
             }
 
             tracing::debug!(
@@ -729,12 +777,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 10 credits/layer/token * 2 layers * 10 tokens = 200
-        assert_eq!(earned, 200);
+        // 10 credits/token * 10 tokens = 100 (no layer multiplier — balanced with consume)
+        assert_eq!(earned, 100);
 
         let bal = balance.read().await;
-        assert_eq!(bal.balance, 200);
-        assert_eq!(bal.lifetime_earned, 200);
+        assert_eq!(bal.balance, 100);
+        assert_eq!(bal.lifetime_earned, 100);
         assert_eq!(bal.lifetime_spent, 0);
     }
 
@@ -767,12 +815,12 @@ mod tests {
             .await
             .unwrap();
 
-        // 10 credits/layer/token * 3 layers * 5 tokens = 150
-        assert_eq!(spent, 150);
+        // 10 credits/token * 5 tokens = 50 (no layer multiplier — balanced with earn)
+        assert_eq!(spent, 50);
 
         let bal = balance.read().await;
-        assert_eq!(bal.balance, 850); // 1000 - 150
-        assert_eq!(bal.lifetime_spent, 150);
+        assert_eq!(bal.balance, 950); // 1000 - 50
+        assert_eq!(bal.lifetime_spent, 50);
     }
 
     #[tokio::test]
@@ -1010,7 +1058,7 @@ mod tests {
             signature,
         };
 
-        process_balance_gossip(&peer_balances, &gossip).await;
+        process_balance_gossip(&peer_balances, &gossip, None).await;
 
         let balances = peer_balances.read().await;
         assert_eq!(balances.len(), 1);
@@ -1035,7 +1083,7 @@ mod tests {
             signature,
         };
 
-        process_balance_gossip(&peer_balances, &gossip).await;
+        process_balance_gossip(&peer_balances, &gossip, None).await;
 
         // Should have been rejected — no balance added
         let balances = peer_balances.read().await;
@@ -1058,7 +1106,7 @@ mod tests {
             signature,
         };
 
-        process_balance_gossip(&peer_balances, &gossip).await;
+        process_balance_gossip(&peer_balances, &gossip, None).await;
 
         let balances = peer_balances.read().await;
         assert_eq!(balances.len(), 0);

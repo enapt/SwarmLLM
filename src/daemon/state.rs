@@ -52,6 +52,10 @@ pub struct SharedState {
     pub model_registry: ModelRegistry,
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
     pub credit_balance: Arc<RwLock<CreditBalance>>,
+    /// Atomic accumulator for credits earned during forward participation.
+    /// Avoids lock contention on credit_balance during high-concurrency forwards.
+    /// Flushed to credit_balance by the CreditLedger periodic persist (every 60s).
+    pub pending_credit_earn: std::sync::atomic::AtomicI64,
     pub node_stats: RwLock<NodeStats>,
     pub executor: SharedExecutor,
     /// Optional draft model executor for speculative decoding.
@@ -600,6 +604,7 @@ impl SharedState {
                 lifetime_spent: 0,
                 last_updated: chrono::Utc::now(),
             })),
+            pending_credit_earn: std::sync::atomic::AtomicI64::new(0),
             node_stats: RwLock::new(NodeStats::default()),
             executor,
             draft_executor: Arc::new(tokio::sync::Mutex::new(
