@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Самые популярные",
   "model_browser.sort_size_asc": "Меньший размер первым",
   "model_browser.sort_size_desc": "Больший размер первым",
+  "model_browser.popular_title": "Популярные модели для начала:",
   "compare.title": "Сравнение моделей",
   "compare.subtitle": "Отправьте один и тот же промпт нескольким моделям и сравните результаты бок о бок. Результаты зависят от длины контекста, возможностей и специализации модели.",
   "compare.prompt_placeholder": "Введите запрос здесь...",

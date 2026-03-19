@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "ダウンロード数が多い",
   "model_browser.sort_size_asc": "小さい順",
   "model_browser.sort_size_desc": "大きい順",
+  "model_browser.popular_title": "人気モデル：",
   "compare.title": "モデル比較",
   "compare.subtitle": "同じプロンプトを複数のモデルに送信し、結果を並べて比較します。結果はコンテキスト長、能力、専門分野により異なります。",
   "compare.prompt_placeholder": "プロンプトを入力してください...",

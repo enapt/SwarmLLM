@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Nejčastěji stahované",
   "model_browser.sort_size_asc": "Nejmenší první",
   "model_browser.sort_size_desc": "Největší první",
+  "model_browser.popular_title": "Oblíbené modely pro začátek:",
   "compare.title": "Porovnání modelů",
   "compare.subtitle": "Pošlete stejný prompt více modelům a porovnejte výsledky vedle sebe. Výsledky se liší podle délky kontextu, schopností a specializace.",
   "compare.prompt_placeholder": "Zadejte svůj prompt zde...",

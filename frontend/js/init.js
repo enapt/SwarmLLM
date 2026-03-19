@@ -218,6 +218,17 @@
     on('btn-hf-search', 'click', function() { App.hf.search(); });
     on('hf-search-input', 'keydown', function(e) { if (e.key === 'Enter') App.hf.search(); });
     on('hf-sort', 'change', function() { App.hf.sortResults(); });
+    // HF suggestion chips
+    document.querySelectorAll('[data-hf-suggest]').forEach(function(chip) {
+      chip.addEventListener('click', function() {
+        var query = chip.getAttribute('data-hf-suggest');
+        var input = document.getElementById('hf-search-input');
+        if (input) { input.value = query; }
+        var suggestions = document.getElementById('hf-suggestions');
+        if (suggestions) suggestions.style.display = 'none';
+        App.hf.search();
+      });
+    });
     on('btn-open-model-browser', 'click', function() { App.ui.openModelBrowser(); });
     on('btn-browse-hf', 'click', function() { App.ui.openModelBrowser(); });
     on('link-browse-hf', 'click', function(e) { e.preventDefault(); App.ui.openModelBrowser(); });

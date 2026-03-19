@@ -6,7 +6,9 @@
 // ============================================================================
 
 (function() {
-  // --- Authenticated fetch ---
+  // --- Authenticated fetch with timeout ---
+  var DEFAULT_TIMEOUT_MS = 30000;
+
   async function authFetch(url, opts) {
     if (!App.settings._apiKeyFull && App.settings._apiKeyPromise) {
       await App.settings._apiKeyPromise;
@@ -15,6 +17,24 @@
     opts.headers = opts.headers || {};
     if (App.settings._apiKeyFull && !opts.headers['Authorization']) {
       opts.headers['Authorization'] = 'Bearer ' + App.settings._apiKeyFull;
+    }
+    var timeoutMs = opts._timeout !== undefined ? opts._timeout : DEFAULT_TIMEOUT_MS;
+    delete opts._timeout;
+    if (timeoutMs > 0 && typeof AbortController !== 'undefined' && !opts.signal) {
+      var controller = new AbortController();
+      opts.signal = controller.signal;
+      var timer = setTimeout(function() { controller.abort(); }, timeoutMs);
+      try {
+        var resp = await fetch(url, opts);
+        clearTimeout(timer);
+        return resp;
+      } catch (e) {
+        clearTimeout(timer);
+        if (e.name === 'AbortError') {
+          throw new Error('Request timed out — server may be busy or unreachable');
+        }
+        throw e;
+      }
     }
     return fetch(url, opts);
   }

@@ -327,7 +327,7 @@
         if (shards.length > 0) {
           var lastIdx = shardCount - 1;
           var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
-          shardHtml = '<div class="shard-grid' + sizeClass + '" data-model-grid="' + safeId + '">';
+          shardHtml = '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="Shard status grid for ' + U.escapeHtml(U.formatModelDisplayName(m.name || m.id)) + '" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
 
           shards.forEach(function(s) {
@@ -398,20 +398,22 @@
               ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
               ' data-shard-index="' + s.index + '"' +
               ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
+              ' role="gridcell"' +
+              ' aria-label="' + U.escapeHtml(title) + '"' +
               ' title="' + U.escapeHtml(title) + '">' + label + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
           // Shard summary counts
           var summaryParts = [];
-          if (localCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + localCount + ' local</span>');
-          if (peerCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
-          if (dlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + dlCount + ' downloading</span>');
-          if (peerDlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + peerDlCount + ' peer DL</span>');
-          if (queuedCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + queuedCount + ' queued</span>');
-          if (missingCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + missingCount + ' missing</span>');
+          if (localCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot" aria-hidden="true"></span>' + localCount + ' local</span>');
+          if (peerCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot" aria-hidden="true"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
+          if (dlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot" aria-hidden="true"></span>' + dlCount + ' downloading</span>');
+          if (peerDlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot" aria-hidden="true"></span>' + peerDlCount + ' peer DL</span>');
+          if (queuedCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot" aria-hidden="true"></span>' + queuedCount + ' queued</span>');
+          if (missingCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot" aria-hidden="true"></span>' + missingCount + ' missing</span>');
           if (summaryParts.length > 0) {
-            shardHtml += '<div class="shard-summary" data-model-summary="' + safeId + '">' + summaryParts.join('') + '</div>';
+            shardHtml += '<div class="shard-summary" role="status" aria-live="polite" data-model-summary="' + safeId + '">' + summaryParts.join('') + '</div>';
           }
         }
 
@@ -749,6 +751,7 @@
               else if (sd.state === 'failed') title += ' \u2014 Failed';
               else title += ' \u2014 Not available';
               cell.setAttribute('title', title);
+              cell.setAttribute('aria-label', title);
             }
           });
 

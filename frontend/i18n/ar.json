@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "الأكثر تحميلاً",
   "model_browser.sort_size_asc": "الأصغر أولاً",
   "model_browser.sort_size_desc": "الأكبر أولاً",
+  "model_browser.popular_title": "نماذج شائعة للبدء:",
   "compare.title": "مقارنة النماذج",
   "compare.subtitle": "أرسل نفس الأمر لعدة نماذج وقارن النتائج جنباً إلى جنب. تختلف النتائج حسب طول السياق والقدرات والتخصص.",
   "compare.prompt_placeholder": "أدخل الطلب هنا...",

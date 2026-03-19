@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Mest nedladdad",
   "model_browser.sort_size_asc": "Minsta först",
   "model_browser.sort_size_desc": "Största först",
+  "model_browser.popular_title": "Populära modeller att börja med:",
   "compare.title": "Jämför modeller",
   "compare.subtitle": "Skicka samma prompt till flera modeller och jämför resultaten sida vid sida. Resultaten varierar beroende på kontextlängd, förmågor och specialisering.",
   "compare.prompt_placeholder": "Skriv din prompt här...",

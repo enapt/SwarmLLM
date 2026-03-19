@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "सबसे अधिक डाउनलोड किया गया",
   "model_browser.sort_size_asc": "सबसे छोटा पहले",
   "model_browser.sort_size_desc": "सबसे बड़ा पहले",
+  "model_browser.popular_title": "शुरू करने के लिए लोकप्रिय मॉडल:",
   "compare.title": "मॉडल तुलना",
   "compare.subtitle": "एक ही प्रॉम्प्ट कई मॉडल को भेजें और परिणामों की साथ-साथ तुलना करें। परिणाम कॉन्टेक्स्ट लंबाई, क्षमताओं और विशेषज्ञता के अनुसार भिन्न होते हैं।",
   "compare.prompt_placeholder": "अपना प्रॉम्प्ट यहाँ दर्ज करें...",

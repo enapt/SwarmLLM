@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Paling banyak diunduh",
   "model_browser.sort_size_asc": "Terkecil dulu",
   "model_browser.sort_size_desc": "Terbesar dulu",
+  "model_browser.popular_title": "Model populer untuk memulai:",
   "compare.title": "Bandingkan Model",
   "compare.subtitle": "Kirim prompt yang sama ke beberapa model dan bandingkan hasilnya berdampingan. Hasil bervariasi berdasarkan panjang konteks, kemampuan, dan spesialisasi.",
   "compare.prompt_placeholder": "Masukkan prompt Anda di sini...",

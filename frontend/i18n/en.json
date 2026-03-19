@@ -145,6 +145,7 @@
   "model_browser.sort_downloads": "Most downloaded",
   "model_browser.sort_size_asc": "Smallest first",
   "model_browser.sort_size_desc": "Largest first",
+  "model_browser.popular_title": "Popular models to get started:",
 
   "compare.title": "Model Compare",
   "compare.subtitle": "Send the same prompt to multiple models and compare results side-by-side. Results vary by model context length, capabilities, and specialization.",

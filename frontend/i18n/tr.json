@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "En çok indirilen",
   "model_browser.sort_size_asc": "En küçük ilk",
   "model_browser.sort_size_desc": "En büyük ilk",
+  "model_browser.popular_title": "Başlamak için popüler modeller:",
   "compare.title": "Model Karşılaştırma",
   "compare.subtitle": "Aynı istemi birden fazla modele gönderin ve sonuçları yan yana karşılaştırın. Sonuçlar bağlam uzunluğu, yetenekler ve uzmanlığa göre değişir.",
   "compare.prompt_placeholder": "İsteminizi buraya girin...",

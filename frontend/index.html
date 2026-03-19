@@ -451,7 +451,20 @@
         </select>
       </div>
       <div id="hf-results">
-        <div class="empty-state"><p>Search for a model above. Results show whether it&rsquo;s already on the swarm (<strong>On Swarm</strong>) or new to the network, and whether your hardware can host or run it.</p></div>
+        <div class="hf-suggestions" id="hf-suggestions">
+          <p class="text-muted" style="font-size:0.85rem;margin:0 0 10px" data-i18n="model_browser.popular_title">Popular models to get started:</p>
+          <div class="hf-suggestion-chips">
+            <button class="hf-suggestion-chip" data-hf-suggest="llama">Llama</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="qwen">Qwen</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="phi">Phi</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="gemma">Gemma</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="mistral">Mistral</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="deepseek">DeepSeek</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="codestral">Codestral</button>
+            <button class="hf-suggestion-chip" data-hf-suggest="tinyllama">TinyLlama</button>
+          </div>
+          <p class="text-muted" style="font-size:0.78rem;margin:10px 0 0">Results show whether a model is already on the swarm and whether your hardware can host or run it.</p>
+        </div>
       </div>
       <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
         <div class="spinner"></div>
@@ -921,7 +934,9 @@
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
-                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px"><div class="spinner" style="width:20px;height:20px;display:inline-block;vertical-align:middle;margin-right:8px"></div>Loading...</td></tr>
+                <tr class="skeleton-row"><td><div class="skeleton-line" style="width:20px;height:12px"></div></td><td><div class="skeleton-line" style="width:120px;height:12px"></div></td><td><div class="skeleton-line" style="width:60px;height:12px"></div></td><td><div class="skeleton-line" style="width:50px;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td><div class="skeleton-line" style="width:20px;height:12px"></div></td><td><div class="skeleton-line" style="width:90px;height:12px"></div></td><td><div class="skeleton-line" style="width:55px;height:12px"></div></td><td><div class="skeleton-line" style="width:50px;height:12px"></div></td></tr>
+                <tr class="skeleton-row"><td><div class="skeleton-line" style="width:20px;height:12px"></div></td><td><div class="skeleton-line" style="width:105px;height:12px"></div></td><td><div class="skeleton-line" style="width:65px;height:12px"></div></td><td><div class="skeleton-line" style="width:50px;height:12px"></div></td></tr>
               </tbody>
             </table>
           </div>

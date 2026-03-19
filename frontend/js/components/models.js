@@ -16,11 +16,16 @@
   App.hf = {
     search: async function() {
       var query = document.getElementById('hf-search-input').value.trim();
-      if (!query) return;
+      var suggestions = document.getElementById('hf-suggestions');
+      if (!query) {
+        if (suggestions) suggestions.style.display = '';
+        return;
+      }
 
       var results = document.getElementById('hf-results');
       var loading = document.getElementById('hf-loading');
       results.innerHTML = '';
+      if (suggestions) suggestions.style.display = 'none';
       loading.classList.remove('hidden');
 
       try {

@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Tải nhiều nhất",
   "model_browser.sort_size_asc": "Nhỏ nhất trước",
   "model_browser.sort_size_desc": "Lớn nhất trước",
+  "model_browser.popular_title": "Mô hình phổ biến để bắt đầu:",
   "compare.title": "So sánh mô hình",
   "compare.subtitle": "Gửi cùng một prompt đến nhiều mô hình và so sánh kết quả cạnh nhau. Kết quả khác nhau tùy theo độ dài ngữ cảnh, khả năng và chuyên môn.",
   "compare.prompt_placeholder": "Nhập prompt của bạn tại đây...",

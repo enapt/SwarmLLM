@@ -1611,6 +1611,17 @@ kbd {
 }
 .compare-model-chip { animation: chip-fade-in 0.25s ease-out both; }
 
+/* ---- HF suggestion chips ---- */
+.hf-suggestions { padding: 20px; text-align: center; }
+.hf-suggestion-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.hf-suggestion-chip {
+  padding: 6px 14px; border-radius: 16px; font-size: 0.82rem; font-weight: 600;
+  background: var(--bg-tertiary); border: 1px solid var(--border-light); color: var(--text-primary);
+  cursor: pointer; transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.hf-suggestion-chip:hover { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.hf-suggestion-chip:active { transform: scale(0.96); }
+
 /* ---- Source badges ---- */
 .source-badge {
   display: inline-flex; align-items: center;
@@ -1701,9 +1712,17 @@ kbd {
 }
 .model-card .shard-cell:hover { transform: scale(1.18); box-shadow: 0 2px 8px rgba(0,0,0,0.35); z-index: 2; }
 .model-card .shard-cell:active { transform: scale(0.92); }
+/* Shard cell states — color + pattern for accessibility */
 .model-card .shard-cell.local { background: var(--green); opacity: 0.6; }
-.model-card .shard-cell.local.vram { opacity: 1; box-shadow: 0 0 4px var(--green); }
-.model-card .shard-cell.peer { background: var(--accent); opacity: 0.75; }
+.model-card .shard-cell.local.vram {
+  opacity: 1; box-shadow: 0 0 4px var(--green);
+  background: var(--green) repeating-linear-gradient(135deg, transparent, transparent 3px, rgba(255,255,255,0.2) 3px, rgba(255,255,255,0.2) 5px);
+}
+.model-card .shard-cell.peer {
+  background: var(--accent); opacity: 0.75;
+  background-image: radial-gradient(circle, rgba(255,255,255,0.25) 1px, transparent 1px);
+  background-size: 5px 5px;
+}
 .model-card .shard-cell.downloading {
   background: linear-gradient(90deg, var(--cyan) var(--dl-pct, 0%), var(--bg-tertiary) var(--dl-pct, 0%));
   border: 1px solid var(--cyan);
@@ -1722,7 +1741,8 @@ kbd {
   color: var(--cyan); font-size: 0.55rem;
 }
 .model-card .shard-cell.verifying {
-  background: var(--yellow, #eab308); border: 1px solid var(--yellow, #eab308);
+  background: repeating-linear-gradient(45deg, var(--yellow, #eab308), var(--yellow, #eab308) 3px, rgba(0,0,0,0.15) 3px, rgba(0,0,0,0.15) 5px);
+  border: 1px solid var(--yellow, #eab308);
   color: var(--bg-primary); font-size: 0.55rem;
   animation: pulse-shard-glow 1.5s ease-in-out infinite;
 }

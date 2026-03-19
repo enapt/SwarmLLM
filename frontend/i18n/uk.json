@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "Найпопулярніший",
   "model_browser.sort_size_asc": "Від найменшого",
   "model_browser.sort_size_desc": "Від найбільшого",
+  "model_browser.popular_title": "Популярні моделі для початку:",
   "compare.title": "Порівняння моделей",
   "compare.subtitle": "Надішліть один промпт кільком моделям і порівняйте результати поруч. Результати залежать від довжини контексту, можливостей та спеціалізації.",
   "compare.prompt_placeholder": "Введіть запит тут...",

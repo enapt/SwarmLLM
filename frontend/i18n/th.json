@@ -65,6 +65,7 @@
   "model_browser.sort_downloads": "ดาวน์โหลดมากที่สุด",
   "model_browser.sort_size_asc": "เล็กที่สุดก่อน",
   "model_browser.sort_size_desc": "ใหญ่ที่สุดก่อน",
+  "model_browser.popular_title": "โมเดลยอดนิยม:",
   "compare.title": "เปรียบเทียบโมเดล",
   "compare.subtitle": "ส่งข้อความเดียวกันไปยังหลายโมเดลและเปรียบเทียบผลลัพธ์แบบเคียงข้างกัน ผลลัพธ์แตกต่างกันตามความยาวบริบท ความสามารถ และความเชี่ยวชาญ",
   "compare.prompt_placeholder": "ป้อนพรอมต์ของคุณที่นี่...",
