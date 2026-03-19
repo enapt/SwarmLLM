@@ -12,6 +12,9 @@
   "pool.title": "My Devices",
   "pool.description": "Link your personal computers, laptops, and servers together. Credits earned by any of your machines are combined into one balance on your main device.",
   "pool.not_network": "This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.",
+  "pool.personal_only": "\u26a0 Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.",
+  "pool.credit_forwarding": "Credit Forwarding",
+  "pool.forward_info": "All credits earned by linked devices are automatically forwarded to this device (your main balance). Since these are all your machines, there's no split — 100% is consolidated here.",
   "pool.create_pool": "Link My Devices",
   "pool.join_pool": "Join Existing Group",
   "pool.enter_code": "Enter the code from your main device",
@@ -50,7 +53,7 @@
   "pool.name_hint": "Give this device a recognizable name so you can tell your machines apart.",
   "pool.name_saved": "Device name saved",
   "pool.credit_split": "Credit Split",
-  "pool.split_hint": "How much of their earnings each linked device keeps. The rest goes to the main device.",
+  "pool.split_hint": "Each device always keeps at least 50% of its own earnings. Since these are your devices, the rest goes to your main device's balance.",
   "pool.split_all_owner": "All to main device",
   "pool.split_saved": "Credit split updated",
 

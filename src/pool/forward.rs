@@ -35,9 +35,10 @@ pub async fn forward_credits_to_owner(
             return Ok(false); // Owner keeps their own credits
         }
 
-        // Apply credit split: member keeps split_pct%, forwards the rest
-        let split_pct = ps.member_credit_split_pct.min(100) as i64;
-        let forward = amount * (100 - split_pct) / 100;
+        // Forward 100% of member earnings to the owner (main device).
+        // This is a personal multi-device feature — all devices belong to the same
+        // user, so all credits consolidate on the main device's balance.
+        let forward = amount;
         if forward <= 0 {
             return Ok(false); // Member keeps 100%
         }

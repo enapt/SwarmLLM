@@ -70,7 +70,7 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 
 [pool]
 # Device Pools ("My Devices"): Link your personal machines so credits combine.
-max_pool_size = 20             # Maximum devices in a single pool
+max_pool_size = 10             # Maximum devices per pool (personal devices only)
 invitation_ttl_hours = 24      # How long an invite code stays valid
 rate_limit_per_hour = 10       # Max pool operations per hour
 gossip_interval_secs = 600     # How often to gossip pool state (10 min)

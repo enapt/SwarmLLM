@@ -887,7 +887,16 @@ async fn finalize_request(
         //   and handle_layer_forward (each node earns for layers it processed)
         // - Here we debit the local API consumer for requesting inference
         // - Skip if escrow was used — escrow already deducted the estimated cost
-        if is_local_api_request && escrow_id.is_none() {
+        // - Pool members (slave devices) skip local inference charges — they're your
+        //   own machines. All earnings are forwarded to the master; spending credits
+        //   from your own hardware doesn't make sense.
+        let is_pool_member = {
+            let ps = shared_state.pool_state.read().await;
+            ps.as_ref()
+                .map(|s| s.pool_id != *shared_state.identity.node_id())
+                .unwrap_or(false)
+        };
+        if is_local_api_request && escrow_id.is_none() && !is_pool_member {
             let total_tokens = result.prompt_tokens + result.completion_tokens;
             let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
             if let Err(e) = crate::credit::ledger::apply_credit_direct(

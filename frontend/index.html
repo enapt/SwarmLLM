@@ -930,6 +930,7 @@
             <h2 style="margin:0 0 8px" data-i18n="pool.title">My Devices</h2>
             <p class="text-muted" style="max-width:480px;margin:0 auto 20px" data-i18n="pool.description">Link your personal computers, laptops, and servers together. Credits earned by any of your machines are combined into one balance on your main device.</p>
             <p class="text-muted" style="max-width:480px;margin:0 auto 20px;font-size:0.78rem" data-i18n="pool.not_network">This is different from the SwarmLLM network — linking devices groups your own hardware, while the network connects you with other people.</p>
+            <p style="max-width:480px;margin:0 auto 12px;font-size:0.75rem;color:var(--orange);background:rgba(255,160,0,0.08);padding:8px 12px;border-radius:var(--radius)" data-i18n="pool.personal_only">&#9888; Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.</p>
 
             <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
               <button class="btn btn-primary" id="pool-create-btn" data-i18n="pool.create_pool">Create Pool</button>
@@ -1024,17 +1025,11 @@
                   <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.name_hint">Give this device a recognizable name so you can tell your machines apart.</p>
                 </div>
               </div>
-              <!-- Credit split (owner only) -->
+              <!-- Credit forwarding info -->
               <div class="panel" id="pool-split-section" style="display:none">
-                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.credit_split">Credit Split</h3></div>
+                <div class="panel-header"><h3 style="margin:0" data-i18n="pool.credit_forwarding">Credit Forwarding</h3></div>
                 <div class="panel-body" style="padding:12px">
-                  <input type="range" id="pool-split-slider" min="0" max="50" value="0" style="width:100%"
-                    oninput="document.getElementById('pool-split-label').textContent=this.value==0?'All to owner':this.value+'% kept by member, '+(100-this.value)+'% to owner'">
-                  <div style="display:flex;justify-content:space-between;margin-top:4px">
-                    <span id="pool-split-label" class="text-muted" style="font-size:0.78rem">All to owner</span>
-                    <button class="btn btn-sm btn-primary" id="pool-save-split-btn" data-i18n="actions.save">Save</button>
-                  </div>
-                  <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.split_hint">How much of their earnings each member device keeps. The rest goes to the main device.</p>
+                  <p class="text-muted" style="font-size:0.82rem;margin:0" data-i18n="pool.forward_info">All credits earned by linked devices are automatically forwarded to this device (your main balance). Since these are all your machines, there's no split — 100% is consolidated here.</p>
                 </div>
               </div>
             </div>
