@@ -182,5 +182,9 @@
   "models.discovering_hint": "Connected to peers. Models will appear as the network syncs.",
   "models.no_models": "No models available yet",
   "models.no_models_hint": "Connect to the network to access shared models, or add a cloud provider in Settings",
-  "models.empty_state": "Connecting to the network... Models shared by other users will appear here automatically. You can also browse HuggingFace or add a cloud provider in Settings."
+  "models.empty_state": "Connecting to the network... Models shared by other users will appear here automatically. You can also browse HuggingFace or add a cloud provider in Settings.",
+  "mode.starting": "STARTING",
+  "network.map_loading": "Discovering network...",
+  "dashboard.connecting": "Connecting...",
+  "dashboard.connecting_sub": "Starting up your SwarmLLM node"
 }

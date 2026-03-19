@@ -179,7 +179,7 @@
       <div class="form-group">
         <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
         <div class="flex gap-1" style="align-items:center">
-          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" value="Loading...">
+          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" placeholder="Loading..." value="">
           <button class="btn btn-sm" id="btn-copy-api-key" title="Copy access token">Copy</button>
         </div>
         <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
@@ -602,7 +602,7 @@
           <div class="mode-indicator mb-2" id="mode-indicator">
             <div class="mode-left">
               <div class="mode-dot offline" id="mode-dot"></div>
-              <span class="mode-label" id="mode-label">INITIALIZING</span>
+              <span class="mode-label" id="mode-label" data-i18n="mode.starting">STARTING</span>
             </div>
             <div class="mode-detail" id="mode-detail"></div>
           </div>
@@ -766,17 +766,7 @@
             </div>
           </div>
 
-          <!-- Download Queue (hidden — progress now inline in model cards, WI-2) -->
-          <div class="panel mt-2 hidden" id="download-queue-panel" style="display:none !important">
-            <div class="panel-header">
-              <h2>Downloads</h2>
-              <span class="text-muted" id="download-queue-count"></span>
-            </div>
-            <div id="download-queue-list"></div>
-            <div class="empty-state hidden" id="download-queue-empty">
-              <p class="text-muted" style="font-size:0.85rem">No active downloads</p>
-            </div>
-          </div>
+
 
           <!-- Network -->
           <div class="panel mt-2">
@@ -847,7 +837,7 @@
               </div>
             </div>
             <div id="map-stats" class="map-stats">
-              <span class="text-muted" style="font-size:0.8rem" id="map-stats-text">0 nodes across 0 regions</span>
+              <span class="text-muted" style="font-size:0.8rem" id="map-stats-text" data-i18n="network.map_loading">Discovering network...</span>
             </div>
           </div>
         </div>
@@ -931,7 +921,7 @@
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
-                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">Loading leaderboard...</td></tr>
+                <tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px"><div class="spinner" style="width:20px;height:20px;display:inline-block;vertical-align:middle;margin-right:8px"></div>Loading...</td></tr>
               </tbody>
             </table>
           </div>
