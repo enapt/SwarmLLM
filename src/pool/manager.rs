@@ -31,6 +31,9 @@ pub struct PoolManager {
     /// Active invite codes (owner only). Keyed by code_hash for O(1) lookup.
     /// One-time use, expired codes cleaned on each generate.
     invite_codes: HashMap<[u8; 32], PoolInviteCode>,
+    /// When true, auto-accept any incoming invitation (set by JoinWithCode).
+    /// This enables the seamless flow: enter code → broadcast join → receive invitation → auto-accept.
+    auto_accept_next_invitation: bool,
 }
 
 impl PoolManager {
@@ -49,6 +52,7 @@ impl PoolManager {
             rate_limiter: PoolRateLimiter::new(rate_limit as usize, 1),
             pending_invitations: HashMap::new(),
             invite_codes: HashMap::new(),
+            auto_accept_next_invitation: false,
         }
     }
 
@@ -769,6 +773,18 @@ impl PoolManager {
                 invitation_id = %invitation.id,
                 "Received pool invitation"
             );
+
+            // Auto-accept if this node used JoinWithCode
+            if self.auto_accept_next_invitation {
+                self.auto_accept_next_invitation = false;
+                tracing::info!(
+                    invitation_id = %invitation.id,
+                    "Auto-accepting invitation (from invite code join)"
+                );
+                if let Err(e) = self.handle_accept_invitation(invitation).await {
+                    tracing::warn!(error = %e, "Auto-accept failed");
+                }
+            }
         }
     }
 
@@ -827,6 +843,18 @@ impl PoolManager {
             invitation_id = %invitation.id,
             "Recognized blinded pool invitation for us"
         );
+
+        // Auto-accept if this node used JoinWithCode (seamless invite code flow)
+        if self.auto_accept_next_invitation {
+            self.auto_accept_next_invitation = false;
+            tracing::info!(
+                invitation_id = %invitation.id,
+                "Auto-accepting invitation (from invite code join)"
+            );
+            if let Err(e) = self.handle_accept_invitation(invitation).await {
+                tracing::warn!(error = %e, "Auto-accept failed");
+            }
+        }
     }
 
     async fn handle_inbound_acceptance(&mut self, acceptance: PoolAcceptance) {
@@ -1187,7 +1215,11 @@ impl PoolManager {
             .send(crate::types::NetworkCommand::Broadcast(msg))
             .await;
 
-        tracing::info!("Broadcast pool join request with invite code");
+        // Set auto-accept flag so when the invitation arrives via gossip,
+        // we accept it automatically — no manual step needed.
+        self.auto_accept_next_invitation = true;
+
+        tracing::info!("Broadcast pool join request with invite code (auto-accept enabled)");
         Ok(())
     }
 
