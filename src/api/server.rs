@@ -210,6 +210,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pool/join", post(pool::pool_join))
         .route("/api/pool/device-name", post(pool::pool_set_device_name))
         .route("/api/pool/credit-split", put(pool::pool_set_credit_split))
+        .route("/api/pool/contribution", put(pool::pool_set_contribution))
         // Pool credit rates
         .route(
             "/api/admin/pools/:id/rates",

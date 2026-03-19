@@ -91,6 +91,12 @@ pub enum PoolCommand {
         pct: u8,
         reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,
     },
+    /// Set contribution level for a member device (owner only). 0-100%.
+    SetContributionLevel {
+        node_id: NodeId,
+        level: u8,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,
+    },
     AcceptInvitation {
         invitation: PoolInvitation,
         reply: tokio::sync::oneshot::Sender<Result<(), crate::error::SwarmError>>,

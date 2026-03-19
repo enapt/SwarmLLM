@@ -22,6 +22,7 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
                     "credits_contributed": m.credits_contributed,
                     "joined_at": m.joined_at.to_rfc3339(),
                     "online": m.online,
+                    "contribution_level": m.contribution_level,
                 });
                 if let Some(ref name) = m.device_name {
                     member["device_name"] = serde_json::json!(name);
@@ -323,6 +324,31 @@ pub async fn pool_set_credit_split(
     }
 }
 
+/// PUT /api/pool/contribution — Set contribution level for a member device (owner only).
+pub async fn pool_set_contribution(
+    State(state): State<AppState>,
+    Json(body): Json<PoolContributionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let node_id = parse_node_id(&body.node_id)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    send_pool_command(
+        &state,
+        PoolCommand::SetContributionLevel {
+            node_id,
+            level: body.level,
+            reply: tx,
+        },
+    )
+    .await?;
+    match rx.await {
+        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
+        Ok(Err(e)) => Err(ApiError(e)),
+        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+            "Pool manager unavailable".into(),
+        ))),
+    }
+}
+
 /// POST /api/pool/generate-code — Generate a short invite code (owner only).
 pub async fn pool_generate_code(
     State(state): State<AppState>,
@@ -438,6 +464,12 @@ pub struct PoolDeviceNameRequest {
 #[derive(Debug, Deserialize)]
 pub struct PoolCreditSplitRequest {
     pub pct: u8,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PoolContributionRequest {
+    pub node_id: String,
+    pub level: u8,
 }
 
 #[derive(Debug, Deserialize)]

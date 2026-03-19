@@ -275,6 +275,27 @@
           else iconEl.textContent = '\uD83D\uDCBB'; // laptop
         }
 
+        // Contribution level slider (owner only, not self/owner device)
+        var contribSection = row.querySelector('.pool-member-contribution');
+        if (contribSection && self._isOwner && !isOwnerDevice) {
+          contribSection.style.display = '';
+          var slider = contribSection.querySelector('.pool-contrib-slider');
+          var label = contribSection.querySelector('.pool-contrib-label');
+          if (slider) {
+            slider.value = m.contribution_level || 100;
+            if (label) label.textContent = (m.contribution_level || 100) + '%';
+            slider.setAttribute('data-node-id', m.node_id);
+            slider.addEventListener('input', function () {
+              var lbl = this.parentElement.querySelector('.pool-contrib-label');
+              if (lbl) lbl.textContent = this.value + '%';
+            });
+            slider.addEventListener('change', function () {
+              var nid = this.getAttribute('data-node-id');
+              App.pool.setContribution(nid, parseInt(this.value, 10));
+            });
+          }
+        }
+
         // Remove button (owner only, not self)
         if (removeBtn && self._isOwner && !isSelf) {
           removeBtn.style.display = '';
@@ -520,6 +541,22 @@
       }
     },
 
+    setContribution: async function (nodeId, level) {
+      try {
+        var resp = await App.authFetch('/api/pool/contribution', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ node_id: nodeId, level: level })
+        });
+        var data = await resp.json();
+        if (data.error) {
+          App.notifications.showToast(data.error, 'error');
+        }
+      } catch (e) {
+        App.notifications.showToast('Failed: ' + e.message, 'error');
+      }
+    },
+
     /// Check pool state on startup and show/hide the slave banner
     checkSlaveBanner: async function () {
       try {
@@ -541,14 +578,37 @@
       }
     },
 
-    /// Show/hide the slave banner on the dashboard
+    /// Show/hide the full-page slave overlay — blocks entire dashboard for linked devices
     updateSlaveBanner: function (data) {
-      var banner = document.getElementById('dashboard-slave-banner');
-      if (!banner) return;
-      if (data && data.in_pool && data.pool_id !== this._myNodeId) {
-        banner.style.display = '';
+      var overlay = document.getElementById('dashboard-slave-overlay');
+      if (!overlay) return;
+
+      var isSlave = data && data.in_pool && data.pool_id !== this._myNodeId;
+      if (isSlave) {
+        overlay.classList.add('visible');
+
+        // Populate stats from pool state
+        var members = data.members || [];
+        var myMember = members.find(function (m) { return m.node_id === App.pool._myNodeId; });
+
+        // Owner name (first member or pool name)
+        var ownerEl = document.getElementById('slave-owner-name');
+        if (ownerEl) {
+          var ownerMember = members.find(function (m) { return m.node_id === data.pool_id; });
+          ownerEl.textContent = (ownerMember && ownerMember.device_name) || data.name || data.pool_id.substring(0, 12) + '...';
+        }
+
+        // My stats
+        var creditsEl = document.getElementById('slave-credits-earned');
+        if (creditsEl) creditsEl.textContent = (myMember && myMember.credits_contributed || 0).toLocaleString();
+
+        var shardsEl = document.getElementById('slave-shards-hosted');
+        if (shardsEl) shardsEl.textContent = (myMember && myMember.stats && myMember.stats.shards_hosted) || '—';
+
+        var forwardsEl = document.getElementById('slave-forwards');
+        if (forwardsEl) forwardsEl.textContent = (myMember && myMember.stats && myMember.stats.forwards_served) || '—';
       } else {
-        banner.style.display = 'none';
+        overlay.classList.remove('visible');
       }
     },
 

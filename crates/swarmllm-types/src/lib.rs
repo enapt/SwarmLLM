@@ -69,6 +69,15 @@ pub struct PoolMembership {
     /// Per-device stats reported via pool state gossip
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_stats: Option<PoolDeviceStats>,
+    /// Contribution level set by the pool owner (0-100%).
+    /// Controls how much of this device's resources are dedicated to the network.
+    /// 100 = full contribution (default), 50 = half speed/bandwidth, 0 = paused.
+    #[serde(default = "default_contribution_level")]
+    pub contribution_level: u8,
+}
+
+fn default_contribution_level() -> u8 {
+    100
 }
 
 /// Per-device performance stats within a pool.

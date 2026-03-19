@@ -182,6 +182,14 @@ impl PoolManager {
                 let result = self.handle_set_credit_split(pct).await;
                 let _ = reply.send(result);
             }
+            PoolCommand::SetContributionLevel {
+                node_id,
+                level,
+                reply,
+            } => {
+                let result = self.handle_set_contribution_level(node_id, level).await;
+                let _ = reply.send(result);
+            }
             PoolCommand::GenerateInviteCode { reply } => {
                 let result = self.handle_generate_invite_code().await;
                 let _ = reply.send(result);
@@ -269,6 +277,7 @@ impl PoolManager {
                 last_seen: Some(now),
                 online: true,
                 device_stats: None,
+                contribution_level: 100,
             }],
             created_at: now,
             owner_signature: sig,
@@ -399,6 +408,7 @@ impl PoolManager {
             last_seen: Some(chrono::Utc::now()),
             online: true,
             device_stats: None,
+            contribution_level: 100,
         };
 
         // Create a local pool state representing our membership
@@ -919,6 +929,7 @@ impl PoolManager {
                 last_seen: Some(chrono::Utc::now()),
                 online: true,
                 device_stats: None,
+                contribution_level: 100,
             });
 
             if let Err(e) = self.persist_pool_state(ps) {
@@ -1120,6 +1131,39 @@ impl PoolManager {
         ps.member_credit_split_pct = pct;
         self.persist_pool_state(ps)?;
         tracing::info!(pct, "Pool credit split updated");
+        Ok(())
+    }
+
+    /// Set contribution level for a member device (owner only).
+    async fn handle_set_contribution_level(
+        &mut self,
+        node_id: NodeId,
+        level: u8,
+    ) -> Result<(), SwarmError> {
+        if level > 100 {
+            return Err(SwarmError::Internal("Level must be 0-100".into()));
+        }
+        let my_id = self.shared_state.identity.node_id().clone();
+        let mut ps = self.shared_state.pool_state.write().await;
+        let ps = ps
+            .as_mut()
+            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+        if ps.pool_id != my_id {
+            return Err(SwarmError::Internal(
+                "Only the pool owner can set contribution levels".into(),
+            ));
+        }
+        if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == node_id) {
+            member.contribution_level = level;
+            tracing::info!(
+                node = %node_id,
+                level,
+                "Set device contribution level"
+            );
+        } else {
+            return Err(SwarmError::Internal("Device not found in pool".into()));
+        }
+        self.persist_pool_state(ps)?;
         Ok(())
     }
 
