@@ -307,20 +307,31 @@
     if (chatInput) {
       chatInput.disabled = !hasModels;
       if (hasModels) {
-        chatInput.placeholder = 'Type your message...';
+        chatInput.placeholder = I18n.t('chat.placeholder') || 'Type your message...';
       } else {
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = 'No models available \u2014 click + above to download one, or add a cloud provider in Settings';
+        if (!dlInfo) chatInput.placeholder = I18n.t('chat.no_models_placeholder') || 'Waiting for models — connect to peers or add a cloud provider in Settings';
       }
     }
     if (emptyState && !hasModels) {
-      emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
-        '<div class="chat-empty-title" style="font-size:1.1rem">No Models Available</div>' +
-        '<div class="chat-empty-hint" style="margin:8px 0">Download an AI model to run locally, or add a cloud provider in Settings for instant access</div>' +
-        '<div style="display:flex;gap:8px;margin-top:12px">' +
-          '<button class="btn btn-primary" data-goto-browse="1">Download Model</button>' +
-          '<button class="btn btn-outline" data-goto-network-code="1" style="border:1px solid var(--border)">Share Network Code</button>' +
-        '</div>';
+      // Check if we have peers — different message for connected vs isolated
+      var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peer_count || 0) : 0;
+      if (peerCount > 0) {
+        // Connected to peers but no models ready yet — they're coming
+        emptyState.innerHTML = '<div class="chat-empty-icon" style="font-size:2rem">' +
+          '<div class="spinner" style="width:24px;height:24px;display:inline-block"></div></div>' +
+          '<div class="chat-empty-title" style="font-size:1.1rem">' + (I18n.t('chat.discovering') || 'Discovering models on the network...') + '</div>' +
+          '<div class="chat-empty-hint" style="margin:8px 0">' + (I18n.t('chat.discovering_hint') || 'Connected to ' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '. Models will appear in the dropdown as they become available.') + '</div>';
+      } else {
+        // No peers, no models — need to connect or add cloud provider
+        emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
+          '<div class="chat-empty-title" style="font-size:1.1rem">' + (I18n.t('chat.getting_started') || 'Getting Started') + '</div>' +
+          '<div class="chat-empty-hint" style="margin:8px 0">' + (I18n.t('chat.getting_started_hint') || 'Connect to the SwarmLLM network to access models, or add a cloud provider in Settings for instant chat.') + '</div>' +
+          '<div style="display:flex;gap:8px;margin-top:12px;justify-content:center">' +
+            '<button class="btn btn-primary" data-goto-network-code="1">' + (I18n.t('chat.connect_peers') || 'Connect to Peers') + '</button>' +
+            '<button class="btn btn-outline" data-goto-settings="1" style="border:1px solid var(--border)">' + (I18n.t('chat.add_provider') || 'Add Cloud Provider') + '</button>' +
+          '</div>';
+      }
     }
   }
 

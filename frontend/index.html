@@ -584,8 +584,8 @@
         <!-- Offline cover — shown while WebSocket is disconnected -->
         <div class="dashboard-offline-cover" id="dashboard-offline-cover">
           <div class="cover-spinner"></div>
-          <div class="cover-msg">Connecting to SwarmLLM…</div>
-          <div class="cover-sub">Waiting for the daemon to respond</div>
+          <div class="cover-msg" data-i18n="dashboard.connecting">Connecting...</div>
+          <div class="cover-sub" data-i18n="dashboard.connecting_sub">Starting up your SwarmLLM node</div>
         </div>
         <!-- Slave mode persistent top banner — shown on every page when device is linked -->
         <!-- Users can still use the full dashboard; inference charges go to the master -->
@@ -760,8 +760,8 @@
               </div>
               <div id="models-list"></div>
               <div class="empty-state" id="models-empty" style="display:none">
-                <div class="empty-icon">&#128229;</div>
-                <p>No models yet. <a href="#" id="link-browse-hf">Browse HuggingFace</a> to download one, or add a cloud provider in Settings.</p>
+                <div class="empty-icon">&#127760;</div>
+                <p data-i18n="models.empty_state">Connecting to the network... Models shared by other users will appear here automatically. You can also <a href="#" id="link-browse-hf">browse HuggingFace</a> or add a cloud provider in Settings.</p>
               </div>
             </div>
           </div>

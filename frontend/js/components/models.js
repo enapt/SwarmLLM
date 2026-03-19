@@ -275,7 +275,20 @@
       list.innerHTML = '';
 
       if (!hasAny) {
-        list.innerHTML = '<div class="model-dropdown-empty">No models available<br><span style="font-size:0.72rem;color:var(--text-muted)">Click + to download a model, or add a cloud provider in Settings</span></div>';
+        var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peer_count || 0) : 0;
+        if (peerCount > 0) {
+          list.innerHTML = '<div class="model-dropdown-empty">' +
+            (I18n.t('models.discovering') || 'Discovering models...') +
+            '<br><span style="font-size:0.72rem;color:var(--text-muted)">' +
+            (I18n.t('models.discovering_hint') || 'Connected to ' + peerCount + ' peers. Models will appear as the network syncs.') +
+            '</span></div>';
+        } else {
+          list.innerHTML = '<div class="model-dropdown-empty">' +
+            (I18n.t('models.no_models') || 'No models available yet') +
+            '<br><span style="font-size:0.72rem;color:var(--text-muted)">' +
+            (I18n.t('models.no_models_hint') || 'Connect to the network to access shared models, or add a cloud provider in Settings') +
+            '</span></div>';
+        }
         return;
       }
 
