@@ -22,6 +22,7 @@
 | `chat` | Interactive CLI chat with streaming |
 | `bench` | Benchmark inference (tokens/sec, TTFT) |
 | `peers` | List connected peers |
+| `pool` | Device pool management (link your machines) |
 | `test-split` | Test split inference locally (diagnostic) |
 | `version` | Print version |
 
@@ -42,6 +43,30 @@
 | `--prompt <TEXT>` | "Write a short essay..." | Benchmark prompt |
 | `--max-tokens <N>` | `128` | Tokens to generate |
 | `--iterations <N>` | `1` | Number of benchmark runs |
+
+### `pool` Subcommands
+
+Link your personal devices so credits are combined on one main machine.
+
+| Command | Description |
+|---|---|
+| `pool create --name "My Devices"` | Create a device group (this machine becomes the main device) |
+| `pool invite-code` | Generate an 8-character invite code to share |
+| `pool join <CODE>` | Link this device using a code from your main machine |
+| `pool status` | Show linked devices, credits, and online status |
+| `pool leave` | Unlink this device from the group |
+
+**Example flow:**
+```bash
+# Main device:
+swarmllm pool create --name "My Devices"
+swarmllm pool invite-code   # → A3F7K2M9
+
+# On each other device:
+swarmllm pool join A3F7K2M9
+```
+
+> **Note**: This links YOUR own devices. It's different from connecting to the SwarmLLM network (which uses `swarm://` peer addresses).
 
 ## Environment Variables
 

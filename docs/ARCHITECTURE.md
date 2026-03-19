@@ -531,37 +531,103 @@ LoRA (Low-Rank Adaptation) adapters are supported via `src/model/lora.rs`:
 
 ```
 Earning (default rates, configurable per pool):
-  +10 credits  per layer per token served
+  +10 credits  per token served (balanced with consume side)
   +1  credit   per GB per hour hosting shards
   +5  credits  per GB seeding shard data
   +2  credits  per connection hour relay service
 
 Spending (default rates, configurable per pool):
-  -8  credits  per layer per token requested
+  -10 credits  per token consumed (balanced with earn side)
   -50 credits  per distributed inference failure (automatic penalty)
 
+Minimum balance enforcement:
+  Nodes below -1000 credits have remote requests rejected.
+  Local API requests (localhost) are always allowed.
+  Earn credits by: hosting shards, serving inference, seeding data.
+
 Tiers (enforced per-request in InferenceRouter):
-  Platinum  (≥90th percentile)  → immediate queue, 2× concurrent slots
-  Gold      (≥70th percentile)  → 1-3s queue, base concurrent slots
-  Silver    (positive balance)  → 5-15s queue, ½ concurrent slots
-  Bronze    (zero/negative)     → 30s+ queue, ¼ concurrent slots
+  Platinum  (≥90th percentile, balance>0)  → 2× concurrent slots
+  Gold      (≥70th percentile, balance>0)  → base concurrent slots
+  Silver    (positive balance)             → ½ concurrent slots
+  Bronze    (zero/negative)                → ¼ concurrent slots (min 1)
 ```
 
+**Balanced rates**: Both earn and spend use `rate × tokens` (no layer multiplier). This prevents
+credit inflation — a 22-layer model serving 100 tokens earns exactly as much as it costs to
+consume. Previously the earn side multiplied by layers, causing 22× inflation per request.
+
 **Tier enforcement flow**: On each `handle_submit()`, the router computes the network percentile
-from `peer_credit_balances` (populated via credit gossip), calls `calculate_tier()`, and sets the
-request priority. In `drain_queue()`, `max_concurrent_for_tier()` limits how many concurrent
-execution slots each tier can use. Higher tiers dequeue first via `PriorityTier` enum ordering (Platinum > Gold > Silver > Bronze).
+from `peer_credit_balances` (populated via credit gossip, **deduplicated by NodeId** to prevent
+Sybil percentile stuffing), calls `calculate_tier()`, and sets the request priority. Balance must
+be positive for Gold/Platinum tiers. In `drain_queue()`, `max_concurrent_for_tier()` limits
+concurrent execution slots per tier.
+
+**Minimum balance enforcement**: Remote peers with balance below `MIN_BALANCE_FOR_INFERENCE`
+(-1000) have their inference requests rejected with a descriptive error message telling them to
+contribute. Local API requests (requester == NodeId([0;32])) bypass this check.
+
+**Atomic credit accumulation**: Forward participation credits (earned during distributed inference
+hot path) are accumulated in an `AtomicI64` (`pending_credit_earn`) to avoid lock contention.
+The CreditLedger periodic persist (every 60s) flushes the accumulator to the balance + DB.
+No credits are lost under high concurrency.
+
+**Anti-Sybil balance gossip**: Peer balance reports are deduplicated by NodeId via a DashMap.
+Each peer gets exactly one entry in the percentile calculation, preventing a single peer from
+dominating the distribution by re-gossiping frequently.
 
 **Relay credits**: NetworkManager tracks active relay circuits via `active_relay_circuits` DashMap.
 On `CircuitReqAccepted`, records start time. On `CircuitClosed`, computes duration and adds to
-`relay_seconds_served` atomic counter. CreditLedger drains this counter periodically and calls
-`earn_relay_service()`.
+`relay_seconds_served` atomic counter. CreditLedger drains this counter periodically.
 
-**Failure penalties**: When distributed inference fails in `execute_request()`, the router applies
-`penalty_serve_failure` credits (default -50) and broadcasts `InferenceError` to all pipeline
-participants via `broadcast_pipeline_error()`.
+**Failure penalties**: When distributed inference fails, the router applies `penalty_serve_failure`
+credits (default -50) and broadcasts `InferenceError` to all pipeline participants.
 
 Credit earn/spend rates are configurable per pool via the pool configuration API.
+
+## Device Pools (Multi-Device Credit Linking)
+
+Users with multiple machines can link them into a **device pool**. All credits earned by member
+devices are forwarded to the owner (main) device, giving a combined credit balance.
+
+```
+Main Device (owner)                 Linked Device (member)
+┌──────────────────┐               ┌──────────────────┐
+│ Combined balance │◀──────────────│ Earns credits    │
+│ Pool management  │  CreditForward│ Forwards to owner│
+│ Invite codes     │  (dual-signed)│ Keeps split %    │
+└──────────────────┘               └──────────────────┘
+```
+
+**Setup flow**:
+1. Main device: `swarmllm pool create --name "My Devices"`
+2. Main device: `swarmllm pool invite-code` → generates 8-char code (e.g., `A3F7K2M9`)
+3. Linked device: `swarmllm pool join A3F7K2M9`
+4. Code validated over gossip, invitation auto-created, member auto-accepted
+
+**Invite code security**:
+- 8-char uppercase alphanumeric (32^8 ≈ 1.1 trillion combos, no 0/O/1/I)
+- One-time use, consumed immediately on claim
+- 24h expiry (configurable `invitation_ttl_hours`)
+- Max 5 active codes at once
+- Code hash (BLAKE3) on the wire — plaintext code never transmitted
+- Join requests signed with Ed25519
+
+**Pool features**:
+- Device nicknames (owner sets per device for easy identification)
+- Online/offline status with last-seen timestamps
+- Per-device stats (VRAM, shards hosted, forwards served, uptime)
+- Combined VRAM display across all pool devices
+- Credit split configuration (0-50% kept by member, rest to owner)
+- Max 20 devices per pool, 10 operations/hour rate limit
+
+**Credit forwarding**: When a pool member earns credits, `forward_credits_to_owner()` in
+`pool/forward.rs` deducts the forward amount (respecting `member_credit_split_pct`) and sends a
+`PoolCreditForward` message. The owner's `PoolManager` co-signs it and applies `apply_credit_direct()`
+to the owner's balance. Both signatures (member + owner) are required — preventing forgery.
+
+**Terminology**: "My Devices" / "Linked Devices" in the UI. Clearly distinguished from "Swarm Peers"
+(other users' nodes on the P2P network). The dashboard, setup wizard, and share popover all use
+distinct language to prevent confusion.
 
 ## Model Acquisition Security
 

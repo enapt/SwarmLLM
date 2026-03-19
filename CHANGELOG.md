@@ -2,6 +2,33 @@
 
 All notable changes to SwarmLLM are documented here.
 
+## [Unreleased] - Post-0.1.0 Hardening
+
+### Code Sweep (105 issues found, 58 fixed)
+- **Round 1**: 10 parallel review agents across all 109 .rs files — 68 issues (9 CRITICAL, 32 HIGH, 22 MEDIUM), 41 fixed
+- **Round 2**: Second pass — 37 new issues (5 CRITICAL, 22 HIGH, 10 MEDIUM), 17 fixed
+- Key fixes: max_seq_len 2048 cap, ShardReader cross-tensor bleed, TensorPayload auth, escrow double-charge, IPC framing overflow, API key leak, Gemma embedding scale in forward_batch, hardcoded sampling in distributed forward
+
+### Credit System Overhaul
+- Balanced rates: `rate × tokens` on both earn and spend (no layer multiplier)
+- Minimum balance enforcement: `MIN_BALANCE_FOR_INFERENCE = -1000`
+- Atomic credit accumulation via `pending_credit_earn` AtomicI64
+- Anti-Sybil peer balance deduplication by NodeId
+- Priority tiers require positive balance for Gold/Platinum
+
+### Device Pool Invite Codes
+- 8-char one-time codes (e.g., `A3F7K2M9`), 24h expiry, Ed25519 signed
+- CLI: `swarmllm pool create/invite-code/join/status/leave`
+- API: `/api/pool/generate-code`, `/api/pool/join`, `/api/pool/device-name`, `/api/pool/credit-split`
+
+### Pool UX Overhaul
+- Device nicknames, online/offline status, per-device stats, combined VRAM display
+- QR code for invite codes, credit split configuration (0-50%)
+- "My Devices" tab with full management UI
+
+### Terminology Clarification
+- "My Devices" vs "Swarm Peers" — clear separation in setup wizard, share popover, dashboard
+
 ## [0.1.0] - 2026-03-18
 
 ### Release & Scale Readiness (Phase 19)

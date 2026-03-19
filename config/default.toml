@@ -69,7 +69,9 @@ shard_size_mb = 512            # Shard size in MB (64-2048, power of 2 recommend
 # max_holder_load_for_prune = 3 # Block pruning if remaining holders avg load exceeds this
 
 [pool]
-max_pool_size = 10             # Maximum devices in a single pool
-invitation_ttl_hours = 24      # How long an invitation stays valid
-rate_limit_per_hour = 3        # Max join/leave/invite operations per hour
+# Device Pools ("My Devices"): Link your personal machines so credits combine.
+max_pool_size = 20             # Maximum devices in a single pool
+invitation_ttl_hours = 24      # How long an invite code stays valid
+rate_limit_per_hour = 10       # Max pool operations per hour
 gossip_interval_secs = 600     # How often to gossip pool state (10 min)
+# Credit rates: [pool.credit_rates] — see docs for per-pool overrides
