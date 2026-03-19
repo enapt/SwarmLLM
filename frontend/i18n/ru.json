@@ -87,7 +87,7 @@
   "leaderboard.empty": "Активности пока нет. Кредиты зарабатываются помощью другим в запуске моделей ИИ.",
   "actions.copy": "Копировать",
   "actions.try_other_models": "Попробовать другие модели",
-  "network.no_peers_yet": "Пиры ещё не подключены. Поделитесь своим Сетевым кодом для объединения ресурсов — чем больше пиров, тем большие модели вы сможете запускать вместе.",
+  "network.no_peers_yet": "No swarm peers connected yet. Share your Peer Address so other SwarmLLM users can find you — more peers means bigger models can be run collectively.",
   "actions.cancel": "Cancel",
   "dl.state_downloading": "Downloading",
   "dl.state_preparing": "Preparing download...",
@@ -149,5 +149,15 @@
   "pool.credit_split": "Credit Split",
   "pool.split_hint": "How much of their earnings each linked device keeps. The rest goes to the main device.",
   "pool.split_all_owner": "All to main device",
-  "pool.split_saved": "Credit split updated"
+  "pool.split_saved": "Credit split updated",
+  "network.your_peer_address": "Your Swarm Peer Address",
+  "network.share_desc": "Share with other SwarmLLM users so your nodes can discover each other on the network",
+  "network.other_peer_address": "Another User's Peer Address",
+  "network.connect_desc": "Paste an address from another user to connect your nodes",
+  "network.connect": "Connect",
+  "network.not_devices": "This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.",
+  "setup.connect_peer": "Connect to a swarm peer",
+  "setup.connect_peer_desc": "Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.",
+  "setup.connect_btn": "Connect",
+  "setup.auto_discover": "No address? No problem — devices on the same local network find each other automatically."
 }

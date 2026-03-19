@@ -95,16 +95,16 @@
       <div class="wizard-body hidden" id="step-2">
         <h3>Connect</h3>
         <p class="text-muted mb-2">Choose one or both. You can also skip this and configure later.</p>
-        <!-- Invite code section -->
+        <!-- Peer address section (NOT device pool — this connects to the P2P swarm) -->
         <div style="margin-bottom:16px">
-          <label style="font-size:0.85rem;font-weight:600">Join a friend's network</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Paste an invite code from someone already running SwarmLLM.</p>
+          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.connect_peer">Connect to a swarm peer</label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.connect_peer_desc">Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.</p>
           <div style="display:flex;gap:8px">
             <input type="text" id="setup-invite-code" placeholder="swarm://..." style="flex:1;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-family:var(--font-mono)">
-            <button class="btn btn-sm" id="setup-invite-join">Join</button>
+            <button class="btn btn-sm" id="setup-invite-join" data-i18n="setup.connect_btn">Connect</button>
           </div>
           <div id="setup-invite-status" style="font-size:0.78rem;margin-top:4px"></div>
-          <p class="text-muted" style="font-size:0.75rem;margin-top:6px">No code? No problem — nodes on the same network find each other automatically.</p>
+          <p class="text-muted" style="font-size:0.75rem;margin-top:6px" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
         </div>
         <!-- Cloud provider section -->
         <div style="border-top:1px solid var(--border);padding-top:12px">
@@ -142,7 +142,7 @@
           <div class="flex-between mb-1"><span class="text-muted">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
           <div class="flex-between mb-1"><span class="text-muted">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
-          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted">Peer</span><span class="mono" id="summary-invite">---</span></div>
+          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
           <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
         </div>
         <div id="summary-next-steps" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
@@ -479,21 +479,22 @@
         <button class="btn btn-sm" id="btn-open-model-browser" title="Find models on HuggingFace to download and host. Models only run distributed if swarm peers are already hosting them." aria-label="Find models">&#43; Find model</button>
       </div>
       <div class="share-btn-wrap" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-share-network" title="Share network code — invite friends to combine resources" aria-label="Share network code" style="font-size:1rem">&#128279;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-share-network" title="Share your swarm peer address" aria-label="Share peer address" style="font-size:1rem">&#127760;</button>
         <div class="share-popover" id="share-popover">
-          <label style="font-weight:600;margin-bottom:6px">Your Network Code</label>
-          <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px">Send this to a friend — together you can run models neither of you could alone</div>
+          <label style="font-weight:600;margin-bottom:6px" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
+          <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
           <div style="display:flex;gap:0.5rem;margin-bottom:10px">
-            <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your network code">
+            <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your peer address">
             <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
           </div>
-          <label style="font-weight:600;margin-bottom:4px">Friend's Network Code</label>
-          <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px">Paste a code from another user to join forces</div>
+          <label style="font-weight:600;margin-bottom:4px" data-i18n="network.other_peer_address">Another User's Peer Address</label>
+          <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
           <div style="display:flex;gap:0.5rem">
-            <input type="text" id="join-code-input" class="form-control mono" placeholder="Paste code here..." style="font-size:0.7rem;flex:1" aria-label="Friend's network code">
-            <button class="btn btn-sm btn-primary" id="btn-join-network">Join</button>
+            <input type="text" id="join-code-input" class="form-control mono" placeholder="swarm://..." style="font-size:0.7rem;flex:1" aria-label="Peer address">
+            <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="network.connect">Connect</button>
           </div>
           <div class="text-muted" id="join-status" style="margin-top:4px"></div>
+          <div class="text-muted" style="font-size:0.68rem;margin-top:6px;border-top:1px solid var(--border);padding-top:6px" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
         </div>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>

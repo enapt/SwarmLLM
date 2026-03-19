@@ -172,7 +172,17 @@
   "dl.state_complete": "Complete",
   "dl.state_failed": "Failed",
 
-  "network.no_peers_yet": "No peers connected yet. Share your Network Code to combine resources — the more peers, the bigger the models you can run together.",
+  "network.no_peers_yet": "No swarm peers connected yet. Share your Peer Address so other SwarmLLM users can find you — more peers means bigger models can be run collectively.",
+  "network.your_peer_address": "Your Swarm Peer Address",
+  "network.share_desc": "Share with other SwarmLLM users so your nodes can discover each other on the network",
+  "network.other_peer_address": "Another User's Peer Address",
+  "network.connect_desc": "Paste an address from another user to connect your nodes",
+  "network.connect": "Connect",
+  "network.not_devices": "This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.",
+  "setup.connect_peer": "Connect to a swarm peer",
+  "setup.connect_peer_desc": "Paste a peer address from someone already running SwarmLLM. This connects you to the network — it's not the same as linking your own devices.",
+  "setup.connect_btn": "Connect",
+  "setup.auto_discover": "No address? No problem — devices on the same local network find each other automatically.",
 
   "map.demand_rate": "Demand Rate",
   "map.coverage_gaps": "Coverage Gaps",

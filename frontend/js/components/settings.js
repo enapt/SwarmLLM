@@ -136,16 +136,16 @@
         var maxMb = data.auto_manage_max_storage_mb || 0;
         document.getElementById('settings-storage-max').textContent = maxMb > 0 ? U.formatMB(maxMb) : '50% of disk limit';
 
-        var poolVram = data.pool_vram_mb || 0;
+        var networkVram = data.pool_vram_mb || 0;
         var localVram = data.local_vram_mb || 0;
         var peerCount = data.peer_count || 0;
-        var poolEl = document.getElementById('settings-pool-vram');
-        if (poolEl) {
-          if (poolVram > 0) {
-            poolEl.innerHTML = '<strong>' + U.formatMB(poolVram) + '</strong> total VRAM' +
-              ' (local: ' + U.formatMB(localVram) + ', ' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + ')';
+        var vramEl = document.getElementById('settings-pool-vram');
+        if (vramEl) {
+          if (networkVram > 0) {
+            vramEl.innerHTML = '<strong>' + U.formatMB(networkVram) + '</strong> swarm network VRAM' +
+              ' (your GPU: ' + U.formatMB(localVram) + ', ' + peerCount + ' swarm peer' + (peerCount !== 1 ? 's' : '') + ')';
           } else {
-            poolEl.innerHTML = '<span class="text-muted">No GPU detected</span>';
+            vramEl.innerHTML = '<span class="text-muted">No GPU detected</span>';
           }
         }
 
@@ -164,10 +164,10 @@
               if (vramNeeded > 0) {
                 var vramSpan = document.createElement('span');
                 vramSpan.textContent = ' ' + U.formatMB(vramNeeded) + ' VRAM';
-                var fits = poolVram > 0 && vramNeeded <= poolVram;
-                var tooLarge = poolVram > 0 && vramNeeded > poolVram;
+                var fits = networkVram > 0 && vramNeeded <= networkVram;
+                var tooLarge = networkVram > 0 && vramNeeded > networkVram;
                 if (fits) vramSpan.style.color = 'var(--green)';
-                else if (tooLarge) { vramSpan.style.color = 'var(--red)'; vramSpan.title = 'Exceeds pool VRAM (' + U.formatMB(poolVram) + ')'; }
+                else if (tooLarge) { vramSpan.style.color = 'var(--red)'; vramSpan.title = 'Exceeds network VRAM (' + U.formatMB(networkVram) + ')'; }
                 else vramSpan.className = 'text-muted';
                 metaEl.appendChild(vramSpan);
               }
