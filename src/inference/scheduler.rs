@@ -35,6 +35,8 @@ struct NodeCandidate {
     region_score: f32,
     /// Estimated tokens/s for a 7B Q4 model (from NodeCapability). 0 = unknown.
     est_tokens_per_sec: f32,
+    /// True if this node is in our device pool (preferred for routing — free, trusted, low latency).
+    is_pool_member: bool,
 }
 
 /// Static adjacency table for adjacent regions (0.5 score).
@@ -220,6 +222,18 @@ impl PipelineScheduler {
         manifest: &ModelManifest,
         local_node_id: &NodeId,
     ) -> Vec<NodeCandidate> {
+        // Build set of pool member NodeIds for preferred routing.
+        // Pool devices are trusted, free (no credit cost), and usually low latency.
+        let pool_member_ids: std::collections::HashSet<NodeId> = {
+            if let Ok(ps) = self.shared_state.pool_state.try_read() {
+                ps.as_ref()
+                    .map(|s| s.members.iter().map(|m| m.node_id.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                std::collections::HashSet::new()
+            }
+        };
+
         // First, collect which shard indices each node holds
         let mut node_shards: std::collections::HashMap<NodeId, Vec<u32>> =
             std::collections::HashMap::new();
@@ -338,6 +352,7 @@ impl PipelineScheduler {
                     .unwrap_or(0.0)
             };
 
+            let is_pool = pool_member_ids.contains(&node_id);
             candidates.push(NodeCandidate {
                 node_id,
                 shard_id: first_shard_id,
@@ -349,6 +364,7 @@ impl PipelineScheduler {
                 can_be_last,
                 region_score,
                 est_tokens_per_sec,
+                is_pool_member: is_pool,
             });
         }
 
@@ -368,9 +384,11 @@ impl PipelineScheduler {
         // Latency is the primary sort — we never sacrifice speed for region affinity.
         // Region breaks ties between nodes with similar latency, preventing
         // cross-continent routing when same-region alternatives exist.
+        // Sort: pool members first (free + trusted), then by latency, region, load, trust, speed
         candidates.sort_by(|a, b| {
-            a.latency_ms
-                .cmp(&b.latency_ms)
+            b.is_pool_member
+                .cmp(&a.is_pool_member) // true (1) > false (0) → pool members first
+                .then_with(|| a.latency_ms.cmp(&b.latency_ms))
                 .then_with(|| {
                     b.region_score
                         .partial_cmp(&a.region_score)
@@ -1096,6 +1114,7 @@ mod tests {
                 can_be_last: true,
                 region_score: 1.0,
                 est_tokens_per_sec: 0.0,
+                is_pool_member: false,
             },
             NodeCandidate {
                 node_id: NodeId([2u8; 32]),
@@ -1111,6 +1130,7 @@ mod tests {
                 can_be_last: false,
                 region_score: 0.7,
                 est_tokens_per_sec: 0.0,
+                is_pool_member: false,
             },
         ];
 

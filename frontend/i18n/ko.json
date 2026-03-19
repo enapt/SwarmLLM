@@ -105,7 +105,7 @@
   "chat.reasoning_summary": "Reasoning ({chars} chars)",
   "nav.devices": "My Devices",
   "pool.title": "My Devices",
-  "pool.description": "Link your personal computers, laptops, and servers together. Credits earned by any of your machines are combined into one balance on your main device.",
+  "pool.description": "Link your personal computers, laptops, and servers together. Inference across your own devices is free — no credits used. Credits earned by any of your machines are combined into one balance on your main device.",
   "pool.create_pool": "Link My Devices",
   "pool.join_pool": "Join Existing Group",
   "pool.enter_code": "Enter the code from your main device",
@@ -162,5 +162,5 @@
   "setup.auto_discover": "No address? No problem — devices on the same local network find each other automatically.",
   "pool.personal_only": "⚠ Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.",
   "pool.credit_forwarding": "Credit Forwarding",
-  "pool.forward_info": "All credits earned by linked devices are automatically forwarded to this device (your main balance). Since these are all your machines, there is no split — 100% is consolidated here."
+  "pool.forward_info": "All credits earned by linked devices are automatically forwarded here. Inference across your own devices is free — credits are only used when your requests are served by other users’ nodes on the network. Your linked devices are always preferred for routing."
 }
