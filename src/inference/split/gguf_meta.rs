@@ -225,10 +225,19 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
     if source_path_file.exists() {
         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
             let gguf_path = std::path::PathBuf::from(path_str.trim());
-            let canonical = gguf_path
+            // SEC: Canonicalize both paths to prevent traversal bypass.
+            // If either fails, skip — don't fall back to raw uncanonicalized paths.
+            let canonical = match gguf_path.canonicalize() {
+                Ok(c) => c,
+                Err(_) => {
+                    tracing::warn!(path = %gguf_path.display(), "source_path canonicalize failed — skipping");
+                    return Err(SwarmError::Internal("source_path not resolvable".into()));
+                }
+            };
+            let canonical_model_dir = model_dir
                 .canonicalize()
-                .unwrap_or_else(|_| gguf_path.clone());
-            if !canonical.starts_with(model_dir) {
+                .unwrap_or_else(|_| model_dir.to_path_buf());
+            if !canonical.starts_with(&canonical_model_dir) {
                 tracing::warn!(
                     path = %canonical.display(),
                     "source_path outside model directory — ignoring"

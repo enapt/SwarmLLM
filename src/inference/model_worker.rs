@@ -156,7 +156,8 @@ fn ensure_model_loaded(
     // Determine which shards we have on disk
     let shard_store = crate::model::shard::ShardStore::new(data_dir);
     let mut local_shard_indices: Vec<u32> = Vec::new();
-    for i in 0u32..256 {
+    let scan_limit = manifest.shard_count.max(1);
+    for i in 0u32..scan_limit {
         let path = shard_store.shard_path(model_id, i);
         if path.exists() {
             local_shard_indices.push(i);
@@ -318,7 +319,10 @@ async fn handle_forward(
                     .map_err(|_| SwarmError::Internal("Invalid activation data".into()))?;
                 i64::from_le_bytes(bytes)
             } else {
-                0i64
+                return Err(SwarmError::Internal(format!(
+                    "Decode step activation payload too short: {} bytes (need 8)",
+                    activation_bytes.len()
+                )));
             };
             candle_core::Tensor::from_vec(vec![token_id], &[1, 1], &candle_core::Device::Cpu)
                 .map_err(|e| SwarmError::Internal(format!("Tensor: {e}")))?

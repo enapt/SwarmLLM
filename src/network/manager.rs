@@ -1028,7 +1028,9 @@ impl NetworkManager {
                                 && !active_pipeline_nodes.contains(e.key())
                                 && *e.key() != node_id
                         })
-                        .max_by_key(|e| e.latency_ms.unwrap_or(u32::MAX))
+                        // Prefer evicting peers with known high latency over unmeasured peers.
+                        // Unmeasured peers (None) get 0 so they survive until measured.
+                        .max_by_key(|e| e.latency_ms.unwrap_or(0))
                         .map(|e| e.key().clone());
                     if let Some(evict_id) = evict_candidate {
                         self.shared_state.peer_registry.remove(&evict_id);
@@ -1100,12 +1102,30 @@ impl NetworkManager {
                         // Verify Ed25519 signature on DHT records before trusting
                         match crate::network::discovery::verify_dht_value(&peer_record.record.value)
                         {
-                            Ok((pubkey, _payload)) => {
+                            Ok((pubkey, payload)) => {
                                 tracing::debug!(
                                     key = ?peer_record.record.key,
                                     signer = %hex::encode(&pubkey[..8]),
+                                    payload_len = payload.len(),
                                     "DHT record verified"
                                 );
+                                // Process verified payload: deserialize NodeCapability
+                                // and update peer registry with the advertised capabilities.
+                                let key_bytes = peer_record.record.key.as_ref();
+                                let key_str = String::from_utf8_lossy(key_bytes);
+                                if key_str.starts_with("/swarm/node/") {
+                                    if let Ok(cap) = serde_json::from_slice::<
+                                        crate::types::NodeCapability,
+                                    >(payload)
+                                    {
+                                        let node_id = crate::types::NodeId(pubkey);
+                                        if let Some(mut entry) =
+                                            self.shared_state.peer_registry.get_mut(&node_id)
+                                        {
+                                            entry.capability = Some(cap);
+                                        }
+                                    }
+                                }
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -1609,6 +1629,24 @@ impl NetworkManager {
                 }
             }
             SwarmRequest::TensorPayload(payload) => {
+                // SEC: Only accept tensor payloads from authenticated peers in peer_registry.
+                // Without this, any node completing a Noise handshake can inject activations
+                // into in-flight inference pipelines, corrupting output silently.
+                let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                let is_authenticated = match &peer_node_id {
+                    Some(nid) => self.shared_state.peer_registry.contains_key(nid),
+                    None => false,
+                };
+                if !is_authenticated {
+                    tracing::warn!(%peer, "TensorPayload from unauthenticated peer — rejecting");
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_response(channel, SwarmResponse::Ack);
+                    return;
+                }
+
                 tracing::info!(
                     %peer,
                     payload_len = payload.len(),

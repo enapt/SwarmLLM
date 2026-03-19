@@ -364,7 +364,8 @@ pub async fn hf_download(
                     let now = std::time::Instant::now();
                     let dt = now.duration_since(last_time).as_secs_f64();
                     if dt > 0.5 {
-                        let speed = ((prog.downloaded_bytes - last_bytes) as f64 / dt) as u64;
+                        let speed =
+                            (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
                         entry.speed_bytes_per_sec = speed;
                         last_bytes = prog.downloaded_bytes;
                         last_time = now;
@@ -1047,7 +1048,8 @@ pub async fn hf_download_shards(
                     let now = std::time::Instant::now();
                     let dt = now.duration_since(last_time).as_secs_f64();
                     if dt > 0.5 {
-                        let speed = ((prog.downloaded_bytes - last_bytes) as f64 / dt) as u64;
+                        let speed =
+                            (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
                         entry.speed_bytes_per_sec = speed;
                         last_bytes = prog.downloaded_bytes;
                         last_time = now;

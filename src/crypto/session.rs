@@ -249,12 +249,14 @@ impl SessionManager {
         let shared_secret = ephemeral_secret.diffie_hellman(&peer_ephemeral_pub);
         // ephemeral_secret is consumed by diffie_hellman — dropped here
 
-        let our_ephemeral_pub = PublicKey::from(
-            self.pending_ephemeral_pub
-                .remove(peer)
-                .map(|(_, b)| b)
-                .unwrap_or(*self.local_public.as_bytes()),
-        );
+        let our_ephemeral_pub_bytes = match self.pending_ephemeral_pub.remove(peer) {
+            Some((_, b)) => b,
+            None => {
+                tracing::warn!(peer = %peer, "pending_ephemeral_pub missing — dropping ephemeral session");
+                return false;
+            }
+        };
+        let our_ephemeral_pub = PublicKey::from(our_ephemeral_pub_bytes);
         let cipher_key = derive_cipher_key(
             shared_secret.as_bytes(),
             &our_ephemeral_pub,

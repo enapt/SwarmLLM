@@ -8,9 +8,11 @@ use crate::types::PriorityTier;
 /// - Silver: positive balance
 /// - Bronze: zero or negative balance
 pub fn calculate_tier(balance: i64, network_percentile: f32) -> PriorityTier {
-    let tier = if network_percentile >= 0.90 {
+    // Balance must be positive for Gold/Platinum — a negative-balance node at the
+    // 90th percentile (when most peers have worse balances) should not get Platinum.
+    let tier = if balance > 0 && network_percentile >= 0.90 {
         PriorityTier::Platinum
-    } else if network_percentile >= 0.70 {
+    } else if balance > 0 && network_percentile >= 0.70 {
         PriorityTier::Gold
     } else if balance > 0 {
         PriorityTier::Silver

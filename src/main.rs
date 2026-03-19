@@ -706,7 +706,13 @@ async fn query_peers(
                     println!("{body}");
                 }
             } else {
-                let peers: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+                let peers: Vec<serde_json::Value> = match serde_json::from_str(&body) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        eprintln!("Unexpected response from daemon:\n{body}");
+                        std::process::exit(1);
+                    }
+                };
                 if peers.is_empty() {
                     println!("No connected peers.");
                 } else {

@@ -751,11 +751,11 @@ impl PipelineExecutor {
                                     accumulated_text.truncate(pos);
                                     if let Some(ref mut st) = streamed_text {
                                         // Remove the stop string from streamed text too
-                                        if let Some(spos) = st.rfind(stop.as_str()) {
+                                        // Use find (not rfind) to match the first occurrence,
+                                        // consistent with accumulated_text truncation above.
+                                        if let Some(spos) = st.find(stop.as_str()) {
                                             st.truncate(spos);
                                         }
-                                        // If rfind misses, the stop string hasn't appeared
-                                        // in streamed text yet — no truncation needed.
                                     }
                                 }
                                 hit_stop_string = true;

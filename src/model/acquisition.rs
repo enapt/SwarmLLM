@@ -572,8 +572,13 @@ impl AcquisitionManager {
                     model = %model_id,
                     shard = shard_index,
                     error = %e,
-                    "Failed to finalize shard file"
+                    "Failed to finalize shard file — skipping verification"
                 );
+                // Mark as failed and skip verification — the .tmp file was not renamed
+                if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
+                    sp.state = ShardState::Failed;
+                }
+                return;
             }
 
             // SECURITY: Verify the completed shard against the manifest hash

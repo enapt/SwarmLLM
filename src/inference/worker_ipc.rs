@@ -176,10 +176,10 @@ async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
     let mut buf4 = [0u8; 4];
     r.read_exact(&mut buf4).await?;
     let json_len = u32::from_le_bytes(buf4);
-    if json_len > MAX_HEADER {
+    if json_len == 0 || json_len > MAX_HEADER {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("IPC header {json_len} > max {MAX_HEADER}"),
+            format!("IPC header len {json_len} invalid (must be 1..{MAX_HEADER})"),
         ));
     }
     let mut json_buf = vec![0u8; json_len as usize];

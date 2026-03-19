@@ -418,7 +418,18 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let (c_major, c_minor, c_patch) = parse(current);
     let (l_major, l_minor, l_patch) = parse(latest);
 
-    (l_major, l_minor, l_patch) > (c_major, c_minor, c_patch)
+    if (l_major, l_minor, l_patch) > (c_major, c_minor, c_patch) {
+        return true;
+    }
+    // Same base version: promote pre-release to stable (e.g., 0.2.0-rc1 → 0.2.0)
+    if (l_major, l_minor, l_patch) == (c_major, c_minor, c_patch) {
+        let current_is_prerelease = current.contains('-');
+        let latest_is_stable = !latest.contains('-');
+        if current_is_prerelease && latest_is_stable {
+            return true;
+        }
+    }
+    false
 }
 
 /// Return (os, arch) strings matching GitHub release asset naming.

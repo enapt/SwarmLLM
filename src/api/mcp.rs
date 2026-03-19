@@ -770,7 +770,13 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                     let body = resp.text().await.unwrap_or_default();
                     let scrubbed = crate::crypto::scrub_api_keys(&body);
                     let truncated = if scrubbed.len() > 512 {
-                        format!("{}…[truncated]", &scrubbed[..512])
+                        {
+                            let mut idx = 512;
+                            while !scrubbed.is_char_boundary(idx) {
+                                idx -= 1;
+                            }
+                            format!("{}…[truncated]", &scrubbed[..idx])
+                        }
                     } else {
                         scrubbed
                     };
@@ -958,7 +964,13 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                     let body = resp.text().await.unwrap_or_default();
                     let scrubbed = crate::crypto::scrub_api_keys(&body);
                     let truncated = if scrubbed.len() > 512 {
-                        format!("{}…[truncated]", &scrubbed[..512])
+                        {
+                            let mut idx = 512;
+                            while !scrubbed.is_char_boundary(idx) {
+                                idx -= 1;
+                            }
+                            format!("{}…[truncated]", &scrubbed[..idx])
+                        }
                     } else {
                         scrubbed
                     };

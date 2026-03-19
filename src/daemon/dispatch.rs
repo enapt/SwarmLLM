@@ -1363,7 +1363,8 @@ async fn handle_layer_forward(
     let is_first = layer_start == 0 && has_shard_0;
     let is_last = layer_end >= total_layers && has_last_shard;
 
-    // Ensure the split model metadata entry exists (lightweight — no GPU loading)
+    // Ensure the split model metadata entry exists (lightweight — no GPU loading).
+    // Re-check after computation to avoid overwriting a concurrent insert.
     let split_key = (model_id.clone(), layer_start, layer_end);
     if !shared_state.split_models.contains_key(&split_key) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
@@ -1404,7 +1405,12 @@ async fn handle_layer_forward(
                 );
             }
         }
-        shared_state.split_models.insert(split_key.clone(), entry);
+        // Re-check: a concurrent task may have inserted while we computed above.
+        // or_insert avoids overwriting the concurrent entry (and its VRAM eviction).
+        shared_state
+            .split_models
+            .entry(split_key.clone())
+            .or_insert(entry);
     }
 
     // Touch the metadata entry

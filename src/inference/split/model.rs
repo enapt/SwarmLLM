@@ -1656,7 +1656,7 @@ impl SplitModel {
             chat_template,
             bos_token,
             eos_token,
-            max_seq_len: context_length.min(2048),
+            max_seq_len: context_length,
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
             final_logit_softcap,
         })
@@ -2940,7 +2940,7 @@ impl SplitModel {
             chat_template,
             bos_token,
             eos_token,
-            max_seq_len: context_length.min(2048),
+            max_seq_len: context_length,
             kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
             final_logit_softcap,
         })
@@ -3791,6 +3791,18 @@ impl SplitModel {
                 )?);
             }
             return Ok(results);
+        }
+
+        // Context window check: reject any item whose index_pos exceeds max_seq_len
+        // (same guard as forward_inner_impl, prevents RoPE table out-of-bounds).
+        for item in items {
+            if item.index_pos + 1 > self.max_seq_len {
+                return Err(SwarmError::Validation(format!(
+                    "Batch item index_pos ({}) exceeds model context window ({})",
+                    item.index_pos + 1,
+                    self.max_seq_len
+                )));
+            }
         }
 
         let batch_size = items.len();

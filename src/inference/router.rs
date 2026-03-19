@@ -771,7 +771,7 @@ impl InferenceRouter {
                 }
             }
 
-            finalize_request(&shared_state, &request, &output).await;
+            finalize_request(&shared_state, &request, &output, escrow_id).await;
 
             // Release or refund escrow
             if let Some(eid) = escrow_id {
@@ -830,10 +830,13 @@ impl InferenceRouter {
 }
 
 /// Finalize a completed request: update stats and apply credit charges.
+/// When `escrow_id` is `Some`, the escrow already deducted credits — skip the
+/// direct charge to avoid double-billing the local API consumer.
 async fn finalize_request(
     shared_state: &SharedState,
     request: &InferenceRequest,
     output: &Result<InferenceOutput, SwarmError>,
+    escrow_id: Option<uuid::Uuid>,
 ) {
     if let Err(ref e) = output {
         tracing::error!(
@@ -860,7 +863,8 @@ async fn finalize_request(
         // - Per-layer earn credits are handled in process_local_segment
         //   and handle_layer_forward (each node earns for layers it processed)
         // - Here we debit the local API consumer for requesting inference
-        if is_local_api_request {
+        // - Skip if escrow was used — escrow already deducted the estimated cost
+        if is_local_api_request && escrow_id.is_none() {
             let total_tokens = result.prompt_tokens + result.completion_tokens;
             let spent = crate::credit::ledger::RATE_INFERENCE_CONSUME * total_tokens as i64;
             if let Err(e) = crate::credit::ledger::apply_credit_direct(
@@ -1099,7 +1103,7 @@ async fn execute_local_batch(
             Err(SwarmError::NoModelLoaded)
         };
 
-        finalize_request(&shared_state, &request, &output).await;
+        finalize_request(&shared_state, &request, &output, None).await;
         shared_state.active_pipelines.remove(&request.id);
         cleanup.complete_one();
         if result_tx.send(output).is_err() {
@@ -1147,8 +1151,9 @@ async fn execute_distributed_batch(
             )
             .await;
 
-            finalize_request(&shared_state, &request, &output).await;
+            finalize_request(&shared_state, &request, &output, None).await;
             shared_state.active_pipelines.remove(&request.id);
+            // Return true to signal the join loop that we already decremented
             active_count.fetch_sub(1, Ordering::Relaxed);
             if result_tx.send(output).is_err() {
                 tracing::warn!(
@@ -1156,14 +1161,18 @@ async fn execute_distributed_batch(
                     "DIAG: distributed batch result_tx receiver dropped"
                 );
             }
+            true // task completed normally, already decremented
         }));
     }
 
     // Wait for all requests in the batch to complete.
-    // If a task panicked before decrementing, do it here.
+    // Only decrement if the task panicked BEFORE it could decrement itself.
     for handle in handles {
-        if handle.await.is_err() {
-            active_count.fetch_sub(1, Ordering::Relaxed);
+        match handle.await {
+            Ok(_) => {} // task already decremented
+            Err(_) => {
+                active_count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
     }
 }

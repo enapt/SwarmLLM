@@ -113,8 +113,8 @@ impl ShardReader {
     }
 
     /// Find which shard (if any) contains the given virtual file position,
-    /// returning (shard_vec_index, offset_within_shard_file).
-    pub(crate) fn find_shard(&self, pos: u64) -> Option<(usize, u64)> {
+    /// returning (shard_vec_index, offset_within_shard_file, remaining_bytes_in_tensor).
+    pub(crate) fn find_shard(&self, pos: u64) -> Option<(usize, u64, u64)> {
         // Binary search: find the last entry where gguf_offset <= pos
         let idx = match self
             .tensor_map
@@ -128,7 +128,12 @@ impl ShardReader {
         let entry = &self.tensor_map[idx];
         if pos < entry.gguf_offset + entry.size {
             let delta = pos - entry.gguf_offset;
-            Some((entry.shard_idx, entry.shard_local_offset + delta))
+            let remaining_in_tensor = entry.size - delta;
+            Some((
+                entry.shard_idx,
+                entry.shard_local_offset + delta,
+                remaining_in_tensor,
+            ))
         } else {
             None
         }
@@ -154,12 +159,15 @@ impl IoRead for ShardReader {
         }
 
         // Reading from shard region via tensor map
-        if let Some((shard_idx, offset_in_shard)) = self.find_shard(self.position) {
+        if let Some((shard_idx, offset_in_shard, remaining_in_tensor)) =
+            self.find_shard(self.position)
+        {
             if tracing::enabled!(tracing::Level::TRACE) {
                 tracing::trace!(
                     pos = self.position,
                     shard_idx,
                     offset_in_shard,
+                    remaining_in_tensor,
                     buf_len = buf.len(),
                     "ShardReader::read"
                 );
@@ -179,7 +187,9 @@ impl IoRead for ShardReader {
             let (_, ref mut file) = self.current_shard.as_mut().expect("shard opened above");
             file.seek(SeekFrom::Start(offset_in_shard))?;
             let available_in_shard = shard_file_len.saturating_sub(offset_in_shard) as usize;
-            let to_read = buf.len().min(available_in_shard);
+            // Cap read to tensor boundary — never bleed into adjacent tensor data
+            let available = available_in_shard.min(remaining_in_tensor as usize);
+            let to_read = buf.len().min(available);
             if to_read == 0 {
                 tracing::error!(
                     pos = self.position,

@@ -322,8 +322,21 @@ impl Daemon {
                         let source_path_file = model_dir.join("source_path");
                         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
                             let path = std::path::PathBuf::from(path_str.trim());
-                            // SEC: Containment check — source_path must be within data directory
-                            let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                            // SEC: Containment check — source_path must be within data directory.
+                            // If canonicalize fails (path doesn't exist), skip entirely — never
+                            // fall back to the raw path which could contain ".." traversal.
+                            let canonical = match path.canonicalize() {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        model = %model_id,
+                                        path = %path.display(),
+                                        error = %e,
+                                        "source_path canonicalize failed — skipping"
+                                    );
+                                    continue;
+                                }
+                            };
                             let data_models = shard_store_tmp.models_dir();
                             if !canonical.starts_with(&data_models) {
                                 tracing::warn!(

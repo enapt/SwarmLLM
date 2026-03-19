@@ -8,6 +8,24 @@ const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
 /// Gap tolerance for coalescing byte-range requests (4MB).
 const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
 
+/// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id
+/// from gossip (e.g., "../../internal-service"). Only allows `owner/repo-name`.
+fn validate_hf_repo_id(repo_id: &str) -> Result<(), String> {
+    let re_valid = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    };
+    let parts: Vec<&str> = repo_id.split('/').collect();
+    if parts.len() != 2 || !re_valid(parts[0]) || !re_valid(parts[1]) {
+        return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
+    }
+    if parts[0] == ".." || parts[1] == ".." || parts[0] == "." || parts[1] == "." {
+        return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
+    }
+    Ok(())
+}
+
 /// Read HuggingFace API token from `HF_TOKEN` env var (or `HUGGING_FACE_HUB_TOKEN` fallback).
 fn hf_token() -> Option<String> {
     std::env::var("HF_TOKEN")
@@ -132,6 +150,7 @@ async fn fetch_gguf_files(
     client: &reqwest::Client,
     repo_id: &str,
 ) -> Result<Vec<HfFileInfo>, String> {
+    validate_hf_repo_id(repo_id)?;
     let url = format!("https://huggingface.co/api/models/{repo_id}?blobs=true");
 
     let resp = hf_headers(client.get(&url))
@@ -166,6 +185,11 @@ async fn fetch_gguf_files(
 
 /// Get the direct download URL for a file in a HuggingFace repo.
 pub fn download_url(repo_id: &str, filename: &str) -> String {
+    // SEC: validate repo_id to prevent SSRF. If invalid, return a safe dummy URL
+    // that will fail on download. Callers should validate before reaching this point.
+    if validate_hf_repo_id(repo_id).is_err() {
+        return format!("https://huggingface.co/INVALID_REPO/resolve/main/{filename}");
+    }
     format!(
         "https://huggingface.co/{}/resolve/main/{}",
         repo_id, filename
@@ -434,13 +458,16 @@ fn build_tensor_meta_from_content(
     for (name, info) in &ct.tensor_infos {
         // SEC: Use checked arithmetic to prevent integer overflow from crafted GGUF headers.
         // A malicious GGUF with huge elem_count can wrap around in release mode.
+        // Cap elem_count to 2^40 (~1 trillion) — no legitimate tensor exceeds this.
         let block_size = info.ggml_dtype.block_size();
-        let size = if block_size == 0 {
+        let elem_count = info.shape.elem_count();
+        const MAX_ELEM_COUNT: usize = 1 << 40;
+        let size = if block_size == 0 || elem_count > MAX_ELEM_COUNT {
             0u64
         } else {
             info.ggml_dtype
                 .type_size()
-                .checked_mul(info.shape.elem_count())
+                .checked_mul(elem_count)
                 .map(|v| (v / block_size) as u64)
                 .unwrap_or(0)
         };

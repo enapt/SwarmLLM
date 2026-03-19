@@ -90,15 +90,31 @@ impl ModelProcessPool {
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| SwarmError::Internal(format!("socket bind: {e}")))?;
 
+        // SEC: Restrict socket permissions so only the current user can connect.
+        // Without this, any local process can impersonate the worker and intercept
+        // inference data (prompts, activations).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+        }
+
         // Spawn the worker subprocess (same binary, model-worker subcommand)
         let exe = std::env::current_exe()
             .map_err(|e| SwarmError::Internal(format!("current_exe: {e}")))?;
+        let socket_str = socket_path
+            .to_str()
+            .ok_or_else(|| SwarmError::Internal("socket path is not valid UTF-8".into()))?;
+        let data_dir_str = self
+            .data_dir
+            .to_str()
+            .ok_or_else(|| SwarmError::Internal("data dir path is not valid UTF-8".into()))?;
         let mut args = vec![
             "model-worker".to_string(),
             "--socket".to_string(),
-            socket_path.to_str().unwrap_or("").to_string(),
+            socket_str.to_string(),
             "--data-dir".to_string(),
-            self.data_dir.to_str().unwrap_or("").to_string(),
+            data_dir_str.to_string(),
         ];
 
         // If a shard window is set for this model, pass it to the worker

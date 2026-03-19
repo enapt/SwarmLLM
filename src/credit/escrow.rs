@@ -105,30 +105,35 @@ impl EscrowManager {
             status: EscrowStatus::Pending,
         };
 
-        // Persist escrow to DB BEFORE deducting balance — crash-safe ordering
-        if let Err(e) = self.db.put_json(TREE_ESCROW, &entry.id.to_string(), &entry) {
-            tracing::warn!(error = %e, "Failed to persist escrow entry");
-            return Err(SwarmError::CreditError(format!(
-                "Failed to persist escrow: {e}"
-            )));
-        }
-
-        // Deduct from requester balance only after escrow is persisted.
-        // Persist the updated balance immediately to prevent crash-restart credit duplication.
+        // SEC: Deduct balance FIRST, then persist escrow. If we crash between the
+        // balance write and the escrow write, the balance is deducted but no escrow
+        // exists — the user loses credits. This is better than the reverse: if we
+        // crash after persisting escrow but before deducting balance, cleanup_expired
+        // would refund into a balance that was never deducted, creating free credits.
         {
             let mut bal = balance.write().await;
             bal.balance = bal.balance.saturating_sub(amount);
             bal.lifetime_spent = bal.lifetime_spent.saturating_add(amount as u64);
             bal.last_updated = chrono::Utc::now();
-            // SEC: Persist balance to DB while holding the write lock — prevents
-            // crash window where escrow is persisted but balance deduction is not.
             if let Err(e) = self.db.put_json(
                 crate::credit::ledger::TREE_CREDITS,
                 crate::credit::ledger::KEY_BALANCE,
                 &*bal,
             ) {
-                tracing::warn!(error = %e, "Failed to persist balance after escrow deduction");
+                tracing::warn!(error = %e, "Failed to persist balance for escrow deduction");
+                return Err(SwarmError::CreditError(format!(
+                    "Failed to persist balance: {e}"
+                )));
             }
+        }
+
+        // Now persist the escrow entry. If we crash here, the balance was already
+        // deducted but the escrow won't be refunded — user loses credits (safe).
+        if let Err(e) = self.db.put_json(TREE_ESCROW, &entry.id.to_string(), &entry) {
+            tracing::warn!(error = %e, "Failed to persist escrow entry");
+            return Err(SwarmError::CreditError(format!(
+                "Failed to persist escrow: {e}"
+            )));
         }
 
         let escrow_id = entry.id;
