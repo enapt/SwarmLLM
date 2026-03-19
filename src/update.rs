@@ -218,18 +218,26 @@ impl UpdateChecker {
             }
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| SwarmError::Network(format!("Failed to read response body: {e}")))?;
-
-        if bytes.len() as u64 > MAX_UPDATE_SIZE {
-            return Err(SwarmError::Internal(format!(
-                "Update binary too large: {} bytes (max {} bytes)",
-                bytes.len(),
-                MAX_UPDATE_SIZE
-            )));
+        // Stream the response body with a size check during download to prevent OOM
+        // on a malicious server that sends a huge body without Content-Length
+        let mut body_bytes = Vec::with_capacity(64 * 1024);
+        {
+            use futures::StreamExt;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| {
+                    SwarmError::Network(format!("Failed to read response body: {e}"))
+                })?;
+                body_bytes.extend_from_slice(&chunk);
+                if body_bytes.len() as u64 > MAX_UPDATE_SIZE {
+                    return Err(SwarmError::Internal(format!(
+                        "Update binary too large (>{} bytes) — aborting download",
+                        MAX_UPDATE_SIZE
+                    )));
+                }
+            }
         }
+        let bytes = bytes::Bytes::from(body_bytes);
 
         // Verify SHA256 checksum — MANDATORY for security.
         // Reject updates without a .sha256 sidecar to prevent accepting unverified binaries.

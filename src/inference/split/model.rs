@@ -3984,9 +3984,17 @@ impl SplitModel {
                 let x = x
                     .i((.., 0, ..))
                     .map_err(|e| SwarmError::Internal(format!("last_token: {e}")))?;
-                let logits = output
+                let mut logits = output
                     .forward(&x)
                     .map_err(|e| SwarmError::Internal(format!("output_proj: {e}")))?;
+                // Apply final logit softcap for Gemma 2 (must match forward_inner_impl)
+                if let Some(cap) = self.final_logit_softcap {
+                    logits = logits
+                        .affine(1.0 / cap as f64, 0.0)
+                        .and_then(|t| t.tanh())
+                        .and_then(|t| t.affine(cap as f64, 0.0))
+                        .map_err(|e| SwarmError::Internal(format!("final_logit_softcap: {e}")))?;
+                }
                 results.push(logits);
             } else {
                 results.push(per_req);

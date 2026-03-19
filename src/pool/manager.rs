@@ -894,7 +894,21 @@ impl PoolManager {
             return;
         }
 
-        // Consume the invitation unconditionally to prevent replay, even if pool_state is None
+        // Check pool capacity BEFORE consuming the invitation to avoid locking out invitees
+        {
+            let state = self.shared_state.pool_state.read().await;
+            if let Some(ref ps) = *state {
+                let max_size = self.shared_state.config.pool.max_pool_size;
+                if ps.members.len() >= max_size as usize {
+                    tracing::warn!(
+                        "Pool full, rejecting acceptance — invitation preserved for retry"
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Consume the invitation to prevent replay (pool capacity already verified above)
         self.pending_invitations.remove(&acceptance.invitation_id);
         let _ = self
             .shared_state
@@ -903,13 +917,6 @@ impl PoolManager {
 
         let mut state = self.shared_state.pool_state.write().await;
         if let Some(ref mut ps) = *state {
-            // Check max pool size
-            let max_size = self.shared_state.config.pool.max_pool_size;
-            if ps.members.len() >= max_size as usize {
-                tracing::warn!("Pool full, rejecting acceptance");
-                return;
-            }
-
             // Check not already a member
             if ps
                 .members
@@ -955,7 +962,8 @@ impl PoolManager {
         if removal.removed_node_id == *my_id {
             // SEC: Freshness check — reject removals older than 5 minutes
             let age = chrono::Utc::now().signed_duration_since(removal.removed_at);
-            if age.num_seconds().abs() > 300 {
+            let age_secs = age.num_seconds();
+            if !(-30..=300).contains(&age_secs) {
                 tracing::warn!(
                     age_secs = age.num_seconds(),
                     "Pool removal rejected: timestamp too old or too far in future"
@@ -1293,17 +1301,12 @@ impl PoolManager {
             return;
         }
 
-        // Verify the requester's signature
-        let mut payload_hasher = blake3::Hasher::new();
-        payload_hasher.update(b"pool_join_request_v1");
-        payload_hasher.update(&code_hash);
-        payload_hasher.update(&requester.0);
-        let _expected_payload = payload_hasher.finalize();
-
-        // We can't verify the signature here directly without the peer's public key
-        // in VerifyingKey form. The transport layer already authenticated the sender,
-        // so the requester NodeId is transport-verified. We trust the dispatch layer's
-        // sender authentication.
+        // SEC: The requester NodeId is transport-authenticated by the dispatch layer
+        // (set from the authenticated sender of the P2P message). The dispatch code at
+        // daemon/dispatch.rs extracts `requester` from the transport-verified sender identity,
+        // so a peer cannot spoof the requester field without controlling the transport key.
+        // Signature verification over the payload is done at the network message level
+        // by gossip_seal/transport auth — no additional check needed here.
 
         // Mark code as consumed (one-time use)
         code_entry.consumed = true;

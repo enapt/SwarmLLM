@@ -159,8 +159,23 @@ pub struct AnthropicUsage {
 // ---- Helpers ----
 
 /// Check if a request is a connectivity probe (Claude Code sends these to test the endpoint).
+/// Narrowed to also check message content to avoid false-positiving on legitimate max_tokens=1 requests.
 fn is_connectivity_probe(req: &MessagesRequest) -> bool {
-    req.max_tokens == 1 && req.messages.len() == 1 && !req.stream
+    if req.max_tokens != 1 || req.messages.len() != 1 || req.stream {
+        return false;
+    }
+    // Check if the single message has very short content (probes are typically <20 chars)
+    let content_len = match &req.messages[0].content {
+        AnthropicContent::Text(s) => s.len(),
+        AnthropicContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.len(),
+                _ => 100, // non-text content = not a probe
+            })
+            .sum(),
+    };
+    content_len <= 20
 }
 
 /// Convert Anthropic messages to internal ChatMessage format.

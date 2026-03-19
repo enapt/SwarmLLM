@@ -288,6 +288,13 @@ pub fn decode_network_code(code: &str) -> Result<String, SwarmError> {
     let trimmed = code.trim();
 
     if let Some(encoded) = trimmed.strip_prefix(INVITE_PREFIX) {
+        // SEC: Reject oversized invite codes before base64 decoding to prevent
+        // large heap allocation from malicious input (valid codes are ~200 chars max)
+        if encoded.len() > 512 {
+            return Err(SwarmError::Network(
+                "Invite code too long (max 512 chars)".into(),
+            ));
+        }
         use base64::Engine;
         let packed = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded.as_bytes())

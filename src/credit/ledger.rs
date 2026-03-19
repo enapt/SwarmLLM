@@ -170,6 +170,9 @@ impl CreditLedger {
                     // Use balance-only adjustment to avoid inflating lifetime_spent
                     self.adjust_balance(-amount).await?;
                     tracing::info!(amount, "Forwarded earned credits to pool owner");
+                    // Single persist after both earn and forwarding deduction
+                    self.persist_balance().await?;
+                    return Ok(0); // Member retained nothing — return 0 to avoid inflated accounting
                 }
                 Ok(false) => {} // Not in a pool or is the owner — keep credits
                 Err(e) => {
@@ -178,7 +181,7 @@ impl CreditLedger {
             }
         }
 
-        // Single persist after both earn and optional forwarding deduction
+        // Single persist after earn (no forwarding)
         self.persist_balance().await?;
 
         Ok(amount)

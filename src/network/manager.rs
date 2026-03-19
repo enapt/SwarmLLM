@@ -1389,7 +1389,7 @@ impl NetworkManager {
                                 .pending_redial
                                 .iter()
                                 .any(|(pid, _, _)| *pid == peer_id);
-                            if !already_queued {
+                            if !already_queued && self.pending_redial.len() < 50 {
                                 use std::hash::{Hash, Hasher};
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                                 peer_id.hash(&mut hasher);
@@ -1658,8 +1658,13 @@ impl NetworkManager {
                     // SEC: Cap to prevent memory exhaustion from request flooding.
                     const MAX_PENDING_TENSOR_CHANNELS: usize = 256;
                     if self.pending_tensor_channels.len() >= MAX_PENDING_TENSOR_CHANNELS {
-                        tracing::warn!(%peer, "pending_tensor_channels full — dropping");
-                        // Drop channel (sends implicit error to requester)
+                        tracing::warn!(%peer, "pending_tensor_channels full — rejecting with ACK");
+                        // Send ACK to avoid leaving requester hung, then skip storing
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_response(channel, SwarmResponse::Ack);
                     } else {
                         self.pending_tensor_channels
                             .insert(request_id, (std::time::Instant::now(), channel));

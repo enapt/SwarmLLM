@@ -251,9 +251,9 @@ pub(crate) async fn dispatch_network_messages(
                                 let permit = match forward_semaphore.clone().try_acquire_owned() {
                                     Ok(p) => p,
                                     Err(_) => {
-                                        peer_forward_counts
-                                            .get(&peer_sender)
-                                            .map(|c| c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
+                                        // Decrement unconditionally — use the entry ref we already hold
+                                        // to avoid racing with concurrent DashMap removal
+                                        peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                         tracing::warn!("LayerForward rejected — forward semaphore full");
                                         continue;
                                     }

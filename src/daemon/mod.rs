@@ -1219,39 +1219,34 @@ impl Daemon {
         let mut restart_counts: std::collections::HashMap<&str, u32> =
             std::collections::HashMap::new();
 
+        // Register SIGTERM handler ONCE before the loop to avoid re-registering on each iteration.
+        // On non-Unix platforms, this is always None and the select branch awaits forever (pending).
+        let mut sigterm_stream: Option<tokio::signal::unix::Signal> = {
+            #[cfg(unix)]
+            {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        };
+
         loop {
             tokio::select! {
-                // Handle OS shutdown signals
+                // Handle Ctrl+C
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Shutdown signal received (Ctrl+C)");
+                    break;
+                }
+                // Handle SIGTERM (Unix) — on non-Unix, sigterm_stream is None so this pends forever
                 _ = async {
-                    let ctrl_c = tokio::signal::ctrl_c();
-                    #[cfg(unix)]
-                    {
-                        match tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::terminate(),
-                        ) {
-                            Ok(mut sigterm) => {
-                                tokio::select! {
-                                    _ = ctrl_c => {
-                                        tracing::info!("Shutdown signal received (Ctrl+C)");
-                                    }
-                                    _ = sigterm.recv() => {
-                                        tracing::info!("Shutdown signal received (SIGTERM)");
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Failed to register SIGTERM handler — using Ctrl+C only");
-                                ctrl_c.await.ok();
-                                tracing::info!("Shutdown signal received (Ctrl+C)");
-                            }
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        ctrl_c.await.ok();
-                        tracing::info!("Shutdown signal received (Ctrl+C)");
+                    match sigterm_stream.as_mut() {
+                        Some(s) => { s.recv().await; }
+                        None => { std::future::pending::<()>().await; }
                     }
                 } => {
+                    tracing::info!("Shutdown signal received (SIGTERM)");
                     break;
                 }
                 // Handle API-triggered shutdown (watch channel)

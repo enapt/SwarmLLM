@@ -99,6 +99,9 @@ pub fn softmax(logits: &[f32]) -> Vec<f32> {
 ///
 /// Returns the index of the sampled token.
 fn sample_from_probs(probs: &[f32]) -> u32 {
+    if probs.is_empty() {
+        return 0;
+    }
     let r: f32 = rand::random::<f32>();
     let mut cumulative = 0.0;
     for (i, &p) in probs.iter().enumerate() {

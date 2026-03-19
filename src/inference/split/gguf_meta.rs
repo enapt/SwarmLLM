@@ -234,15 +234,9 @@ pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
                     return Err(SwarmError::Internal("source_path not resolvable".into()));
                 }
             };
-            let canonical_model_dir = model_dir
-                .canonicalize()
-                .unwrap_or_else(|_| model_dir.to_path_buf());
-            if !canonical.starts_with(&canonical_model_dir) {
-                tracing::warn!(
-                    path = %canonical.display(),
-                    "source_path outside model directory — ignoring"
-                );
-            } else if canonical.exists() {
+            // Allow source_path to be anywhere (it's typically the original GGUF
+            // outside the model dir). Just verify the path exists and is a file.
+            if canonical.exists() && canonical.is_file() {
                 tracing::info!(
                     gguf = %canonical.display(),
                     "Extracting GGUF header from source path"

@@ -624,8 +624,8 @@ pub async fn chat_completions(
     }
 
     // SEC: Cap individual message content size and total prompt size
-    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024; // 2 MB
-    const MAX_TOTAL_PROMPT_BYTES: usize = 64 * 1024; // 64 KB total (~16K tokens max)
+    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024; // 2 MB per message
+    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024; // 4 MB total (Claude Code tool results can be large)
     let mut total_content_bytes: usize = 0;
     for msg in &req.messages {
         let content_len = match &msg.content {
