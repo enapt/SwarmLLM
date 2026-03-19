@@ -106,6 +106,17 @@
           <div id="setup-invite-status" style="font-size:0.78rem;margin-top:4px"></div>
           <p class="text-muted" style="font-size:0.75rem;margin-top:6px" data-i18n="setup.auto_discover">No address? No problem — devices on the same local network find each other automatically.</p>
         </div>
+        <!-- Device group section (link to an existing device group) -->
+        <div style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:12px">
+          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.link_device">Link to your other devices <span class="text-muted" style="font-weight:normal">(optional)</span></label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.link_device_desc">If you already have SwarmLLM running on another machine, enter the invite code to link this device. Credits earned here will be combined with your main device.</p>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="setup-pool-code" placeholder="A3F7K2M9" maxlength="8" style="flex:1;font-size:1rem;padding:8px 10px;text-align:center;letter-spacing:3px;text-transform:uppercase;font-family:var(--font-mono);background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+            <button class="btn btn-sm" id="setup-pool-join" data-i18n="pool.join">Link</button>
+          </div>
+          <div id="setup-pool-status" style="font-size:0.78rem;margin-top:4px"></div>
+        </div>
+
         <!-- Cloud provider section -->
         <div style="border-top:1px solid var(--border);padding-top:12px">
           <label style="font-size:0.85rem;font-weight:600">Cloud AI Service <span class="text-muted" style="font-weight:normal">(optional — chat instantly)</span></label>
@@ -575,6 +586,23 @@
           <div class="cover-spinner"></div>
           <div class="cover-msg">Connecting to SwarmLLM…</div>
           <div class="cover-sub">Waiting for the daemon to respond</div>
+        </div>
+        <!-- Slave mode banner — shown when this device is a linked member (not the main device) -->
+        <div class="dashboard-slave-banner" id="dashboard-slave-banner" style="display:none">
+          <div style="font-size:1.8rem;margin-bottom:8px">&#128279;</div>
+          <div style="font-size:1.1rem;font-weight:600" data-i18n="pool.slave_title">Linked Device Mode</div>
+          <div class="text-muted" style="max-width:400px;margin:6px auto 16px;font-size:0.85rem" data-i18n="pool.slave_desc">This device is linked to another machine. All credits earned here are forwarded to your main device. Inference is free across your linked devices.</div>
+          <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+            <button class="btn btn-sm btn-outline" onclick="App.ui.switchTab('devices')" data-i18n="pool.slave_manage">Manage Devices</button>
+            <button class="btn btn-sm btn-ghost" style="color:var(--red)" onclick="if(confirm(I18n.t('pool.confirm_leave'))){App.pool.leavePool()}" data-i18n="pool.slave_unlink">Unlink This Device</button>
+          </div>
+          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+            <div class="text-muted" style="font-size:0.78rem;margin-bottom:6px" data-i18n="pool.slave_or_join">Or enter a new invite code to switch to a different device group:</div>
+            <div style="display:flex;gap:6px;max-width:280px;margin:0 auto">
+              <input type="text" id="slave-join-code" placeholder="A3F7K2M9" maxlength="8" style="text-align:center;font-size:1.1rem;letter-spacing:2px;text-transform:uppercase;font-family:var(--font-mono);flex:1">
+              <button class="btn btn-sm btn-primary" id="slave-join-btn" data-i18n="pool.join">Join</button>
+            </div>
+          </div>
         </div>
         <div class="container">
           <!-- Status banner -->

@@ -162,5 +162,12 @@
   "setup.auto_discover": "No address? No problem — devices on the same local network find each other automatically.",
   "pool.personal_only": "⚠ Only link your own devices. Linked devices forward 100% of their credits to the main device. Do not share invite codes with other users — this is for your personal machines only.",
   "pool.credit_forwarding": "Credit Forwarding",
-  "pool.forward_info": "All credits earned by linked devices are automatically forwarded here. Inference across your own devices is free — credits are only used when your requests are served by other users’ nodes on the network. Your linked devices are always preferred for routing."
+  "pool.forward_info": "All credits earned by linked devices are automatically forwarded here. Inference across your own devices is free — credits are only used when your requests are served by other users’ nodes on the network. Your linked devices are always preferred for routing.",
+  "pool.slave_title": "Linked Device Mode",
+  "pool.slave_desc": "This device is linked to another machine. All credits earned here are forwarded to your main device. Inference is free across your linked devices.",
+  "pool.slave_manage": "Manage Devices",
+  "pool.slave_unlink": "Unlink This Device",
+  "pool.slave_or_join": "Or enter a new invite code to switch to a different device group:",
+  "setup.link_device": "Link to your other devices",
+  "setup.link_device_desc": "If you already have SwarmLLM running on another machine, enter the invite code to link this device. Credits earned here will be combined with your main device."
 }

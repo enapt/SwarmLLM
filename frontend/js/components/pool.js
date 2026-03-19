@@ -49,6 +49,53 @@
           if (e.key === 'Enter') self[enterBind[id]]();
         });
       });
+
+      // Slave banner join button
+      var slaveJoinBtn = document.getElementById('slave-join-btn');
+      if (slaveJoinBtn) slaveJoinBtn.addEventListener('click', function () {
+        var input = document.getElementById('slave-join-code');
+        var code = input ? input.value.trim().toUpperCase() : '';
+        if (code.length === 8) {
+          // Must leave current pool first, then join new one
+          App.pool.leaveAndRejoin(code);
+        } else {
+          App.notifications.showToast(I18n.t('pool.code_invalid'), 'error');
+        }
+      });
+      var slaveJoinInput = document.getElementById('slave-join-code');
+      if (slaveJoinInput) slaveJoinInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && slaveJoinBtn) slaveJoinBtn.click();
+      });
+
+      // Setup wizard pool join button
+      var setupPoolJoin = document.getElementById('setup-pool-join');
+      if (setupPoolJoin) setupPoolJoin.addEventListener('click', function () {
+        var input = document.getElementById('setup-pool-code');
+        var code = input ? input.value.trim().toUpperCase() : '';
+        var status = document.getElementById('setup-pool-status');
+        if (!code || code.length !== 8) {
+          if (status) { status.textContent = I18n.t('pool.code_invalid'); status.style.color = 'var(--red)'; }
+          return;
+        }
+        if (status) { status.textContent = 'Linking...'; status.style.color = 'var(--text-muted)'; }
+        App.authFetch('/api/pool/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code })
+        }).then(function (r) { return r.json(); }).then(function (data) {
+          if (data.error) {
+            if (status) { status.textContent = data.error; status.style.color = 'var(--red)'; }
+          } else {
+            if (status) { status.textContent = '\u2713 Link request sent — will be added shortly'; status.style.color = 'var(--green)'; }
+            if (input) input.value = '';
+          }
+        }).catch(function (e) {
+          if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+        });
+      });
+
+      // Check pool state on init to show slave banner
+      this.checkSlaveBanner();
     },
 
     load: async function () {
@@ -73,6 +120,8 @@
         } else {
           this.renderNoPool();
         }
+        // Update slave banner on dashboard
+        this.updateSlaveBanner(data);
       } catch (e) {
         console.error('Pool load error:', e);
       }
@@ -465,6 +514,68 @@
         } else {
           App.notifications.showToast(I18n.t('pool.member_removed'), 'success');
           this.load();
+        }
+      } catch (e) {
+        App.notifications.showToast('Failed: ' + e.message, 'error');
+      }
+    },
+
+    /// Check pool state on startup and show/hide the slave banner
+    checkSlaveBanner: async function () {
+      try {
+        // Delay slightly to let the API key load
+        await new Promise(function (r) { setTimeout(r, 2000); });
+        if (!this._myNodeId) {
+          var statsResp = await App.authFetch('/api/admin/stats');
+          if (statsResp.ok) {
+            var stats = await statsResp.json();
+            this._myNodeId = stats.node_id || null;
+          }
+        }
+        var resp = await App.authFetch('/api/pool/state');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        this.updateSlaveBanner(data);
+      } catch (e) {
+        // Silent — banner is secondary
+      }
+    },
+
+    /// Show/hide the slave banner on the dashboard
+    updateSlaveBanner: function (data) {
+      var banner = document.getElementById('dashboard-slave-banner');
+      if (!banner) return;
+      if (data && data.in_pool && data.pool_id !== this._myNodeId) {
+        banner.style.display = '';
+      } else {
+        banner.style.display = 'none';
+      }
+    },
+
+    /// Leave current pool and join a new one with a code
+    leaveAndRejoin: async function (code) {
+      try {
+        // Leave current pool first
+        var leaveResp = await App.authFetch('/api/pool/leave', { method: 'POST' });
+        var leaveData = await leaveResp.json();
+        if (leaveData.error) {
+          App.notifications.showToast('Failed to unlink: ' + leaveData.error, 'error');
+          return;
+        }
+        // Now join with new code
+        var joinResp = await App.authFetch('/api/pool/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code })
+        });
+        var joinData = await joinResp.json();
+        if (joinData.error) {
+          App.notifications.showToast(joinData.error, 'error');
+        } else {
+          App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
+          var input = document.getElementById('slave-join-code');
+          if (input) input.value = '';
+          setTimeout(function () { App.pool.load(); }, 5000);
         }
       } catch (e) {
         App.notifications.showToast('Failed: ' + e.message, 'error');
