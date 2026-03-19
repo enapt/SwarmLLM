@@ -75,7 +75,10 @@ fn has_nvidia_gpu() -> bool {
     {
         // nvcuda.dll lives in %WINDIR%\System32 on all NVIDIA driver installs.
         let windir = env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
-        std::path::Path::new(&format!("{}\\System32\\nvcuda.dll", windir)).exists()
+        std::path::Path::new(&windir)
+            .join("System32")
+            .join("nvcuda.dll")
+            .exists()
     }
 
     #[cfg(not(target_os = "windows"))]

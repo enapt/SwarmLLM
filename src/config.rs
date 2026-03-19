@@ -1231,7 +1231,16 @@ impl Config {
         // 5. Auto-detect WSL2 and apply safe network defaults.
         // Only overrides values the user didn't explicitly set in config.toml.
         if is_wsl2() {
-            let has = |key: &str| config_text.contains(key);
+            // Parse TOML into a Value to check which keys were explicitly set.
+            // Raw string search (e.g., config_text.contains("enable_quic")) would
+            // match commented-out keys or keys in string values — false positives.
+            let explicit_network_keys: std::collections::HashSet<String> =
+                toml::from_str::<toml::Value>(&config_text)
+                    .ok()
+                    .and_then(|v| v.get("network").and_then(|n| n.as_table().cloned()))
+                    .map(|t| t.keys().cloned().collect())
+                    .unwrap_or_default();
+            let has = |key: &str| explicit_network_keys.contains(key);
             let net = &mut config.network;
             let mut adapted = Vec::new();
             if !has("enable_quic") {

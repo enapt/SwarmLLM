@@ -1477,6 +1477,20 @@ async fn handle_vision_encode_request(
     req: crate::types::VisionEncodeRequest,
 ) {
     let model_id = &req.model_id;
+
+    // SEC: Reject oversized image payloads BEFORE loading vision module to prevent
+    // a malicious peer from triggering expensive module loading with large payloads.
+    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
+    if req.image_data.len() > MAX_IMAGE_BYTES {
+        tracing::warn!(
+            request_id = %req.request_id,
+            size = req.image_data.len(),
+            max = MAX_IMAGE_BYTES,
+            "VisionEncodeRequest image_data too large — rejecting"
+        );
+        return;
+    }
+
     tracing::info!(
         request_id = %req.request_id,
         model = %model_id,
@@ -1526,15 +1540,9 @@ async fn handle_vision_encode_request(
         }
     };
 
-    // SEC: Reject oversized image payloads before decode to prevent OOM
-    const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20 MB
+    // Size check already done above (before module loading).
+    // This is a defense-in-depth second check.
     if req.image_data.len() > MAX_IMAGE_BYTES {
-        tracing::warn!(
-            request_id = %req.request_id,
-            size = req.image_data.len(),
-            max = MAX_IMAGE_BYTES,
-            "VisionEncodeRequest image_data too large — rejecting"
-        );
         return;
     }
 

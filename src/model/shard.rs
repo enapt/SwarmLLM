@@ -19,7 +19,16 @@ pub fn sanitize_path_component(s: &str) -> String {
             }
         })
         .collect();
-    replaced.replace("..", "_")
+    let sanitized = replaced.replace("..", "_");
+    // Reject single "." which resolves to parent directory and causes path collisions
+    if sanitized == "." {
+        return "_".to_string();
+    }
+    // Reject empty string after sanitization
+    if sanitized.is_empty() {
+        return "_".to_string();
+    }
+    sanitized
 }
 
 /// Manages shard files on disk — loading, verification, and storage.
@@ -502,13 +511,14 @@ mod tests {
 
     #[test]
     fn sanitize_empty_string() {
-        assert_eq!(sanitize_path_component(""), "");
+        // Empty strings become "_" to prevent path issues
+        assert_eq!(sanitize_path_component(""), "_");
     }
 
     #[test]
     fn sanitize_single_dot() {
-        // A single dot is fine — it's not ".."
-        assert_eq!(sanitize_path_component("."), ".");
+        // A single dot is unsafe — resolves to parent dir causing collisions
+        assert_eq!(sanitize_path_component("."), "_");
     }
 
     #[test]

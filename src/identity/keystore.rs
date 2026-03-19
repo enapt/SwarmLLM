@@ -26,13 +26,25 @@ impl Keystore {
         match passphrase {
             Some(pass) => Self::save_encrypted(key, pass, path),
             None => {
-                // Store raw 32-byte key with restricted permissions
-                std::fs::write(path, key.to_bytes()).map_err(SwarmError::Io)?;
+                // Store raw 32-byte key with restricted permissions.
+                // Use OpenOptions with mode(0o600) to avoid TOCTOU window where
+                // the key file is world-readable between write and chmod.
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    let perms = std::fs::Permissions::from_mode(0o600);
-                    std::fs::set_permissions(path, perms).map_err(SwarmError::Io)?;
+                    use std::io::Write;
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(path)
+                        .map_err(SwarmError::Io)?;
+                    file.write_all(&key.to_bytes()).map_err(SwarmError::Io)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::fs::write(path, key.to_bytes()).map_err(SwarmError::Io)?;
                 }
                 Ok(())
             }

@@ -168,14 +168,11 @@ pub fn compute_optimal_shard_window(
     }
 
     // Fill remaining budget with contiguous middle shards starting from shard 1
-    let remaining = shards_that_fit.saturating_sub(selected.len() as u32);
     for i in 1..last_shard {
         if selected.len() as u32 >= shards_that_fit {
             break;
         }
-        if remaining > 0 {
-            selected.push(i);
-        }
+        selected.push(i);
     }
 
     selected.sort();

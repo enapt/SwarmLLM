@@ -101,11 +101,20 @@ impl GossipSealer {
             return Ok(plaintext);
         }
 
-        // Try previous epoch only when tagged epoch is current (handles boundary case
-        // where sender sealed at end of previous epoch, receiver just rotated)
-        if epoch_tag == current_epoch {
-            let prev_epoch = epoch_tag.wrapping_sub(1);
-            let alt_key = self.derive_epoch_key(prev_epoch);
+        // Epoch boundary fallback: try adjacent epoch keys.
+        // Case 1: epoch_tag == current_epoch — primary key failed, try previous epoch
+        //   (sender derived key from epoch N-1 but tagged with N due to race)
+        // Case 2: epoch_tag == current_epoch - 1 — receiver just rotated, try current key
+        //   (sender sealed at epoch N-1, receiver has moved to N)
+        let alt_epoch = if epoch_tag == current_epoch {
+            Some(epoch_tag.wrapping_sub(1))
+        } else if epoch_tag + 1 == current_epoch {
+            Some(current_epoch)
+        } else {
+            None
+        };
+        if let Some(alt) = alt_epoch {
+            let alt_key = self.derive_epoch_key(alt);
             let alt_cipher = ChaCha20Poly1305::new_from_slice(&alt_key)
                 .map_err(|e| SwarmError::Encryption(format!("Gossip cipher init: {e}")))?;
             if let Ok(plaintext) = alt_cipher.decrypt(nonce, ciphertext) {

@@ -64,9 +64,12 @@ pub async fn rescan_local_shards(
             if !path.exists() {
                 continue;
             }
-            let size_ok = std::fs::metadata(&path)
-                .map(|m| m.len() >= shard_info.size_bytes * 9 / 10)
-                .unwrap_or(false);
+            // Skip size check when manifest has no size info (size_bytes == 0) —
+            // an empty file must not pass as a valid shard.
+            let size_ok = shard_info.size_bytes > 0
+                && std::fs::metadata(&path)
+                    .map(|m| m.len() >= shard_info.size_bytes * 9 / 10)
+                    .unwrap_or(false);
             if !size_ok {
                 continue;
             }

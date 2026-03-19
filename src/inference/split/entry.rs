@@ -122,10 +122,26 @@ impl SplitModelEntry {
                         .and_then(|v| v.to_string().ok().cloned());
                     (vocab, bos, eos_str, eos_tok, tmpl)
                 } else {
-                    (vec![], String::new(), String::new(), vec![2], None)
+                    // Fallback: include common EOS tokens across architectures
+                    // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
+                    (
+                        vec![],
+                        String::new(),
+                        String::new(),
+                        vec![2, 107, 32000],
+                        None,
+                    )
                 }
             } else {
-                (vec![], String::new(), String::new(), vec![2], None)
+                // Fallback: include common EOS tokens across architectures
+                // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
+                (
+                    vec![],
+                    String::new(),
+                    String::new(),
+                    vec![2, 107, 32000],
+                    None,
+                )
             };
 
         Self {
