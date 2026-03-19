@@ -14,11 +14,11 @@ pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value
     match pool_state.as_ref() {
         Some(ps) => Json(serde_json::json!({
             "in_pool": true,
-            "pool_id": format!("{}", ps.pool_id),
+            "pool_id": hex::encode(ps.pool_id.0),
             "name": ps.name,
             "members": ps.members.iter().map(|m| {
                 let mut member = serde_json::json!({
-                    "node_id": format!("{}", m.node_id),
+                    "node_id": hex::encode(m.node_id.0),
                     "credits_contributed": m.credits_contributed,
                     "joined_at": m.joined_at.to_rfc3339(),
                     "online": m.online,
@@ -80,7 +80,7 @@ pub async fn pool_create(
     match rx.await {
         Ok(Ok(ps)) => Ok(Json(serde_json::json!({
             "status": "created",
-            "pool_id": format!("{}", ps.pool_id),
+            "pool_id": hex::encode(ps.pool_id.0),
             "name": ps.name,
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
@@ -240,7 +240,7 @@ pub async fn pool_invitations(
             serde_json::json!({
                 "id": inv.id.to_string(),
                 "pool_id": format!("{}", inv.pool_id),
-                "invitee": format!("{}", inv.invitee_node_id),
+                "invitee": hex::encode(inv.invitee_node_id.0),
                 "expires_at": inv.expires_at.to_rfc3339(),
                 "created_at": inv.created_at.to_rfc3339(),
             })
@@ -268,7 +268,7 @@ pub async fn pool_leaderboard(
         .into_iter()
         .map(|e| {
             serde_json::json!({
-                "node_id": format!("{}", e.node_id),
+                "node_id": hex::encode(e.node_id.0),
                 "credits_contributed": e.credits_contributed,
                 "rank": e.rank,
             })

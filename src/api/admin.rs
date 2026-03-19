@@ -13,7 +13,7 @@ use crate::error::ApiError;
 
 /// GET /api/admin/stats — Full dashboard stats snapshot.
 pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let node_id = format!("{}", state.shared_state.identity.node_id());
+    let node_id = hex::encode(state.shared_state.identity.node_id().0);
     let stats = state.shared_state.node_stats.read().await;
     let credit = state.shared_state.credit_balance.read().await;
 
