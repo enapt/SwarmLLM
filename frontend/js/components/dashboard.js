@@ -423,7 +423,7 @@
             else if (cls === 'verifying') title += ' \u2014 Verifying';
             else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
             else title += ' \u2014 Not available';
-            title += '\nRight-click to manage';
+            title += '\nClick to manage';
 
             var style = '';
             if (cls === 'downloading' || cls === 'peer-downloading') {
