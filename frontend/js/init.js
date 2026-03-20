@@ -519,7 +519,7 @@
 
       // Model card click -> select and chat
       var modelCard = target.closest('.model-card');
-      if (modelCard && !target.closest('button, a, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select')) {
+      if (modelCard && !target.closest('button, a, summary, details, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select')) {
         var cardModelId = modelCard.getAttribute('data-model-id');
         if (cardModelId) {
           var cardModel = (window._lastModelsData || []).find(function(mm) { return mm.id === cardModelId; });
