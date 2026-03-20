@@ -265,6 +265,9 @@
         var globalAvail = m.global_available || hostedShards;
         var isDownloading = m.acquisition === 'downloading';
         var isReady = m.status === 'loaded' || m.status === 'ready' || (globalAvail === shardCount && shardCount > 0);
+        // Auto-manage may download local copies of a model that is already READY via peers.
+        // In that case, show as Ready (not Downloading) — the download is just local caching.
+        var isCachingLocally = isDownloading && isReady;
         var isPartial = !isReady && hostedShards > 0 && hostedShards < shardCount;
         var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
 
@@ -272,11 +275,13 @@
         card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
         card.setAttribute('data-model-id', m.id);
 
-        // Status pill
+        // Status pill — Ready takes priority over Downloading when model is usable
         var statusHtml = '';
         if (m.status === 'loaded') {
           statusHtml = '<span class="model-status-pill active">\u25CF Active</span>';
-        } else if (isReady) {
+        } else if (isReady && !isDownloading) {
+          statusHtml = '<span class="model-status-pill ready">Ready</span>';
+        } else if (isCachingLocally) {
           statusHtml = '<span class="model-status-pill ready">Ready</span>';
         } else if (isDownloading) {
           statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>Downloading</span>';
@@ -443,7 +448,16 @@
               segmentsHtml += '<div class="dl-seg" style="width:' + segW.toFixed(2) + '%;"><div class="dl-seg-fill" style="width:' + segPct + '%"></div></div>';
             }
           }
-          var shardLabel = ap.downloaded_shards !== undefined ? ('Shard ' + ap.downloaded_shards + '/' + shardCount) : 'Downloading';
+          var shardLabel;
+          if (isCachingLocally) {
+            // Model is already usable via peers — this download is just local caching
+            var cachedCount = shards.filter(function(s) { return s.local; }).length;
+            shardLabel = 'Caching locally (' + cachedCount + '/' + shardCount + ')';
+          } else if (ap.downloaded_shards !== undefined) {
+            shardLabel = 'Downloading shard ' + (ap.downloaded_shards + 1) + ' of ' + shardCount;
+          } else {
+            shardLabel = 'Downloading';
+          }
           var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
           if (speed > 0) rightText += ' &middot; ' + U.formatSpeed(speed);
           if (etaStr) rightText += ' &middot; ETA ' + etaStr;
