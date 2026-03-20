@@ -1830,22 +1830,17 @@ kbd {
 /* (shard-bar and shard-grid-compact removed — now using shard-grid with size tiers) */
 
 /* Shard health bar — gradient, sits above the shard grid */
+/* Health bar — flex segments with same gap as shard grid for alignment */
 .shard-health-bar {
-  height: 8px; border-radius: 4px; overflow: hidden;
-  background: var(--bg-tertiary); margin-bottom: 6px;
-  transition: background 0.5s, height 0.15s, box-shadow 0.15s;
-  cursor: help; position: relative;
+  display: flex; gap: 3px; height: 8px; margin-bottom: 6px;
+  transition: height 0.15s;
+  cursor: help;
 }
-.shard-health-bar:hover {
-  height: 12px;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.3);
+.shard-health-bar:hover { height: 12px; }
+.health-seg {
+  border-radius: 3px; transition: background 0.4s, box-shadow 0.15s;
 }
-/* Tick marks connecting health bar segments to shard cells below */
-.health-tick {
-  position: absolute; top: 0; bottom: 0; width: 1px;
-  background: rgba(0,0,0,0.25);
-}
-[data-theme="light"] .health-tick { background: rgba(255,255,255,0.4); }
+.shard-health-bar:hover .health-seg { box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
 /* Health badge — inline in the title row next to the model name */
 .shard-health-summary {
   display: inline-flex; align-items: center; gap: 4px;

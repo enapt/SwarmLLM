@@ -534,16 +534,19 @@
 
           var barTooltip = barTooltipLines.join('\n');
 
-          // Build tick marks that align with shard cell boundaries
-          var tickHtml = '';
-          if (totalShards > 1) {
-            for (var ti = 1; ti < totalShards; ti++) {
-              tickHtml += '<div class="health-tick" style="left:' + (ti * 100 / totalShards).toFixed(2) + '%"></div>';
-            }
-          }
-
+          // Build segmented health bar using flex — same layout as shard grid so they align
           var healthPct = totalShards > 0 ? Math.round(((totalShards - networkMissing) / totalShards) * 100) : 0;
-          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '" style="background:' + gradient + '">' + tickHtml + '</div>';
+          var barSegments = '';
+          shards.forEach(function(s, i) {
+            var holders = s.holders || 0;
+            var color;
+            if (holders >= 3) color = 'var(--green)';
+            else if (holders === 2) color = 'rgba(134,239,172,0.7)';
+            else if (holders === 1) color = 'var(--orange)';
+            else color = 'var(--red, #ef4444)';
+            barSegments += '<div class="health-seg" style="flex:1;background:' + color + '" title="Part ' + (i + 1) + ': ' + holders + ' node' + (holders !== 1 ? 's' : '') + '"></div>';
+          });
+          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '">' + barSegments + '</div>';
 
           // Summary: scale-aware detail
           var healthDetail = '';
