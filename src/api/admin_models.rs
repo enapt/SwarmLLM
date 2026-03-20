@@ -53,15 +53,27 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 let holders = state.shared_state.model_registry.shard_holders(&shard_id);
                 let local = holders.contains(&local_node_id);
 
-                // Check if this shard is currently loaded in VRAM (vs just on disk)
-                let in_vram = if local {
+                // Check if this shard is currently loaded in memory (VRAM or RAM).
+                // Check: subprocess pool, split_models DashMap, or legacy executor.
+                let is_model_loaded = state.shared_state.model_process_pool.is_loaded(&m.id)
+                    || state
+                        .shared_state
+                        .split_models
+                        .iter()
+                        .any(|e| e.key().0 == m.id)
+                    || state
+                        .shared_state
+                        .model_loaded
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                let in_vram = if local && is_model_loaded {
                     let window = state
                         .shared_state
                         .model_process_pool
                         .get_shard_window(&m.id);
                     match window {
                         Some(w) => w.contains(&s.index),
-                        None => state.shared_state.model_process_pool.is_loaded(&m.id),
+                        // No shard window = all local shards are loaded
+                        None => true,
                     }
                 } else {
                     false

@@ -415,8 +415,8 @@
             }
 
             var title = 'Part ' + (s.index + 1) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
-            if (cls === 'local vram') title += ' \u2014 Loaded in GPU VRAM';
-            else if (cls === 'local') title += ' \u2014 On disk';
+            if (cls === 'local vram') title += ' \u2014 Active (loaded in memory)';
+            else if (cls === 'local') title += ' \u2014 On disk (not loaded)';
             else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
             else if (cls === 'verifying') title += ' \u2014 Verifying';
@@ -453,14 +453,22 @@
           });
           shardHtml += '</div>';
 
-          // Compact legend
-          shardHtml += '<div class="shard-legend-bar">' +
-            '<span class="sleg"><span class="sleg-swatch sleg-local"></span>On this PC</span>' +
-            '<span class="sleg"><span class="sleg-swatch sleg-vram"></span>In GPU</span>' +
-            '<span class="sleg"><span class="sleg-swatch sleg-peer"></span>On peers</span>' +
-            '<span class="sleg"><span class="sleg-swatch sleg-dl"></span>Downloading</span>' +
-            '<span class="sleg"><span class="sleg-swatch sleg-missing"></span>Missing</span>' +
-            '</div>';
+          // Compact legend — only show entries relevant to this model's current state
+          var hasVram = shards.some(function(s) { return s.local && s.in_vram; });
+          var hasLocalNotVram = shards.some(function(s) { return s.local && !s.in_vram; });
+          var hasPeer = peerCount > 0;
+          var hasDl = dlCount > 0 || peerDlCount > 0 || queuedCount > 0;
+          var hasMissing = missingCount > 0;
+
+          var legendParts = [];
+          if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>On this PC</span>');
+          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>Active (in memory)</span>');
+          if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>On peers</span>');
+          if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>Downloading</span>');
+          if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>Missing</span>');
+          if (legendParts.length > 0) {
+            shardHtml += '<div class="shard-legend-bar">' + legendParts.join('') + '</div>';
+          }
 
           // Swarm health bar — shows NETWORK replication, not local status
           // Color = holder count per shard across all nodes (including this one)
