@@ -334,6 +334,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 .get(&crate::types::ModelId(model_id.clone()))
                 .map(|t| t.trust_level.to_string())
                 .unwrap_or_else(|| "pinned".to_string()); // loaded models are at least pinned
+            let enc_info = encrypted_pipeline_info(&model_id);
             models.push(serde_json::json!({
                 "id": model_id,
                 "name": info.name,
@@ -353,9 +354,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 "probed": probed,
                 "mmproj": mmproj_info,
                 "trust_level": trust_level,
-                "encrypted_pipeline": encrypted_pipeline_info(&model_id).0,
-                "has_first_shard": encrypted_pipeline_info(&model_id).1,
-                "has_last_shard": encrypted_pipeline_info(&model_id).2,
+                "encrypted_pipeline": enc_info.0,
+                "has_first_shard": enc_info.1,
+                "has_last_shard": enc_info.2,
             }));
         } // else: stale loaded model, files deleted
     }
@@ -494,6 +495,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .get(&m.id)
             .map(|t| t.trust_level.to_string())
             .unwrap_or_else(|| "discovered".to_string());
+        let enc_info_reg = encrypted_pipeline_info(&m.id.0);
         models.push(serde_json::json!({
             "id": m.id.0,
             "name": m.name,
@@ -516,9 +518,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "acquisition_progress": acq_progress,
             "mmproj": mmproj_info_reg,
             "trust_level": trust_level,
-            "encrypted_pipeline": encrypted_pipeline_info(&m.id.0).0,
-                "has_first_shard": encrypted_pipeline_info(&m.id.0).1,
-                "has_last_shard": encrypted_pipeline_info(&m.id.0).2,
+            "encrypted_pipeline": enc_info_reg.0,
+                "has_first_shard": enc_info_reg.1,
+                "has_last_shard": enc_info_reg.2,
         }));
     }
 
@@ -534,6 +536,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .get(&crate::types::ModelId(model_name.clone()))
             .map(|t| t.trust_level.to_string())
             .unwrap_or_else(|| "discovered".to_string());
+        let enc_info_net = encrypted_pipeline_info(model_name);
         models.push(serde_json::json!({
             "id": model_name,
             "name": model_name,
@@ -548,9 +551,9 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             "peers_hosting": peers.len(),
             "shards": [],
             "trust_level": trust_level,
-            "encrypted_pipeline": encrypted_pipeline_info(model_name).0,
-                "has_first_shard": encrypted_pipeline_info(model_name).1,
-                "has_last_shard": encrypted_pipeline_info(model_name).2,
+            "encrypted_pipeline": enc_info_net.0,
+                "has_first_shard": enc_info_net.1,
+                "has_last_shard": enc_info_net.2,
         }));
     }
 
@@ -868,6 +871,7 @@ pub async fn delete_model(
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
+    shared.model_process_pool.clear_shard_window(&mid);
 
     // Broadcast shard removal via GossipSub
     if let Some(ref ntx) = state.network_tx {
@@ -914,6 +918,7 @@ pub async fn unload_model(
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
+    shared.model_process_pool.clear_shard_window(&mid);
 
     // Clear loaded model info if it matches this model
     {
@@ -949,6 +954,12 @@ pub async fn unload_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // SEC: Reject mmproj sentinel index
+    if shard_index == u32::MAX {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Reserved shard index".into(),
+        )));
+    }
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1035,6 +1046,12 @@ pub async fn load_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // SEC: Reject mmproj sentinel index
+    if shard_index == u32::MAX {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Reserved shard index".into(),
+        )));
+    }
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1162,8 +1179,10 @@ pub async fn delete_shard(
     // Evict any cached split model segments that included this shard
     shared.split_models.retain(|key, _| key.0 != mid);
 
-    // Kill the worker subprocess to free GPU memory
+    // Kill the worker subprocess to free GPU memory and clear the shard window
+    // so next spawn doesn't try to load the deleted shard
     shared.model_process_pool.unload_model(&mid).await;
+    shared.model_process_pool.clear_shard_window(&mid);
 
     // Broadcast updated ShardAnnounce with remaining held shards
     if let Some(ref ntx) = state.network_tx {
