@@ -486,31 +486,54 @@
           else if (avgHolders >= 2) { healthLabel = 'Healthy'; healthClass = 'health-full'; }
           else { healthLabel = 'Good'; healthClass = 'health-good'; }
 
-          // Extended tooltip with per-shard holder detail
-          var barTooltipLines = ['Swarm Health: ' + healthLabel + ' (' + avgHolders.toFixed(1) + '\u00d7 avg)', ''];
-          shards.forEach(function(s) {
-            var h = s.holders || 0;
-            var line = 'Part ' + (s.index + 1) + ': ' + h + ' peer' + (h !== 1 ? 's' : '');
-            if (s.local) line += ' + you';
-            barTooltipLines.push(line);
-          });
-          if (wellReplicated > 0) barTooltipLines.push('', wellReplicated + ' well-replicated (3+)');
-          if (adequate > 0) barTooltipLines.push(adequate + ' adequate (2)');
-          if (fragile > 0) barTooltipLines.push(fragile + ' single-copy (1) \u2014 at risk if node leaves');
-          if (networkMissing > 0) barTooltipLines.push(networkMissing + ' missing \u2014 not available on network');
+          // Human-readable health tooltip
+          var barTooltipLines = [];
+
+          // Opening summary
+          if (healthClass === 'health-full') {
+            barTooltipLines.push('This model is well backed up across the network.');
+            barTooltipLines.push('If a computer goes offline, others still have every part.');
+          } else if (healthClass === 'health-good') {
+            barTooltipLines.push('This model is available but could use more backups.');
+            barTooltipLines.push('More people hosting it = faster and more reliable.');
+          } else if (healthClass === 'health-partial') {
+            barTooltipLines.push('Some parts of this model only exist on one computer.');
+            barTooltipLines.push('If that computer goes offline, those parts are lost.');
+          } else {
+            barTooltipLines.push('Some parts of this model are missing from the network.');
+            barTooltipLines.push('It cannot run until someone provides the missing parts.');
+          }
+
+          barTooltipLines.push('');
+
+          // Per-part breakdown — grouped by status
+          if (wellReplicated > 0) barTooltipLines.push('\u2705 ' + wellReplicated + ' part' + (wellReplicated !== 1 ? 's' : '') + ' backed up on 3+ computers');
+          if (adequate > 0) barTooltipLines.push('\u{1F7E1} ' + adequate + ' part' + (adequate !== 1 ? 's' : '') + ' on 2 computers');
+          if (fragile > 0) barTooltipLines.push('\u{1F7E0} ' + fragile + ' part' + (fragile !== 1 ? 's' : '') + ' on only 1 computer \u2014 needs backup');
+          if (networkMissing > 0) barTooltipLines.push('\u{1F534} ' + networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing entirely');
+
+          barTooltipLines.push('');
+          barTooltipLines.push(totalShards + ' parts total \u00b7 ' + avgHolders.toFixed(1) + ' copies on average');
+
           var barTooltip = barTooltipLines.join('\n');
 
           var healthPct = totalShards > 0 ? Math.round(((totalShards - networkMissing) / totalShards) * 100) : 0;
           var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '" style="background:' + gradient + '"></div>';
 
-          // Summary: network-level detail
-          var healthTextParts = [];
-          healthTextParts.push(avgHolders.toFixed(1) + '\u00d7 avg replication');
-          if (fragile > 0) healthTextParts.push(fragile + ' single-copy');
-          if (networkMissing > 0) healthTextParts.push(networkMissing + ' missing');
+          // Summary: plain-language detail
+          var healthDetail = '';
+          if (healthClass === 'health-full') {
+            healthDetail = totalShards + ' parts backed up across ' + Math.round(avgHolders) + '+ computers';
+          } else if (healthClass === 'health-good') {
+            healthDetail = totalShards + ' parts available';
+          } else if (fragile > 0) {
+            healthDetail = fragile + ' part' + (fragile !== 1 ? 's' : '') + ' need' + (fragile === 1 ? 's' : '') + ' more backups';
+          } else if (networkMissing > 0) {
+            healthDetail = networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing from network';
+          }
           var healthSummary = '<div class="shard-health-summary ' + healthClass + '">' +
             '<span class="shard-health-label">' + healthLabel + '</span>' +
-            '<span class="shard-health-detail">' + healthTextParts.join(' \u00b7 ') + '</span>' +
+            '<span class="shard-health-detail">' + healthDetail + '</span>' +
             '</div>';
 
           // barHtml and healthSummary are injected into the title area below
