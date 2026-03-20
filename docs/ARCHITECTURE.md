@@ -204,9 +204,10 @@ Memory: O(shards × 50) bounded regardless of network size (was O(shards × node
 ```
 libp2p Swarm
 ├── Kademlia (DHT)
-│   ├── /swarm/node/{node_id}         → NodeCapability
-│   ├── /swarm/shard/{model}/{index}  → Vec<NodeId> (batched per model)
-│   └── /swarm/model/{model_id}       → ModelManifest
+│   ├── /swarm/node/{node_id}                  → NodeCapability
+│   ├── /swarm/shards/{model_id}/{node_id_hex} → Vec<ShardIndex> (per-node; avoids last-writer-wins)
+│   ├── /swarm/shard/{model}/{index}           → Vec<NodeId> (batched per model, legacy provider key)
+│   └── /swarm/model/{model_id}               → ModelManifest
 │   └── Records expire after 1 hour, re-published periodically
 │
 ├── GossipSub (pub/sub, mesh_outbound_min=1)
@@ -324,6 +325,7 @@ Qwen 3.5 introduces a hybrid architecture combining SSM (Gated Delta Networks) w
 - **Attention layers**: Standard attention with sigmoid output gate + partial RoPE (25% of head_dim)
 - **State management**: `SsmState` (conv_state + recurrent_state) alongside KV-cache for attention layers
 - **Per-layer detection**: SSM vs attention determined by presence of `ssm_alpha.weight` tensor in GGUF
+- **Note**: `ssm_alpha.weight` and `ssm_beta.weight` are present in the GGUF but not yet read — `delta_net_scan` uses a hardcoded 0.95 decay stub. Dynamic per-step alpha/beta is deferred (see Deferred Items).
 
 ### Tensor Parallelism (AllReduce)
 
@@ -951,6 +953,10 @@ Kademlia provider records (S5) track shard holders at scale:
 - Provider TTL: 1 hour, republication: 20 minutes
 - PeerId↔NodeId conversion via `node_id_to_peer_id()` / `peer_id_to_node_id()` in `transport.rs`
 
+**DHT shard keys are per-node** to prevent last-writer-wins collisions: records are keyed
+as `/swarm/shards/{model_id}/{node_id_hex}` (one record per node per model), not a single
+shared key that any node can overwrite. Each node publishes only its own shard holdings.
+
 ## Identity & Nicknames
 
 - Ed25519-signed nickname records with timestamp-wins conflict resolution
@@ -968,6 +974,14 @@ Kademlia provider records (S5) track shard holders at scale:
 - Pool leaderboard aggregates member contributions
 - Invitation expiry checked at API layer with clear error messages
 - Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=3
+
+**Pool join security hardening** (6-agent sweep):
+- Join request **signature verification is transport-authenticated**: the dispatch layer sets the requester `NodeId` from the verified Noise-authenticated sender, not from a self-reported field in the message body. Forgery of join origin is not possible.
+- **Capacity check before invitation consumption**: pool size is validated before the invite code is marked as used, preventing invitee lockout when the pool is already full.
+- **`auto_accept` bound to specific `code_hash`**: auto-acceptance only fires for the exact invitation that matches the code the joiner used, preventing cross-pool or stale auto-acceptance.
+- **Removal freshness**: signed removal notices are rejected if their timestamp is more than 30 seconds in the future (previously `abs()` allowed ±5 min, enabling timestamp spoofing).
+- **Invite code DoS prevention**: base64-encoded invite codes are capped at 512 characters before decode. Oversized payloads are rejected before any allocation.
+- **`pending_credit_earn` atomics use `AcqRel` ordering** (was `Relaxed`) — ensures credit accumulator writes are visible across threads without data races.
 
 ## Reputation & Trust
 
@@ -1016,6 +1030,10 @@ Kademlia provider records (S5) track shard holders at scale:
 - HTTP timeout: 5 minutes (tower-http TimeoutLayer, Slowloris protection)
 - Per-IP rate limiter with periodic 5-minute cleanup of stale entries
 - Inference queue depth cap: 512 requests
+- **CORS**: `OPTIONS` preflight requests explicitly allowed (required for cross-origin browser clients)
+- **Connectivity probe** (health check): narrowed to reject responses with content length > 20 chars, preventing false-positive pass-through from other services on the same port
+- **Total prompt cap**: raised from 64KB to 4MB for Claude Code compatibility (tool call results and long context prompts can exceed 64KB)
+- **Anthropic→OpenAI proxy**: now supports streaming — SSE events from the upstream OpenAI-compatible provider are translated to Anthropic SSE format and forwarded to the client in real time
 
 ## Shard-Only Mode
 
@@ -1049,7 +1067,8 @@ allowing candle to parse the full tensor index while only loading assigned layer
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
 - **Request fields:** `tools`, `tool_choice`, `metadata`, `thinking` (extended thinking), `cache_control` on system blocks
 - **Content blocks:** `text`, `image`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`
-- **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy; local GGUF models → tool calls/thinking converted to text for inference
+- **Routing:** Claude models → Anthropic cloud (full pass-through); non-Claude models → Anthropic→OpenAI translation proxy (supports streaming — SSE events translated in real time); local GGUF models → tool calls/thinking converted to text for inference
+- **Total prompt cap:** 4MB (raised from 64KB for Claude Code compatibility — tool results and long-context prompts can exceed the old limit)
 - **Claude Code usage:** `ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b`
 
 ### MCP Server (Protocol v2025-11-05)
@@ -1270,6 +1289,10 @@ Items identified during audits but deferred for future implementation:
 
 | Torrent-style parallel P2P download | Single-source P2P per shard | chunk_offset/chunk_size support exists but multi-source coordination not built |
 | Download resume | HF downloads restart from scratch on interrupt | Needs HTTP Range header from last byte on resume |
+| TP forward pass — FFN norm position | FFN norm currently applied to pre-attention tensor | Correct placement is post-attention; fixing requires a 2-IPC round-trip protocol redesign to pass the post-attention intermediate tensor separately |
+| `delta_net_scan` alpha/beta integration | Qwen 3.5 SSM scan uses hardcoded 0.95 decay stub | `ssm_alpha.weight` and `ssm_beta.weight` tensors present in GGUF but not yet read; dynamic per-step alpha/beta computation deferred |
+| PEX aggregate rate limiter | Individual connection rate limit only | A per-node aggregate PEX request budget is bounded implicitly by `max_established_per_peer=1` and `max_connections=500`; an explicit aggregate limiter is a future hardening item |
+| `connection_addrs` cap | No explicit cap on addresses per peer | Upper bound is `max_established_per_peer=1` × connections; an explicit per-peer address cap would further reduce memory usage at scale |
 
 Resolved items (removed from deferred):
 - **DHT-based shard holder resolution (S5)**: COMPLETE — Kademlia provider records + bounded cache (max 50/shard LRU). Two-tier resolution: sync cache for hot path, async DHT for cold lookups. Scales to 50K+ nodes.
