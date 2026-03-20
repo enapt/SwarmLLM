@@ -533,7 +533,7 @@
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
-          App.notifications.showToast(errData.error || 'Failed to unload model', 'error');
+          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to unload model', 'error');
         }
       } catch (e) {
         App.notifications.showToast('Unload failed: ' + e.message, 'error');
@@ -983,7 +983,7 @@
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
-          App.notifications.showToast(errData.error || 'Failed to unload', 'error');
+          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to unload', 'error');
         }
       } catch (e) {
         App.notifications.showToast('Unload failed: ' + e.message, 'error');

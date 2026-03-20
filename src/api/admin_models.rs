@@ -952,6 +952,22 @@ pub async fn unload_shard(
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
+    // Validate shard is local
+    let local_node_id = shared.identity.node_id().clone();
+    let shard_id = crate::types::ShardId {
+        model_id: mid.clone(),
+        index: shard_index,
+    };
+    if !shared
+        .model_registry
+        .shard_holders(&shard_id)
+        .contains(&local_node_id)
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Shard is not held locally".into(),
+        )));
+    }
+
     // Get current shard window (or all local shard indices if no window set)
     let current_window = shared.model_process_pool.get_shard_window(&mid);
     let all_local: Vec<u32> = shared
@@ -1038,9 +1054,31 @@ pub async fn load_shard(
         )));
     }
 
-    // Expand the shard window to include this shard
+    // Expand the shard window to include this shard.
+    // If no window exists, start from all local shards (same as unload_shard).
     let current_window = shared.model_process_pool.get_shard_window(&mid);
-    let mut new_window = current_window.unwrap_or_default();
+    let mut new_window = current_window.unwrap_or_else(|| {
+        shared
+            .model_registry
+            .get_manifest(&mid)
+            .map(|m| {
+                m.shards
+                    .iter()
+                    .filter(|s| {
+                        let sid = crate::types::ShardId {
+                            model_id: mid.clone(),
+                            index: s.index,
+                        };
+                        shared
+                            .model_registry
+                            .shard_holders(&sid)
+                            .contains(&local_node_id)
+                    })
+                    .map(|s| s.index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
     if !new_window.contains(&shard_index) {
         new_window.push(shard_index);
         new_window.sort();
