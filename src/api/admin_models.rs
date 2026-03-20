@@ -54,26 +54,43 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 let local = holders.contains(&local_node_id);
 
                 // Check if this shard is currently loaded in memory (VRAM or RAM).
-                // Check: subprocess pool, split_models DashMap, or legacy executor.
+                // Check subprocess pool and split_models DashMap.
+                // Also check legacy executor — but only if its loaded model matches this model.
+                let legacy_loaded = state
+                    .shared_state
+                    .model_loaded
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    && state
+                        .shared_state
+                        .loaded_model_info
+                        .try_read()
+                        .map(|info| {
+                            info.as_ref().is_some_and(|i| {
+                                m.id.0
+                                    .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
+                            })
+                        })
+                        .unwrap_or(false);
+                // Determine if this shard is loaded in memory.
+                // If a shard window exists, it's the authority on what's loaded
+                // (even between worker restarts). Otherwise check if model is loaded.
+                let shard_window = state
+                    .shared_state
+                    .model_process_pool
+                    .get_shard_window(&m.id);
                 let is_model_loaded = state.shared_state.model_process_pool.is_loaded(&m.id)
                     || state
                         .shared_state
                         .split_models
                         .iter()
                         .any(|e| e.key().0 == m.id)
-                    || state
-                        .shared_state
-                        .model_loaded
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                let in_vram = if local && is_model_loaded {
-                    let window = state
-                        .shared_state
-                        .model_process_pool
-                        .get_shard_window(&m.id);
-                    match window {
+                    || legacy_loaded;
+                let in_vram = if local {
+                    match &shard_window {
+                        // Explicit window = shard is loaded only if in the window
                         Some(w) => w.contains(&s.index),
-                        // No shard window = all local shards are loaded
-                        None => true,
+                        // No window = all local shards loaded if model is active
+                        None => is_model_loaded,
                     }
                 } else {
                     false
