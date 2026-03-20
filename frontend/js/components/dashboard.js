@@ -373,7 +373,7 @@
 
           shards.forEach(function(s) {
             var cls = 'missing';
-            var label = '' + s.index;
+            var label = '' + (s.index + 1);
             var dlPct = 0;
 
             var holderBadge = '';
@@ -849,7 +849,7 @@
 
             var oldClass = cell.className.replace(/shard-cell\s*/, '').trim().split(/\s+/)[0] || 'missing';
             var newClass = 'missing';
-            var label = '' + sd.index;
+            var label = '' + (sd.index + 1);
             var dlPct = sd.progress_pct || 0;
 
             if (sd.state === 'complete') { newClass = 'local'; localCount++; }
@@ -995,7 +995,7 @@
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               cell.className = 'shard-cell local';
-              cell.textContent = '' + s.index;
+              cell.textContent = '' + (s.index + 1);
               cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Stored locally');
               App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
