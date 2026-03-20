@@ -91,6 +91,7 @@
 
       if (data.hardware) {
         var hw = data.hardware;
+        S._gpuInference = !!hw.gpu_inference;
         var gpuEl = document.getElementById('node-gpu');
         var gpuBadge = document.getElementById('node-gpu-badge');
         if (hw.gpu_name) {
@@ -98,13 +99,13 @@
           if (gpuBadge) {
             if (hw.gpu_inference) {
               var backendLabel = hw.inference_backend || 'GPU';
-              gpuBadge.textContent = backendLabel;
+              gpuBadge.textContent = backendLabel + ' mode';
               gpuBadge.className = 'node-mode-badge node-mode-gpu';
-              gpuBadge.title = 'Inference running on GPU via ' + backendLabel;
+              gpuBadge.title = 'Inference running on GPU via ' + backendLabel + ' — fast inference, full credit earning';
             } else {
               gpuBadge.textContent = 'CPU mode';
               gpuBadge.className = 'node-mode-badge node-mode-cpu';
-              gpuBadge.title = 'GPU detected but inference running on CPU — check build flags';
+              gpuBadge.title = 'Inference runs on CPU — responses are slower. GPU-enabled nodes handle requests faster and earn more credits.';
             }
           }
           if (hw.gpu_vram_mb) {
@@ -132,9 +133,9 @@
         } else {
           gpuEl.textContent = 'None';
           if (gpuBadge) {
-            gpuBadge.textContent = 'CPU mode';
+            gpuBadge.textContent = 'CPU only';
             gpuBadge.className = 'node-mode-badge node-mode-cpu';
-            gpuBadge.title = 'No GPU detected — all inference runs on CPU';
+            gpuBadge.title = 'No GPU detected — responses will be slower. You can still host model data and earn credits from storage.';
           }
           document.getElementById('node-vram').textContent = '\u2014';
           document.getElementById('vram-bar').style.width = '0%';
@@ -415,7 +416,7 @@
             }
 
             var title = 'Part ' + (s.index + 1) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
-            if (cls === 'local vram') title += ' \u2014 Active (loaded in memory)';
+            if (cls === 'local vram') title += ' \u2014 Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')';
             else if (cls === 'local') title += ' \u2014 On disk (not loaded)';
             else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
@@ -462,7 +463,7 @@
 
           var legendParts = [];
           if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>On this PC</span>');
-          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>Active (in memory)</span>');
+          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>Active (in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')</span>');
           if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>On peers</span>');
           if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>Downloading</span>');
           if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>Missing</span>');
@@ -644,7 +645,10 @@
         var footerMeta = [];
         footerMeta.push(U.formatBytes(m.total_size_bytes || 0));
         if (shardCount > 0) footerMeta.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
-        if (m.estimated_vram_mb) footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' VRAM');
+        if (m.estimated_vram_mb) {
+          var memLabel = S._gpuInference ? 'VRAM' : 'RAM';
+          footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' ' + memLabel);
+        }
         if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">Local only</span>');
 

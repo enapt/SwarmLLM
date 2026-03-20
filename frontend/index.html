@@ -675,7 +675,10 @@
             <div class="panel node-compact">
               <div class="panel-header">
                 <h2>Node</h2>
-                <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
+                <span style="display:flex;align-items:center;gap:6px">
+                  <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu">CPU mode</span>
+                  <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
+                </span>
               </div>
               <div class="node-hw-grid">
                 <div class="node-hw-cell">
@@ -685,7 +688,6 @@
                 <div class="node-hw-cell">
                   <span class="node-hw-label"><span class="node-hw-icon">▪</span>GPU</span>
                   <span class="mono node-hw-value" id="node-gpu">Detecting...</span>
-                  <span class="node-mode-badge" id="node-gpu-badge"></span>
                 </div>
                 <div class="node-hw-cell">
                   <span class="node-hw-label"><span class="node-hw-icon">≡</span>RAM</span>
