@@ -1724,7 +1724,10 @@ kbd {
   transition: transform 0.15s, box-shadow 0.15s, background-color 0.4s ease, border-color 0.4s ease, color 0.3s ease;
   position: relative; overflow: hidden;
 }
-.model-card .shard-cell:hover { transform: scale(1.18); box-shadow: 0 2px 8px rgba(0,0,0,0.35); z-index: 2; }
+.model-card .shard-cell:hover {
+  transform: scale(1.25); box-shadow: 0 2px 10px rgba(0,0,0,0.4); z-index: 2;
+  outline: 2px solid rgba(255,255,255,0.5); outline-offset: 1px;
+}
 .model-card .shard-cell:active { transform: scale(0.92); }
 /* Shard cell states — color + pattern for accessibility */
 .model-card .shard-cell.local { background: var(--green); opacity: 0.6; }

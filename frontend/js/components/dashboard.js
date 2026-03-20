@@ -413,14 +413,15 @@
               }
             }
 
-            var title = 'Shard ' + s.index + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
+            var title = 'Part ' + (s.index + 1) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
             if (cls === 'local vram') title += ' \u2014 Loaded in GPU VRAM';
-            else if (cls === 'local') title += ' \u2014 On disk (not in VRAM)';
+            else if (cls === 'local') title += ' \u2014 On disk';
             else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
             else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
-            else if (cls === 'verifying') title += ' \u2014 Verifying (BLAKE3)';
+            else if (cls === 'verifying') title += ' \u2014 Verifying';
             else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
             else title += ' \u2014 Not available';
+            title += '\nRight-click to manage';
 
             var style = '';
             if (cls === 'downloading' || cls === 'peer-downloading') {
