@@ -332,7 +332,8 @@
         if (shards.length > 0) {
           var lastIdx = shardCount - 1;
           var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
-          shardHtml = '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="Shard status grid for ' + U.escapeHtml(U.formatModelDisplayName(m.name || m.id)) + '" data-model-grid="' + safeId + '">';
+          shardHtml = '<details class="shard-grid-details"><summary class="shard-grid-toggle">Show parts</summary>' +
+            '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="Shard status grid for ' + U.escapeHtml(U.formatModelDisplayName(m.name || m.id)) + '" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
 
           shards.forEach(function(s) {
@@ -411,19 +412,44 @@
               ' aria-label="' + U.escapeHtml(title) + '"' +
               ' title="' + U.escapeHtml(title) + '">' + label + holderBadge + lockIcon + '</div>';
           });
-          shardHtml += '</div>';
+          shardHtml += '</div></details>';
 
-          // Shard summary counts
-          var summaryParts = [];
-          if (localCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot" aria-hidden="true"></span>' + localCount + ' local</span>');
-          if (peerCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot" aria-hidden="true"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
-          if (dlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot" aria-hidden="true"></span>' + dlCount + ' downloading</span>');
-          if (peerDlCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot" aria-hidden="true"></span>' + peerDlCount + ' peer DL</span>');
-          if (queuedCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot" aria-hidden="true"></span>' + queuedCount + ' queued</span>');
-          if (missingCount > 0) summaryParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot" aria-hidden="true"></span>' + missingCount + ' missing</span>');
-          if (summaryParts.length > 0) {
-            shardHtml += '<div class="shard-summary" role="status" aria-live="polite" data-model-summary="' + safeId + '">' + summaryParts.join('') + '</div>';
-          }
+          // Torrent-style health bar — each segment is a shard, color = status
+          var availCount = localCount + peerCount + dlCount + peerDlCount + queuedCount;
+          var totalShards = localCount + peerCount + dlCount + peerDlCount + queuedCount + missingCount;
+          var healthPct = totalShards > 0 ? Math.round((availCount / totalShards) * 100) : 0;
+          var healthLabel, healthClass;
+          if (healthPct === 100 && localCount === totalShards) { healthLabel = 'Fully local'; healthClass = 'health-full'; }
+          else if (healthPct === 100) { healthLabel = 'Available'; healthClass = 'health-good'; }
+          else if (healthPct >= 60) { healthLabel = 'Partial'; healthClass = 'health-partial'; }
+          else if (healthPct > 0) { healthLabel = 'Limited'; healthClass = 'health-low'; }
+          else { healthLabel = 'Unavailable'; healthClass = 'health-none'; }
+
+          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="' + healthLabel + ' — ' + availCount + ' of ' + totalShards + ' parts available">';
+          shards.forEach(function(s) {
+            var segCls = 'seg-missing';
+            if (s.local && s.in_vram) segCls = 'seg-vram';
+            else if (s.local) segCls = 'seg-local';
+            else if (s.download && (s.download.state === 'Downloading' || s.download.state === 'Verifying')) segCls = 'seg-dl';
+            else if (s.download && (s.download.state === 'Queued' || s.download.state === 'pending')) segCls = 'seg-queued';
+            else if (s.peer_downloads && s.peer_downloads.length > 0) segCls = 'seg-peer-dl';
+            else if (s.holders > 0) segCls = 'seg-peer';
+            barHtml += '<div class="shard-seg ' + segCls + '" style="width:' + (100 / totalShards).toFixed(2) + '%" title="Part ' + (s.index + 1) + '"></div>';
+          });
+          barHtml += '</div>';
+
+          // Health summary text
+          var healthTextParts = [];
+          if (localCount > 0) healthTextParts.push(localCount + ' on this PC');
+          if (peerCount > 0) healthTextParts.push(peerCount + ' from peers');
+          if (dlCount > 0) healthTextParts.push(dlCount + ' downloading');
+          if (missingCount > 0) healthTextParts.push(missingCount + ' unavailable');
+          var healthSummary = '<div class="shard-health-summary ' + healthClass + '">' +
+            '<span class="shard-health-label">' + healthLabel + '</span>' +
+            '<span class="shard-health-detail">' + healthTextParts.join(' · ') + '</span>' +
+            '</div>';
+
+          shardHtml += barHtml + healthSummary;
         }
 
         // Download progress bar
