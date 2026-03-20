@@ -1792,9 +1792,14 @@ kbd {
   width: 100%; padding: 0 0 6px 0; margin-top: 6px;
 }
 .shard-health-bar {
-  height: 5px; border-radius: 2.5px; overflow: hidden;
+  height: 8px; border-radius: 4px; overflow: hidden;
   background: var(--bg-tertiary); margin-bottom: 4px;
-  transition: background 0.5s;
+  transition: background 0.5s, height 0.15s, box-shadow 0.15s;
+  cursor: help;
+}
+.shard-health-bar:hover {
+  height: 12px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.3);
 }
 .shard-health-summary {
   display: flex; align-items: center; gap: 6px;
