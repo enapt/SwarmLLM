@@ -65,6 +65,17 @@
     return s + 's';
   }
 
+  function timeAgo(ts) {
+    var secs = Math.round((Date.now() - ts) / 1000);
+    if (secs < 5) return 'just now';
+    if (secs < 60) return secs + 's ago';
+    var mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + 'm ago';
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm ago';
+    return Math.floor(hrs / 24) + 'd ago';
+  }
+
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   function setTierBadge(elementId, tier) {
@@ -386,6 +397,7 @@
     formatBytes: formatBytes,
     formatSpeed: formatSpeed,
     formatEta: formatEta,
+    timeAgo: timeAgo,
     capitalize: capitalize,
     setTierBadge: setTierBadge,
     renderSparkline: renderSparkline,

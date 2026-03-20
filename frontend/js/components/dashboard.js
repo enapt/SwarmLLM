@@ -19,9 +19,8 @@
     _logModelEvent: function(modelId, icon, text) {
       if (!_modelEvents[modelId]) _modelEvents[modelId] = [];
       var events = _modelEvents[modelId];
-      var now = new Date();
-      var timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      events.unshift({ icon: icon, text: text, time: timeStr });
+      var ts = Date.now();
+      events.unshift({ icon: icon, text: text, ts: ts });
       if (events.length > 10) events.pop();
 
       // Update the ticker in the model card — latest line + hover history
@@ -33,14 +32,14 @@
         if (events.length > 1) {
           historyHtml = '<div class="model-ticker-history">';
           events.slice(1, 6).forEach(function(e) {
-            historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time">' + e.time + '</span></div>';
+            historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + U.timeAgo(e.ts) + '</span></div>';
           });
           historyHtml += '</div>';
         }
         ticker.innerHTML =
           '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
           '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
-          '<span class="model-ticker-time">' + latest.time + '</span></div>' +
+          '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>' +
           historyHtml;
         ticker.style.display = '';
       }

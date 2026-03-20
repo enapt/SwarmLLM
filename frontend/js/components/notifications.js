@@ -14,24 +14,25 @@
   var MAX_ACTIVITY = 50;
 
   function logActivity(icon, text) {
-    var now = new Date();
-    var timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    _activityEntries.unshift({ icon: icon, text: text, time: timeStr, ts: now.getTime() });
+    var ts = Date.now();
+    _activityEntries.unshift({ icon: icon, text: text, ts: ts });
     if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+    _renderActivityLog();
+  }
 
+  function _renderActivityLog() {
     var log = document.getElementById('activity-log');
     if (!log) return;
     var countEl = document.getElementById('activity-count');
     if (countEl) countEl.textContent = _activityEntries.length + ' events';
 
-    // Rebuild (only showing latest 20 for performance)
     var html = '';
     var show = _activityEntries.slice(0, 20);
     for (var i = 0; i < show.length; i++) {
       var e = show[i];
       html += '<div class="activity-entry"><span class="activity-icon">' + e.icon + '</span>' +
         '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
-        '<span class="activity-time">' + e.time + '</span></div>';
+        '<span class="activity-time">' + U.timeAgo(e.ts) + '</span></div>';
     }
     log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>';
   }
@@ -475,6 +476,16 @@
 
     startHealthPolling: startHealthPolling,
   };
+
+  // Refresh "ago" timestamps every 30 seconds
+  setInterval(function() {
+    _renderActivityLog();
+    // Also refresh per-model tickers
+    document.querySelectorAll('.model-ticker-time').forEach(function(el) {
+      var ts = parseInt(el.getAttribute('data-ts'), 10);
+      if (ts) el.textContent = U.timeAgo(ts);
+    });
+  }, 30000);
 
   App.notifications = {
     showToast: showToast,
