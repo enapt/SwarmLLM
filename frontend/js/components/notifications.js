@@ -9,6 +9,33 @@
   var S = App.state;
   var U = App.utils;
 
+  // --- Activity Log ---
+  var _activityEntries = [];
+  var MAX_ACTIVITY = 50;
+
+  function logActivity(icon, text) {
+    var now = new Date();
+    var timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    _activityEntries.unshift({ icon: icon, text: text, time: timeStr, ts: now.getTime() });
+    if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+
+    var log = document.getElementById('activity-log');
+    if (!log) return;
+    var countEl = document.getElementById('activity-count');
+    if (countEl) countEl.textContent = _activityEntries.length + ' events';
+
+    // Rebuild (only showing latest 20 for performance)
+    var html = '';
+    var show = _activityEntries.slice(0, 20);
+    for (var i = 0; i < show.length; i++) {
+      var e = show[i];
+      html += '<div class="activity-entry"><span class="activity-icon">' + e.icon + '</span>' +
+        '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
+        '<span class="activity-time">' + e.time + '</span></div>';
+    }
+    log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>';
+  }
+
   // --- Toast System ---
   function showToast(text, type, duration) {
     type = type || 'info';
@@ -146,12 +173,33 @@
         hideWsBanner(2000);
       }
       S.wsWasConnected = true;
+      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node');
     };
 
     S.ws.onmessage = function(event) {
       try {
         var msg = JSON.parse(event.data);
         if (msg.type === 'stats_update') {
+          // Log first peer connection and acquisition starts for activity visibility
+          if (msg.data.peers !== undefined) {
+            var prevPeers = S._lastPeerCount || 0;
+            if (msg.data.peers > prevPeers && prevPeers === 0) {
+              logActivity('\u{1F310}', 'Connected to ' + msg.data.peers + ' peer' + (msg.data.peers !== 1 ? 's' : ''));
+            }
+            S._lastPeerCount = msg.data.peers;
+          }
+          if (msg.data.acquisitions && msg.data.acquisitions.length > 0) {
+            msg.data.acquisitions.forEach(function(acq) {
+              if (!acq.model_id) return;
+              var acqKey = 'acq_' + acq.model_id;
+              if (acq.state === 'downloading' && !S[acqKey]) {
+                S[acqKey] = true;
+                logActivity('\u2B07', 'Auto-manage: downloading ' + (acq.model_name || acq.model_id));
+              } else if (acq.state === 'complete' && S[acqKey]) {
+                delete S[acqKey];
+              }
+            });
+          }
           App.dashboard.updateStats(msg.data);
           if (msg.data.acquisitions) App.dashboard.updateAcquisitionProgress(msg.data.acquisitions);
           App.dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
@@ -163,6 +211,7 @@
         } else if (msg.type === 'lan_peer_discovered') {
           var count = msg.data.peer_count || 1;
           showToast('Found ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on your local network \u2014 zero configuration needed!', 'success', 8000);
+          logActivity('\u{1F310}', 'Discovered ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on local network');
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {
@@ -173,6 +222,7 @@
           var text = 'Pruned shard ' + U.escapeHtml(String(d.shard_index)) + ' of ' + U.escapeHtml(d.model_name || d.model_id) +
             ' \u2014 ' + U.escapeHtml(String(d.holder_count_before)) + '\u2192' + U.escapeHtml(String(d.holder_count_after)) + ' holders (freed ' + U.escapeHtml(freed) + ')';
           showToast(text, 'info', 6000);
+          logActivity('\u2702', 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) + ' (freed ' + U.formatBytes(d.freed_bytes || 0) + ')');
           App.pruneSchedule.prependHistory(d);
         } else if (msg.type === 'system_notification') {
           var n = msg.data;
@@ -184,6 +234,16 @@
             App.models.load();
             App.modeIndicator.load();
           }, 1000);
+          var reason = msg.data && msg.data.reason;
+          if (reason === 'shard_downloaded') {
+            logActivity('\u2B07', 'Downloaded shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'));
+          } else if (reason === 'model_loaded') {
+            logActivity('\u2705', 'Model loaded: ' + (msg.data.model_name || msg.data.model_id || 'model'));
+          } else if (reason === 'shard_removed') {
+            logActivity('\u274C', 'Removed shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'));
+          } else if (reason) {
+            logActivity('\u{1F504}', 'Model update: ' + reason);
+          }
         }
       } catch (e) {}
     };
@@ -411,5 +471,6 @@
     showUpdateBanner: showUpdateBanner,
     connectWebSocket: connectWebSocket,
     startPolling: startPolling,
+    logActivity: logActivity,
   };
 })();

@@ -340,9 +340,13 @@
             var label = '' + s.index;
             var dlPct = 0;
 
+            var holderBadge = '';
             if (s.local && s.in_vram) { cls = 'local vram'; localCount++; }
             else if (s.local) { cls = 'local'; localCount++; }
-            else if (s.holders > 0) { cls = 'peer'; peerCount++; }
+            else if (s.holders > 0) {
+              cls = 'peer'; peerCount++;
+              holderBadge = '<span class="shard-holders">' + s.holders + '</span>';
+            }
             else { missingCount++; }
 
             if (s.download && s.download.state === 'Downloading') {
@@ -405,7 +409,7 @@
               ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
               ' role="gridcell"' +
               ' aria-label="' + U.escapeHtml(title) + '"' +
-              ' title="' + U.escapeHtml(title) + '">' + label + lockIcon + '</div>';
+              ' title="' + U.escapeHtml(title) + '">' + label + holderBadge + lockIcon + '</div>';
           });
           shardHtml += '</div>';
 
@@ -1012,6 +1016,7 @@
 
         if (status.state === 'complete') {
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
+          App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId));
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);
         } else if (status.state === 'failed') {
           var reason = (typeof status.state === 'object' && status.state.failed) ? status.state.failed.reason : '';
