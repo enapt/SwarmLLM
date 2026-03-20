@@ -1717,7 +1717,7 @@ kbd {
 .model-card .shard-grid.shard-grid-sm .shard-cell { min-width: 18px; height: 18px; font-size: 0.48rem; }
 
 .model-card .shard-cell {
-  flex: 1; min-width: 34px; height: 30px; border-radius: 5px; cursor: pointer;
+  flex: 1; min-width: 0; height: 30px; border-radius: 5px; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   font-size: 0.8rem; font-weight: 900; color: #fff;
   text-shadow: 0 1px 2px rgba(0,0,0,0.5);
@@ -1838,7 +1838,7 @@ kbd {
 }
 .shard-health-bar:hover { height: 12px; }
 .health-seg {
-  border-radius: 3px; transition: background 0.4s, box-shadow 0.15s;
+  flex: 1; min-width: 0; border-radius: 3px; transition: background 0.4s, box-shadow 0.15s;
 }
 .shard-health-bar:hover .health-seg { box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
 /* Health badge — inline in the title row next to the model name */

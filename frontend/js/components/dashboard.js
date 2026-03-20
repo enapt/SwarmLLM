@@ -441,15 +441,8 @@
               endpointLabel = '<span class="shard-endpoint-tag">last</span>';
             }
 
-            // Size-proportional flex — larger shards get wider cells
-            var flexStyle = '';
-            if (s.size_bytes && m.total_size_bytes) {
-              var ratio = s.size_bytes / (m.total_size_bytes / shardCount);
-              if (ratio > 0.5 && ratio < 3) flexStyle = 'flex:' + ratio.toFixed(2) + ';';
-            }
-
             shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' +
-              (style ? style.replace('"', ' ' + flexStyle + '"') : (flexStyle ? ' style="' + flexStyle + '"' : '')) +
+              (style ? style : '') +
               ' data-shard="' + safeId + '-' + s.index + '"' +
               ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
               ' data-shard-index="' + s.index + '"' +
