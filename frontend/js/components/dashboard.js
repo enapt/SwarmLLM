@@ -9,9 +9,45 @@
   var S = App.state;
   var U = App.utils;
 
+  // Per-model event log — keyed by model ID, max 10 events per model
+  var _modelEvents = {};
+
   App.dashboard = {
     _peersExpanded: false,
     _lastPeers: [],
+
+    _logModelEvent: function(modelId, icon, text) {
+      if (!_modelEvents[modelId]) _modelEvents[modelId] = [];
+      var events = _modelEvents[modelId];
+      var now = new Date();
+      var timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      events.unshift({ icon: icon, text: text, time: timeStr });
+      if (events.length > 10) events.pop();
+
+      // Update the ticker in the model card — latest line + hover history
+      var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+      var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
+      if (ticker) {
+        var latest = events[0];
+        var historyHtml = '';
+        if (events.length > 1) {
+          historyHtml = '<div class="model-ticker-history">';
+          events.slice(1, 6).forEach(function(e) {
+            historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time">' + e.time + '</span></div>';
+          });
+          historyHtml += '</div>';
+        }
+        ticker.innerHTML =
+          '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
+          '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
+          '<span class="model-ticker-time">' + latest.time + '</span></div>' +
+          historyHtml;
+        ticker.style.display = '';
+      }
+
+      // Also log to global activity
+      App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text);
+    },
 
     loadInitial: async function() {
       var statsResult, modelsResult;
@@ -608,6 +644,7 @@
           '<div class="model-card-shards">' +
             shardHtml + progressHtml + perShardDlHtml +
           '</div>' +
+          '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
           '<div class="model-card-footer">' +
             '<div class="model-card-meta">' +
               footerMeta.map(function(p) { return '<span>' + p + '</span>'; }).join('') +
@@ -808,6 +845,20 @@
             else { missingCount++; }
 
             if (oldClass !== newClass || cell.textContent !== label) {
+              // Flash animation on state transition
+              if (oldClass !== newClass) {
+                cell.classList.add('shard-transitioning');
+                setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
+                // Log per-model activity
+                var displayName = U.formatModelDisplayName(modelId);
+                if (newClass === 'local' && oldClass !== 'local') {
+                  App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (sd.index + 1) + ' cached locally');
+                } else if (newClass === 'downloading' && oldClass !== 'downloading') {
+                  App.dashboard._logModelEvent(modelId, '\u2B07', 'Downloading part ' + (sd.index + 1));
+                } else if (newClass === 'verifying') {
+                  App.dashboard._logModelEvent(modelId, '\u{1F50D}', 'Verifying part ' + (sd.index + 1));
+                }
+              }
               cell.className = 'shard-cell ' + newClass;
               cell.textContent = label;
 
@@ -920,12 +971,18 @@
             if (current.indexOf('downloading') >= 0 || current.indexOf('local') >= 0) return;
 
             if (s.local) {
+              cell.classList.add('shard-transitioning');
+              setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               cell.className = 'shard-cell local';
               cell.textContent = '' + s.index;
               cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Stored locally');
+              App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
+              cell.classList.add('shard-transitioning');
+              setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               cell.className = 'shard-cell peer';
               cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Available from ' + s.holders + ' peer(s)');
+              App.dashboard._logModelEvent(modelId, '\u{1F310}', 'Part ' + (s.index + 1) + ' found on ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : ''));
             }
           });
         });
@@ -943,6 +1000,12 @@
           if (current.indexOf('local') >= 0 || current.indexOf(' downloading') >= 0) return;
 
           var pdPct = pd.progress_pct || 0;
+          var wasPeerDl = current.indexOf('peer-downloading') >= 0;
+          if (!wasPeerDl) {
+            cell.classList.add('shard-transitioning');
+            setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
+            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading part ' + (pd.shard_index + 1));
+          }
           cell.className = 'shard-cell peer-downloading';
           cell.style.setProperty('--dl-pct', pdPct + '%');
           cell.textContent = pdPct + '%';
