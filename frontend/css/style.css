@@ -1675,9 +1675,10 @@ kbd {
 /* Title bar */
 .model-card-title {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 14px 10px 14px;
+  padding: 10px 14px 6px 14px;
   border-bottom: 1px solid var(--border);
   gap: 8px; min-width: 0;
+  flex-wrap: wrap;
   transition: background 0.3s;
 }
 .model-card.ready .model-card-title {
@@ -1696,8 +1697,8 @@ kbd {
 .model-card .model-name { font-weight: 700; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .model-card-controls { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 
-/* Shard body */
-.model-card-shards { padding: 10px 14px 6px; }
+/* Shard body — full width to align with health bar in title */
+.model-card-shards { padding: 8px 14px 6px; }
 
 /* Footer */
 .model-card-footer {
@@ -1710,14 +1711,14 @@ kbd {
 .model-card-meta { display: flex; gap: 12px; font-size: 0.78rem; color: var(--text-secondary); flex-wrap: wrap; }
 .model-card-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
-/* Shard grid */
-.model-card .shard-grid { display: flex; gap: 3px; flex-wrap: wrap; margin-bottom: 6px; }
+/* Shard grid — flex cells fill available width */
+.model-card .shard-grid { display: flex; gap: 2px; flex-wrap: wrap; margin-bottom: 6px; }
 /* Size tiers — md: 21-50 shards, sm: 51+ shards */
-.model-card .shard-grid.shard-grid-md .shard-cell { width: 24px; height: 19px; font-size: 0.52rem; }
-.model-card .shard-grid.shard-grid-sm .shard-cell { width: 20px; height: 15px; font-size: 0.45rem; }
+.model-card .shard-grid.shard-grid-md .shard-cell { min-width: 20px; height: 18px; font-size: 0.5rem; }
+.model-card .shard-grid.shard-grid-sm .shard-cell { min-width: 16px; height: 14px; font-size: 0.42rem; }
 
 .model-card .shard-cell {
-  width: 30px; height: 24px; border-radius: 3px; cursor: pointer;
+  flex: 1; min-width: 28px; height: 22px; border-radius: 3px; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   font-size: 0.58rem; font-weight: 700; color: rgba(255,255,255,0.9);
   transition: transform 0.15s, box-shadow 0.15s, background-color 0.4s ease, border-color 0.4s ease, color 0.3s ease;
@@ -1786,24 +1787,18 @@ kbd {
 .model-card .shard-legend .leg-missing::before { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
 /* (shard-bar and shard-grid-compact removed — now using shard-grid with size tiers) */
 
-/* Torrent-style shard health bar */
-.shard-health-bar {
-  display: flex; height: 6px; border-radius: 3px; overflow: hidden;
-  background: var(--bg-tertiary); gap: 1px; margin-bottom: 4px;
+/* Torrent-style shard health bar — gradient, attached to bottom of title */
+.model-card-health {
+  width: 100%; padding: 0 0 6px 0; margin-top: 6px;
 }
-.shard-seg { transition: background-color 0.4s, box-shadow 0.3s; min-width: 2px; }
-.seg-vram { background: var(--green); box-shadow: 0 0 4px var(--green); }
-.seg-local { background: var(--green); opacity: 0.7; }
-.seg-peer { background: var(--accent); opacity: 0.8; }
-.seg-dl { background: var(--cyan); animation: seg-pulse 1.5s ease-in-out infinite; }
-.seg-peer-dl { background: var(--orange); animation: seg-pulse 2s ease-in-out infinite; }
-.seg-queued { background: var(--border-light); }
-.seg-missing { background: var(--bg-tertiary); }
-@keyframes seg-pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
-
+.shard-health-bar {
+  height: 5px; border-radius: 2.5px; overflow: hidden;
+  background: var(--bg-tertiary); margin-bottom: 4px;
+  transition: background 0.5s;
+}
 .shard-health-summary {
   display: flex; align-items: center; gap: 6px;
-  font-size: 0.72rem; margin-bottom: 4px;
+  font-size: 0.72rem;
 }
 .shard-health-label {
   font-weight: 700; font-size: 0.68rem; text-transform: uppercase;
@@ -1815,17 +1810,6 @@ kbd {
 .health-low .shard-health-label { color: var(--red, #ef4444); background: var(--red-dim, rgba(239,68,68,0.15)); }
 .health-none .shard-health-label { color: var(--text-muted); background: var(--bg-tertiary); }
 .shard-health-detail { color: var(--text-muted); font-size: 0.7rem; }
-
-/* Collapsible shard grid — hidden by default, click "Show parts" to expand */
-.shard-grid-details { margin-bottom: 6px; }
-.shard-grid-toggle {
-  font-size: 0.65rem; color: var(--text-muted); cursor: pointer;
-  list-style: none; user-select: none; padding: 2px 0;
-}
-.shard-grid-toggle::-webkit-details-marker { display: none; }
-.shard-grid-toggle::before { content: '\25B6 '; font-size: 0.5rem; }
-.shard-grid-details[open] .shard-grid-toggle::before { content: '\25BC '; }
-.shard-grid-details[open] .shard-grid { margin-top: 4px; }
 
 /* Legacy shard summary (kept for live updates) */
 .shard-summary { display: flex; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 6px; }

@@ -192,9 +192,19 @@
             msg.data.acquisitions.forEach(function(acq) {
               if (!acq.model_id) return;
               var acqKey = 'acq_' + acq.model_id;
+              var modelName = acq.model_name || U.formatModelDisplayName(acq.model_id);
+              var source = acq.source === 'huggingface' ? 'HuggingFace' : 'peers';
               if (acq.state === 'downloading' && !S[acqKey]) {
-                S[acqKey] = true;
-                logActivity('\u2B07', 'Auto-manage: downloading ' + (acq.model_name || acq.model_id));
+                S[acqKey] = { shards: 0 };
+                var shardInfo = acq.total_shards ? ' (' + acq.total_shards + ' parts from ' + source + ')' : '';
+                logActivity('\u2B07', 'Auto-manage: caching ' + modelName + shardInfo);
+              } else if (acq.state === 'downloading' && S[acqKey]) {
+                // Track per-shard completions
+                var newShards = acq.downloaded_shards || 0;
+                if (newShards > S[acqKey].shards) {
+                  S[acqKey].shards = newShards;
+                  logActivity('\u2705', 'Cached part ' + newShards + ' of ' + modelName);
+                }
               } else if (acq.state === 'complete' && S[acqKey]) {
                 delete S[acqKey];
               }
