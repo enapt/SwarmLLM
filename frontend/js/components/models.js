@@ -790,6 +790,8 @@
     init: function() {
       this.menu = document.getElementById('shard-context-menu');
       // Wire up buttons once
+      var loadBtn = document.getElementById('shard-ctx-load');
+      if (loadBtn) loadBtn.addEventListener('click', function() { App.shardMenu.loadShard(); });
       var unloadBtn = document.getElementById('shard-ctx-unload');
       if (unloadBtn) unloadBtn.addEventListener('click', function() { App.shardMenu.unloadShard(); });
       var lockBtn = document.getElementById('shard-ctx-lock');
@@ -834,10 +836,16 @@
         btn.className = 'shard-ctx-btn';
       }
 
+      // Load button — only for local shards NOT in memory
+      var loadBtn = document.getElementById('shard-ctx-load');
+      if (loadBtn) {
+        loadBtn.style.display = (shardState === 'local' && !isInVram) ? '' : 'none';
+        loadBtn.title = 'Load this part into memory for inference. The model worker will restart to include it.';
+      }
+
       // Unload button — only when shard is loaded in memory
       if (unloadBtn) {
         unloadBtn.style.display = (shardState === 'local' && isInVram) ? '' : 'none';
-        unloadBtn.textContent = 'Unload from memory';
         unloadBtn.title = 'Keeps the file on disk but frees RAM/VRAM. The model worker will restart without this part.';
       }
 
@@ -935,6 +943,26 @@
         }
       } catch (e) {
         App.ui.showBanner('error', 'Lock update failed: ' + e.message);
+      }
+    },
+
+    loadShard: async function() {
+      var modelId = this.currentModel;
+      var idx = this.currentIndex;
+      this.hide();
+
+      try {
+        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load', { method: 'POST' });
+        if (resp.ok) {
+          App.notifications.showToast('Loading part ' + (idx + 1) + ' into memory...', 'success');
+          App.notifications.logActivity('\u{1F4E5}', U.formatModelDisplayName(modelId) + ': loading part ' + (idx + 1) + ' into memory');
+          App.models.load();
+        } else {
+          var errData = await resp.json().catch(function() { return {}; });
+          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to load shard', 'error');
+        }
+      } catch (e) {
+        App.notifications.showToast('Load failed: ' + e.message, 'error');
       }
     },
 

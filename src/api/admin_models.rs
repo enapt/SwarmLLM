@@ -994,6 +994,66 @@ pub async fn unload_shard(
     })))
 }
 
+/// POST /api/admin/models/:model_id/shards/:shard_index/load — Load a single shard into memory.
+///
+/// Adds the shard to the shard window and restarts the worker so it picks up the new shard.
+/// The shard must already exist on disk (local).
+pub async fn load_shard(
+    State(state): State<AppState>,
+    Path((model_id, shard_index)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    // Verify the shard exists on disk
+    let shard_id = crate::types::ShardId {
+        model_id: mid.clone(),
+        index: shard_index,
+    };
+    let local_node_id = shared.identity.node_id().clone();
+    if !shared
+        .model_registry
+        .shard_holders(&shard_id)
+        .contains(&local_node_id)
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Shard is not on disk — download it first".into(),
+        )));
+    }
+
+    // Expand the shard window to include this shard
+    let current_window = shared.model_process_pool.get_shard_window(&mid);
+    let mut new_window = current_window.unwrap_or_default();
+    if !new_window.contains(&shard_index) {
+        new_window.push(shard_index);
+        new_window.sort();
+    }
+
+    // Restart worker with expanded window
+    shared
+        .model_process_pool
+        .restart_with_window(&mid, new_window.clone())
+        .await;
+    // Clear split models so they reload with new window
+    shared.split_models.retain(|key, _| key.0 != mid);
+
+    let _ = shared.models_changed_tx.send(());
+
+    tracing::info!(
+        model = %model_id,
+        shard = shard_index,
+        loaded = ?new_window,
+        "Shard loaded into memory"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "loaded",
+        "model_id": model_id,
+        "shard_index": shard_index,
+        "loaded_shards": new_window,
+    })))
+}
+
 /// DELETE /api/admin/models/:model_id/shards/:shard_index — Remove a single shard.
 ///
 /// Deletes the shard file from disk, removes self from shard_holders in model_registry,
