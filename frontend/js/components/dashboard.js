@@ -668,7 +668,7 @@
         // Action buttons
         var actionHtml = '';
         if (m.status === 'loaded') {
-          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '">Unload</button>';
+          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="Unload all parts from memory — frees RAM/VRAM but keeps files on disk">Unload all</button>';
         } else if (isReady) {
           actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">Use</button>';
         } else if (isDownloading) {

@@ -789,42 +789,74 @@
 
     init: function() {
       this.menu = document.getElementById('shard-context-menu');
+      // Wire up buttons once
+      var unloadBtn = document.getElementById('shard-ctx-unload');
+      if (unloadBtn) unloadBtn.addEventListener('click', function() { App.shardMenu.unloadShard(); });
+      var lockBtn = document.getElementById('shard-ctx-lock');
+      if (lockBtn) lockBtn.addEventListener('click', function() { App.shardMenu.toggleLock(); });
     },
 
-    show: function(modelId, shardIndex, shardState, x, y, isLocked) {
+    show: function(modelId, shardIndex, shardState, x, y, isLocked, isInVram) {
       if (!this.menu) this.init();
       this.currentModel = modelId;
       this.currentIndex = shardIndex;
       this.currentState = shardState;
       this.currentLocked = !!isLocked;
+      this.currentInVram = !!isInVram;
 
       var header = document.getElementById('shard-ctx-header');
+      var statusEl = document.getElementById('shard-ctx-status');
       var btn = document.getElementById('shard-ctx-action');
-      header.textContent = 'Shard ' + shardIndex;
+      var unloadBtn = document.getElementById('shard-ctx-unload');
+      var lockBtn = document.getElementById('shard-ctx-lock');
+      var warnEl = document.getElementById('shard-ctx-warn');
 
+      header.textContent = 'Part ' + (shardIndex + 1);
+
+      // Status line
+      var statusText = '';
+      if (shardState === 'local' && isInVram) statusText = 'Active (loaded in memory)';
+      else if (shardState === 'local') statusText = 'On disk (not loaded)';
+      else if (shardState === 'downloading') statusText = 'Downloading...';
+      else if (shardState === 'peer') statusText = 'Available from peers';
+      else statusText = 'Not available';
+      statusEl.textContent = statusText;
+
+      // Primary action
       if (shardState === 'local') {
-        btn.textContent = 'Remove this shard';
+        btn.textContent = 'Delete from disk';
         btn.className = 'shard-ctx-btn danger';
       } else if (shardState === 'downloading') {
         btn.textContent = 'Cancel download';
         btn.className = 'shard-ctx-btn danger';
       } else {
-        btn.textContent = 'Download this shard';
+        btn.textContent = 'Download this part';
         btn.className = 'shard-ctx-btn';
       }
 
-      var lockBtn = document.getElementById('shard-ctx-lock');
-      if (!lockBtn) {
-        lockBtn = document.createElement('button');
-        lockBtn.id = 'shard-ctx-lock';
-        lockBtn.className = 'shard-ctx-btn';
-        lockBtn.addEventListener('click', function() { App.shardMenu.toggleLock(); });
-        btn.parentNode.insertBefore(lockBtn, btn.nextSibling);
+      // Unload button — only when shard is loaded in memory
+      if (unloadBtn) {
+        unloadBtn.style.display = (shardState === 'local' && isInVram) ? '' : 'none';
+        unloadBtn.textContent = 'Unload from memory';
+        unloadBtn.title = 'Keeps the file on disk but frees RAM/VRAM. The model worker will restart without this part.';
       }
-      lockBtn.textContent = isLocked ? 'Unlock shard' : 'Lock shard (pin)';
-      lockBtn.style.display = (shardState === 'local') ? '' : 'none';
 
-      var mw = 180, mh = 100;
+      // Lock button — only for local shards
+      if (lockBtn) {
+        lockBtn.textContent = isLocked ? 'Unlock (unpin)' : 'Lock (pin)';
+        lockBtn.style.display = (shardState === 'local') ? '' : 'none';
+      }
+
+      // Warning when auto-manage is on
+      if (warnEl) {
+        warnEl.style.display = 'none';
+        if (shardState === 'local') {
+          warnEl.innerHTML = '\u26a0 Auto-manage may re-download this part if demand is high';
+          warnEl.style.display = '';
+        }
+      }
+
+      var mw = 220, mh = 160;
       var left = Math.min(x, window.innerWidth - mw - 8);
       var top = Math.min(y, window.innerHeight - mh - 8);
       this.menu.style.left = left + 'px';
@@ -903,6 +935,30 @@
         }
       } catch (e) {
         App.ui.showBanner('error', 'Lock update failed: ' + e.message);
+      }
+    },
+
+    unloadShard: async function() {
+      var modelId = this.currentModel;
+      var idx = this.currentIndex;
+      this.hide();
+
+      if (!confirm('Unload part ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart to free memory. Active inference requests may be interrupted.')) return;
+
+      try {
+        // Unload the entire model (kills worker → OS frees memory).
+        // On next inference request, the model reloads with remaining shards.
+        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/unload', { method: 'POST' });
+        if (resp.ok) {
+          App.notifications.showToast('Model unloaded from memory — part ' + (idx + 1) + ' freed', 'success');
+          App.notifications.logActivity('\u{1F4A4}', U.formatModelDisplayName(modelId) + ': unloaded from memory');
+          App.models.load();
+        } else {
+          var errData = await resp.json().catch(function() { return {}; });
+          App.notifications.showToast(errData.error || 'Failed to unload', 'error');
+        }
+      } catch (e) {
+        App.notifications.showToast('Unload failed: ' + e.message, 'error');
       }
     }
   };

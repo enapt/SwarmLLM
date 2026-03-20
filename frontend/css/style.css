@@ -2402,24 +2402,29 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-  min-width: 160px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  min-width: 200px; max-width: 260px;
   overflow: hidden;
 }
 .shard-ctx-header {
-  padding: 6px 12px;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
+  padding: 8px 12px 4px;
+  font-size: 0.85rem; font-weight: 700;
+  color: var(--text-primary);
+}
+.shard-ctx-status {
+  padding: 0 12px 6px;
+  font-size: 0.7rem; color: var(--text-muted);
   border-bottom: 1px solid var(--border);
 }
+.shard-ctx-actions { padding: 4px 0; }
 .shard-ctx-btn {
   display: block;
   width: 100%;
-  padding: 8px 12px;
+  padding: 7px 12px;
   background: none;
   border: none;
   color: var(--text-primary);
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   text-align: left;
   cursor: pointer;
   transition: background var(--transition);
@@ -2427,6 +2432,11 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .shard-ctx-btn:hover { background: var(--bg-tertiary); }
 .shard-ctx-btn.danger { color: var(--red); }
 .shard-ctx-btn.danger:hover { background: var(--red-dim); }
+.shard-ctx-warn {
+  padding: 5px 12px; font-size: 0.62rem;
+  color: var(--orange); border-top: 1px solid var(--border);
+  background: rgba(245,158,11,0.05);
+}
 
 /* ---- Shard cell clickable cursor ---- */
 .model-card .shard-cell { cursor: pointer; }

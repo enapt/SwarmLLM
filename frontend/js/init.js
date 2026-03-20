@@ -434,7 +434,8 @@
           else if (cls.indexOf('downloading') !== -1 && cls.indexOf('peer-downloading') === -1) state = 'downloading';
           else if (cls.indexOf('peer') !== -1) state = 'peer';
           var isLocked = target.getAttribute('data-shard-locked') === '1';
-          App.shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY, isLocked);
+          var isInVram = cls.indexOf('vram') !== -1;
+          App.shardMenu.show(shardModel, shardIdx, state, e.clientX, e.clientY, isLocked, isInVram);
           e.stopPropagation();
           return;
         }
