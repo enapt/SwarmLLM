@@ -486,50 +486,48 @@
           else if (avgHolders >= 2) { healthLabel = 'Healthy'; healthClass = 'health-full'; }
           else { healthLabel = 'Good'; healthClass = 'health-good'; }
 
-          // Human-readable health tooltip
+          // Health tooltip — scale-aware language
           var barTooltipLines = [];
+          var maxH = 0;
+          shards.forEach(function(s) { if ((s.holders || 0) > maxH) maxH = s.holders || 0; });
 
-          // Opening summary
           if (healthClass === 'health-full') {
-            barTooltipLines.push('This model is well backed up across the network.');
-            barTooltipLines.push('If a computer goes offline, others still have every part.');
+            barTooltipLines.push('Well replicated \u2014 every part is distributed across multiple nodes.');
+            barTooltipLines.push('The network can tolerate nodes going offline without disruption.');
           } else if (healthClass === 'health-good') {
-            barTooltipLines.push('This model is available but could use more backups.');
-            barTooltipLines.push('More people hosting it = faster and more reliable.');
+            barTooltipLines.push('Available but lightly replicated.');
+            barTooltipLines.push('More nodes hosting this model improves speed and resilience.');
           } else if (healthClass === 'health-partial') {
-            barTooltipLines.push('Some parts of this model only exist on one computer.');
-            barTooltipLines.push('If that computer goes offline, those parts are lost.');
+            barTooltipLines.push('Some parts have only a single copy on the network.');
+            barTooltipLines.push('If that node goes offline, inference will fail.');
           } else {
-            barTooltipLines.push('Some parts of this model are missing from the network.');
-            barTooltipLines.push('It cannot run until someone provides the missing parts.');
+            barTooltipLines.push('Parts of this model are missing from the network.');
+            barTooltipLines.push('Inference cannot run until the missing parts are provided.');
           }
 
           barTooltipLines.push('');
-
-          // Per-part breakdown — grouped by status
-          if (wellReplicated > 0) barTooltipLines.push('\u2705 ' + wellReplicated + ' part' + (wellReplicated !== 1 ? 's' : '') + ' backed up on 3+ computers');
-          if (adequate > 0) barTooltipLines.push('\u{1F7E1} ' + adequate + ' part' + (adequate !== 1 ? 's' : '') + ' on 2 computers');
-          if (fragile > 0) barTooltipLines.push('\u{1F7E0} ' + fragile + ' part' + (fragile !== 1 ? 's' : '') + ' on only 1 computer \u2014 needs backup');
-          if (networkMissing > 0) barTooltipLines.push('\u{1F534} ' + networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing entirely');
-
+          if (wellReplicated > 0) barTooltipLines.push('\u2705 ' + wellReplicated + '/' + totalShards + ' parts on ' + (maxH >= 3 ? maxH + '+' : '3+') + ' nodes');
+          if (adequate > 0) barTooltipLines.push('\u{1F7E1} ' + adequate + '/' + totalShards + ' parts on 2 nodes');
+          if (fragile > 0) barTooltipLines.push('\u{1F7E0} ' + fragile + '/' + totalShards + ' parts on 1 node only');
+          if (networkMissing > 0) barTooltipLines.push('\u{1F534} ' + networkMissing + '/' + totalShards + ' parts unavailable');
           barTooltipLines.push('');
-          barTooltipLines.push(totalShards + ' parts total \u00b7 ' + avgHolders.toFixed(1) + ' copies on average');
+          barTooltipLines.push(totalShards + ' parts \u00b7 ' + avgHolders.toFixed(1) + '\u00d7 avg replication');
 
           var barTooltip = barTooltipLines.join('\n');
 
           var healthPct = totalShards > 0 ? Math.round(((totalShards - networkMissing) / totalShards) * 100) : 0;
           var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '" style="background:' + gradient + '"></div>';
 
-          // Summary: plain-language detail
+          // Summary: scale-aware detail
           var healthDetail = '';
           if (healthClass === 'health-full') {
-            healthDetail = totalShards + ' parts backed up across ' + Math.round(avgHolders) + '+ computers';
+            healthDetail = avgHolders.toFixed(1) + '\u00d7 replicated across the swarm';
           } else if (healthClass === 'health-good') {
-            healthDetail = totalShards + ' parts available';
+            healthDetail = totalShards + ' parts distributed';
           } else if (fragile > 0) {
-            healthDetail = fragile + ' part' + (fragile !== 1 ? 's' : '') + ' need' + (fragile === 1 ? 's' : '') + ' more backups';
+            healthDetail = fragile + ' part' + (fragile !== 1 ? 's' : '') + ' under-replicated';
           } else if (networkMissing > 0) {
-            healthDetail = networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing from network';
+            healthDetail = networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing from swarm';
           }
           var healthSummary = '<div class="shard-health-summary ' + healthClass + '">' +
             '<span class="shard-health-label">' + healthLabel + '</span>' +
