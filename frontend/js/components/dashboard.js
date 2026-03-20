@@ -364,7 +364,8 @@
 
         // Shard grid
         var shardHtml = '';
-        var healthBarBlock = '';
+        var healthBadgeHtml = '';
+        var healthBarHtml = '';
         if (shards.length > 0) {
           var lastIdx = shardCount - 1;
           var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
@@ -533,8 +534,16 @@
 
           var barTooltip = barTooltipLines.join('\n');
 
+          // Build tick marks that align with shard cell boundaries
+          var tickHtml = '';
+          if (totalShards > 1) {
+            for (var ti = 1; ti < totalShards; ti++) {
+              tickHtml += '<div class="health-tick" style="left:' + (ti * 100 / totalShards).toFixed(2) + '%"></div>';
+            }
+          }
+
           var healthPct = totalShards > 0 ? Math.round(((totalShards - networkMissing) / totalShards) * 100) : 0;
-          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '" style="background:' + gradient + '"></div>';
+          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '" style="background:' + gradient + '">' + tickHtml + '</div>';
 
           // Summary: scale-aware detail
           var healthDetail = '';
@@ -552,8 +561,9 @@
             '<span class="shard-health-detail">' + healthDetail + '</span>' +
             '</div>';
 
-          // barHtml and healthSummary are injected into the title area below
-          var healthBarBlock = barHtml + healthSummary;
+          // Split: badge goes in title, bar goes above shard grid
+          var healthBadgeHtml = healthSummary;
+          var healthBarHtml = barHtml;
         }
 
         // Download progress bar
@@ -673,15 +683,14 @@
             '<div class="model-card-name-row">' +
               creatorIconHtml +
               '<span class="model-name" title="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(name) + '</span>' +
-              encBadge + sourceLabel + trustBadge +
+              encBadge + sourceLabel + trustBadge + healthBadgeHtml +
             '</div>' +
             '<div class="model-card-controls">' +
               statusHtml + metaBtnHtml + gearHtml +
             '</div>' +
-            (healthBarBlock ? '<div class="model-card-health">' + healthBarBlock + '</div>' : '') +
           '</div>' +
           '<div class="model-card-shards">' +
-            shardHtml + progressHtml + perShardDlHtml +
+            healthBarHtml + shardHtml + progressHtml + perShardDlHtml +
           '</div>' +
           '<div class="model-ticker" data-model-ticker="' + safeId + '" style="display:none"></div>' +
           '<div class="model-card-footer">' +

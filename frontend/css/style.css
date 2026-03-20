@@ -1675,10 +1675,9 @@ kbd {
 /* Title bar */
 .model-card-title {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 14px 6px 14px;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   gap: 8px; min-width: 0;
-  flex-wrap: wrap;
   transition: background 0.3s;
 }
 .model-card.ready .model-card-title {
@@ -1830,34 +1829,38 @@ kbd {
 .model-card .shard-legend .leg-missing::before { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
 /* (shard-bar and shard-grid-compact removed — now using shard-grid with size tiers) */
 
-/* Torrent-style shard health bar — gradient, attached to bottom of title */
-.model-card-health {
-  width: 100%; padding: 0 0 6px 0; margin-top: 6px;
-}
+/* Shard health bar — gradient, sits above the shard grid */
 .shard-health-bar {
   height: 8px; border-radius: 4px; overflow: hidden;
-  background: var(--bg-tertiary); margin-bottom: 4px;
+  background: var(--bg-tertiary); margin-bottom: 6px;
   transition: background 0.5s, height 0.15s, box-shadow 0.15s;
-  cursor: help;
+  cursor: help; position: relative;
 }
 .shard-health-bar:hover {
   height: 12px;
   box-shadow: 0 1px 6px rgba(0,0,0,0.3);
 }
+/* Tick marks connecting health bar segments to shard cells below */
+.health-tick {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(0,0,0,0.25);
+}
+[data-theme="light"] .health-tick { background: rgba(255,255,255,0.4); }
+/* Health badge — inline in the title row next to the model name */
 .shard-health-summary {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 0.72rem;
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.68rem; margin-left: 6px; flex-shrink: 0;
 }
 .shard-health-label {
-  font-weight: 700; font-size: 0.68rem; text-transform: uppercase;
-  letter-spacing: 0.03em; padding: 1px 5px; border-radius: 3px;
+  font-weight: 700; font-size: 0.6rem; text-transform: uppercase;
+  letter-spacing: 0.03em; padding: 1px 6px; border-radius: 10px;
 }
 .health-full .shard-health-label { color: var(--green); background: var(--green-dim); }
 .health-good .shard-health-label { color: var(--accent); background: var(--accent-glow); }
 .health-partial .shard-health-label { color: var(--orange); background: rgba(245,158,11,0.15); }
 .health-low .shard-health-label { color: var(--red, #ef4444); background: var(--red-dim, rgba(239,68,68,0.15)); }
 .health-none .shard-health-label { color: var(--text-muted); background: var(--bg-tertiary); }
-.shard-health-detail { color: var(--text-muted); font-size: 0.7rem; }
+.shard-health-detail { color: var(--text-muted); font-size: 0.62rem; }
 
 /* Per-model activity ticker */
 .model-ticker {
