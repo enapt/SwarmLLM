@@ -223,7 +223,7 @@
         container.style.display = '';
         var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Recent Comparisons</div>';
         history.slice(0, 10).forEach(function(item, idx) {
-          var ago = App.compare.timeAgo(item.timestamp);
+          var ago = U.timeAgo(item.timestamp);
           var modelList = (item.models || []).map(function(m) {
             return m.split('/').pop().replace(/-\d{4}-\d{2}-\d{2}$/, '');
           }).join(', ');
@@ -260,15 +260,7 @@
       });
 
       var statusDiv = document.getElementById('compare-status');
-      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Restored from history &middot; ' + App.compare.timeAgo(item.timestamp) + '</span>'; }
-    },
-
-    timeAgo: function(ts) {
-      var s = Math.floor((Date.now() - ts) / 1000);
-      if (s < 60) return 'just now';
-      if (s < 3600) return Math.floor(s / 60) + 'm ago';
-      if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-      return Math.floor(s / 86400) + 'd ago';
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Restored from history &middot; ' + U.timeAgo(item.timestamp) + '</span>'; }
     },
 
     renderCard: function(result) {

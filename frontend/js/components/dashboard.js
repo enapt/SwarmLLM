@@ -906,7 +906,6 @@
                 cell.classList.add('shard-transitioning');
                 setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
                 // Log per-model activity
-                var displayName = U.formatModelDisplayName(modelId);
                 if (newClass === 'local' && oldClass !== 'local') {
                   App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (sd.index + 1) + ' cached locally');
                 } else if (newClass === 'downloading' && oldClass !== 'downloading') {

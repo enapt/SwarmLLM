@@ -298,8 +298,8 @@
         var isDistributed = modelData && modelData.shard_count > 1;
         var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
-        var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.disable') + '</button>';
-        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + I18n.t('enc.enable_privacy') + '</button>';
+        var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.disable')) + '</button>';
+        var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.enable_privacy')) + '</button>';
         if (headerSource === 'cloud') {
           var providerName = (headerModelItem && headerModelItem.group) ? (PROVIDER_NAMES[headerModelItem.group] || headerModelItem.group) : 'cloud provider';
           var providerIcon = (headerModelItem && headerModelItem.group) ? providerIconHtml(headerModelItem.group, 12) : '';

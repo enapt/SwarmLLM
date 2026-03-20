@@ -460,11 +460,7 @@ a:hover { color: var(--accent-hover); }
 .session-item:hover .session-delete { opacity: 0.6; }
 .session-delete:hover { opacity: 1 !important; color: var(--red) !important; }
 
-.sidebar-footer {
-  padding: 8px;
-  border-top: 1px solid var(--border);
-  display: none; /* hidden — toggle is now in header */
-}
+/* (sidebar-footer removed — toggle moved to header) */
 
 /* ---- Content ---- */
 .content {
@@ -614,15 +610,6 @@ a:hover { color: var(--accent-hover); }
   flex-shrink: 0;
   margin-left: 12px;
 }
-.hf-download-mode {
-  padding: 4px 8px;
-  font-size: 0.72rem;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-secondary);
-}
-
 /* ---- Tier badges ---- */
 .tier-badge {
   display: inline-flex;
@@ -990,8 +977,7 @@ label {
   display: flex; align-items: center; gap: 6px; font-size: 0.78rem;
   min-width: 0;
 }
-/* keep legacy row style for anything outside the grid */
-.node-hw-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; font-size: 0.8rem; }
+/* (node-hw-row removed — replaced by node-hw-grid/node-hw-cell) */
 .node-hw-label { width: 44px; color: var(--text-muted); font-size: 0.65rem; text-transform: uppercase; flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
 .node-hw-icon { font-size: 0.7rem; opacity: 0.55; line-height: 1; }
 .node-hw-value { flex: 1; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
@@ -1635,24 +1621,9 @@ kbd {
 .hf-suggestion-chip:hover { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
 .hf-suggestion-chip:active { transform: scale(0.96); }
 
-/* ---- Source badges ---- */
-.source-badge {
-  display: inline-flex; align-items: center;
-  padding: 2px 7px; border-radius: 12px;
-  font-size: 0.65rem; font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-family: var(--font-mono);
-}
-.source-badge.local { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34, 197, 94, 0.25); }
-.source-badge.network { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(59, 130, 246, 0.25); }
-.source-badge.hybrid { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.25); }
-.source-badge.huggingface { background: rgba(255, 208, 65, 0.15); color: #ffd041; border: 1px solid rgba(255, 208, 65, 0.25); }
+/* (source-badge removed — unused, replaced by msg-source-badge) */
 
-/* ---- Shard map ---- */
-.shard-map { display: flex; gap: 2px; margin-top: 4px; }
-.shard-map div { transition: transform 0.15s; }
-.shard-map div:hover { transform: scaleY(1.5); z-index: 1; }
+/* (shard-map removed — unused, replaced by shard-grid) */
 
 /* Model cards */
 .model-card {
@@ -1815,19 +1786,7 @@ kbd {
   0%, 100% { box-shadow: none; }
   50% { box-shadow: 0 0 6px rgba(34, 211, 238, 0.4); }
 }
-.model-card .shard-legend { display: flex; gap: 12px; font-size: 0.7rem; color: var(--text-secondary); margin-top: 6px; flex-wrap: wrap; }
-.model-card .shard-legend span::before {
-  content: ''; display: inline-block; width: 8px; height: 8px;
-  border-radius: 2px; margin-right: 4px; vertical-align: middle;
-}
-.model-card .shard-legend .leg-local::before { background: var(--green); }
-.model-card .shard-legend .leg-peer::before { background: var(--accent); opacity: 0.75; }
-.model-card .shard-legend .leg-dl::before { background: var(--cyan); }
-.model-card .shard-legend .leg-peer-dl::before { background: var(--orange); }
-.model-card .shard-legend .leg-queued::before { background: var(--bg-tertiary); border: 1px dashed var(--cyan); }
-.model-card .shard-legend .leg-verifying::before { background: var(--yellow); }
-.model-card .shard-legend .leg-missing::before { background: var(--bg-tertiary); border: 1px dashed var(--border-light); }
-/* (shard-bar and shard-grid-compact removed — now using shard-grid with size tiers) */
+/* (shard-legend/.leg-* removed — replaced by .shard-legend-bar/.sleg-* ) */
 
 /* Shard health bar — gradient, sits above the shard grid */
 /* Health bar — flex segments with same gap as shard grid for alignment */
@@ -1985,7 +1944,7 @@ kbd {
 details.models-section:not([open]) .models-section-header::before {
   transform: rotate(-90deg);
 }
-.models-section-icon { font-size: 0.9rem; flex-shrink: 0; }
+/* (models-section-icon removed — unused) */
 .models-section-logo { display: inline-block; vertical-align: middle; flex-shrink: 0; }
 .model-card-name-row .provider-icon { margin-right: 4px; opacity: 0.85; }
 .models-section-title { flex: 1; }
@@ -2033,9 +1992,7 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .cloud-model-row-ping { flex-shrink: 0; min-width: 44px; text-align: right; }
 .cloud-model-empty { padding: 12px 10px; font-size: 0.8rem; color: var(--text-muted); text-align: center; }
 .cloud-card-note { font-size: 0.72rem; color: var(--text-muted); }
-.cloud-models-divider { display: flex; align-items: center; gap: 12px; margin: 16px 0 8px; }
-.cloud-divider-line { flex: 1; height: 1px; background: var(--border); }
-.cloud-divider-label { font-size: 0.8rem; color: var(--text-secondary); white-space: nowrap; }
+/* (cloud-models-divider removed — unused) */
 .provider-health-badge { display: inline-block; font-size: 0.68rem; font-weight: 600; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
 .health-fast { background: rgba(76,175,80,0.15); color: var(--green); }
 .health-ok { background: rgba(255,193,7,0.15); color: var(--orange); }
@@ -2323,7 +2280,7 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
   border-top-color: var(--accent);
   animation: spin 0.9s linear infinite;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+/* (duplicate @keyframes spin removed — defined earlier) */
 .cover-msg {
   font-size: 0.95rem; font-weight: 600; color: var(--text-primary);
 }
@@ -2456,17 +2413,7 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 }
 
 /* ---- Probed badge ---- */
-.badge-probed {
-  display: inline-block;
-  font-size: 0.65rem;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
-  margin-left: 6px;
-  vertical-align: middle;
-  font-weight: 500;
-}
+/* (badge-probed removed — unused) */
 
 /* ---- Encrypted pipeline badge ---- */
 .badge-encrypted {
@@ -2785,9 +2732,7 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .stat-help:hover { color: var(--text-primary); border-color: var(--border-light); }
 
 /* #14: Mode indicator help text */
-.mode-indicator .mode-help {
-  font-size: 0.7rem; color: var(--text-muted); margin-left: 4px; font-weight: 400;
-}
+/* (mode-help removed — unused) */
 
 /* #17: Shard cells pointer cursor */
 .shard-cell { cursor: pointer; }
@@ -3098,10 +3043,7 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
 .view > .container > .panel + .panel,
 .view > .container > :not(.grid) > .panel + .panel { margin-top: 20px; }
 /* Nav tabs — stronger active state */
-.nav-tabs .nav-link.active,
-.tab-bar .tab.active {
-  border-bottom-width: 3px;
-}
+/* (nav-tabs/tab-bar removed — unused Bootstrap-style selectors) */
 
 
 /* ---- Reduced motion preference ---- */

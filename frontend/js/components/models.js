@@ -483,7 +483,6 @@
         var resp = await App.authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
         if (resp.ok) {
           App.ui.showBanner('success', 'Download cancelled');
-          var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) {
             var progress = card.querySelector('.dl-progress');
