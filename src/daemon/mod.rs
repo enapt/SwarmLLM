@@ -1138,11 +1138,12 @@ impl Daemon {
                         .unwrap_or(0);
                     count_b.cmp(&count_a)
                 });
-                let vram_budget = crate::model::auto_manage::compute_vram_budget(&sm);
                 for m in &manifests {
                     if sm.split_models.iter().any(|e| e.key().0 == m.id) {
                         continue;
                     }
+                    // Recompute VRAM budget each iteration since loading a model consumes VRAM
+                    let vram_budget = crate::model::auto_manage::compute_vram_budget(&sm);
                     crate::model::auto_manage::check_and_load_model(&sm, &m.id, vram_budget).await;
                 }
             });

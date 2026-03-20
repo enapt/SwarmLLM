@@ -49,7 +49,7 @@ impl SpeculativeDraftState {
         tracing::debug!(
             drafted_count = proposed,
             accepted_count = accepted,
-            acceptance_rate = format!("{:.2}", self.acceptance_rate()),
+            acceptance_rate = self.acceptance_rate(),
             "DIAG: speculative batch"
         );
     }

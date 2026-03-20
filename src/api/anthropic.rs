@@ -1361,6 +1361,98 @@ async fn anthropic_to_openai_proxy(
         ))));
     }
 
+    // Handle streaming vs non-streaming responses
+    if req.stream {
+        // Upstream was told to stream (stream: true in body), so it returns SSE.
+        // Stream the response back, translating OpenAI SSE events to Anthropic format.
+        let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
+        let model_clone = req.model.clone();
+
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            let mut content_so_far = String::new();
+            let mut output_tokens: u32 = 0;
+
+            // Send message_start
+            let _ = sse_tx
+                .send(AnthropicSseEvent::MessageStart {
+                    id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+                    model: model_clone,
+                })
+                .await;
+            let _ = sse_tx
+                .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
+                .await;
+
+            // Read the upstream response body in chunks
+            let mut resp = resp;
+            while let Ok(Some(chunk)) = resp.chunk().await {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE lines
+                while let Some(line_end) = buffer.find('\n') {
+                    let line = buffer[..line_end].trim().to_string();
+                    buffer = buffer[line_end + 1..].to_string();
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                            // Extract delta content from OpenAI SSE
+                            if let Some(delta_text) =
+                                event["choices"][0]["delta"]["content"].as_str()
+                            {
+                                if !delta_text.is_empty() {
+                                    content_so_far.push_str(delta_text);
+                                    output_tokens += 1;
+                                    if sse_tx
+                                        .send(AnthropicSseEvent::ContentBlockDelta {
+                                            index: 0,
+                                            text: delta_text.to_string(),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        return; // client disconnected
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = sse_tx
+                .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                .await;
+            let _ = sse_tx
+                .send(AnthropicSseEvent::MessageDelta {
+                    stop_reason: "end_turn".to_string(),
+                    output_tokens,
+                })
+                .await;
+            let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
+            let (event_type, data) = serialize_anthropic_event(&event);
+            Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default()
+                    .event(event_type)
+                    .data(data),
+            )
+        });
+
+        return Ok(axum::response::sse::Sse::new(stream)
+            .keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+            )
+            .into_response());
+    }
+
+    // Non-streaming: read full JSON response
     let openai_resp: serde_json::Value = resp.json().await.map_err(|e| {
         ApiError(crate::error::SwarmError::Internal(format!(
             "Failed to parse cloud response: {e}"

@@ -120,9 +120,11 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     if tick_count == 1 {
                         continue;
                     }
-                    // Check if last pong was within 10s of the last ping
+                    // Check if last pong was received within a reasonable window.
+                    // Ping fires every 30s; allow up to 35s since last pong to detect
+                    // dead connections within ~1 ping cycle instead of ~2.
                     let last = *last_pong_push.lock().await;
-                    if last.elapsed() > Duration::from_secs(40) {
+                    if last.elapsed() > Duration::from_secs(35) {
                         tracing::debug!("WebSocket client failed pong check — closing");
                         break;
                     }

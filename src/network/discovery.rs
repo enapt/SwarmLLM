@@ -195,8 +195,10 @@ pub fn announce_shards(
     }
 
     for (model_id, indices) in &by_model {
-        // Single record per model: key = /swarm/shards/<model_id>, value = signed(node_id, [indices])
-        let key = RecordKey::new(&format!("/swarm/shards/{model_id}"));
+        // Per-node record: key includes node_id to prevent last-writer-wins collision
+        // between different nodes announcing shards for the same model.
+        let node_id_hex = hex::encode(&node_id.0[..8]);
+        let key = RecordKey::new(&format!("/swarm/shards/{model_id}/{node_id_hex}"));
         let payload = serde_json::to_vec(&(node_id, indices))
             .map_err(|e| SwarmError::Network(e.to_string()))?;
         let value = sign_dht_value(identity, &payload);

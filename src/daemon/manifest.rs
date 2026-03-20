@@ -180,7 +180,18 @@ pub fn generate_and_register_local_manifest(
             for entry in entries.flatten() {
                 let dir = entry.path();
                 if dir.is_dir() && dir != model_dir && dir.join("shard_000.bin").exists() {
-                    // Found shards in a different directory — save manifest + header there too
+                    // Verify this directory is for the SAME model by checking if the
+                    // directory name contains the model slug (prevent cross-model contamination)
+                    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let model_slug = model_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !dir_name.is_empty() && !model_slug.is_empty() {
+                        // Only match if the directory names share a significant common prefix
+                        // (e.g. "tinyllama-1.1b-chat-v1.0" matches "tinyllama-1.1b-chat-v1.0.q4-k-m")
+                        let shorter = model_slug.len().min(dir_name.len()).min(20);
+                        if model_slug[..shorter] != dir_name[..shorter] {
+                            continue; // Different model — skip to prevent cross-contamination
+                        }
+                    }
                     if !dir.join("manifest.json").exists() {
                         if let Err(e) = manifest.save_to_dir(&dir) {
                             tracing::warn!(error = %e, path = %dir.display(), "Failed to save manifest to shard dir");

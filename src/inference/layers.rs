@@ -1202,6 +1202,9 @@ impl Qwen35AttnWeights {
             let gate = qkv.narrow(2, q_dim + k_dim + v_dim, q_dim)?;
             (q, k, v, gate)
         } else {
+            // Separate Q/K/V projections without fused QKV — gate not available.
+            // The gate will only use the learned attn_gate bias (sigmoid(0 + bias)).
+            // This produces degraded but functional output for GGUFs with split Q/K/V.
             let q = self.wq.as_ref().unwrap().forward(x)?;
             let k = self.wk.as_ref().unwrap().forward(x)?;
             let v = self.wv.as_ref().unwrap().forward(x)?;
@@ -1494,9 +1497,12 @@ impl DeltaNetWeights {
             let k_row = k_t.unsqueeze(2)?;
             let outer = v_col.matmul(&k_row)?;
 
-            // State update with fixed decay (simplified — proper alpha/beta
-            // integration requires per-head per-timestep parameters from GGUF
-            // which vary in representation across model sizes)
+            // TODO(qwen35): Implement proper per-timestep alpha/beta gating.
+            // Correct: state = diag(alpha_t) * state + beta_t * outer
+            // Current: fixed 0.95 decay — produces approximate outputs for Qwen 3.5.
+            // The alpha/beta tensors are passed to this function but not yet integrated
+            // because the reshape from [b, seq, hidden] to per-head state dims requires
+            // model-size-specific head decomposition. See CLAUDE.md "Deferred Items".
             state = (&state * 0.95_f64 + outer)?;
 
             // Output: state @ q → [b, n_head, value_head_dim]

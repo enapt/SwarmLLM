@@ -161,10 +161,12 @@ impl Database {
             std::env::temp_dir().join(format!("swarmllm_test_{}.redb", uuid::Uuid::new_v4()));
         let inner = redb::Database::create(&temp_path)
             .map_err(|e| SwarmError::Database(format!("Failed to create temp db: {e}")))?;
-        Ok(Self {
+        let db = Self {
             inner: Arc::new(inner),
             _temp_dir: None,
-        })
+        };
+        db.check_schema_version()?;
+        Ok(db)
     }
 
     /// Store a JSON-serializable value.

@@ -650,11 +650,8 @@ pub fn decode_layer_result(data: &[u8]) -> Result<LayerResult, SwarmError> {
             pos += 1;
             // Error: read message length + message
             if pos + 4 <= data.len() {
-                let msg_len = u32::from_le_bytes(
-                    data[pos..pos + 4]
-                        .try_into()
-                        .expect("slice is exactly 4 bytes after bounds check"),
-                ) as usize;
+                let msg_len_bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap_or([0; 4]); // safe: bounds already checked above
+                let msg_len = u32::from_le_bytes(msg_len_bytes) as usize;
                 pos += 4;
                 // SEC: Cap error message to 4KB to prevent 256MB allocation from oversized msg_len
                 let capped_len = msg_len.min(4096).min(data.len() - pos);

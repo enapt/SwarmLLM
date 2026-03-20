@@ -422,7 +422,7 @@ impl CreditLedger {
                     // Flush pending credit earn accumulator from forward participation.
                     // This prevents credit loss from try_write() contention in the hot path.
                     if let Some(ref ss) = self.shared_state {
-                        let pending = ss.pending_credit_earn.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let pending = ss.pending_credit_earn.swap(0, std::sync::atomic::Ordering::AcqRel);
                         if pending != 0 {
                             if let Err(e) = apply_credit_direct(
                                 &self.balance,
@@ -432,7 +432,7 @@ impl CreditLedger {
                             ).await {
                                 tracing::warn!(error = %e, pending, "Failed to flush pending credit earn");
                                 // Put it back so it's not lost
-                                ss.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Relaxed);
+                                ss.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Release);
                             } else {
                                 tracing::debug!(pending, "Flushed pending forward participation credits");
                             }

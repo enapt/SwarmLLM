@@ -31,9 +31,9 @@ pub struct PoolManager {
     /// Active invite codes (owner only). Keyed by code_hash for O(1) lookup.
     /// One-time use, expired codes cleaned on each generate.
     invite_codes: HashMap<[u8; 32], PoolInviteCode>,
-    /// When true, auto-accept any incoming invitation (set by JoinWithCode).
-    /// This enables the seamless flow: enter code → broadcast join → receive invitation → auto-accept.
-    auto_accept_next_invitation: bool,
+    /// When set, auto-accept invitations from this specific pool owner (set by JoinWithCode).
+    /// Bound to a code_hash to prevent a different pool's invitation from being auto-accepted.
+    auto_accept_code_hash: Option<[u8; 32]>,
 }
 
 impl PoolManager {
@@ -52,7 +52,7 @@ impl PoolManager {
             rate_limiter: PoolRateLimiter::new(rate_limit as usize, 1),
             pending_invitations: HashMap::new(),
             invite_codes: HashMap::new(),
-            auto_accept_next_invitation: false,
+            auto_accept_code_hash: None,
         }
     }
 
@@ -784,9 +784,9 @@ impl PoolManager {
                 "Received pool invitation"
             );
 
-            // Auto-accept if this node used JoinWithCode
-            if self.auto_accept_next_invitation {
-                self.auto_accept_next_invitation = false;
+            // Auto-accept only if this invitation matches the code we used to join
+            if self.auto_accept_code_hash.is_some() {
+                self.auto_accept_code_hash = None;
                 tracing::info!(
                     invitation_id = %invitation.id,
                     "Auto-accepting invitation (from invite code join)"
@@ -854,12 +854,12 @@ impl PoolManager {
             "Recognized blinded pool invitation for us"
         );
 
-        // Auto-accept if this node used JoinWithCode (seamless invite code flow)
-        if self.auto_accept_next_invitation {
-            self.auto_accept_next_invitation = false;
+        // Auto-accept only if we have a pending code-based join
+        if self.auto_accept_code_hash.is_some() {
+            self.auto_accept_code_hash = None;
             tracing::info!(
                 invitation_id = %invitation.id,
-                "Auto-accepting invitation (from invite code join)"
+                "Auto-accepting blinded invitation (from invite code join)"
             );
             if let Err(e) = self.handle_accept_invitation(invitation).await {
                 tracing::warn!(error = %e, "Auto-accept failed");
@@ -1267,9 +1267,9 @@ impl PoolManager {
             .send(crate::types::NetworkCommand::Broadcast(msg))
             .await;
 
-        // Set auto-accept flag so when the invitation arrives via gossip,
-        // we accept it automatically — no manual step needed.
-        self.auto_accept_next_invitation = true;
+        // Set auto-accept with the code hash so when the invitation arrives via gossip,
+        // we only auto-accept if it matches this specific join request.
+        self.auto_accept_code_hash = Some(code_hash);
 
         tracing::info!("Broadcast pool join request with invite code (auto-accept enabled)");
         Ok(())

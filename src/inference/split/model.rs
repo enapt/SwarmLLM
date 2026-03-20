@@ -3650,9 +3650,16 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("before tensor: {e}")))?
                             .reshape(&[1, pos])
                             .map_err(|e| SwarmError::Internal(format!("before reshape: {e}")))?;
-                        let before_emb = tok_emb_layer
+                        let mut before_emb = tok_emb_layer
                             .forward(&before_ids)
                             .map_err(|e| SwarmError::Internal(format!("before embed: {e}")))?;
+                        // Apply Gemma embedding scale (must match forward_inner_impl)
+                        if self.arch.use_gemma_norm() {
+                            let scale = (self.hidden_dim as f64).sqrt();
+                            before_emb = before_emb
+                                .affine(scale, 0.0)
+                                .map_err(|e| SwarmError::Internal(format!("gemma scale: {e}")))?;
+                        }
                         // Ensure 3D: (1, pos, hidden)
                         let before_3d = if before_emb.dims().len() == 2 {
                             before_emb.unsqueeze(0).map_err(|e| {
@@ -3674,9 +3681,16 @@ impl SplitModel {
                             .map_err(|e| SwarmError::Internal(format!("after tensor: {e}")))?
                             .reshape(&[1, after_len])
                             .map_err(|e| SwarmError::Internal(format!("after reshape: {e}")))?;
-                        let after_emb = tok_emb_layer
+                        let mut after_emb = tok_emb_layer
                             .forward(&after_ids)
                             .map_err(|e| SwarmError::Internal(format!("after embed: {e}")))?;
+                        // Apply Gemma embedding scale (must match forward_inner_impl)
+                        if self.arch.use_gemma_norm() {
+                            let scale = (self.hidden_dim as f64).sqrt();
+                            after_emb = after_emb
+                                .affine(scale, 0.0)
+                                .map_err(|e| SwarmError::Internal(format!("gemma scale: {e}")))?;
+                        }
                         let after_3d = if after_emb.dims().len() == 2 {
                             after_emb.unsqueeze(0).map_err(|e| {
                                 SwarmError::Internal(format!("after unsqueeze: {e}"))
