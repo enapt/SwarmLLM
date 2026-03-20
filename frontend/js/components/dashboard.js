@@ -431,24 +431,42 @@
             var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
 
             var endpointClass = '';
-            if (shardCount > 1 && (s.index === 0 || s.index === lastIdx)) {
-              if (m.encrypted_pipeline && s.local) {
-                endpointClass = ' shard-pinned';
-              } else {
-                endpointClass = ' shard-endpoint';
-              }
+            var endpointLabel = '';
+            if (shardCount > 1 && s.index === 0) {
+              endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
+              endpointLabel = '<span class="shard-endpoint-tag">1st</span>';
+            } else if (shardCount > 1 && s.index === lastIdx) {
+              endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
+              endpointLabel = '<span class="shard-endpoint-tag">last</span>';
             }
 
-            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' + style +
+            // Size-proportional flex — larger shards get wider cells
+            var flexStyle = '';
+            if (s.size_bytes && m.total_size_bytes) {
+              var ratio = s.size_bytes / (m.total_size_bytes / shardCount);
+              if (ratio > 0.5 && ratio < 3) flexStyle = 'flex:' + ratio.toFixed(2) + ';';
+            }
+
+            shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' +
+              (style ? style.replace('"', ' ' + flexStyle + '"') : (flexStyle ? ' style="' + flexStyle + '"' : '')) +
               ' data-shard="' + safeId + '-' + s.index + '"' +
               ' data-shard-model="' + U.escapeHtml(m.id) + '"' +
               ' data-shard-index="' + s.index + '"' +
               ' data-shard-locked="' + (s.locked ? '1' : '0') + '"' +
               ' role="gridcell"' +
               ' aria-label="' + U.escapeHtml(title) + '"' +
-              ' title="' + U.escapeHtml(title) + '">' + label + holderBadge + lockIcon + '</div>';
+              ' title="' + U.escapeHtml(title) + '">' + label + holderBadge + endpointLabel + lockIcon + '</div>';
           });
           shardHtml += '</div>';
+
+          // Compact legend
+          shardHtml += '<div class="shard-legend-bar">' +
+            '<span class="sleg"><span class="sleg-swatch sleg-local"></span>On this PC</span>' +
+            '<span class="sleg"><span class="sleg-swatch sleg-vram"></span>In GPU</span>' +
+            '<span class="sleg"><span class="sleg-swatch sleg-peer"></span>On peers</span>' +
+            '<span class="sleg"><span class="sleg-swatch sleg-dl"></span>Downloading</span>' +
+            '<span class="sleg"><span class="sleg-swatch sleg-missing"></span>Missing</span>' +
+            '</div>';
 
           // Swarm health bar — shows NETWORK replication, not local status
           // Color = holder count per shard across all nodes (including this one)
