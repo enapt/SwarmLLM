@@ -924,6 +924,76 @@ pub async fn unload_model(
     })))
 }
 
+/// POST /api/admin/models/:model_id/shards/:shard_index/unload — Unload a single shard from memory.
+///
+/// Narrows the shard window to exclude this shard, then restarts the model worker.
+/// The shard file stays on disk. The worker reloads with the remaining shards.
+pub async fn unload_shard(
+    State(state): State<AppState>,
+    Path((model_id, shard_index)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    // Get current shard window (or all local shard indices if no window set)
+    let current_window = shared.model_process_pool.get_shard_window(&mid);
+    let all_local: Vec<u32> = shared
+        .model_registry
+        .get_manifest(&mid)
+        .map(|m| {
+            let local_node_id = shared.identity.node_id().clone();
+            m.shards
+                .iter()
+                .filter(|s| {
+                    let sid = crate::types::ShardId {
+                        model_id: mid.clone(),
+                        index: s.index,
+                    };
+                    shared
+                        .model_registry
+                        .shard_holders(&sid)
+                        .contains(&local_node_id)
+                })
+                .map(|s| s.index)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let window = current_window.unwrap_or(all_local);
+    let new_window: Vec<u32> = window.into_iter().filter(|&i| i != shard_index).collect();
+
+    if new_window.is_empty() {
+        // Unloading the last shard = unload the model entirely
+        shared.model_process_pool.unload_model(&mid).await;
+        shared.split_models.retain(|key, _| key.0 != mid);
+    } else {
+        // Narrow window and restart worker — next inference request
+        // respawns loading only the remaining shards
+        shared
+            .model_process_pool
+            .restart_with_window(&mid, new_window.clone())
+            .await;
+        // Remove split model entries so they reload with new window
+        shared.split_models.retain(|key, _| key.0 != mid);
+    }
+
+    let _ = shared.models_changed_tx.send(());
+
+    tracing::info!(
+        model = %model_id,
+        shard = shard_index,
+        remaining = ?new_window,
+        "Shard unloaded from memory"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "unloaded",
+        "model_id": model_id,
+        "shard_index": shard_index,
+        "remaining_loaded": new_window,
+    })))
+}
+
 /// DELETE /api/admin/models/:model_id/shards/:shard_index — Remove a single shard.
 ///
 /// Deletes the shard file from disk, removes self from shard_holders in model_registry,

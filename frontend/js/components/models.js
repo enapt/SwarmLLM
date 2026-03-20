@@ -943,12 +943,12 @@
       var idx = this.currentIndex;
       this.hide();
 
-      if (!confirm('Unload part ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart to free memory. Active inference requests may be interrupted.')) return;
+      if (!confirm('Unload part ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart without this part. Active inference may be briefly interrupted.')) return;
 
       try {
-        // Unload the entire model (kills worker → OS frees memory).
-        // On next inference request, the model reloads with remaining shards.
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/unload', { method: 'POST' });
+        // Unload this specific shard — narrows the shard window and restarts the worker.
+        // The remaining shards stay loaded; only this one is freed.
+        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload', { method: 'POST' });
         if (resp.ok) {
           App.notifications.showToast('Model unloaded from memory — part ' + (idx + 1) + ' freed', 'success');
           App.notifications.logActivity('\u{1F4A4}', U.formatModelDisplayName(modelId) + ': unloaded from memory');

@@ -152,6 +152,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/:id/shards/:index/lock",
             put(admin::lock_shard),
         )
+        // Shard unload (free memory, keep file)
+        .route(
+            "/api/admin/models/:id/shards/:index/unload",
+            post(admin::unload_shard),
+        )
         // HF source lookup
         .route("/api/admin/hf/source/:model_id", get(admin::hf_source))
         // Model management
