@@ -1138,6 +1138,8 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `DELETE /api/admin/models/:id/shards/:index` — Delete a single shard
 - `GET/PUT /api/admin/models/:id/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
 - `PUT    /api/admin/models/:id/shards/:index/lock` — Lock/unlock a shard (prevent auto-pruning)
+- `POST   /api/admin/models/:id/shards/:index/load` — Load a shard into memory (expands shard window, restarts worker)
+- `POST   /api/admin/models/:id/shards/:index/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
 - `GET    /api/admin/prune-history` — Recent auto-prune events
 - `GET/POST /api/admin/adapters` — List/register LoRA adapters
