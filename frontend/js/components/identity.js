@@ -145,7 +145,7 @@
           App.notifications.showToast('Peer connected successfully', 'success');
           setTimeout(function() { App.networkCode.load(); }, 2000);
         } else {
-          if (status) { status.textContent = data.error || 'Failed to join'; status.style.color = 'var(--red, #ff6464)'; }
+          if (status) { status.textContent = (data.error ? (data.error.message || data.error) : 'Failed to join'); status.style.color = 'var(--red, #ff6464)'; }
         }
       } catch (e) {
         if (status) { status.textContent = 'Network error'; status.style.color = 'var(--red, #ff6464)'; }

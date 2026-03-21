@@ -324,7 +324,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.created_success'), 'success');
           this.load();
@@ -349,7 +349,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
           if (input) input.value = '';
@@ -366,7 +366,7 @@
         var resp = await App.authFetch('/api/pool/generate-code', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
           return;
         }
         var code = data.code;
@@ -475,7 +475,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.name_saved') || 'Device name saved', 'success');
           this.load();
@@ -496,7 +496,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.split_saved') || 'Credit split saved', 'success');
         }
@@ -511,7 +511,7 @@
         var resp = await App.authFetch('/api/pool/leave', { method: 'POST' });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.left'), 'success');
           this.load();
@@ -531,7 +531,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
           App.notifications.showToast(I18n.t('pool.member_removed'), 'success');
           this.load();
@@ -550,7 +550,7 @@
         });
         var data = await resp.json();
         if (data.error) {
-          App.notifications.showToast(data.error, 'error');
+          App.notifications.showToast((data.error.message || data.error), 'error');
         }
       } catch (e) {
         App.notifications.showToast('Failed: ' + e.message, 'error');

@@ -199,7 +199,7 @@
           setTimeout(function() { App.downloads.load(); App.models.load(); }, 1000);
         } else {
           var err = await resp.json().catch(function() { return {}; });
-          App.ui.showBanner('error', err.error || 'Failed to cancel download');
+          App.ui.showBanner('error', err.error ? (err.error.message || err.error) : 'Failed to cancel download');
         }
       } catch (e) {
         App.ui.showBanner('error', 'Cancel failed: ' + e.message);
