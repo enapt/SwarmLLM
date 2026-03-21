@@ -333,6 +333,8 @@ pub async fn hf_download(
         speed_bytes_per_sec: 0,
         started_at: Some(chrono::Utc::now()),
         log: vec![format!("Downloading {} from HuggingFace...", filename)],
+        source: "huggingface".to_string(),
+        trigger: "user".to_string(),
     };
     shared.acquisition_progress.insert(mid.clone(), status);
 
@@ -810,6 +812,8 @@ pub async fn hf_download_shards(
         speed_bytes_per_sec: 0,
         started_at: Some(chrono::Utc::now()),
         log: vec![log_msg],
+        source: "huggingface".to_string(),
+        trigger: "user".to_string(),
     };
     let shared = state.shared_state.clone();
     shared.acquisition_progress.insert(mid.clone(), status);

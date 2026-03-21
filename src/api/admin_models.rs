@@ -464,6 +464,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                         "total_bytes": entry.total_bytes,
                         "downloaded_shards": entry.downloaded_shards,
                         "speed_bytes_per_sec": entry.speed_bytes_per_sec,
+                        "source": entry.source,
+                        "trigger": entry.trigger,
                     })
                 })
         } else {

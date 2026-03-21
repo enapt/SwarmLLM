@@ -599,12 +599,14 @@
           }
           var shardLabel;
           var localNow = shards.filter(function(s) { return s.local; }).length;
+          var dlSource = ap.source || '';
+          var dlTrigger = ap.trigger || '';
+          var triggerText = dlTrigger === 'auto_manage' ? 'Auto-manage' : (dlTrigger === 'user' ? 'Manual' : '');
+          var sourceText = dlSource === 'huggingface' ? 'from HuggingFace' : (dlSource === 'peers' ? 'from peers' : '');
           if (isCachingLocally) {
-            shardLabel = 'Caching locally (' + localNow + '/' + shardCount + ')';
-          } else if (localNow > 0) {
-            shardLabel = 'Downloading (' + localNow + '/' + shardCount + ' parts)';
+            shardLabel = (triggerText || 'Auto-manage') + ': caching locally (' + localNow + '/' + shardCount + ')';
           } else {
-            shardLabel = 'Downloading';
+            shardLabel = (triggerText ? triggerText + ': ' : '') + 'Downloading' + (sourceText ? ' ' + sourceText : '') + ' (' + localNow + '/' + shardCount + ' parts)';
           }
           var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
           if (speed > 0) rightText += ' &middot; ' + U.formatSpeed(speed);

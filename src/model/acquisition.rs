@@ -33,6 +33,12 @@ pub struct AcquisitionStatus {
     /// Recent log lines for the UI.
     #[serde(default)]
     pub log: Vec<String>,
+    /// Download source: "peers", "huggingface", or "mixed".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    /// What triggered this: "auto_manage", "user", "encrypted_pipeline".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub trigger: String,
 }
 
 /// Progress for a single shard.
@@ -195,6 +201,8 @@ impl AcquisitionManager {
                     speed_bytes_per_sec: 0,
                     started_at: Some(chrono::Utc::now()),
                     log: vec!["Waiting for manifest from network...".into()],
+                    source: "peers".to_string(),
+                    trigger: "user".to_string(),
                 };
                 self.publish_progress(&model_id, &status);
                 self.jobs.insert(
@@ -320,6 +328,8 @@ impl AcquisitionManager {
                 needed.len(),
                 format_bytes_short(total_bytes)
             )],
+            source: "peers".to_string(),
+            trigger: "user".to_string(),
         };
         self.publish_progress(&model_id, &status);
 

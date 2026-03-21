@@ -204,6 +204,8 @@ impl AutoShardManager {
                         "Auto-manage: downloading shard {} of {} (score: {:.1})",
                         candidate.shard_index, candidate.model_name, candidate.score
                     )],
+                    source: "peers".to_string(),
+                    trigger: "auto_manage".to_string(),
                 };
                 self.shared_state
                     .acquisition_progress
