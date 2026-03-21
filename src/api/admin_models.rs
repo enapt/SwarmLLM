@@ -96,18 +96,34 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     false
                 };
 
+                let locked = state
+                    .shared_state
+                    .locked_shards
+                    .get(&shard_id)
+                    .map(|v| *v)
+                    .unwrap_or(false);
+
                 let mut shard_json = serde_json::json!({
                     "index": s.index,
                     "size_bytes": s.size_bytes,
                     "local": local,
                     "holders": holders.len(),
                     "in_vram": in_vram,
+                    "locked": locked,
                 });
 
                 // Attach per-shard download state if downloading
                 if let Some(ref p) = acq {
                     if let Some(sp) = p.shard_progress.get(&s.index) {
-                        if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                        let dl_state = match sp.state {
+                            crate::model::acquisition::ShardState::Downloading => {
+                                Some("Downloading")
+                            }
+                            crate::model::acquisition::ShardState::Verifying => Some("Verifying"),
+                            crate::model::acquisition::ShardState::Pending => Some("Queued"),
+                            _ => None,
+                        };
+                        if let Some(state_str) = dl_state {
                             let pct = if sp.total_bytes > 0 {
                                 (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
                             } else {
@@ -117,7 +133,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                                 obj.insert(
                                     "download".to_string(),
                                     serde_json::json!({
-                                        "state": "Downloading",
+                                        "state": state_str,
                                         "progress_pct": pct,
                                         "downloaded_bytes": sp.downloaded_bytes,
                                         "total_bytes": sp.total_bytes,
@@ -418,9 +434,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 .split_models
                 .iter()
                 .any(|e| e.key().0 == m.id)
+                || state.shared_state.model_process_pool.is_loaded(&m.id)
         } else {
-            // No local shards on disk — can't be "loaded" even if split_models
-            // has a stale entry from a previous load
             false
         };
         let all_covered = global_available == m.shard_count as usize;

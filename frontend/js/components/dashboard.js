@@ -480,9 +480,8 @@
           var wellReplicated = 0, adequate = 0, fragile = 0, networkMissing = 0;
 
           shards.forEach(function(s, i) {
-            // Swarm health = number of NETWORK copies (peers holding this shard).
-            // s.holders = remote peer count. This is consistent across all nodes
-            // viewing the same model, giving everyone the same health bar.
+            // Swarm health = total holder count (includes local node + all peers).
+            // s.holders = total count from model_registry.shard_holders().len()
             var holders = s.holders || 0;
             totalHolders += holders;
 
@@ -1029,9 +1028,11 @@
             if (s.local) {
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-              cell.className = 'shard-cell local';
+              var vramCls = s.in_vram ? 'local vram' : 'local';
+              var vramLabel = s.in_vram ? 'Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')' : 'On disk (not loaded)';
+              cell.className = 'shard-cell ' + vramCls;
               cell.textContent = '' + (s.index + 1);
-              cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Stored locally');
+              cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
               App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
               cell.classList.add('shard-transitioning');

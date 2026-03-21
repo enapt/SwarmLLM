@@ -411,10 +411,25 @@ async fn build_stats_message(
                 let shard_arr: Vec<serde_json::Value> = shards
                     .iter()
                     .map(|s| {
+                        // Compute in_vram: local AND model is loaded with this shard in the window
+                        let mid = crate::types::ModelId(model_id.clone());
+                        let in_vram = if s.local {
+                            let window = state.model_process_pool.get_shard_window(&mid);
+                            match window {
+                                Some(w) => w.contains(&s.index),
+                                None => {
+                                    state.model_process_pool.is_loaded(&mid)
+                                        || state.split_models.iter().any(|e| e.key().0 == mid)
+                                }
+                            }
+                        } else {
+                            false
+                        };
                         serde_json::json!({
                             "index": s.index,
                             "local": s.local,
                             "holders": s.holder_count,
+                            "in_vram": in_vram,
                         })
                     })
                     .collect();
