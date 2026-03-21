@@ -598,12 +598,11 @@
             }
           }
           var shardLabel;
+          var localNow = shards.filter(function(s) { return s.local; }).length;
           if (isCachingLocally) {
-            // Model is already usable via peers — this download is just local caching
-            var cachedCount = shards.filter(function(s) { return s.local; }).length;
-            shardLabel = 'Caching locally (' + cachedCount + '/' + shardCount + ')';
-          } else if (ap.downloaded_shards !== undefined) {
-            shardLabel = 'Downloading shard ' + (ap.downloaded_shards + 1) + ' of ' + shardCount;
+            shardLabel = 'Caching locally (' + localNow + '/' + shardCount + ')';
+          } else if (localNow > 0) {
+            shardLabel = 'Downloading (' + localNow + '/' + shardCount + ' parts)';
           } else {
             shardLabel = 'Downloading';
           }
