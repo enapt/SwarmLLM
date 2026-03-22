@@ -1376,11 +1376,13 @@
           isComplete = true;
         }
 
-        if (isComplete) {
+        if (isComplete && !S.activeAcquisitions[modelId]._completeFired) {
+          S.activeAcquisitions[modelId]._completeFired = true;
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
           App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);
-        } else if (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) {
+        } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
+          S.activeAcquisitions[modelId]._failFired = true;
           var reason = (typeof status.state === 'object' && status.state.failed) ? (status.state.failed.reason || '') : '';
           App.notifications.showToast('Download failed: ' + (status.model_name || modelId) + (reason ? ' \u2014 ' + reason : ''), 'error', 8000);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 10000);
