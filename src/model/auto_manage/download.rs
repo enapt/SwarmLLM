@@ -728,55 +728,53 @@ impl AutoShardManager {
                     .and_then(|p| p.peer_id_bytes.clone());
 
                 if let Some(bytes) = peer_id_bytes {
-                    // Create acquisition_progress entry so the frontend shows a download bar
-                    let total_shards = self
-                        .shared_state
-                        .model_registry
-                        .get_manifest(&candidate.model_id)
-                        .map(|m| m.shard_count)
-                        .unwrap_or(1);
-                    let mut shard_progress = std::collections::HashMap::new();
-                    shard_progress.insert(
-                        candidate.shard_index,
-                        crate::model::acquisition::ShardProgress {
-                            index: candidate.shard_index,
-                            total_bytes: candidate.shard_size_bytes,
-                            downloaded_bytes: 0,
-                            state: crate::model::acquisition::ShardState::Downloading,
-                        },
-                    );
+                    // Create/update acquisition_progress so frontend shows a download bar.
+                    // For P2P, we download one shard at a time — total_bytes is THIS shard's size,
+                    // not the entire model. total_shards reflects shards being P2P downloaded.
+                    let shard_bytes = candidate.shard_size_bytes;
                     if let Some(mut entry) = self
                         .shared_state
                         .acquisition_progress
                         .get_mut(&candidate.model_id)
                     {
                         entry.state = crate::model::acquisition::AcquisitionState::Downloading;
+                        entry.total_bytes = shard_bytes;
+                        entry.downloaded_bytes = 0;
+                        entry.speed_bytes_per_sec = 0;
                         entry
                             .shard_progress
                             .entry(candidate.shard_index)
                             .or_insert_with(|| crate::model::acquisition::ShardProgress {
                                 index: candidate.shard_index,
-                                total_bytes: candidate.shard_size_bytes,
+                                total_bytes: shard_bytes,
                                 downloaded_bytes: 0,
                                 state: crate::model::acquisition::ShardState::Downloading,
                             });
+                        entry.log.push(format!(
+                            "P2P: downloading shard {} from peer",
+                            candidate.shard_index + 1
+                        ));
                     } else {
-                        let total_bytes = self
-                            .shared_state
-                            .model_registry
-                            .get_manifest(&candidate.model_id)
-                            .map(|m| m.total_size_bytes)
-                            .unwrap_or(candidate.shard_size_bytes);
+                        let mut shard_progress = std::collections::HashMap::new();
+                        shard_progress.insert(
+                            candidate.shard_index,
+                            crate::model::acquisition::ShardProgress {
+                                index: candidate.shard_index,
+                                total_bytes: shard_bytes,
+                                downloaded_bytes: 0,
+                                state: crate::model::acquisition::ShardState::Downloading,
+                            },
+                        );
                         self.shared_state.acquisition_progress.insert(
                             candidate.model_id.clone(),
                             crate::model::acquisition::AcquisitionStatus {
                                 model_id: candidate.model_id.clone(),
                                 state: crate::model::acquisition::AcquisitionState::Downloading,
-                                total_shards,
+                                total_shards: 1,
                                 downloaded_shards: 0,
                                 verified_shards: 0,
                                 failed_shards: 0,
-                                total_bytes,
+                                total_bytes: shard_bytes,
                                 downloaded_bytes: 0,
                                 shard_progress,
                                 speed_bytes_per_sec: 0,

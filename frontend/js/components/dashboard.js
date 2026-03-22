@@ -712,7 +712,13 @@
           if (isCachingLocally) {
             shardLabel = (triggerText || 'Auto-manage') + ': caching locally (' + localNow + '/' + shardCount + ')';
           } else {
-            shardLabel = (triggerText ? triggerText + ': ' : '') + 'Downloading' + (sourceText ? ' ' + sourceText : '') + ' (' + localNow + '/' + shardCount + ' parts)';
+            // Show which specific shard is downloading (from shard_details)
+            var dlShardIdx = '';
+            if (ap.shard_details) {
+              var activeShard = ap.shard_details.find(function(sd) { return sd.state === 'downloading'; });
+              if (activeShard) dlShardIdx = ' part ' + (activeShard.index + 1);
+            }
+            shardLabel = (triggerText ? triggerText + ': ' : '') + 'Downloading' + dlShardIdx + (sourceText ? ' ' + sourceText : '') + ' (' + localNow + '/' + shardCount + ' local)';
           }
           var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
           if (speed > 0) rightText += ' &middot; ' + U.formatSpeed(speed);
