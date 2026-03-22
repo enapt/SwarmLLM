@@ -1933,7 +1933,7 @@ impl NetworkManager {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
 
-                        // Mark shard as complete in acquisition_progress
+                        // Mark this shard as complete in acquisition_progress
                         if let Some(mut entry) = self
                             .shared_state
                             .acquisition_progress
@@ -1944,13 +1944,18 @@ impl NetworkManager {
                                 sp.state = crate::model::acquisition::ShardState::Complete;
                                 sp.downloaded_bytes = sp.total_bytes;
                             }
-                            // Check if all tracked shards are complete
-                            let all_done = entry.shard_progress.values().all(|sp| {
-                                sp.state == crate::model::acquisition::ShardState::Complete
+                            // Don't mark the entire acquisition as Complete here —
+                            // we only track the P2P shards, not ALL model shards.
+                            // auto-manage's check_model_complete handles full model readiness.
+                        }
+                        // Remove the acquisition entry after a delay so UI sees the completion
+                        {
+                            let cleanup_shared = self.shared_state.clone();
+                            let cleanup_mid = shard_id.model_id.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                cleanup_shared.acquisition_progress.remove(&cleanup_mid);
                             });
-                            if all_done {
-                                entry.state = crate::model::acquisition::AcquisitionState::Complete;
-                            }
                         }
 
                         let _ = self.shared_state.models_changed_tx.send(());
