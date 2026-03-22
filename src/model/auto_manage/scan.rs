@@ -107,6 +107,25 @@ pub async fn rescan_local_shards(
                 new_shards,
                 "Rescan: registered new local shards"
             );
+            let mname = shared
+                .model_registry
+                .get_manifest(&model_id)
+                .map(|m| m.name.clone());
+            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "model",
+                kind: "shard_scan_found",
+                message: format!(
+                    "Found {} new shard{} of {} on disk",
+                    new_shards,
+                    if new_shards != 1 { "s" } else { "" },
+                    mname.as_deref().unwrap_or(&model_id_str)
+                ),
+                model_id: Some(model_id.0.clone()),
+                model_name: mname,
+                node_id: None,
+                detail_num: Some(new_shards as i64),
+                detail_str: None,
+            });
         }
     }
 

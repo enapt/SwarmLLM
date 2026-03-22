@@ -30,6 +30,14 @@
     'shard_unloaded_memory': '\uD83D\uDCE4', // 📤
     'shard_deleted': '\uD83D\uDDD1',       // 🗑
     'shard_pruned': '\u2702\uFE0F',        // ✂️
+    'pool_device_joined': '\uD83D\uDD17', // 🔗
+    'pool_device_left': '\u26D4',         // ⛔
+    'shard_scan_found': '\uD83D\uDD0D',  // 🔍
+    'rebalance_peer_left': '\u2696\uFE0F', // ⚖️
+    'rebalance_peer_joined': '\u2696\uFE0F', // ⚖️
+    'rebalance_manual': '\u2696\uFE0F',   // ⚖️
+    'inference_request': '\u2728',         // ✨
+    'daemon_started': '\uD83D\uDE80',     // 🚀
   };
 
   // Category CSS class for color coding
@@ -39,6 +47,8 @@
     'download': 'activity-cat-download',
     'inference': 'activity-cat-inference',
     'auto_manage': 'activity-cat-automanage',
+    'pool': 'activity-cat-network',
+    'system': 'activity-cat-model',
   };
 
   function logActivity(icon, text, category, modelId) {

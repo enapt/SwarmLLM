@@ -727,6 +727,30 @@ pub async fn chat_completions(
         stats.requests_made += 1;
     }
 
+    // Emit activity event for inference request
+    {
+        let mname = state
+            .shared_state
+            .model_registry
+            .get_manifest(&crate::types::ModelId(req.model.clone()))
+            .map(|m| m.name.clone());
+        state
+            .shared_state
+            .emit_activity(crate::daemon::state::ActivityEvent {
+                category: "inference",
+                kind: "inference_request",
+                message: format!(
+                    "Inference request: {}",
+                    mname.as_deref().unwrap_or(&req.model)
+                ),
+                model_id: Some(req.model.clone()),
+                model_name: mname,
+                node_id: None,
+                detail_num: None,
+                detail_str: None,
+            });
+    }
+
     // Resolve "auto" model alias to the first available model.
     // Check loaded_model_info first (local split model), then fall back to registry ID.
     if req.model == "auto" {

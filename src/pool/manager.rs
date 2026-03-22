@@ -441,6 +441,18 @@ impl PoolManager {
             "Accepted pool invitation"
         );
 
+        self.shared_state
+            .emit_activity(crate::daemon::state::ActivityEvent {
+                category: "pool",
+                kind: "pool_device_joined",
+                message: "Joined device pool".to_string(),
+                model_id: None,
+                model_name: None,
+                node_id: Some(format!("{}", invitation.pool_id)),
+                detail_num: None,
+                detail_str: None,
+            });
+
         Ok(())
     }
 
@@ -530,6 +542,18 @@ impl PoolManager {
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!("Left device pool");
+
+        self.shared_state
+            .emit_activity(crate::daemon::state::ActivityEvent {
+                category: "pool",
+                kind: "pool_device_left",
+                message: "Left device pool".to_string(),
+                model_id: None,
+                model_name: None,
+                node_id: None,
+                detail_num: None,
+                detail_str: None,
+            });
 
         Ok(())
     }

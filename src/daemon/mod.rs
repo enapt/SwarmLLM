@@ -969,6 +969,17 @@ impl Daemon {
             "SwarmLLM daemon running"
         );
 
+        shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "system",
+            kind: "daemon_started",
+            message: format!("SwarmLLM started on port {}", self.config.node.listen_port),
+            model_id: None,
+            model_name: None,
+            node_id: Some(format!("{}", self.identity.node_id())),
+            detail_num: Some(self.config.node.listen_port as i64),
+            detail_str: None,
+        });
+
         // Auto-detect region via IP geolocation (non-blocking, best-effort)
         if shared_state.config.identity.region.is_none() {
             let geo_state = shared_state.clone();
