@@ -269,6 +269,11 @@
         // Reload ALL data on reconnect so nothing is stale
         App.dashboard.loadInitial();
         App.providerHealth.startHealthPolling();
+      } else {
+        // First connect this page load — clear stale activity from previous daemon session
+        _activityEntries = [];
+        _persistActivity();
+        try { sessionStorage.removeItem('swarmllm_model_events'); } catch (e2) {}
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'network');
