@@ -195,6 +195,15 @@ pub async fn rate_limit_middleware(
     );
     let limiter = &state.rate_limiter;
 
+    // Exempt localhost admin GET requests from rate limiting — the dashboard
+    // polls these frequently and rate limiting causes a feedback loop
+    // (429 → error banner → reconnect → more requests → more 429s).
+    let is_loopback = addr.ip().is_loopback();
+    let is_admin_get = path.starts_with("/api/admin/") && !is_mutating;
+    if is_loopback && is_admin_get {
+        return next.run(req).await;
+    }
+
     if !limiter.try_acquire(addr.ip(), &path, is_mutating) {
         tracing::warn!(
             ip = %addr.ip(),
