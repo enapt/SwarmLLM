@@ -105,7 +105,7 @@
             } else {
               gpuBadge.textContent = 'CPU mode';
               gpuBadge.className = 'node-mode-badge node-mode-cpu';
-              gpuBadge.title = 'Inference runs on CPU — responses are slower. GPU-enabled nodes handle requests faster and earn more credits.';
+              gpuBadge.title = 'Inference runs on CPU — responses are slower than GPU.\n\nModels are memory-mapped from disk, so they use much less RAM than their file size. A 5 GB model might only use a few hundred MB of RAM because the OS only loads the parts being actively used.\n\nGPU-enabled nodes handle requests faster and earn more credits.';
             }
           }
           if (hw.gpu_vram_mb) {
@@ -138,7 +138,7 @@
               if (vramLabel) vramLabel.textContent = 'VRAM (idle)';
               // CPU mode: show actual GPU VRAM (driver baseline only, models use RAM)
               vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
-              vramEl.title = 'GPU not used for inference — models are loaded in RAM instead. This shows GPU driver memory only.';
+              vramEl.title = 'GPU is not used for inference in CPU mode.\n\nModels are memory-mapped from disk into RAM instead. This is slower than GPU but uses much less memory — the OS only loads the parts being actively used, so a 5 GB model may only use a few hundred MB.\n\nThis bar shows GPU driver memory only (baseline allocation).';
               var vramPct = vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0;
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = 'fill cyan';
@@ -164,7 +164,11 @@
           document.getElementById('ram-used').textContent = U.formatMB(ramUsed);
           var ramEl = document.getElementById('ram-used');
           if (processRss > 0) {
-            ramEl.title = 'This node: ' + U.formatMB(processRss) + ' — System total: ' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
+            ramEl.title = 'This node uses ' + U.formatMB(processRss) + ' of RAM.\n\n' +
+              (S._gpuInference
+                ? 'Models are loaded into GPU VRAM for fast inference. RAM usage is low.'
+                : 'In CPU mode, models are memory-mapped from disk. Only the parts being actively used are loaded into RAM, so a 5 GB model may only use a few hundred MB. The OS manages this automatically.') +
+              '\n\nSystem total: ' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
           }
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
@@ -668,9 +672,9 @@
         if (m.estimated_vram_mb) {
           if (S._gpuInference) {
             footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' VRAM');
+          } else {
+            footerMeta.push('<span title="In CPU mode, models are memory-mapped from disk. Only the parts being actively used are loaded into RAM — actual memory usage is much lower than the file size." style="cursor:help">low RAM usage</span>');
           }
-          // In CPU mode, don't show estimated memory — it's misleading
-          // (mmap means actual RSS is much less than file size)
         }
         if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">Local only</span>');
