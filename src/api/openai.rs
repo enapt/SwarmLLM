@@ -734,20 +734,65 @@ pub async fn chat_completions(
             .model_registry
             .get_manifest(&crate::types::ModelId(req.model.clone()))
             .map(|m| m.name.clone());
+        let display = mname.as_deref().unwrap_or(&req.model);
+        let max_tok = req.max_tokens;
+        let msg_count = req.messages.len();
+        let prompt_preview: String = req
+            .messages
+            .last()
+            .map(|m| {
+                let content = match &m.content {
+                    crate::api::openai::MessageContent::Text(s) => s.clone(),
+                    crate::api::openai::MessageContent::Parts(parts) => parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::api::openai::ContentPart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
+                if content.len() > 60 {
+                    format!(
+                        "{}...",
+                        &content[..content
+                            .char_indices()
+                            .take_while(|(i, _)| *i < 57)
+                            .last()
+                            .map(|(i, c)| i + c.len_utf8())
+                            .unwrap_or(57)]
+                    )
+                } else {
+                    content
+                }
+            })
+            .unwrap_or_default();
         state
             .shared_state
             .emit_activity(crate::daemon::state::ActivityEvent {
                 category: "inference",
                 kind: "inference_request",
                 message: format!(
-                    "Inference request: {}",
-                    mname.as_deref().unwrap_or(&req.model)
+                    "Inference request on {} — {} message{}, max {} tokens{}",
+                    display,
+                    msg_count,
+                    if msg_count != 1 { "s" } else { "" },
+                    max_tok,
+                    if !prompt_preview.is_empty() {
+                        format!(": \"{}\"", prompt_preview)
+                    } else {
+                        String::new()
+                    }
                 ),
                 model_id: Some(req.model.clone()),
                 model_name: mname,
                 node_id: None,
-                detail_num: None,
-                detail_str: None,
+                detail_num: Some(max_tok as i64),
+                detail_str: if !prompt_preview.is_empty() {
+                    Some(prompt_preview)
+                } else {
+                    None
+                },
             });
     }
 

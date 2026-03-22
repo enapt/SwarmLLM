@@ -904,18 +904,23 @@ async fn finalize_request(
                 .get_manifest(&request.model_id)
                 .map(|m| m.name.clone());
             let display = mname.as_deref().unwrap_or(&request.model_id.0);
+            let total_tokens = result.prompt_tokens + result.completion_tokens;
             shared_state.emit_activity(crate::daemon::state::ActivityEvent {
                 category: "inference",
                 kind: "inference_completed",
                 message: format!(
-                    "Inference: {} tokens on {}",
-                    result.completion_tokens, display
+                    "Completed on {} — {} prompt + {} generated = {} total tokens ({})",
+                    display,
+                    result.prompt_tokens,
+                    result.completion_tokens,
+                    total_tokens,
+                    result.finish_reason,
                 ),
                 model_id: Some(request.model_id.0.clone()),
                 model_name: mname,
                 node_id: None,
-                detail_num: Some(result.completion_tokens as i64),
-                detail_str: None,
+                detail_num: Some(total_tokens as i64),
+                detail_str: Some(result.finish_reason.clone()),
             });
         }
 

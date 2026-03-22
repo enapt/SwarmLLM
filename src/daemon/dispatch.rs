@@ -620,7 +620,10 @@ pub(crate) async fn dispatch_network_messages(
                                             shared_state.emit_activity(crate::daemon::state::ActivityEvent {
                                                 category: "model",
                                                 kind: "model_discovered",
-                                                message: format!("Discovered model: {} ({} shards)", manifest.name, manifest.shard_count),
+                                                message: format!(
+                                                    "Discovered new model on network: {} — {:?} arch, {} layers, {} shards",
+                                                    manifest.name, manifest.architecture, manifest.num_layers, manifest.shard_count
+                                                ),
                                                 model_id: Some(manifest.id.0.clone()),
                                                 model_name: Some(manifest.name.clone()),
                                                 node_id: None,

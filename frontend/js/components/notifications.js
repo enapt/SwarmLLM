@@ -9,10 +9,24 @@
   var S = App.state;
   var U = App.utils;
 
-  // --- Activity Log ---
-  var _activityEntries = [];
+  // --- Activity Log (persisted to sessionStorage) ---
+  var ACTIVITY_STORAGE_KEY = 'swarmllm_activity';
+  var _activityEntries = (function() {
+    try {
+      var stored = sessionStorage.getItem(ACTIVITY_STORAGE_KEY);
+      if (stored) return JSON.parse(stored);
+    } catch (e) {}
+    return [];
+  })();
   var MAX_ACTIVITY = 200;
   var MAX_DISPLAY = 40;
+
+  function _persistActivity() {
+    try {
+      // Only persist the last 100 to keep sessionStorage lean
+      sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100)));
+    } catch (e) {}
+  }
 
   // Category → icon mapping for backend activity events
   var ACTIVITY_ICONS = {
@@ -55,6 +69,7 @@
     var ts = Date.now();
     _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category || '', modelId: modelId || '' });
     if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+    _persistActivity();
     _renderActivityLog();
   }
 
@@ -67,6 +82,7 @@
 
     _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category, modelId: modelId });
     if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+    _persistActivity();
     _renderActivityLog();
 
     // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
@@ -538,6 +554,11 @@
 
     startHealthPolling: startHealthPolling,
   };
+
+  // Render restored activity log from sessionStorage immediately
+  if (_activityEntries.length > 0) {
+    setTimeout(_renderActivityLog, 0);
+  }
 
   // Refresh "ago" timestamps every 30 seconds
   setInterval(function() {
