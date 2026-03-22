@@ -195,6 +195,9 @@
     },
 
     updateStats: function(data) {
+      if (data.uptime_seconds !== undefined) {
+        document.getElementById('uptime').textContent = U.formatUptime(data.uptime_seconds);
+      }
       if (data.peers !== undefined) {
         document.getElementById('stat-peers').textContent = data.peers;
         var lanBadge = document.getElementById('lan-peer-badge');

@@ -248,6 +248,9 @@
       if (S.wsWasConnected) {
         showWsBanner('connected', 'Connected');
         hideWsBanner(2000);
+        // Reload ALL data on reconnect so nothing is stale
+        App.dashboard.loadInitial();
+        App.providerHealth.startHealthPolling();
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'network');
