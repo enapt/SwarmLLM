@@ -101,11 +101,11 @@
               var backendLabel = hw.inference_backend || 'GPU';
               gpuBadge.textContent = backendLabel + ' mode';
               gpuBadge.className = 'node-mode-badge node-mode-gpu';
-              gpuBadge.title = 'Inference running on GPU via ' + backendLabel + ' — fast inference, full credit earning';
+              gpuBadge.title = I18n.t('hw.gpu_mode_tip');
             } else {
               gpuBadge.textContent = 'CPU mode';
               gpuBadge.className = 'node-mode-badge node-mode-cpu';
-              gpuBadge.title = 'Inference runs on CPU — responses are slower than GPU.\n\nModels are memory-mapped from disk, so they use much less RAM than their file size. A 5 GB model might only use a few hundred MB of RAM because the OS only loads the parts being actively used.\n\nGPU-enabled nodes handle requests faster and earn more credits.';
+              gpuBadge.title = I18n.t('hw.cpu_mode_tip');
             }
           }
           if (hw.gpu_vram_mb) {
@@ -138,7 +138,7 @@
               if (vramLabel) vramLabel.textContent = 'VRAM (idle)';
               // CPU mode: show actual GPU VRAM (driver baseline only, models use RAM)
               vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
-              vramEl.title = 'GPU is not used for inference in CPU mode.\n\nModels are memory-mapped from disk into RAM instead. This is slower than GPU but uses much less memory — the OS only loads the parts being actively used, so a 5 GB model may only use a few hundred MB.\n\nThis bar shows GPU driver memory only (baseline allocation).';
+              vramEl.title = I18n.t('hw.vram_idle_tip');
               var vramPct = vramTotal > 0 ? (vramUsed / vramTotal * 100) : 0;
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = 'fill cyan';
@@ -149,7 +149,7 @@
           if (gpuBadge) {
             gpuBadge.textContent = 'CPU only';
             gpuBadge.className = 'node-mode-badge node-mode-cpu';
-            gpuBadge.title = 'No GPU detected — responses will be slower. You can still host model data and earn credits from storage.';
+            gpuBadge.title = I18n.t('hw.cpu_only_tip');
           }
           document.getElementById('node-vram').textContent = '\u2014';
           document.getElementById('vram-bar').style.width = '0%';
@@ -164,11 +164,9 @@
           document.getElementById('ram-used').textContent = U.formatMB(ramUsed);
           var ramEl = document.getElementById('ram-used');
           if (processRss > 0) {
-            ramEl.title = 'This node uses ' + U.formatMB(processRss) + ' of RAM.\n\n' +
-              (S._gpuInference
-                ? 'Models are loaded into GPU VRAM for fast inference. RAM usage is low.'
-                : 'In CPU mode, models are memory-mapped from disk. Only the parts being actively used are loaded into RAM, so a 5 GB model may only use a few hundred MB. The OS manages this automatically.') +
-              '\n\nSystem total: ' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
+            ramEl.title = U.formatMB(processRss) + '\n\n' +
+              I18n.t(S._gpuInference ? 'hw.ram_tip_gpu' : 'hw.ram_tip_cpu') +
+              '\n\n' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
           }
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
@@ -673,7 +671,7 @@
           if (S._gpuInference) {
             footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' VRAM');
           } else {
-            footerMeta.push('<span title="In CPU mode, models are memory-mapped from disk. Only the parts being actively used are loaded into RAM — actual memory usage is much lower than the file size." style="cursor:help">low RAM usage</span>');
+            footerMeta.push('<span title="' + U.escapeHtml(I18n.t('hw.low_ram_tip')) + '" style="cursor:help">' + U.escapeHtml(I18n.t('hw.low_ram')) + '</span>');
           }
         }
         if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
@@ -738,6 +736,11 @@
           '<div class="gguf-metadata-panel hidden" data-meta-panel="' + U.escapeHtml(m.id) + '"></div>';
 
         if (swarmBody) swarmBody.appendChild(card);
+
+        // Restore per-model activity ticker from stored events
+        if (_modelEvents[m.id] && _modelEvents[m.id].length > 0) {
+          App.dashboard._logModelEvent(m.id, _modelEvents[m.id][0].icon, _modelEvents[m.id][0].text);
+        }
       });
 
       // Cloud provider models

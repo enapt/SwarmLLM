@@ -922,6 +922,18 @@ pub async fn unload_model(
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
+    // Get model name and estimated size before removing
+    let model_display_name = shared
+        .model_registry
+        .get_manifest(&mid)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| model_id.clone());
+    let estimated_mb = shared
+        .model_registry
+        .get_manifest(&mid)
+        .map(|m| crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes))
+        .unwrap_or(0);
+
     // Remove split models for this model
     let mut segments_removed = 0u32;
     shared.split_models.retain(|key, _| {
@@ -959,7 +971,9 @@ pub async fn unload_model(
     Ok(Json(serde_json::json!({
         "status": "unloaded",
         "model_id": model_id,
+        "model_name": model_display_name,
         "segments_removed": segments_removed,
+        "estimated_freed_mb": estimated_mb,
     })))
 }
 

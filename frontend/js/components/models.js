@@ -528,7 +528,14 @@
       try {
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/unload', { method: 'POST' });
         if (resp.ok) {
-          App.notifications.showToast('Model unloaded: ' + U.formatModelDisplayName(modelId), 'success');
+          var result = await resp.json().catch(function() { return {}; });
+          var freedMb = result.estimated_freed_mb || 0;
+          var name = result.model_name || U.formatModelDisplayName(modelId);
+          var msg = name + ' unloaded from memory';
+          if (freedMb > 0) msg += ' (~' + U.formatMB(freedMb) + ' freed)';
+          App.notifications.showToast(msg, 'success');
+          App.notifications.logActivity('\u{1F4A4}', msg);
+          App.dashboard._logModelEvent(modelId, '\u{1F4A4}', 'Unloaded from memory' + (freedMb > 0 ? ' — ~' + U.formatMB(freedMb) + ' freed' : ''));
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
@@ -977,8 +984,10 @@
         // The remaining shards stay loaded; only this one is freed.
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload', { method: 'POST' });
         if (resp.ok) {
-          App.notifications.showToast('Model unloaded from memory — part ' + (idx + 1) + ' freed', 'success');
-          App.notifications.logActivity('\u{1F4A4}', U.formatModelDisplayName(modelId) + ': unloaded from memory');
+          var name = U.formatModelDisplayName(modelId);
+          App.notifications.showToast('Part ' + (idx + 1) + ' of ' + name + ' unloaded from memory', 'success');
+          App.notifications.logActivity('\u{1F4A4}', name + ': part ' + (idx + 1) + ' unloaded (manual)');
+          App.dashboard._logModelEvent(modelId, '\u{1F4A4}', 'Part ' + (idx + 1) + ' unloaded from memory (manual)');
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
