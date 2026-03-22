@@ -158,8 +158,14 @@
 
         if (hw.total_ram_mb) {
           document.getElementById('ram-total').textContent = '/ ' + U.formatMB(hw.total_ram_mb);
-          var ramUsed = hw.used_ram_mb || 0;
+          // Show per-process RSS (this node's actual memory) rather than system-wide
+          var processRss = hw.process_rss_mb || 0;
+          var ramUsed = processRss > 0 ? processRss : (hw.used_ram_mb || 0);
           document.getElementById('ram-used').textContent = U.formatMB(ramUsed);
+          var ramEl = document.getElementById('ram-used');
+          if (processRss > 0) {
+            ramEl.title = 'This node: ' + U.formatMB(processRss) + ' — System total: ' + U.formatMB(hw.used_ram_mb || 0) + ' / ' + U.formatMB(hw.total_ram_mb);
+          }
           var ramPct = hw.total_ram_mb > 0 ? (ramUsed / hw.total_ram_mb * 100) : 0;
           document.getElementById('ram-bar').style.width = ramPct.toFixed(1) + '%';
           document.getElementById('ram-bar').className = ramPct > 90 ? 'fill red' : (ramPct > 70 ? 'fill orange' : 'fill green');
@@ -660,8 +666,11 @@
         footerMeta.push(U.formatBytes(m.total_size_bytes || 0));
         if (shardCount > 0) footerMeta.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
         if (m.estimated_vram_mb) {
-          var memLabel = S._gpuInference ? 'VRAM' : 'RAM';
-          footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' ' + memLabel);
+          if (S._gpuInference) {
+            footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' VRAM');
+          }
+          // In CPU mode, don't show estimated memory — it's misleading
+          // (mmap means actual RSS is much less than file size)
         }
         if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
         else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">Local only</span>');

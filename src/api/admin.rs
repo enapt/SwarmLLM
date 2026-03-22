@@ -357,6 +357,14 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
     let total_ram_mb = sys.total_memory() / (1024 * 1024);
     let used_ram_mb = sys.used_memory() / (1024 * 1024);
 
+    // Per-process memory (RSS) — actual memory this node is using
+    let process_rss_mb = {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        sys.process(pid)
+            .map(|p| p.memory() / (1024 * 1024))
+            .unwrap_or(0)
+    };
+
     let cpu_name = sys
         .cpus()
         .first()
@@ -415,6 +423,7 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
         "est_tokens_per_sec_7b": est_tokens_per_sec_7b,
         "total_ram_mb": total_ram_mb,
         "used_ram_mb": used_ram_mb,
+        "process_rss_mb": process_rss_mb,
         "available_disk_mb": available_disk_mb,
         "total_disk_mb": total_disk_mb,
         "used_disk_mb": used_disk_mb,
