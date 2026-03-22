@@ -1881,6 +1881,22 @@ impl NetworkManager {
                         }
                     }
 
+                    // Update acquisition_progress so the frontend download bar moves
+                    if let Some(mut entry) = self
+                        .shared_state
+                        .acquisition_progress
+                        .get_mut(&shard_id.model_id)
+                    {
+                        entry.downloaded_bytes = entry.downloaded_bytes.saturating_add(chunk_len);
+                        if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
+                            sp.downloaded_bytes = sp.downloaded_bytes.saturating_add(chunk_len);
+                        }
+                        // Estimate speed from chunk timing
+                        if chunk_len > 0 {
+                            entry.speed_bytes_per_sec = chunk_len; // rough per-chunk estimate
+                        }
+                    }
+
                     // Update progress tracking
                     let new_offset = offset + chunk_len;
                     if new_offset < data.total_size {
@@ -1916,11 +1932,65 @@ impl NetworkManager {
                     } else {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
+
+                        // Mark shard as complete in acquisition_progress
+                        if let Some(mut entry) = self
+                            .shared_state
+                            .acquisition_progress
+                            .get_mut(&shard_id.model_id)
+                        {
+                            entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
+                            if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
+                                sp.state = crate::model::acquisition::ShardState::Complete;
+                                sp.downloaded_bytes = sp.total_bytes;
+                            }
+                            // Check if all tracked shards are complete
+                            let all_done = entry.shard_progress.values().all(|sp| {
+                                sp.state == crate::model::acquisition::ShardState::Complete
+                            });
+                            if all_done {
+                                entry.state = crate::model::acquisition::AcquisitionState::Complete;
+                            }
+                        }
+
+                        let _ = self.shared_state.models_changed_tx.send(());
+
                         tracing::info!(
                             model = %shard_id.model_id,
                             index = shard_id.index,
                             "Shard download complete"
                         );
+                        let mname = self
+                            .shared_state
+                            .model_registry
+                            .get_manifest(&shard_id.model_id)
+                            .map(|m| m.name.clone());
+                        let peer_node_id = self.peer_to_node.get(&peer).map(|r| r.clone());
+                        let peer_label = peer_node_id
+                            .as_ref()
+                            .and_then(|nid| {
+                                self.shared_state
+                                    .nickname_registry
+                                    .get(nid)
+                                    .map(|r| r.nickname.clone())
+                            })
+                            .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
+                        self.shared_state
+                            .emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_p2p_complete",
+                                message: format!(
+                                    "Shard {} of {} downloaded from peer {}",
+                                    shard_id.index + 1,
+                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                                    peer_label
+                                ),
+                                model_id: Some(shard_id.model_id.0.clone()),
+                                model_name: mname,
+                                node_id: Some(format!("{}", peer)),
+                                detail_num: Some(shard_id.index as i64),
+                                detail_str: None,
+                            });
                     }
                 } else {
                     tracing::warn!(

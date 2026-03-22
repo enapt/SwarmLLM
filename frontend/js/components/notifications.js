@@ -59,6 +59,7 @@
     'shard_no_source': '\u26A0\uFE0F',   // ⚠️
     'model_download_complete': '\uD83C\uDF89', // 🎉
     'shard_transfer_failed': '\u274C',    // ❌
+    'shard_p2p_complete': '\u2705',       // ✅
   };
 
   // Category CSS class for color coding
