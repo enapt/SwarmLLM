@@ -1959,10 +1959,11 @@ details.models-section:not([open]) .models-section-header::before {
   transform: rotate(-90deg);
 }
 select.swarm-model-sort {
-  margin-left: auto; flex-shrink: 0;
-  padding: 3px 6px; font-size: 0.7rem;
+  margin-left: auto; flex: 0 0 auto; width: auto;
+  padding: 2px 6px; font-size: 0.68rem;
   background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px;
   color: var(--text-secondary); cursor: pointer; outline: none;
+  appearance: auto; -webkit-appearance: menulist;
 }
 select.swarm-model-sort:focus { border-color: var(--accent); }
 /* (models-section-icon removed — unused) */
