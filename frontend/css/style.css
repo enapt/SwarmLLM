@@ -1571,6 +1571,7 @@ kbd {
 .activity-cat-download .activity-text { color: var(--blue, #3b82f6); }
 .activity-cat-inference .activity-text { color: var(--green, #22c55e); }
 .activity-cat-automanage .activity-text { color: var(--orange, #f59e0b); }
+.activity-ago { opacity: 0.6; margin-left: 2px; }
 .activity-overflow { opacity: 0.5; }
 
 /* ---- Loading skeletons ---- */

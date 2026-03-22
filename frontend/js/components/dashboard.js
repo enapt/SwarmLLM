@@ -60,11 +60,15 @@
       if (!ticker) return;
 
       var latest = events[0];
+      function _tickerTime(ts) {
+        var d = new Date(ts);
+        return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+      }
       var historyHtml = '';
       if (events.length > 1) {
         historyHtml = '<div class="model-ticker-history">';
         events.slice(1, 10).forEach(function(e) {
-          historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + U.timeAgo(e.ts) + '</span></div>';
+          historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
         });
         historyHtml += '</div>';
       }

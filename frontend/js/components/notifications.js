@@ -113,9 +113,15 @@
     for (var i = 0; i < show.length; i++) {
       var e = show[i];
       var catClass = ACTIVITY_CATEGORY_CLASS[e.category] || '';
+      var d = new Date(e.ts);
+      var clock = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+      var ago = U.timeAgo(e.ts);
+      var timeHtml = i === 0
+        ? '<span class="activity-time" title="' + clock + '">' + ago + '</span>'
+        : '<span class="activity-time">' + clock + ' <span class="activity-ago">' + ago + '</span></span>';
       html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + e.icon + '</span>' +
         '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
-        '<span class="activity-time">' + U.timeAgo(e.ts) + '</span></div>';
+        timeHtml + '</div>';
     }
     if (_activityEntries.length > MAX_DISPLAY) {
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
