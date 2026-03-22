@@ -57,6 +57,7 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<ModelId, Notify>       — loading models    │  │
 │  │  DashMap<ModelId, bool>         — encrypted pipeline │  │
 │  │  mpsc::Sender<ModelId>          — DHT query (S5)    │  │
+│  │  broadcast::Sender<ActivityEvent> — activity events │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -221,7 +222,8 @@ libp2p Swarm
 │
 ├── request_response (unified protocol, /swarmllm/1.0.0, 300s timeout)
 │   ├── JSON control messages — SwarmMessage, ShardRequest/ShardResponse
-│   └── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
+│   ├── Binary tensor payloads — LayerForward, LayerResult (type-tag byte: 0x00=JSON, 0x01=tensor, zstd compression optional)
+│   └── Binary shard data — ShardResponse payload (type-tag byte: 0x03=shard, 32MB chunks as raw bytes, bypasses 4MB JSON limit)
 │
 ├── TCP transport (Noise + Yamux, nodelay=true, port+10)
 ├── QUIC transport (port, fallback for NAT traversal)
@@ -671,6 +673,7 @@ Network Registry (GossipSub/DHT)
 - Failed shards are renamed `.bin.quarantine` and the serving peer's trust is penalized
 - Downloads are retried (3 attempts, 5s/30s/120s backoff) with alternate peer selection
 - Atomic writes: shards written to `.tmp` then renamed, preventing corrupt partial files
+- **P2P shard wire format**: Shard chunks use `WIRE_TAG_SHARD` (0x03) binary framing — raw bytes sent directly without JSON serialization. This is essential: the 4MB JSON body limit would silently fail all P2P shard transfers (shards are typically 256MB–1GB)
 - On startup, `load_all_local()` rejects model directories without a valid manifest
 - On startup, every existing shard is re-verified against its manifest hash
 - Stale `.tmp` files cleaned up on startup
@@ -1188,6 +1191,28 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Basic/Advanced mode**: Hides technical details (shard grids, GGUF metadata, etc.) in basic mode. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
+
+## Activity Event System
+
+A lightweight cross-subsystem event bus for real-time dashboard observability.
+
+**Backend** (`src/daemon/state.rs`):
+- `ActivityEvent` struct with fields: `kind` (enum, 26 variants), `model_id` (optional), `message` (human-readable string), `timestamp` (Unix seconds)
+- `activity_tx: broadcast::Sender<ActivityEvent>` in SharedState (capacity 256, oldest events dropped on overflow)
+- All 10 subsystems emit events via `state.activity_tx.send()` — fire-and-forget (send errors ignored)
+- Example event kinds: `ShardDownloaded`, `ShardPruned`, `InferenceRequest`, `InferenceComplete`, `PeerConnected`, `PeerDisconnected`, `CreditEarned`, `CreditSpent`, `ModelLoaded`, `ModelUnloaded`, `WorkerSpawned`, `WorkerKilled`, `PoolJoined`, `AutoManageCycle`, `HealthPing`, and more
+
+**WebSocket delivery** (`src/api/websocket.rs`):
+- ApiServer subscribes to `activity_tx` on WebSocket upgrade
+- Events sent to client as `{"type":"activity_event","data":{...}}` JSON messages
+- Dropped messages (slow client) are non-fatal — buffer overflow discards oldest events
+
+**Frontend** (`js/components/dashboard.js`, `js/components/notifications.js`):
+- Global activity log persisted to `sessionStorage` (survives tab refresh within the session)
+- Category-based color coding by event kind (inference = blue, download = green, prune = orange, error = red, etc.)
+- Per-model activity ticker: latest event shown inline on each model card; hover expands to last 5 events
+- Global Activity panel: chronological log of all events with relative timestamps ("just now", "5m ago")
+- Shard flash animation: model card shard cells glow white on `ShardDownloaded`/`ShardPruned` events
 
 ## Node Tiers
 
