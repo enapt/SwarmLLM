@@ -34,6 +34,37 @@ impl AutoShardManager {
             "AutoShardManager: requesting shard download"
         );
 
+        // Emit activity event for download start
+        {
+            let mname = self
+                .shared_state
+                .model_registry
+                .get_manifest(&candidate.model_id)
+                .map(|m| m.name.clone());
+            let display = mname.as_deref().unwrap_or(&candidate.model_id.0);
+            let source = if candidate.holder_count > 0 {
+                "peers"
+            } else {
+                "HuggingFace"
+            };
+            self.shared_state
+                .emit_activity(crate::daemon::state::ActivityEvent {
+                    category: "download",
+                    kind: "shard_download_started",
+                    message: format!(
+                        "Downloading shard {} of {} from {}",
+                        candidate.shard_index + 1,
+                        display,
+                        source
+                    ),
+                    model_id: Some(candidate.model_id.0.clone()),
+                    model_name: mname,
+                    node_id: None,
+                    detail_num: Some(candidate.shard_index as i64),
+                    detail_str: Some(source.to_string()),
+                });
+        }
+
         let model_dir = self.shared_state.config.node.data_dir.join("models").join(
             crate::model::shard::sanitize_path_component(&candidate.model_id.0),
         );
@@ -511,6 +542,25 @@ impl AutoShardManager {
 
                         // Notify dashboard that models have changed
                         let _ = shared.models_changed_tx.send(());
+
+                        // Emit activity event for shard download complete
+                        {
+                            let mname = shared
+                                .model_registry
+                                .get_manifest(&model_id)
+                                .map(|m| m.name.clone());
+                            let display = mname.as_deref().unwrap_or(&model_id.0);
+                            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_download_complete",
+                                message: format!("Downloaded all shards of {}", display),
+                                model_id: Some(model_id.0.clone()),
+                                model_name: mname,
+                                node_id: None,
+                                detail_num: None,
+                                detail_str: Some("p2p".to_string()),
+                            });
+                        }
 
                         // Self-wake so we immediately re-evaluate and download
                         // more shards (libp2p gossipsub doesn't deliver our own

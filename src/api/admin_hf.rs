@@ -1279,6 +1279,18 @@ pub async fn hf_download_shards(
             // Notify dashboard that models have changed
             let _ = download_shared.models_changed_tx.send(());
 
+            // Emit activity event for HF download completion
+            download_shared.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "download",
+                kind: "hf_download_complete",
+                message: format!("HuggingFace download complete: {}", model_id_str),
+                model_id: Some(model_id_str.clone()),
+                model_name: None,
+                node_id: None,
+                detail_num: None,
+                detail_str: Some("huggingface".to_string()),
+            });
+
             // Wake auto-manage again to re-evaluate (maybe download more shards)
             download_shared.auto_manage_notify.notify_one();
 

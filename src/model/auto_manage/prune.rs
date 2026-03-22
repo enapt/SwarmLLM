@@ -421,6 +421,24 @@ impl AutoShardManager {
             let _ = self.shared_state.prune_events_tx.send(event.clone());
             let _ = self.shared_state.models_changed_tx.send(());
 
+            // Emit activity event
+            self.shared_state
+                .emit_activity(crate::daemon::state::ActivityEvent {
+                    category: "auto_manage",
+                    kind: "shard_pruned",
+                    message: format!(
+                        "Pruned shard {} of {} — {} holders remain",
+                        event.shard_index + 1,
+                        event.model_name,
+                        event.holder_count_after
+                    ),
+                    model_id: Some(event.model_id.0.clone()),
+                    model_name: Some(event.model_name.clone()),
+                    node_id: None,
+                    detail_num: Some(event.freed_bytes as i64),
+                    detail_str: Some(event.reason.clone()),
+                });
+
             // Add to history
             {
                 let mut history = self.shared_state.prune_history.write().await;

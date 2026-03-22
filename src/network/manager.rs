@@ -999,6 +999,41 @@ impl NetworkManager {
                     .insert(node_id.clone(), peer_info);
                 let _ = self.shared_state.peer_list_changed_tx.send(());
 
+                // Emit activity event for peer connection
+                {
+                    let nick = self
+                        .shared_state
+                        .nickname_registry
+                        .get(&node_id)
+                        .map(|r| r.nickname.clone());
+                    let node_id_str = format!("{}", node_id);
+                    let label = nick.as_deref().unwrap_or(&node_id_str[..16]);
+                    let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                        p.capability
+                            .as_ref()
+                            .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
+                    });
+                    let detail = if is_lan { "LAN" } else { "WAN" };
+                    self.shared_state
+                        .emit_activity(crate::daemon::state::ActivityEvent {
+                            category: "network",
+                            kind: "peer_connected",
+                            message: format!(
+                                "Peer connected: {}{}",
+                                label,
+                                gpu_name
+                                    .as_ref()
+                                    .map(|g| format!(" ({})", g))
+                                    .unwrap_or_default()
+                            ),
+                            model_id: None,
+                            model_name: None,
+                            node_id: Some(node_id_str),
+                            detail_num: None,
+                            detail_str: Some(detail.to_string()),
+                        });
+                }
+
                 // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
                 // Evict highest-latency non-LAN non-pipeline peer when over limit.
                 const MAX_PEER_REGISTRY: usize = 200;
@@ -1370,11 +1405,34 @@ impl NetworkManager {
                         }
 
                         if !in_active_pipeline {
+                            // Capture info before removing
+                            let nick = self
+                                .shared_state
+                                .nickname_registry
+                                .get(&node_id)
+                                .map(|r| r.nickname.clone());
+                            let label = nick
+                                .as_deref()
+                                .unwrap_or(&format!("{}", node_id)[..16])
+                                .to_string();
+
                             // Remove peer_to_node BEFORE peer_registry to prevent
                             // dispatch from resolving NodeId for a peer that's being removed
                             self.peer_to_node.remove(&peer_id);
                             self.shared_state.peer_registry.remove(&node_id);
                             let _ = self.shared_state.peer_list_changed_tx.send(());
+
+                            self.shared_state
+                                .emit_activity(crate::daemon::state::ActivityEvent {
+                                    category: "network",
+                                    kind: "peer_disconnected",
+                                    message: format!("Peer disconnected: {}", label),
+                                    model_id: None,
+                                    model_name: None,
+                                    node_id: Some(format!("{}", node_id)),
+                                    detail_num: None,
+                                    detail_str: None,
+                                });
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
                             tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");

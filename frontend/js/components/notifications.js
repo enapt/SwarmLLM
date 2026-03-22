@@ -11,13 +11,58 @@
 
   // --- Activity Log ---
   var _activityEntries = [];
-  var MAX_ACTIVITY = 50;
+  var MAX_ACTIVITY = 200;
+  var MAX_DISPLAY = 40;
 
-  function logActivity(icon, text) {
+  // Category → icon mapping for backend activity events
+  var ACTIVITY_ICONS = {
+    'peer_connected': '\uD83D\uDD17',      // 🔗
+    'peer_disconnected': '\u26D4',          // ⛔
+    'model_discovered': '\u2728',           // ✨
+    'shard_announced': '\uD83D\uDCE1',     // 📡
+    'shard_download_started': '\u2B07\uFE0F', // ⬇️
+    'shard_download_complete': '\u2705',    // ✅
+    'hf_download_complete': '\u2705',       // ✅
+    'inference_completed': '\u26A1',        // ⚡
+    'inference_failed': '\u274C',           // ❌
+    'model_unloaded': '\uD83D\uDCE4',      // 📤
+    'shard_loaded_memory': '\uD83D\uDCE5', // 📥
+    'shard_unloaded_memory': '\uD83D\uDCE4', // 📤
+    'shard_deleted': '\uD83D\uDDD1',       // 🗑
+    'shard_pruned': '\u2702\uFE0F',        // ✂️
+  };
+
+  // Category CSS class for color coding
+  var ACTIVITY_CATEGORY_CLASS = {
+    'network': 'activity-cat-network',
+    'model': 'activity-cat-model',
+    'download': 'activity-cat-download',
+    'inference': 'activity-cat-inference',
+    'auto_manage': 'activity-cat-automanage',
+  };
+
+  function logActivity(icon, text, category, modelId) {
     var ts = Date.now();
-    _activityEntries.unshift({ icon: icon, text: text, ts: ts });
+    _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category || '', modelId: modelId || '' });
     if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
     _renderActivityLog();
+  }
+
+  function _handleActivityEvent(data) {
+    var icon = ACTIVITY_ICONS[data.kind] || '\uD83D\uDD35'; // 🔵 default
+    var text = data.message || data.kind;
+    var category = data.category || '';
+    var modelId = data.model_id || '';
+    var ts = Date.now();
+
+    _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category, modelId: modelId });
+    if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+    _renderActivityLog();
+
+    // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
+    if (modelId && App.dashboard && App.dashboard._logModelEvent) {
+      App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true);
+    }
   }
 
   function _renderActivityLog() {
@@ -27,12 +72,17 @@
     if (countEl) countEl.textContent = _activityEntries.length + ' events';
 
     var html = '';
-    var show = _activityEntries.slice(0, 20);
+    var show = _activityEntries.slice(0, MAX_DISPLAY);
     for (var i = 0; i < show.length; i++) {
       var e = show[i];
-      html += '<div class="activity-entry"><span class="activity-icon">' + e.icon + '</span>' +
+      var catClass = ACTIVITY_CATEGORY_CLASS[e.category] || '';
+      html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + e.icon + '</span>' +
         '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
         '<span class="activity-time">' + U.timeAgo(e.ts) + '</span></div>';
+    }
+    if (_activityEntries.length > MAX_DISPLAY) {
+      html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
+        (_activityEntries.length - MAX_DISPLAY) + ' older events</div>';
     }
     log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>';
   }
@@ -174,7 +224,7 @@
         hideWsBanner(2000);
       }
       S.wsWasConnected = true;
-      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node');
+      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'network');
     };
 
     S.ws.onmessage = function(event) {
@@ -185,7 +235,7 @@
           if (msg.data.peers !== undefined) {
             var prevPeers = S._lastPeerCount || 0;
             if (msg.data.peers > prevPeers && prevPeers === 0) {
-              logActivity('\u{1F310}', 'Connected to ' + msg.data.peers + ' peer' + (msg.data.peers !== 1 ? 's' : ''));
+              logActivity('\u{1F310}', 'Connected to ' + msg.data.peers + ' peer' + (msg.data.peers !== 1 ? 's' : ''), 'network');
             }
             S._lastPeerCount = msg.data.peers;
           }
@@ -198,13 +248,13 @@
               if (acq.state === 'downloading' && !S[acqKey]) {
                 S[acqKey] = { shards: 0 };
                 var shardInfo = acq.total_shards ? ' (' + acq.total_shards + ' parts from ' + source + ')' : '';
-                logActivity('\u2B07', 'Auto-manage: caching ' + modelName + shardInfo);
+                logActivity('\u2B07', 'Auto-manage: caching ' + modelName + shardInfo, 'download', acq.model_id);
               } else if (acq.state === 'downloading' && S[acqKey]) {
                 // Track per-shard completions
                 var newShards = acq.downloaded_shards || 0;
                 if (newShards > S[acqKey].shards) {
                   S[acqKey].shards = newShards;
-                  logActivity('\u2705', 'Cached part ' + newShards + ' of ' + modelName);
+                  logActivity('\u2705', 'Cached part ' + newShards + ' of ' + modelName, 'download', acq.model_id);
                 }
               } else if (acq.state === 'complete' && S[acqKey]) {
                 delete S[acqKey];
@@ -222,7 +272,7 @@
         } else if (msg.type === 'lan_peer_discovered') {
           var count = msg.data.peer_count || 1;
           showToast('Found ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on your local network \u2014 zero configuration needed!', 'success', 8000);
-          logActivity('\u{1F310}', 'Discovered ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on local network');
+          logActivity('\u{1F310}', 'Discovered ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on local network', 'network');
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {
@@ -233,27 +283,29 @@
           var text = 'Pruned shard ' + U.escapeHtml(String(d.shard_index)) + ' of ' + U.escapeHtml(d.model_name || d.model_id) +
             ' \u2014 ' + U.escapeHtml(String(d.holder_count_before)) + '\u2192' + U.escapeHtml(String(d.holder_count_after)) + ' holders (freed ' + U.escapeHtml(freed) + ')';
           showToast(text, 'info', 6000);
-          logActivity('\u2702', 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) + ' (freed ' + U.formatBytes(d.freed_bytes || 0) + ')');
+          logActivity('\u2702', 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) + ' (freed ' + U.formatBytes(d.freed_bytes || 0) + ')', 'auto_manage', d.model_id);
           App.pruneSchedule.prependHistory(d);
         } else if (msg.type === 'system_notification') {
           var n = msg.data;
           var level = n.level === 'error' ? 'error' : (n.level === 'warn' ? 'warning' : 'info');
           showToast(n.title + ': ' + n.message, level, 10000);
+        } else if (msg.type === 'activity_event') {
+          _handleActivityEvent(msg.data || {});
         } else if (msg.type === 'models_changed') {
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
           window._modelsChangedTimer = setTimeout(function() {
             App.models.load();
             App.modeIndicator.load();
           }, 1000);
+          // models_changed without reason is now supplemented by activity_events —
+          // only log if there's an explicit reason field (legacy compat)
           var reason = msg.data && msg.data.reason;
           if (reason === 'shard_downloaded') {
-            logActivity('\u2B07', 'Downloaded shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'));
+            logActivity('\u2B07', 'Downloaded shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'), 'download', msg.data.model_id);
           } else if (reason === 'model_loaded') {
-            logActivity('\u2705', 'Model loaded: ' + (msg.data.model_name || msg.data.model_id || 'model'));
+            logActivity('\u2705', 'Model loaded: ' + (msg.data.model_name || msg.data.model_id || 'model'), 'model', msg.data.model_id);
           } else if (reason === 'shard_removed') {
-            logActivity('\u274C', 'Removed shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'));
-          } else if (reason) {
-            logActivity('\u{1F504}', 'Model update: ' + reason);
+            logActivity('\u274C', 'Removed shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'), 'model', msg.data.model_id);
           }
         }
       } catch (e) {}

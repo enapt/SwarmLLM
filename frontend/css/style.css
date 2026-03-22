@@ -1566,6 +1566,12 @@ kbd {
 .activity-text { flex: 1; line-height: 1.3; }
 .activity-time { flex-shrink: 0; font-size: 0.65rem; color: var(--text-muted); font-family: var(--font-mono); }
 @keyframes activity-fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+.activity-cat-network .activity-text { color: var(--cyan, #22d3ee); }
+.activity-cat-model .activity-text { color: var(--purple, #a78bfa); }
+.activity-cat-download .activity-text { color: var(--blue, #3b82f6); }
+.activity-cat-inference .activity-text { color: var(--green, #22c55e); }
+.activity-cat-automanage .activity-text { color: var(--orange, #f59e0b); }
+.activity-overflow { opacity: 0.5; }
 
 /* ---- Loading skeletons ---- */
 @keyframes skeleton-pulse {
@@ -1841,7 +1847,7 @@ kbd {
   border-top: 1px solid var(--border); margin-top: 0;
 }
 .model-ticker:hover .model-ticker-history {
-  max-height: 150px; margin-top: 4px;
+  max-height: 250px; margin-top: 4px;
 }
 .model-ticker-row {
   display: flex; justify-content: space-between; align-items: center;

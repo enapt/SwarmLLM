@@ -28,6 +28,33 @@ pub struct SystemNotification {
     pub model_id: Option<String>,
 }
 
+/// Rich activity event for the dashboard activity log.
+/// Pushed over WebSocket as `activity_event` messages for verbose real-time tracking.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ActivityEvent {
+    /// Event category for frontend grouping/filtering.
+    pub category: &'static str,
+    /// Machine-readable event kind.
+    pub kind: &'static str,
+    /// Human-readable description (English; frontend may i18n-override).
+    pub message: String,
+    /// Optional model ID for per-model ticker routing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Optional model display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Optional peer/node ID (short hex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Optional numeric detail (e.g. shard index, credit amount, latency).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_num: Option<i64>,
+    /// Optional string detail (e.g. reason, source, error message).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_str: Option<String>,
+}
+
 /// Thread-safe shared state accessible by all daemon tasks.
 /// Cached info about a locally loaded model (lock-free reads).
 #[derive(Clone, Debug)]
@@ -208,6 +235,9 @@ pub struct SharedState {
     /// Broadcast channel for system notifications (CPU fallback, errors, etc.).
     /// WebSocket subscribers push these as toast-worthy events to the dashboard.
     pub system_notify_tx: broadcast::Sender<SystemNotification>,
+    /// Broadcast channel for rich activity events (verbose dashboard activity log).
+    /// All subsystems emit events here; WebSocket pushes them as `activity_event` messages.
+    pub activity_tx: broadcast::Sender<ActivityEvent>,
     /// Cached mapping of cloud provider model IDs to provider names.
     /// Populated by `list_provider_models` so that `try_proxy_openai` can route
     /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
@@ -718,6 +748,7 @@ impl SharedState {
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
             system_notify_tx: broadcast::channel(32).0,
+            activity_tx: broadcast::channel(256).0,
             provider_model_map: DashMap::new(),
             provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
             ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
@@ -769,5 +800,11 @@ impl SharedState {
     /// Apply hot-reloaded operational params and notify subscribers.
     pub fn apply_config_reload(&self, params: crate::config::OperationalParams) {
         let _ = self.config_watch_tx.send(params);
+    }
+
+    /// Emit a rich activity event to the dashboard.
+    /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
+    pub fn emit_activity(&self, event: ActivityEvent) {
+        let _ = self.activity_tx.send(event);
     }
 }

@@ -16,17 +16,19 @@
     _peersExpanded: false,
     _lastPeers: [],
 
-    _logModelEvent: function(modelId, icon, text) {
+    _logModelEvent: function(modelId, icon, text, skipGlobal) {
       if (!_modelEvents[modelId]) _modelEvents[modelId] = [];
       var events = _modelEvents[modelId];
       var ts = Date.now();
       events.unshift({ icon: icon, text: text, ts: ts });
-      if (events.length > 10) events.pop();
+      if (events.length > 15) events.pop();
 
       App.dashboard._renderModelTicker(modelId);
 
-      // Also log to global activity
-      App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text);
+      // Also log to global activity (unless the caller already did via activity_event)
+      if (!skipGlobal) {
+        App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text, 'model', modelId);
+      }
     },
 
     // Render the per-model ticker DOM from stored events (no side effects)
@@ -41,7 +43,7 @@
       var historyHtml = '';
       if (events.length > 1) {
         historyHtml = '<div class="model-ticker-history">';
-        events.slice(1, 6).forEach(function(e) {
+        events.slice(1, 10).forEach(function(e) {
           historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + U.timeAgo(e.ts) + '</span></div>';
         });
         historyHtml += '</div>';
@@ -1228,7 +1230,7 @@
 
         if (status.state === 'complete') {
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
-          App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId));
+          App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);
         } else if (status.state === 'failed') {
           var reason = (typeof status.state === 'object' && status.state.failed) ? status.state.failed.reason : '';

@@ -558,9 +558,31 @@ pub(crate) async fn dispatch_network_messages(
                                 if let Some(mut peer) = shared_state.peer_registry.get_mut(&announce.node_id) {
                                     peer.last_seen = chrono::Utc::now();
                                 }
+                                // Group shards by model for activity logging
+                                let mut models_announced: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                                 for shard_id in &announce.shards {
                                     shared_state.model_registry
                                         .record_shard_holder(shard_id.clone(), announce.node_id.clone());
+                                    *models_announced.entry(shard_id.model_id.0.clone()).or_insert(0) += 1;
+                                }
+                                // Emit activity for each model announced
+                                let peer_label = shared_state.nickname_registry.get(&announce.node_id)
+                                    .map(|r| r.nickname.clone())
+                                    .unwrap_or_else(|| format!("{}", announce.node_id).chars().take(8).collect());
+                                for (mid, count) in &models_announced {
+                                    let mname = shared_state.model_registry
+                                        .get_manifest(&crate::types::ModelId(mid.clone()))
+                                        .map(|m| m.name.clone());
+                                    shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+                                        category: "model",
+                                        kind: "shard_announced",
+                                        message: format!("{} announced {} shard{} of {}", peer_label, count, if *count != 1 { "s" } else { "" }, mname.as_deref().unwrap_or(mid)),
+                                        model_id: Some(mid.clone()),
+                                        model_name: mname,
+                                        node_id: Some(format!("{}", announce.node_id)),
+                                        detail_num: Some(*count as i64),
+                                        detail_str: None,
+                                    });
                                 }
                                 // Wake auto-manage so it re-evaluates rarity scores —
                                 // new shard holders change which shards are most needed.
@@ -595,6 +617,16 @@ pub(crate) async fn dispatch_network_messages(
                                         // Wake auto-manage when a genuinely new model appears
                                         if is_new {
                                             shared_state.auto_manage_notify.notify_one();
+                                            shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+                                                category: "model",
+                                                kind: "model_discovered",
+                                                message: format!("Discovered model: {} ({} shards)", manifest.name, manifest.shard_count),
+                                                model_id: Some(manifest.id.0.clone()),
+                                                model_name: Some(manifest.name.clone()),
+                                                node_id: None,
+                                                detail_num: Some(manifest.shard_count as i64),
+                                                detail_str: Some(format!("{:?}", manifest.architecture)),
+                                            });
                                         }
                                     }
                                     Err(e) => {

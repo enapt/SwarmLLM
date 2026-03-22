@@ -868,6 +868,21 @@ async fn finalize_request(
             error = %e,
             "Inference request failed"
         );
+        // Emit failure activity
+        let mname = shared_state
+            .model_registry
+            .get_manifest(&request.model_id)
+            .map(|m| m.name.clone());
+        shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "inference",
+            kind: "inference_failed",
+            message: format!("Inference failed: {}", e),
+            model_id: Some(request.model_id.0.clone()),
+            model_name: mname,
+            node_id: None,
+            detail_num: None,
+            detail_str: Some(format!("{}", e)),
+        });
     }
 
     // Local API requests use NodeId([0; 32]) as requester sentinel
@@ -881,6 +896,28 @@ async fn finalize_request(
         shared_state
             .inference_requests_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Emit inference completion activity
+        {
+            let mname = shared_state
+                .model_registry
+                .get_manifest(&request.model_id)
+                .map(|m| m.name.clone());
+            let display = mname.as_deref().unwrap_or(&request.model_id.0);
+            shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "inference",
+                kind: "inference_completed",
+                message: format!(
+                    "Inference: {} tokens on {}",
+                    result.completion_tokens, display
+                ),
+                model_id: Some(request.model_id.0.clone()),
+                model_name: mname,
+                node_id: None,
+                detail_num: Some(result.completion_tokens as i64),
+                detail_str: None,
+            });
+        }
 
         // Credit operations:
         // - Per-layer earn credits are handled in process_local_segment

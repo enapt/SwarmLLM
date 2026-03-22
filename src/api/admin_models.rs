@@ -966,6 +966,21 @@ pub async fn unload_model(
     // Notify dashboard
     let _ = shared.models_changed_tx.send(());
 
+    // Emit activity event
+    shared.emit_activity(crate::daemon::state::ActivityEvent {
+        category: "model",
+        kind: "model_unloaded",
+        message: format!(
+            "Unloaded {} from memory (~{}MB freed)",
+            model_display_name, estimated_mb
+        ),
+        model_id: Some(model_id.clone()),
+        model_name: Some(model_display_name.clone()),
+        node_id: None,
+        detail_num: Some(estimated_mb as i64),
+        detail_str: None,
+    });
+
     tracing::info!(model = %model_id, segments = segments_removed, "Model unloaded from memory");
 
     Ok(Json(serde_json::json!({
@@ -1054,6 +1069,27 @@ pub async fn unload_shard(
 
     let _ = shared.models_changed_tx.send(());
 
+    {
+        let mname = shared
+            .model_registry
+            .get_manifest(&mid)
+            .map(|m| m.name.clone());
+        shared.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "model",
+            kind: "shard_unloaded_memory",
+            message: format!(
+                "Unloaded shard {} of {} from memory",
+                shard_index + 1,
+                mname.as_deref().unwrap_or(&model_id)
+            ),
+            model_id: Some(model_id.clone()),
+            model_name: mname,
+            node_id: None,
+            detail_num: Some(shard_index as i64),
+            detail_str: None,
+        });
+    }
+
     tracing::info!(
         model = %model_id,
         shard = shard_index,
@@ -1141,6 +1177,27 @@ pub async fn load_shard(
     shared.split_models.retain(|key, _| key.0 != mid);
 
     let _ = shared.models_changed_tx.send(());
+
+    {
+        let mname = shared
+            .model_registry
+            .get_manifest(&mid)
+            .map(|m| m.name.clone());
+        shared.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "model",
+            kind: "shard_loaded_memory",
+            message: format!(
+                "Loaded shard {} of {} into memory",
+                shard_index + 1,
+                mname.as_deref().unwrap_or(&model_id)
+            ),
+            model_id: Some(model_id.clone()),
+            model_name: mname,
+            node_id: None,
+            detail_num: Some(shard_index as i64),
+            detail_str: None,
+        });
+    }
 
     tracing::info!(
         model = %model_id,
@@ -1233,6 +1290,27 @@ pub async fn delete_shard(
         let _ = ntx
             .send(crate::types::NetworkCommand::Broadcast(announce))
             .await;
+    }
+
+    {
+        let mname = shared
+            .model_registry
+            .get_manifest(&mid)
+            .map(|m| m.name.clone());
+        shared.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "model",
+            kind: "shard_deleted",
+            message: format!(
+                "Deleted shard {} of {} from disk",
+                shard_index + 1,
+                mname.as_deref().unwrap_or(&model_id)
+            ),
+            model_id: Some(model_id.clone()),
+            model_name: mname,
+            node_id: None,
+            detail_num: Some(shard_index as i64),
+            detail_str: None,
+        });
     }
 
     tracing::info!(model = %model_id, shard = shard_index, "Shard removed");

@@ -91,6 +91,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
     let mut system_rx = shared_state.system_notify_tx.subscribe();
     let mut peer_list_rx = shared_state.peer_list_changed_tx.subscribe();
+    let mut activity_rx = shared_state.activity_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
         // Send the current peer list immediately on connect so the dashboard
         // populates without waiting for the first peer_list_changed event.
@@ -208,6 +209,18 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                                 "published_at": info.published_at,
                                 "downloaded": info.downloaded,
                             }
+                        });
+                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                        if sender.send(Message::Text(msg_str)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                activity = activity_rx.recv() => {
+                    if let Ok(event) = activity {
+                        let msg = serde_json::json!({
+                            "type": "activity_event",
+                            "data": event,
                         });
                         let msg_str = serde_json::to_string(&msg).unwrap_or_default();
                         if sender.send(Message::Text(msg_str)).await.is_err() {
