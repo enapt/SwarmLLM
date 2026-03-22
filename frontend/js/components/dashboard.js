@@ -1367,7 +1367,16 @@
           }
         }
 
-        if (status.state === 'complete') {
+        // Detect completion: explicit state OR all tracked shards at 100%
+        var isComplete = status.state === 'complete';
+        if (!isComplete && status.shard_details && status.shard_details.length > 0) {
+          isComplete = status.shard_details.every(function(sd) { return sd.state === 'complete'; });
+        }
+        if (!isComplete && status.overall_pct >= 100) {
+          isComplete = true;
+        }
+
+        if (isComplete) {
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
           App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);

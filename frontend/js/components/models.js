@@ -910,35 +910,31 @@
       } else if (state === 'downloading') {
         App.models.cancelDownload(modelId);
       } else {
-        // Try P2P first if peers hold this shard, fall back to HuggingFace
+        // Single shard download — backend tries P2P first, falls back to HF
         try {
-          if (state === 'peer') {
-            // Peers hold this shard — use model acquisition (P2P)
-            var p2pResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
-            if (p2pResp.ok) {
-              App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from peers');
-              App.models.load();
-              return;
-            }
-          }
-          // Fallback: HuggingFace
-          var srcResp = await App.authFetch('/api/admin/hf/source/' + encodeURIComponent(modelId));
-          if (!srcResp.ok) {
-            App.ui.showBanner('error', 'No download source found for this model (no HuggingFace source and no peers)');
-            return;
-          }
-          var src = await srcResp.json();
-          var dlResp = await App.authFetch('/api/admin/hf/download-shards', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: [idx], model_id: modelId }),
-          });
-          if (dlResp.ok) {
-            App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from HuggingFace');
+          var dlResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/download', { method: 'POST' });
+          var dlData = await dlResp.json();
+          if (dlData.status === 'downloading') {
+            App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from ' + (dlData.source === 'p2p' ? 'peer ' + (dlData.peer || '') : 'peers'));
             App.models.load();
+          } else if (dlData.status === 'use_hf') {
+            // Backend says use HuggingFace
+            var hfResp = await App.authFetch('/api/admin/hf/download-shards', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ repo_id: dlData.repo_id, filename: dlData.filename, shards: [idx], model_id: modelId }),
+            });
+            if (hfResp.ok) {
+              App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from HuggingFace');
+              App.models.load();
+            } else {
+              var errHf = await hfResp.json().catch(function() { return {}; });
+              App.ui.showBanner('error', errHf.error ? errHf.error.message : 'Download failed');
+            }
+          } else if (dlData.status === 'already_local') {
+            App.ui.showBanner('info', 'Part ' + (idx + 1) + ' is already on this device');
           } else {
-            var errData2 = await dlResp.json().catch(function() { return {}; });
-            App.ui.showBanner('error', errData2.error ? errData2.error.message : 'Download failed');
+            App.ui.showBanner('error', dlData.error ? dlData.error.message : 'Download unavailable');
           }
         } catch (e) {
           App.ui.showBanner('error', 'Download failed: ' + e.message);

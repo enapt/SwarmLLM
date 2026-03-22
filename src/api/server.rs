@@ -130,6 +130,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/admin/models/:id/shards/:index",
             delete(admin::delete_shard),
         )
+        .route(
+            "/api/admin/models/:id/shards/:index/download",
+            post(admin::download_shard),
+        )
         // Per-model auto-manage policy
         .route(
             "/api/admin/models/:id/auto-manage",

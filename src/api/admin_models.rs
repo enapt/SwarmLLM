@@ -1322,6 +1322,168 @@ pub async fn delete_shard(
     })))
 }
 
+/// POST /api/admin/models/:model_id/shards/:shard_index/download — Download a single shard.
+///
+/// Tries P2P first (if peers hold the shard), falls back to HuggingFace.
+/// Creates an acquisition_progress entry for the download bar.
+pub async fn download_shard(
+    State(state): State<AppState>,
+    Path((model_id, shard_index)): Path<(String, u32)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mid = crate::types::ModelId(model_id.clone());
+    let shared = &state.shared_state;
+
+    let shard_id = crate::types::ShardId {
+        model_id: mid.clone(),
+        index: shard_index,
+    };
+
+    // Check if we already have it locally
+    let local_node_id = shared.identity.node_id().clone();
+    if shared
+        .model_registry
+        .shard_holders(&shard_id)
+        .contains(&local_node_id)
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "already_local",
+            "model_id": model_id,
+            "shard_index": shard_index,
+        })));
+    }
+
+    // Get shard size from manifest
+    let shard_size = shared
+        .model_registry
+        .get_manifest(&mid)
+        .and_then(|m| {
+            m.shards
+                .iter()
+                .find(|s| s.index == shard_index)
+                .map(|s| s.size_bytes)
+        })
+        .unwrap_or(0);
+
+    // Try P2P: find peers who hold this shard
+    let holders: Vec<_> = shared
+        .model_registry
+        .shard_holders(&shard_id)
+        .into_iter()
+        .filter(|n| n != &local_node_id)
+        .collect();
+
+    if !holders.is_empty() {
+        // Pick a peer and send P2P shard request
+        let target = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::time::Instant::now().hash(&mut hasher);
+            holders[hasher.finish() as usize % holders.len()].clone()
+        };
+
+        let peer_id_bytes = shared
+            .peer_registry
+            .get(&target)
+            .and_then(|p| p.peer_id_bytes.clone());
+
+        if let Some(bytes) = peer_id_bytes {
+            // Create acquisition_progress for the download bar
+            let mut shard_progress = std::collections::HashMap::new();
+            shard_progress.insert(
+                shard_index,
+                crate::model::acquisition::ShardProgress {
+                    index: shard_index,
+                    total_bytes: shard_size,
+                    downloaded_bytes: 0,
+                    state: crate::model::acquisition::ShardState::Downloading,
+                },
+            );
+            shared.acquisition_progress.insert(
+                mid.clone(),
+                crate::model::acquisition::AcquisitionStatus {
+                    model_id: mid.clone(),
+                    state: crate::model::acquisition::AcquisitionState::Downloading,
+                    total_shards: 1,
+                    downloaded_shards: 0,
+                    verified_shards: 0,
+                    failed_shards: 0,
+                    total_bytes: shard_size,
+                    downloaded_bytes: 0,
+                    shard_progress,
+                    speed_bytes_per_sec: 0,
+                    started_at: Some(chrono::Utc::now()),
+                    log: vec![format!("Downloading shard {} from peer", shard_index + 1)],
+                    source: "peers".to_string(),
+                    trigger: "user".to_string(),
+                },
+            );
+
+            let request = crate::types::ShardRequest {
+                shard_id,
+                chunk_offset: 0,
+                chunk_size: 32 * 1024 * 1024,
+            };
+            if let Some(ref tx) = state.network_tx {
+                let _ = tx
+                    .send(crate::types::NetworkCommand::SendShardRequest {
+                        target_peer_bytes: bytes,
+                        request,
+                    })
+                    .await;
+            }
+
+            let mname = shared
+                .model_registry
+                .get_manifest(&mid)
+                .map(|m| m.name.clone());
+            let peer_label = shared
+                .nickname_registry
+                .get(&target)
+                .map(|r| r.nickname.clone())
+                .unwrap_or_else(|| format!("{}", target).chars().take(8).collect());
+            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "download",
+                kind: "shard_download_p2p",
+                message: format!(
+                    "Downloading shard {} of {} from peer {}",
+                    shard_index + 1,
+                    mname.as_deref().unwrap_or(&model_id),
+                    peer_label
+                ),
+                model_id: Some(model_id.clone()),
+                model_name: mname,
+                node_id: Some(format!("{}", target)),
+                detail_num: Some(shard_index as i64),
+                detail_str: Some("p2p".to_string()),
+            });
+
+            return Ok(Json(serde_json::json!({
+                "status": "downloading",
+                "source": "p2p",
+                "model_id": model_id,
+                "shard_index": shard_index,
+                "peer": format!("{}", target).chars().take(16).collect::<String>(),
+            })));
+        }
+    }
+
+    // Fallback: HuggingFace (if source exists)
+    if let Some(hf) = shared.hf_sources.get(&mid) {
+        return Ok(Json(serde_json::json!({
+            "status": "use_hf",
+            "source": "huggingface",
+            "model_id": model_id,
+            "shard_index": shard_index,
+            "repo_id": hf.repo_id.clone(),
+            "filename": hf.filename.clone(),
+        })));
+    }
+
+    Err(ApiError(crate::error::SwarmError::Validation(
+        "No peers hold this shard and no HuggingFace source available".into(),
+    )))
+}
+
 /// GET /api/admin/models/:model_id/auto-manage — Get per-model auto-manage policy.
 pub async fn get_model_auto_manage(
     State(state): State<AppState>,
