@@ -731,6 +731,30 @@ impl NetworkManager {
                         bytes_downloaded = progress,
                         "DIAG: shard download OutboundFailure"
                     );
+                    {
+                        let mname = self
+                            .shared_state
+                            .model_registry
+                            .get_manifest(&shard_id.model_id)
+                            .map(|m| m.name.clone());
+                        self.shared_state
+                            .emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_transfer_failed",
+                                message: format!(
+                                    "P2P transfer failed: shard {} of {} — {} ({}B received)",
+                                    shard_id.index + 1,
+                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                                    error,
+                                    progress
+                                ),
+                                model_id: Some(shard_id.model_id.0.clone()),
+                                model_name: mname,
+                                node_id: Some(format!("{}", peer)),
+                                detail_num: Some(shard_id.index as i64),
+                                detail_str: Some(format!("{}", error)),
+                            });
+                    }
                     // Clean up stale download progress entry to prevent resource leak
                     self.shard_download_progress.remove(&shard_id);
                 }
