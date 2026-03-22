@@ -81,12 +81,19 @@
     },
 
     loadInitial: async function() {
+      // Debounce: skip if already loading or loaded within 5s
+      if (App.dashboard._loading) return;
+      var now = Date.now();
+      if (now - (App.dashboard._lastLoadTime || 0) < 5000) return;
+      App.dashboard._loading = true;
+      App.dashboard._lastLoadTime = now;
       var statsResult, modelsResult;
       try {
         var results = await Promise.all([App.data.loadStats(), App.models.load()]);
         statsResult = results[0];
         modelsResult = results[1];
       } catch (e) {
+        App.dashboard._loading = false;
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
         return;
       }
@@ -108,6 +115,7 @@
       App.downloads.load();
       App.dashboard.loadNetworkData();
       App.networkCode.load();
+      App.dashboard._loading = false;
     },
 
     updateFull: function(data) {

@@ -55,7 +55,11 @@
         document.getElementById('chat-input').focus();
       }
       if (tab === 'dashboard') {
-        App.dashboard.loadInitial();
+        // Only reload if data is older than 10s to avoid rate limit hammering
+        var lastLoad = App.dashboard._lastLoadTime || 0;
+        if (Date.now() - lastLoad > 10000) {
+          App.dashboard.loadInitial();
+        }
       }
       if (tab === 'leaderboard') {
         App.identity.loadLeaderboard();
