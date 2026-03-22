@@ -23,29 +23,35 @@
       events.unshift({ icon: icon, text: text, ts: ts });
       if (events.length > 10) events.pop();
 
-      // Update the ticker in the model card — latest line + hover history
-      var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
-      var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
-      if (ticker) {
-        var latest = events[0];
-        var historyHtml = '';
-        if (events.length > 1) {
-          historyHtml = '<div class="model-ticker-history">';
-          events.slice(1, 6).forEach(function(e) {
-            historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + U.timeAgo(e.ts) + '</span></div>';
-          });
-          historyHtml += '</div>';
-        }
-        ticker.innerHTML =
-          '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
-          '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
-          '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>' +
-          historyHtml;
-        ticker.style.display = '';
-      }
+      App.dashboard._renderModelTicker(modelId);
 
       // Also log to global activity
       App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text);
+    },
+
+    // Render the per-model ticker DOM from stored events (no side effects)
+    _renderModelTicker: function(modelId) {
+      var events = _modelEvents[modelId];
+      if (!events || events.length === 0) return;
+      var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+      var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
+      if (!ticker) return;
+
+      var latest = events[0];
+      var historyHtml = '';
+      if (events.length > 1) {
+        historyHtml = '<div class="model-ticker-history">';
+        events.slice(1, 6).forEach(function(e) {
+          historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + U.timeAgo(e.ts) + '</span></div>';
+        });
+        historyHtml += '</div>';
+      }
+      ticker.innerHTML =
+        '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
+        '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
+        '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>' +
+        historyHtml;
+      ticker.style.display = '';
     },
 
     loadInitial: async function() {
@@ -737,9 +743,9 @@
 
         if (swarmBody) swarmBody.appendChild(card);
 
-        // Restore per-model activity ticker from stored events
+        // Restore per-model activity ticker from stored events (DOM only, don't re-log)
         if (_modelEvents[m.id] && _modelEvents[m.id].length > 0) {
-          App.dashboard._logModelEvent(m.id, _modelEvents[m.id][0].icon, _modelEvents[m.id][0].text);
+          App.dashboard._renderModelTicker(m.id);
         }
       });
 
