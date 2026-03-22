@@ -910,10 +910,21 @@
       } else if (state === 'downloading') {
         App.models.cancelDownload(modelId);
       } else {
+        // Try P2P first if peers hold this shard, fall back to HuggingFace
         try {
+          if (state === 'peer') {
+            // Peers hold this shard — use model acquisition (P2P)
+            var p2pResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
+            if (p2pResp.ok) {
+              App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from peers');
+              App.models.load();
+              return;
+            }
+          }
+          // Fallback: HuggingFace
           var srcResp = await App.authFetch('/api/admin/hf/source/' + encodeURIComponent(modelId));
           if (!srcResp.ok) {
-            App.ui.showBanner('error', 'No HuggingFace source found for this model');
+            App.ui.showBanner('error', 'No download source found for this model (no HuggingFace source and no peers)');
             return;
           }
           var src = await srcResp.json();
@@ -923,7 +934,7 @@
             body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: [idx], model_id: modelId }),
           });
           if (dlResp.ok) {
-            App.ui.showBanner('success', 'Downloading model part ' + (idx + 1));
+            App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from HuggingFace');
             App.models.load();
           } else {
             var errData2 = await dlResp.json().catch(function() { return {}; });
