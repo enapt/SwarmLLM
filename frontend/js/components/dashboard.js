@@ -1165,8 +1165,11 @@
             if (cell.classList.contains('shard-pinned')) preserve += ' shard-pinned';
 
             if (s.local) {
-              cell.classList.add('shard-transitioning');
-              setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
+              var wasLocal = alreadyLocal;
+              if (!wasLocal) {
+                cell.classList.add('shard-transitioning');
+                setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
+              }
               var vramCls = s.in_vram ? 'local vram' : 'local';
               var vramLabel = s.in_vram ? 'Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')' : 'On disk (not loaded)';
               cell.className = 'shard-cell ' + vramCls + preserve;
@@ -1174,7 +1177,10 @@
               Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
               cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
               cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
-              App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
+              // Only log the first time a shard becomes local (not on vram toggle)
+              if (!wasLocal) {
+                App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
+              }
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
