@@ -60,6 +60,8 @@
     'model_download_complete': '\uD83C\uDF89', // 🎉
     'shard_transfer_failed': '\u274C',    // ❌
     'shard_p2p_complete': '\u2705',       // ✅
+    'model_loaded': '\uD83E\uDDE0',      // 🧠
+    'model_load_skipped': '\u26A0\uFE0F', // ⚠️
   };
 
   // Category CSS class for color coding

@@ -372,6 +372,19 @@ pub async fn check_and_load_model(
                         budget_mb = budget,
                         "VRAM budget full — skipping auto-load (shards remain on disk for P2P)"
                     );
+                    shared.emit_activity(crate::daemon::state::ActivityEvent {
+                        category: "model",
+                        kind: "model_load_skipped",
+                        message: format!(
+                            "Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
+                            manifest.name, budget - total_after
+                        ),
+                        model_id: Some(model_id.0.clone()),
+                        model_name: Some(manifest.name.clone()),
+                        node_id: None,
+                        detail_num: Some(estimated as i64),
+                        detail_str: Some("vram_budget".to_string()),
+                    });
                     continue;
                 }
             }
@@ -440,5 +453,19 @@ pub async fn check_and_load_model(
             layers = format!("[{}..{})", layer_start, layer_end),
             "Auto-manage: model metadata loaded (subprocess will load on first inference)"
         );
+
+        shared.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "model",
+            kind: "model_loaded",
+            message: format!(
+                "Loaded {} into memory — layers [{}, {}) ready for inference",
+                manifest.name, layer_start, layer_end
+            ),
+            model_id: Some(model_id.0.clone()),
+            model_name: Some(manifest.name.clone()),
+            node_id: None,
+            detail_num: Some((layer_end - layer_start) as i64),
+            detail_str: Some(format!("[{}..{})", layer_start, layer_end)),
+        });
     }
 }
