@@ -407,6 +407,28 @@ impl AutoShardManager {
                             shard = shard_idx,
                             "AutoShardManager: shard downloaded from HF"
                         );
+                        // Emit per-shard completion activity
+                        {
+                            let mname = shared
+                                .model_registry
+                                .get_manifest(&model_id)
+                                .map(|m| m.name.clone());
+                            let display = mname.as_deref().unwrap_or(&model_id.0);
+                            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_download_complete",
+                                message: format!(
+                                    "Downloaded shard {} of {} from HuggingFace — verifying",
+                                    shard_idx + 1,
+                                    display
+                                ),
+                                model_id: Some(model_id.0.clone()),
+                                model_name: mname,
+                                node_id: None,
+                                detail_num: Some(shard_idx as i64),
+                                detail_str: Some("huggingface".to_string()),
+                            });
+                        }
 
                         // Verify the downloaded shard before registering
                         let shard_store =
@@ -425,6 +447,22 @@ impl AutoShardManager {
                                         error = %e,
                                         "AutoShardManager: HF shard failed verification — not registering"
                                     );
+                                    {
+                                        let mname = shared
+                                            .model_registry
+                                            .get_manifest(&model_id)
+                                            .map(|m| m.name.clone());
+                                        shared.emit_activity(crate::daemon::state::ActivityEvent {
+                                            category: "download",
+                                            kind: "shard_verify_failed",
+                                            message: format!("Shard {} of {} failed BLAKE3 verification — discarded", shard_idx + 1, mname.as_deref().unwrap_or(&model_id.0)),
+                                            model_id: Some(model_id.0.clone()),
+                                            model_name: mname,
+                                            node_id: None,
+                                            detail_num: Some(shard_idx as i64),
+                                            detail_str: Some(format!("{}", e)),
+                                        });
+                                    }
                                     if let Some(mut entry) =
                                         shared.acquisition_progress.get_mut(&model_id)
                                     {
@@ -507,6 +545,27 @@ impl AutoShardManager {
                             }
                             entry.log.push("Shard downloaded and registered".into());
                         }
+                        // Emit shard registered activity
+                        {
+                            let mname = shared
+                                .model_registry
+                                .get_manifest(&model_id)
+                                .map(|m| m.name.clone());
+                            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_verified",
+                                message: format!(
+                                    "Shard {} of {} verified and registered",
+                                    shard_idx + 1,
+                                    mname.as_deref().unwrap_or(&model_id.0)
+                                ),
+                                model_id: Some(model_id.0.clone()),
+                                model_name: mname,
+                                node_id: None,
+                                detail_num: Some(shard_idx as i64),
+                                detail_str: None,
+                            });
+                        }
 
                         // Broadcast completion to network
                         let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
@@ -552,8 +611,11 @@ impl AutoShardManager {
                             let display = mname.as_deref().unwrap_or(&model_id.0);
                             shared.emit_activity(crate::daemon::state::ActivityEvent {
                                 category: "download",
-                                kind: "shard_download_complete",
-                                message: format!("Downloaded all shards of {}", display),
+                                kind: "model_download_complete",
+                                message: format!(
+                                    "All shards of {} downloaded and verified — model ready",
+                                    display
+                                ),
                                 model_id: Some(model_id.0.clone()),
                                 model_name: mname,
                                 node_id: None,
@@ -583,6 +645,27 @@ impl AutoShardManager {
                             error = %e,
                             "AutoShardManager: HF shard download failed"
                         );
+                        {
+                            let mname = shared
+                                .model_registry
+                                .get_manifest(&model_id)
+                                .map(|m| m.name.clone());
+                            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_download_failed",
+                                message: format!(
+                                    "Failed to download shard {} of {} from HuggingFace: {}",
+                                    shard_idx + 1,
+                                    mname.as_deref().unwrap_or(&model_id.0),
+                                    e
+                                ),
+                                model_id: Some(model_id.0.clone()),
+                                model_name: mname,
+                                node_id: None,
+                                detail_num: Some(shard_idx as i64),
+                                detail_str: Some(e.clone()),
+                            });
+                        }
                         if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id) {
                             entry.state =
                                 crate::model::acquisition::AcquisitionState::Failed { reason: e };
@@ -612,6 +695,23 @@ impl AutoShardManager {
                     shard = candidate.shard_index,
                     "No HF source and no peer holders — cannot download"
                 );
+                {
+                    let mname = self
+                        .shared_state
+                        .model_registry
+                        .get_manifest(&candidate.model_id)
+                        .map(|m| m.name.clone());
+                    self.shared_state.emit_activity(crate::daemon::state::ActivityEvent {
+                        category: "download",
+                        kind: "shard_no_source",
+                        message: format!("Cannot download shard {} of {} — no HuggingFace source and no peers hold it", candidate.shard_index + 1, mname.as_deref().unwrap_or(&candidate.model_id.0)),
+                        model_id: Some(candidate.model_id.0.clone()),
+                        model_name: mname,
+                        node_id: None,
+                        detail_num: Some(candidate.shard_index as i64),
+                        detail_str: None,
+                    });
+                }
             } else {
                 // Pick a random holder and send a direct shard request via P2P
                 let target = {
@@ -639,6 +739,35 @@ impl AutoShardManager {
                         peer = %target,
                         "AutoShardManager: downloading shard from peer (no HF source)"
                     );
+                    {
+                        let mname = self
+                            .shared_state
+                            .model_registry
+                            .get_manifest(&candidate.model_id)
+                            .map(|m| m.name.clone());
+                        let peer_label = self
+                            .shared_state
+                            .nickname_registry
+                            .get(&target)
+                            .map(|r| r.nickname.clone())
+                            .unwrap_or_else(|| format!("{}", target).chars().take(8).collect());
+                        self.shared_state
+                            .emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_download_p2p",
+                                message: format!(
+                                    "Requesting shard {} of {} from peer {}",
+                                    candidate.shard_index + 1,
+                                    mname.as_deref().unwrap_or(&candidate.model_id.0),
+                                    peer_label
+                                ),
+                                model_id: Some(candidate.model_id.0.clone()),
+                                model_name: mname,
+                                node_id: Some(format!("{}", target)),
+                                detail_num: Some(candidate.shard_index as i64),
+                                detail_str: Some("p2p".to_string()),
+                            });
+                    }
                     let cmd = NetworkCommand::SendShardRequest {
                         target_peer_bytes: bytes,
                         request,

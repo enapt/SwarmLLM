@@ -52,6 +52,12 @@
     'rebalance_manual': '\u2696\uFE0F',   // ⚖️
     'inference_request': '\u2728',         // ✨
     'daemon_started': '\uD83D\uDE80',     // 🚀
+    'shard_verified': '\u2705',           // ✅
+    'shard_verify_failed': '\u274C',      // ❌
+    'shard_download_failed': '\u274C',    // ❌
+    'shard_download_p2p': '\uD83D\uDD17', // 🔗
+    'shard_no_source': '\u26A0\uFE0F',   // ⚠️
+    'model_download_complete': '\uD83C\uDF89', // 🎉
   };
 
   // Category CSS class for color coding
