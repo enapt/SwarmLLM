@@ -97,6 +97,9 @@ const WIRE_TAG_TENSOR: u8 = 0x01;
 /// Zstd-compressed tensor payload. Peers that don't recognize this tag will
 /// reject the message, but all nodes running this version or later support it.
 const WIRE_TAG_TENSOR_COMPRESSED: u8 = 0x02;
+/// Binary shard data frame: [tag][4B total_size_le][data...]
+/// Avoids JSON serialization overhead for large shard chunks (32MB+).
+const WIRE_TAG_SHARD: u8 = 0x03;
 
 #[async_trait]
 impl request_response::Codec for SwarmCodec {
@@ -185,7 +188,7 @@ impl request_response::Codec for SwarmCodec {
         tracing::trace!(tag = tag_buf[0], len, "DIAG: codec read_response header");
 
         let max_for_tag = match tag_buf[0] {
-            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED => MAX_MESSAGE_SIZE,
+            WIRE_TAG_TENSOR | WIRE_TAG_TENSOR_COMPRESSED | WIRE_TAG_SHARD => MAX_MESSAGE_SIZE,
             _ => MAX_JSON_MSG_SIZE,
         };
         if len > max_for_tag {
@@ -202,6 +205,23 @@ impl request_response::Codec for SwarmCodec {
         match tag_buf[0] {
             WIRE_TAG_JSON => serde_json::from_slice(&buf)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+            WIRE_TAG_SHARD => {
+                // Binary shard frame: first 8 bytes = total_size (little-endian u64), rest = data
+                if buf.len() < 8 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Shard frame too short",
+                    ));
+                }
+                let total_size = u64::from_le_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]);
+                let data = buf[8..].to_vec();
+                Ok(SwarmResponse::ShardData(crate::types::ShardResponse {
+                    data,
+                    total_size,
+                }))
+            }
             WIRE_TAG_TENSOR => Ok(SwarmResponse::TensorPayload(buf)),
             WIRE_TAG_TENSOR_COMPRESSED => {
                 let decompressed = compression::decompress_tensor(&buf).map_err(|e| {
@@ -296,6 +316,17 @@ impl request_response::Codec for SwarmCodec {
                 self.compress_level,
                 self.compress_threshold,
             ),
+            SwarmResponse::ShardData(ref shard) => {
+                // Binary shard frame: [tag][4B payload_len_be][8B total_size_le][data...]
+                let payload_len = 8 + shard.data.len();
+                let len_bytes = (payload_len as u32).to_be_bytes();
+                let mut frame = Vec::with_capacity(1 + 4 + payload_len);
+                frame.push(WIRE_TAG_SHARD);
+                frame.extend_from_slice(&len_bytes);
+                frame.extend_from_slice(&shard.total_size.to_le_bytes());
+                frame.extend_from_slice(&shard.data);
+                frame
+            }
             other => {
                 let data = serde_json::to_vec(&other)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
