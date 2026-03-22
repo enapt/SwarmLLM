@@ -9,8 +9,27 @@
   var S = App.state;
   var U = App.utils;
 
-  // Per-model event log — keyed by model ID, max 10 events per model
-  var _modelEvents = {};
+  // Per-model event log — keyed by model ID, persisted to sessionStorage
+  var MODEL_EVENTS_KEY = 'swarmllm_model_events';
+  var _modelEvents = (function() {
+    try {
+      var stored = sessionStorage.getItem(MODEL_EVENTS_KEY);
+      if (stored) return JSON.parse(stored);
+    } catch (e) {}
+    return {};
+  })();
+
+  function _persistModelEvents() {
+    try {
+      // Keep max 10 events per model, max 20 models
+      var slim = {};
+      var keys = Object.keys(_modelEvents);
+      keys.slice(0, 20).forEach(function(k) {
+        slim[k] = _modelEvents[k].slice(0, 10);
+      });
+      sessionStorage.setItem(MODEL_EVENTS_KEY, JSON.stringify(slim));
+    } catch (e) {}
+  }
 
   App.dashboard = {
     _peersExpanded: false,
@@ -23,6 +42,7 @@
       events.unshift({ icon: icon, text: text, ts: ts });
       if (events.length > 15) events.pop();
 
+      _persistModelEvents();
       App.dashboard._renderModelTicker(modelId);
 
       // Also log to global activity (unless the caller already did via activity_event)
