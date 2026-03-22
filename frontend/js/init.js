@@ -106,21 +106,27 @@
 
     // Language picker dropdown
     (function() {
+      // [lang_code, display_name, country_code_for_flag]
       var LANGS = [
-        ['en','English'],['es','Espa\u00f1ol'],['fr','Fran\u00e7ais'],['de','Deutsch'],
-        ['pt','Portugu\u00eas'],['it','Italiano'],['nl','Nederlands'],['ru','\u0420\u0443\u0441\u0441\u043a\u0438\u0439'],
-        ['zh','\u4e2d\u6587'],['ja','\u65e5\u672c\u8a9e'],['ko','\ud55c\uad6d\uc5b4'],['ar','\u0627\u0644\u0639\u0631\u0628\u064a\u0629'],
-        ['tr','T\u00fcrk\u00e7e'],['pl','Polski'],['sv','Svenska'],['th','\u0e44\u0e17\u0e22'],
-        ['hi','\u0939\u093f\u0928\u094d\u0926\u0940'],['vi','Ti\u1ebfng Vi\u1ec7t'],['id','Bahasa Indonesia'],
-        ['uk','\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430'],['cs','\u010ce\u0161tina']
+        ['en','English','US'],['es','Espa\u00f1ol','ES'],['fr','Fran\u00e7ais','FR'],['de','Deutsch','DE'],
+        ['pt','Portugu\u00eas','BR'],['it','Italiano','IT'],['nl','Nederlands','NL'],['ru','\u0420\u0443\u0441\u0441\u043a\u0438\u0439','RU'],
+        ['zh','\u4e2d\u6587','CN'],['ja','\u65e5\u672c\u8a9e','JP'],['ko','\ud55c\uad6d\uc5b4','KR'],['ar','\u0627\u0644\u0639\u0631\u0628\u064a\u0629','SA'],
+        ['tr','T\u00fcrk\u00e7e','TR'],['pl','Polski','PL'],['sv','Svenska','SE'],['th','\u0e44\u0e17\u0e22','TH'],
+        ['hi','\u0939\u093f\u0928\u094d\u0926\u0940','IN'],['vi','Ti\u1ebfng Vi\u1ec7t','VN'],['id','Bahasa Indonesia','ID'],
+        ['uk','\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430','UA'],['cs','\u010ce\u0161tina','CZ']
       ];
+      // Country flag as inline SVG img
+      function countryFlag(cc) {
+        return '<img src="/static/flags/' + cc.toLowerCase() + '.svg" alt="' + cc + '" class="lang-flag-img">';
+      }
       var dropdown = document.getElementById('lang-dropdown');
       var btn = document.getElementById('btn-lang-picker');
       if (!dropdown || !btn) return;
       LANGS.forEach(function(pair) {
         var b = document.createElement('button');
         b.type = 'button';
-        b.textContent = pair[1];
+        b.innerHTML = countryFlag(pair[2]) + ' ' + App.utils.escapeHtml(pair[1]);
+        b.title = pair[1];
         b.dataset.lang = pair[0];
         b.addEventListener('click', function() {
           if (typeof I18n !== 'undefined') I18n.setLang(pair[0]);
@@ -147,7 +153,11 @@
         dropdown.querySelectorAll('button').forEach(function(b) {
           b.classList.toggle('active', b.dataset.lang === cur);
         });
+        // Update header button to show current flag
+        var curLang = LANGS.find(function(l) { return l[0] === cur; });
+        if (curLang && btn) btn.innerHTML = countryFlag(curLang[2]);
       }
+      updateLangDropdownActive();
     })();
 
     // Setup wizard language picker
@@ -158,6 +168,12 @@
       if (settingsLang) settingsLang.value = lang;
       var engBtn = document.getElementById('setup-lang-english');
       if (engBtn) engBtn.style.display = (lang !== 'en') ? '' : 'none';
+      // Update setup flag
+      var LANG_FLAGS = {en:'us',es:'es',fr:'fr',de:'de',pt:'br',it:'it',nl:'nl',ru:'ru',zh:'cn',ja:'jp',ko:'kr',ar:'sa',tr:'tr',pl:'pl',sv:'se',th:'th',hi:'in',vi:'vn',id:'id',uk:'ua',cs:'cz'};
+      var setupFlag = document.getElementById('setup-lang-flag');
+      if (setupFlag && LANG_FLAGS[lang]) {
+        setupFlag.src = '/static/flags/' + LANG_FLAGS[lang] + '.svg';
+      }
     });
 
     on('btn-rerun-setup', 'click', function() {

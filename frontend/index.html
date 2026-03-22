@@ -18,6 +18,7 @@
       <div class="modal-header">
         <div id="setup-lang-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:4px">
           <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none">Continue in English</button>
+          <img id="setup-lang-flag" src="/static/flags/us.svg" alt="" class="lang-flag-img" style="width:20px;height:15px">
           <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" title="Language">
             <option value="en">English</option>
             <option value="es">Español</option>
@@ -523,7 +524,7 @@
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>
       <div class="header-lang-picker" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" title="Language" aria-label="Language" style="font-size:0.85rem;font-weight:700;letter-spacing:-0.02em">A<span style="font-size:0.55rem;vertical-align:super;opacity:0.6">文</span></button>
+        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" title="Language" aria-label="Language"><img src="/static/flags/us.svg" alt="EN" class="lang-flag-img"></button>
         <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>
       </div>
       <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
