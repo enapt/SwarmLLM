@@ -490,8 +490,13 @@
             card.classList.remove('downloading');
             card.querySelectorAll('.shard-cell.downloading, .shard-cell.verifying').forEach(function(cell) {
               var idx = cell.getAttribute('data-shard-index') || cell.textContent;
-              cell.className = 'shard-cell missing';
-              cell.textContent = idx;
+              var cPreserve = '';
+              if (cell.classList.contains('locked')) cPreserve += ' locked';
+              if (cell.classList.contains('shard-endpoint')) cPreserve += ' shard-endpoint';
+              if (cell.classList.contains('shard-pinned')) cPreserve += ' shard-pinned';
+              cell.className = 'shard-cell missing' + cPreserve;
+              Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
+              cell.insertBefore(document.createTextNode(idx), cell.firstChild);
               cell.style.removeProperty('--dl-pct');
             });
           }

@@ -332,8 +332,8 @@
         var modelData2 = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
         var sendEncActive = !!(modelData2 && modelData2.encrypted_pipeline && modelData2.shard_count > 1);
         sendBtn.innerHTML = sendEncActive
-          ? I18n.t('chat.send') + ' <span class="send-enc-lock" aria-hidden="true">&#128274;</span>'
-          : I18n.t('chat.send');
+          ? App.utils.escapeHtml(I18n.t('chat.send')) + ' <span class="send-enc-lock" aria-hidden="true">&#128274;</span>'
+          : App.utils.escapeHtml(I18n.t('chat.send'));
       }
     },
 

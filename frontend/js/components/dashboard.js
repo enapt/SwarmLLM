@@ -506,29 +506,18 @@
           // Swarm health bar — shows NETWORK replication, not local status
           // Color = holder count per shard across all nodes (including this one)
           var totalShards = shards.length;
-          var segW = 100 / totalShards;
-          var gradStops = [];
           var totalHolders = 0;
           var wellReplicated = 0, adequate = 0, fragile = 0, networkMissing = 0;
 
-          shards.forEach(function(s, i) {
-            // Swarm health = total holder count (includes local node + all peers).
-            // s.holders = total count from model_registry.shard_holders().len()
+          shards.forEach(function(s) {
             var holders = s.holders || 0;
             totalHolders += holders;
-
-            var color;
-            if (holders >= 3) { color = 'var(--green)'; wellReplicated++; }
-            else if (holders === 2) { color = 'rgba(134,239,172,0.7)'; adequate++; }
-            else if (holders === 1) { color = 'var(--orange)'; fragile++; }
-            else { color = 'var(--red, #ef4444)'; networkMissing++; }
-
-            var start = (i * segW).toFixed(1);
-            var end = ((i + 1) * segW).toFixed(1);
-            gradStops.push(color + ' ' + start + '%', color + ' ' + end + '%');
+            if (holders >= 3) wellReplicated++;
+            else if (holders === 2) adequate++;
+            else if (holders === 1) fragile++;
+            else networkMissing++;
           });
 
-          var gradient = 'linear-gradient(90deg, ' + gradStops.join(', ') + ')';
           var avgHolders = totalShards > 0 ? (totalHolders / totalShards) : 0;
 
           // Health label based on network replication quality
@@ -664,7 +653,7 @@
               var bytes = s.download.downloaded_bytes || 0;
               var total = s.download.total_bytes || s.size_bytes || 0;
               perShardDlHtml += '<div class="per-shard-dl-row">' +
-                '<span class="per-shard-dl-label">Shard ' + s.index + '</span>' +
+                '<span class="per-shard-dl-label">Part ' + (s.index + 1) + '</span>' +
                 '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct2 + '%"></div></div>' +
                 '<span class="per-shard-dl-pct">' + U.formatBytes(bytes) + '/' + U.formatBytes(total) + ' (' + pct2 + '%)</span>' +
                 '</div>';
@@ -1077,7 +1066,11 @@
             if (!cell) return;
 
             var current = cell.className;
-            if (current.indexOf('downloading') >= 0 || current.indexOf('local') >= 0) return;
+            if (current.indexOf('downloading') >= 0) return;
+            // Allow local→local+vram and local+vram→local transitions
+            var alreadyLocal = current.indexOf('local') >= 0;
+            var hasVram = current.indexOf('vram') >= 0;
+            if (alreadyLocal && s.local && s.in_vram === hasVram) return;
 
             // Preserve lock/endpoint classes across state changes
             var preserve = '';
@@ -1275,8 +1268,8 @@
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
           App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);
-        } else if (status.state === 'failed') {
-          var reason = (typeof status.state === 'object' && status.state.failed) ? status.state.failed.reason : '';
+        } else if (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) {
+          var reason = (typeof status.state === 'object' && status.state.failed) ? (status.state.failed.reason || '') : '';
           App.notifications.showToast('Download failed: ' + (status.model_name || modelId) + (reason ? ' \u2014 ' + reason : ''), 'error', 8000);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 10000);
         }
