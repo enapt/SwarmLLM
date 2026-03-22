@@ -61,6 +61,8 @@ pub struct NetworkManager {
     /// Sends shard data to the AcquisitionManager when received from peers.
     #[allow(dead_code)]
     acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
+    /// Deferred broadcasts queued during swarm event handling (can't publish gossip inline).
+    deferred_broadcasts: Vec<crate::types::SwarmMessage>,
     /// Shard store for serving shard data to peers.
     shard_store: ShardStore,
     /// Maps OutboundRequestId → (PeerId, ShardId) for in-flight shard download requests.
@@ -201,6 +203,7 @@ impl NetworkManager {
             inbound_rx,
             outbound_tx,
             acquisition_tx,
+            deferred_broadcasts: Vec::new(),
             shard_store,
             pending_shard_requests: HashMap::new(),
             shard_download_progress: HashMap::new(),
@@ -541,6 +544,13 @@ impl NetworkManager {
                 // Swarm events from the network
                 event = self.swarm.select_next_some() => {
                     self.handle_swarm_event(event).await;
+                    // Process any broadcasts queued during event handling
+                    if !self.deferred_broadcasts.is_empty() {
+                        let msgs: Vec<_> = self.deferred_broadcasts.drain(..).collect();
+                        for msg in msgs {
+                            self.handle_broadcast(msg).await;
+                        }
+                    }
                 }
             }
         }
@@ -1971,15 +1981,17 @@ impl NetworkManager {
                             .model_registry
                             .record_shard_holder(shard_id.clone(), local_node_id.clone());
 
-                        // Announce to the network that we now hold this shard
-                        let announce_msg = crate::types::SwarmMessage::ShardAnnounce(
-                            crate::types::ShardAnnounce {
-                                node_id: local_node_id,
-                                shards: vec![shard_id.clone()],
-                                timestamp: chrono::Utc::now(),
-                            },
-                        );
-                        self.handle_broadcast(announce_msg).await;
+                        // Queue shard announce — can't call handle_broadcast inline
+                        // because we're inside a swarm event handler (causes re-entrant panic).
+                        // The announce will be sent on the next event loop iteration.
+                        self.deferred_broadcasts
+                            .push(crate::types::SwarmMessage::ShardAnnounce(
+                                crate::types::ShardAnnounce {
+                                    node_id: local_node_id,
+                                    shards: vec![shard_id.clone()],
+                                    timestamp: chrono::Utc::now(),
+                                },
+                            ));
 
                         // Notify so auto-manage can load the model
                         self.shared_state.auto_manage_notify.notify_one();
