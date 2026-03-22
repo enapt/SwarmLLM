@@ -54,6 +54,9 @@
         App.chat.scrollToBottom();
         document.getElementById('chat-input').focus();
       }
+      if (tab === 'dashboard') {
+        App.dashboard.loadInitial();
+      }
       if (tab === 'leaderboard') {
         App.identity.loadLeaderboard();
       }

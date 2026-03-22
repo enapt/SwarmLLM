@@ -1248,7 +1248,12 @@
         var modelId = status.model_id;
         if (!modelId) return;
         if (!S.activeAcquisitions[modelId]) {
-          if (status.state === 'complete') return;
+          if (status.state === 'complete') {
+            // Download completed but we weren't tracking it (e.g. after WS reconnect)
+            // — trigger a full reload to update the status pill
+            setTimeout(function() { App.dashboard.loadInitial(); }, 1500);
+            return;
+          }
           S.activeAcquisitions[modelId] = { started: Date.now() };
         }
         App.dashboard.renderAcquisitionPanel(modelId, status);

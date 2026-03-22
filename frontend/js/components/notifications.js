@@ -89,6 +89,11 @@
     if (modelId && App.dashboard && App.dashboard._logModelEvent) {
       App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true);
     }
+
+    // Auto-refresh pool tab when pool events arrive
+    if (data.kind === 'pool_device_joined' || data.kind === 'pool_device_left') {
+      if (App.pool && App.pool.load) App.pool.load();
+    }
   }
 
   function _renderActivityLog() {

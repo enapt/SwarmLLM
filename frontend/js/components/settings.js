@@ -254,6 +254,7 @@
         App.settings.loadProviders();
         App.models.load();
         App.modeIndicator.load();
+        App.providerHealth.startHealthPolling();
         App.ui.showBanner('success', 'Provider keys saved');
       } catch (e) {
         App.ui.showBanner('error', 'Failed to save provider keys: ' + (e.message || 'network error'));
@@ -342,6 +343,8 @@
         if (resp.ok) {
           App.ui.showBanner('success', 'Settings saved');
           App.ui.closeSettings();
+          // Refresh dashboard to reflect new config immediately
+          App.dashboard.loadInitial();
         } else {
           App.ui.showBanner('error', 'Failed to save settings');
         }
