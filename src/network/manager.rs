@@ -1881,9 +1881,20 @@ impl NetworkManager {
                         .unwrap_or(0);
                     let chunk_len = data.data.len() as u64;
 
-                    // Write shard chunk directly to disk (the AcquisitionManager's job
-                    // registry doesn't track P2P downloads — auto-manage creates them
-                    // outside the acquisition flow).
+                    // Forward to AcquisitionManager if it has a job for this model
+                    // (user-initiated downloads via the "Download" button).
+                    // Auto-manage P2P downloads don't have jobs, so we also write directly.
+                    if let Some(ref acq_tx) = self.acquisition_tx {
+                        let _ = acq_tx.try_send(AcquisitionCommand::ShardDataReceived {
+                            shard_id: shard_id.clone(),
+                            offset,
+                            data: data.data.clone(),
+                            total_size: data.total_size,
+                        });
+                    }
+
+                    // Also write directly (handles auto-manage P2P downloads that
+                    // bypass the AcquisitionManager job registry).
                     if let Err(e) = self.shard_store.write_chunk(
                         &shard_id.model_id,
                         shard_id.index,
