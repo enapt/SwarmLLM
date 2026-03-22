@@ -169,8 +169,8 @@
           // Show per-process RSS (this node's actual memory) rather than system-wide
           var processRss = hw.process_rss_mb || 0;
           var ramUsed = processRss > 0 ? processRss : (hw.used_ram_mb || 0);
-          document.getElementById('ram-used').textContent = U.formatMB(ramUsed);
           var ramEl = document.getElementById('ram-used');
+          ramEl.textContent = U.formatMB(ramUsed);
           if (processRss > 0) {
             ramEl.title = U.formatMB(processRss) + '\n\n' +
               I18n.t(S._gpuInference ? 'hw.ram_tip_gpu' : 'hw.ram_tip_cpu') +
@@ -1217,10 +1217,10 @@
         });
 
         if (overflow) {
-          if (peers.length > PEER_LIMIT && !showAll) {
+          if (peers.length > PEER_LIMIT) {
             overflow.style.display = '';
             var btn = document.getElementById('btn-show-all-peers');
-            if (btn) btn.textContent = 'Show all ' + peers.length + ' peers';
+            if (btn) btn.textContent = showAll ? 'Show fewer' : 'Show all ' + peers.length + ' peers';
           } else {
             overflow.style.display = 'none';
           }

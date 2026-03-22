@@ -276,7 +276,7 @@
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {
-          App.dashboard.renderPeers(msg.data.peers || []);
+          App.dashboard.renderPeers((msg.data && msg.data.peers) || []);
         } else if (msg.type === 'prune_event') {
           var d = msg.data;
           var freed = U.formatBytes(d.freed_bytes || 0);
