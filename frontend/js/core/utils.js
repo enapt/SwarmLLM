@@ -87,7 +87,7 @@
 
   function renderSparkline(containerId, data) {
     var container = document.getElementById(containerId);
-    if (!data || data.length === 0) return;
+    if (!container || !data || data.length === 0) return;
     var hasActivity = data.some(function(v) { return v !== 0; });
     if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">Credit activity will appear here</span>'; return; }
     var min = Math.min.apply(null, data);

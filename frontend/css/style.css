@@ -2582,6 +2582,9 @@ select.cloud-model-sort { flex: 0 0 88px; width: 88px; padding: 6px 6px; font-si
   gap: 8px;
   font-size: 0.8rem;
 }
+.peer-row-item .peer-label {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .peer-row-item .peer-gpu {
   font-size: 0.7rem;
   margin-left: auto;

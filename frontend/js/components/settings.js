@@ -69,7 +69,8 @@
 
     load: async function() {
       try {
-        var resp = await fetch('/api/admin/config');
+        var resp = await App.authFetch('/api/admin/config');
+        if (!resp.ok) return;
         var data = await resp.json();
         document.getElementById('settings-contribution').value = data.contribution || 'moderate';
         document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
@@ -93,7 +94,7 @@
       var keyEl = document.getElementById('settings-api-key');
       if (!keyEl) return;
       try {
-        var resp = await fetch('/api/admin/api-key');
+        var resp = await App.authFetch('/api/admin/api-key');
         if (resp.ok) {
           var data = await resp.json();
           var key = data.api_key || '';
@@ -130,7 +131,7 @@
 
     loadStorageInfo: async function() {
       try {
-        var resp = await fetch('/api/admin/shard-storage');
+        var resp = await App.authFetch('/api/admin/shard-storage');
         var data = await resp.json();
         document.getElementById('settings-storage-used').textContent = U.formatBytes(data.disk_usage_bytes || 0);
         var maxMb = data.auto_manage_max_storage_mb || 0;
@@ -397,7 +398,7 @@
 
     detectHardware: async function() {
       try {
-        var resp = await fetch('/api/admin/stats');
+        var resp = await App.authFetch('/api/admin/stats');
         var data = await resp.json();
         App.setup.hwData = data.hardware || {};
         var gpuName = App.setup.hwData.gpu_name || 'No GPU (CPU mode)';

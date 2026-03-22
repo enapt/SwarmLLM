@@ -185,7 +185,9 @@
           var diskUsed = hw.used_disk_mb || 0;
           document.getElementById('disk-used').textContent = U.formatMB(diskUsed);
           var diskPct = hw.total_disk_mb > 0 ? (diskUsed / hw.total_disk_mb * 100) : 0;
-          document.getElementById('disk-bar').style.width = diskPct.toFixed(1) + '%';
+          var diskBar = document.getElementById('disk-bar');
+          diskBar.style.width = diskPct.toFixed(1) + '%';
+          diskBar.className = diskPct > 90 ? 'fill red' : (diskPct > 70 ? 'fill orange' : 'fill accent');
         }
       }
 
@@ -952,8 +954,22 @@
                   App.dashboard._logModelEvent(modelId, '\u{1F50D}', 'Verifying part ' + (sd.index + 1));
                 }
               }
-              cell.className = 'shard-cell ' + newClass;
-              cell.textContent = label;
+              // Preserve lock, endpoint, and pinned classes
+              var preserve = '';
+              if (cell.classList.contains('locked')) preserve += ' locked';
+              if (cell.classList.contains('shard-endpoint')) preserve += ' shard-endpoint';
+              if (cell.classList.contains('shard-pinned')) preserve += ' shard-pinned';
+              cell.className = 'shard-cell ' + newClass + preserve;
+
+              // Set label text while preserving holder badge and endpoint tag
+              var holderBadge = cell.querySelector('.shard-holders');
+              var endpointTag = cell.querySelector('.shard-endpoint-tag');
+              var lockIcon = cell.querySelector('.shard-lock-icon');
+              // Clear text nodes only (preserves child elements)
+              Array.from(cell.childNodes).forEach(function(n) {
+                if (n.nodeType === 3) n.textContent = '';
+              });
+              cell.insertBefore(document.createTextNode(label), cell.firstChild);
 
               if (newClass === 'downloading' || newClass === 'peer-downloading') {
                 cell.style.setProperty('--dl-pct', dlPct + '%');
@@ -1063,21 +1079,42 @@
             var current = cell.className;
             if (current.indexOf('downloading') >= 0 || current.indexOf('local') >= 0) return;
 
+            // Preserve lock/endpoint classes across state changes
+            var preserve = '';
+            if (cell.classList.contains('locked')) preserve += ' locked';
+            if (cell.classList.contains('shard-endpoint')) preserve += ' shard-endpoint';
+            if (cell.classList.contains('shard-pinned')) preserve += ' shard-pinned';
+
             if (s.local) {
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               var vramCls = s.in_vram ? 'local vram' : 'local';
               var vramLabel = s.in_vram ? 'Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')' : 'On disk (not loaded)';
-              cell.className = 'shard-cell ' + vramCls;
-              cell.textContent = '' + (s.index + 1);
+              cell.className = 'shard-cell ' + vramCls + preserve;
+              // Preserve inner elements (holder badge, endpoint tag)
+              Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
+              cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
               cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
               App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-              cell.className = 'shard-cell peer';
+              cell.className = 'shard-cell peer' + preserve;
+              // Update or create holder badge
+              var hBadge = cell.querySelector('.shard-holders');
+              if (hBadge) { hBadge.textContent = s.holders; }
+              else {
+                hBadge = document.createElement('span');
+                hBadge.className = 'shard-holders';
+                hBadge.textContent = s.holders;
+                cell.appendChild(hBadge);
+              }
               cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Available from ' + s.holders + ' peer(s)');
               App.dashboard._logModelEvent(modelId, '\u{1F310}', 'Part ' + (s.index + 1) + ' found on ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : ''));
+            } else if (s.holders > 0) {
+              // Update holder count on existing peer cells
+              var hBadge2 = cell.querySelector('.shard-holders');
+              if (hBadge2) hBadge2.textContent = s.holders;
             }
           });
         });
@@ -1101,9 +1138,14 @@
             setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
             App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading part ' + (pd.shard_index + 1));
           }
-          cell.className = 'shard-cell peer-downloading';
+          var pdPreserve = '';
+          if (cell.classList.contains('locked')) pdPreserve += ' locked';
+          if (cell.classList.contains('shard-endpoint')) pdPreserve += ' shard-endpoint';
+          if (cell.classList.contains('shard-pinned')) pdPreserve += ' shard-pinned';
+          cell.className = 'shard-cell peer-downloading' + pdPreserve;
           cell.style.setProperty('--dl-pct', pdPct + '%');
-          cell.textContent = pdPct + '%';
+          Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
+          cell.insertBefore(document.createTextNode(pdPct + '%'), cell.firstChild);
           cell.setAttribute('title', 'Shard ' + pd.shard_index + ' \u2014 Peer ' + pd.node_id.substring(0, 8) + ' downloading (' + pdPct + '%)');
         });
       }
@@ -1111,6 +1153,7 @@
 
     renderPeerItem: function(p) {
       var tmpl = document.getElementById('tmpl-peer-row');
+      if (!tmpl) return document.createElement('div');
       var node = tmpl.content.cloneNode(true);
       var div = node.querySelector('.peer-row-item');
 
