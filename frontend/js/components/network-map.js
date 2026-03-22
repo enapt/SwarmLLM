@@ -143,7 +143,7 @@
     refresh: async function() {
       if (!App.networkMap.mapRendered) await App.networkMap.buildSvg();
       try {
-        var resp = await fetch('/api/admin/network-map');
+        var resp = await App.authFetch('/api/admin/network-map');
         var data = await resp.json();
         App.networkMap.data = data;
         App.networkMap.render(data);

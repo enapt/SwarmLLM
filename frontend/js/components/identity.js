@@ -12,7 +12,7 @@
   App.identity = {
     loadNickname: async function() {
       try {
-        var resp = await fetch('/api/identity/nickname');
+        var resp = await App.authFetch('/api/identity/nickname');
         if (!resp.ok) return;
         var data = await resp.json();
         var nickEl = document.getElementById('settings-nickname');
@@ -58,7 +58,7 @@
       if (!tbody) return;
 
       try {
-        var resp = await fetch('/api/identity/leaderboard?limit=50');
+        var resp = await App.authFetch('/api/identity/leaderboard?limit=50');
         if (!resp.ok) { tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Failed to load</td></tr>'; return; }
         var data = await resp.json();
         var entries = data.leaderboard || [];

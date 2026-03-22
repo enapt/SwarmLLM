@@ -61,7 +61,7 @@
       var models = [];
       var cloudModels = [];
       try {
-        var r = await fetch('/api/admin/models');
+        var r = await authFetch('/api/admin/models');
         if (r.ok) models = await r.json();
       } catch (e) {}
       try {
@@ -80,11 +80,11 @@
       var stats = null;
       var config = null;
       try {
-        var r = await fetch('/api/admin/stats');
+        var r = await authFetch('/api/admin/stats');
         if (r.ok) stats = await r.json();
       } catch (e) {}
       try {
-        var r2 = await fetch('/api/admin/config');
+        var r2 = await authFetch('/api/admin/config');
         if (r2.ok) config = await r2.json();
       } catch (e) {}
       cache.stats = stats;

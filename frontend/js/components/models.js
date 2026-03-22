@@ -29,7 +29,7 @@
       loading.classList.remove('hidden');
 
       try {
-        var resp = await fetch('/api/admin/hf/search?query=' + encodeURIComponent(query));
+        var resp = await App.authFetch('/api/admin/hf/search?query=' + encodeURIComponent(query));
         loading.classList.add('hidden');
 
         if (!resp.ok) {
@@ -906,7 +906,7 @@
         App.models.cancelDownload(modelId);
       } else {
         try {
-          var srcResp = await fetch('/api/admin/hf/source/' + encodeURIComponent(modelId));
+          var srcResp = await App.authFetch('/api/admin/hf/source/' + encodeURIComponent(modelId));
           if (!srcResp.ok) {
             App.ui.showBanner('error', 'No HuggingFace source found for this model');
             return;

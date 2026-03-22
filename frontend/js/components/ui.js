@@ -215,7 +215,7 @@
       var statsData = App.data.cache.stats;
       if (!statsData) {
         try {
-          var resp = await fetch('/api/admin/stats');
+          var resp = await App.authFetch('/api/admin/stats');
           if (resp.ok) statsData = await resp.json();
         } catch (e) {}
       }
