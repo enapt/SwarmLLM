@@ -306,6 +306,38 @@
         if (sep) sep.style.display = hasCloud ? '' : 'none';
       }
 
+      // Sort swarm models
+      var swarmSort = S._swarmModelSort || 'az';
+      function _sortModels(arr, mode) {
+        var sorted = arr.slice();
+        if (mode === 'az') {
+          sorted.sort(function(a, b) {
+            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+            return na < nb ? -1 : na > nb ? 1 : 0;
+          });
+        } else if (mode === 'za') {
+          sorted.sort(function(a, b) {
+            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+            return na > nb ? -1 : na < nb ? 1 : 0;
+          });
+        } else if (mode === 'status') {
+          var rank = { loaded: 0, ready: 1, downloading: 2, partial: 3, available: 4, network: 5 };
+          sorted.sort(function(a, b) {
+            var ra = rank[a.status] !== undefined ? rank[a.status] : 9;
+            var rb = rank[b.status] !== undefined ? rank[b.status] : 9;
+            if (ra !== rb) return ra - rb;
+            var na = (a.name || a.id).toLowerCase(), nb = (b.name || b.id).toLowerCase();
+            return na < nb ? -1 : na > nb ? 1 : 0;
+          });
+        } else if (mode === 'size') {
+          sorted.sort(function(a, b) { return (b.total_size_bytes || 0) - (a.total_size_bytes || 0); });
+        } else if (mode === 'shards') {
+          sorted.sort(function(a, b) { return (b.hosted_shards || 0) - (a.hosted_shards || 0); });
+        }
+        return sorted;
+      }
+      models = _sortModels(models, swarmSort);
+
       // Swarm models section
       var swarmBody;
       if (models.length > 0) {
@@ -322,11 +354,30 @@
           '<img src="/static/icons/swarm.svg" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo">' +
           '<span class="models-section-title">Swarm Models</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
+          '<select class="swarm-model-sort" id="swarm-model-sort" title="Sort models">' +
+            '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>A\u2013Z</option>' +
+            '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>Z\u2013A</option>' +
+            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>Status</option>' +
+            '<option value="size"' + (swarmSort === 'size' ? ' selected' : '') + '>Size \u2193</option>' +
+            '<option value="shards"' + (swarmSort === 'shards' ? ' selected' : '') + '>Local shards \u2193</option>' +
+          '</select>' +
           '</summary>';
         swarmBody = document.createElement('div');
         swarmBody.className = 'models-section-body';
         swarmSection.appendChild(swarmBody);
         list.appendChild(swarmSection);
+
+        // Wire sort change handler
+        var sortEl = document.getElementById('swarm-model-sort');
+        if (sortEl) {
+          sortEl.addEventListener('change', function(e) {
+            e.stopPropagation(); // Don't toggle the <details>
+            S._swarmModelSort = this.value;
+            try { localStorage.setItem('swarmllm_model_sort', this.value); } catch(e2) {}
+            App.models.load();
+          });
+          sortEl.addEventListener('click', function(e) { e.stopPropagation(); });
+        }
       }
 
       models.forEach(function(m) {

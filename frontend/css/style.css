@@ -1958,6 +1958,13 @@ kbd {
 details.models-section:not([open]) .models-section-header::before {
   transform: rotate(-90deg);
 }
+select.swarm-model-sort {
+  margin-left: auto; flex-shrink: 0;
+  padding: 3px 6px; font-size: 0.7rem;
+  background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text-secondary); cursor: pointer; outline: none;
+}
+select.swarm-model-sort:focus { border-color: var(--accent); }
 /* (models-section-icon removed — unused) */
 .models-section-logo { display: inline-block; vertical-align: middle; flex-shrink: 0; }
 .model-card-name-row .provider-icon { margin-right: 4px; opacity: 0.85; }

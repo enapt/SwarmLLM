@@ -15,6 +15,7 @@ window.App = {
     pollTimers: [],
     creditHistory: [],
     activeAcquisitions: {},
+    _swarmModelSort: (function() { try { return localStorage.getItem('swarmllm_model_sort') || 'az'; } catch(e) { return 'az'; } })(),
     isStreaming: false,
     currentModel: '',
     currentSessionId: null,
