@@ -59,6 +59,7 @@ pub struct NetworkManager {
     /// Each message carries the transport-authenticated sender identity.
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
     /// Sends shard data to the AcquisitionManager when received from peers.
+    #[allow(dead_code)]
     acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     /// Shard store for serving shard data to peers.
     shard_store: ShardStore,
@@ -1870,15 +1871,21 @@ impl NetworkManager {
                         .unwrap_or(0);
                     let chunk_len = data.data.len() as u64;
 
-                    if let Some(ref acq_tx) = self.acquisition_tx {
-                        if let Err(e) = acq_tx.try_send(AcquisitionCommand::ShardDataReceived {
-                            shard_id: shard_id.clone(),
-                            offset,
-                            data: data.data,
-                            total_size: data.total_size,
-                        }) {
-                            tracing::warn!(error = %e, "Failed to forward shard data to acquisition");
-                        }
+                    // Write shard chunk directly to disk (the AcquisitionManager's job
+                    // registry doesn't track P2P downloads — auto-manage creates them
+                    // outside the acquisition flow).
+                    if let Err(e) = self.shard_store.write_chunk(
+                        &shard_id.model_id,
+                        shard_id.index,
+                        offset,
+                        &data.data,
+                    ) {
+                        tracing::error!(
+                            model = %shard_id.model_id,
+                            shard = shard_id.index,
+                            error = %e,
+                            "Failed to write P2P shard chunk to disk"
+                        );
                     }
 
                     // Update acquisition_progress so the frontend download bar moves
@@ -1958,12 +1965,30 @@ impl NetworkManager {
                             });
                         }
 
+                        // Register ourselves as a holder of this shard
+                        let local_node_id = self.shared_state.identity.node_id().clone();
+                        self.shared_state
+                            .model_registry
+                            .record_shard_holder(shard_id.clone(), local_node_id.clone());
+
+                        // Announce to the network that we now hold this shard
+                        let announce_msg = crate::types::SwarmMessage::ShardAnnounce(
+                            crate::types::ShardAnnounce {
+                                node_id: local_node_id,
+                                shards: vec![shard_id.clone()],
+                                timestamp: chrono::Utc::now(),
+                            },
+                        );
+                        self.handle_broadcast(announce_msg).await;
+
+                        // Notify so auto-manage can load the model
+                        self.shared_state.auto_manage_notify.notify_one();
                         let _ = self.shared_state.models_changed_tx.send(());
 
                         tracing::info!(
                             model = %shard_id.model_id,
                             index = shard_id.index,
-                            "Shard download complete"
+                            "P2P shard download complete — registered and announced"
                         );
                         let mname = self
                             .shared_state
