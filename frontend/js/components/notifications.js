@@ -9,23 +9,32 @@
   var S = App.state;
   var U = App.utils;
 
-  // --- Activity Log (persisted to sessionStorage) ---
+  // --- Activity + Network Logs (persisted to sessionStorage) ---
   var ACTIVITY_STORAGE_KEY = 'swarmllm_activity';
+  var NETWORK_STORAGE_KEY = 'swarmllm_network_log';
   var _activityEntries = (function() {
-    try {
-      var stored = sessionStorage.getItem(ACTIVITY_STORAGE_KEY);
-      if (stored) return JSON.parse(stored);
-    } catch (e) {}
+    try { var s = sessionStorage.getItem(ACTIVITY_STORAGE_KEY); if (s) return JSON.parse(s); } catch (e) {}
+    return [];
+  })();
+  var _networkEntries = (function() {
+    try { var s = sessionStorage.getItem(NETWORK_STORAGE_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return [];
   })();
   var MAX_ACTIVITY = 200;
   var MAX_DISPLAY = 40;
 
+  // Events that go to the Network panel instead of Activity
+  var NETWORK_KINDS = {
+    'peer_connected': true, 'peer_disconnected': true,
+    'shard_announced': true,
+    'rebalance_peer_left': true, 'rebalance_peer_joined': true, 'rebalance_manual': true,
+  };
+
   function _persistActivity() {
-    try {
-      // Only persist the last 100 to keep sessionStorage lean
-      sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100)));
-    } catch (e) {}
+    try { sessionStorage.setItem(ACTIVITY_STORAGE_KEY, JSON.stringify(_activityEntries.slice(0, 100))); } catch (e) {}
+  }
+  function _persistNetwork() {
+    try { sessionStorage.setItem(NETWORK_STORAGE_KEY, JSON.stringify(_networkEntries.slice(0, 100))); } catch (e) {}
   }
 
   // Category → icon mapping for backend activity events
@@ -79,7 +88,16 @@
 
   function logActivity(icon, text, category, modelId) {
     var ts = Date.now();
-    _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category || '', modelId: modelId || '' });
+    var entry = { icon: icon, text: text, ts: ts, category: category || '', modelId: modelId || '' };
+    // Route peer/network events to the Network panel
+    if (category === 'network') {
+      _networkEntries.unshift(entry);
+      if (_networkEntries.length > MAX_ACTIVITY) _networkEntries.pop();
+      _persistNetwork();
+      _renderNetworkLog();
+      return;
+    }
+    _activityEntries.unshift(entry);
     if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
     _persistActivity();
     _renderActivityLog();
@@ -91,11 +109,19 @@
     var category = data.category || '';
     var modelId = data.model_id || '';
     var ts = Date.now();
+    var entry = { icon: icon, text: text, ts: ts, category: category, modelId: modelId };
 
-    _activityEntries.unshift({ icon: icon, text: text, ts: ts, category: category, modelId: modelId });
-    if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
-    _persistActivity();
-    _renderActivityLog();
+    if (NETWORK_KINDS[data.kind]) {
+      _networkEntries.unshift(entry);
+      if (_networkEntries.length > MAX_ACTIVITY) _networkEntries.pop();
+      _persistNetwork();
+      _renderNetworkLog();
+    } else {
+      _activityEntries.unshift(entry);
+      if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
+      _persistActivity();
+      _renderActivityLog();
+    }
 
     // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
     if (modelId && App.dashboard && App.dashboard._logModelEvent) {
@@ -134,6 +160,34 @@
         (_activityEntries.length - MAX_DISPLAY) + ' older events</div>';
     }
     log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>';
+  }
+
+  function _renderNetworkLog() {
+    var log = document.getElementById('network-log');
+    if (!log) return;
+    var countEl = document.getElementById('network-log-count');
+    if (countEl) countEl.textContent = _networkEntries.length + ' events';
+
+    var html = '';
+    var show = _networkEntries.slice(0, MAX_DISPLAY);
+    for (var i = 0; i < show.length; i++) {
+      var e = show[i];
+      var catClass = ACTIVITY_CATEGORY_CLASS[e.category] || '';
+      var d = new Date(e.ts);
+      var clock = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+      var ago = U.timeAgo(e.ts);
+      var timeHtml = i === 0
+        ? '<span class="activity-time" title="' + clock + '">' + ago + '</span>'
+        : '<span class="activity-time">' + clock + ' <span class="activity-ago">' + ago + '</span></span>';
+      html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + e.icon + '</span>' +
+        '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
+        timeHtml + '</div>';
+    }
+    if (_networkEntries.length > MAX_DISPLAY) {
+      html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
+        (_networkEntries.length - MAX_DISPLAY) + ' older events</div>';
+    }
+    log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No network events yet.</div>';
   }
 
   // --- Toast System ---
@@ -277,7 +331,9 @@
       } else {
         // First connect this page load — clear stale activity from previous daemon session
         _activityEntries = [];
+        _networkEntries = [];
         _persistActivity();
+        _persistNetwork();
         try { sessionStorage.removeItem('swarmllm_model_events'); } catch (e2) {}
       }
       S.wsWasConnected = true;
@@ -586,14 +642,14 @@
     startHealthPolling: startHealthPolling,
   };
 
-  // Render restored activity log from sessionStorage immediately
-  if (_activityEntries.length > 0) {
-    setTimeout(_renderActivityLog, 0);
-  }
+  // Render restored logs from sessionStorage immediately
+  if (_activityEntries.length > 0) setTimeout(_renderActivityLog, 0);
+  if (_networkEntries.length > 0) setTimeout(_renderNetworkLog, 0);
 
   // Refresh "ago" timestamps every 30 seconds
   setInterval(function() {
     _renderActivityLog();
+    _renderNetworkLog();
     // Also refresh per-model tickers
     document.querySelectorAll('.model-ticker-time').forEach(function(el) {
       var ts = parseInt(el.getAttribute('data-ts'), 10);
