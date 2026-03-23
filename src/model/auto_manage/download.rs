@@ -478,6 +478,14 @@ impl AutoShardManager {
                                             shard_idx
                                         ));
                                     }
+                                    // Clean up failed entry after 10s
+                                    let cleanup_shared = shared.clone();
+                                    let cleanup_mid = model_id.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_secs(10))
+                                            .await;
+                                        cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                                    });
                                     return;
                                 }
                             }
@@ -671,6 +679,13 @@ impl AutoShardManager {
                                 crate::model::acquisition::AcquisitionState::Failed { reason: e };
                             entry.log.push("HF download failed".into());
                         }
+                        // Clean up failed entry after 10s
+                        let cleanup_shared2 = shared.clone();
+                        let cleanup_mid2 = model_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            cleanup_shared2.acquisition_progress.remove(&cleanup_mid2);
+                        });
                     }
                 }
             });
