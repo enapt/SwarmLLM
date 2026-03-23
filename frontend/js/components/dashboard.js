@@ -1343,10 +1343,9 @@
         var modelId = status.model_id;
         if (!modelId) return;
         if (!S.activeAcquisitions[modelId]) {
-          if (status.state === 'complete') {
-            // Download completed but we weren't tracking it (e.g. after WS reconnect)
-            // — trigger a full reload to update the status pill
-            setTimeout(function() { App.dashboard.loadInitial(); }, 1500);
+          // Skip stale complete/failed entries we aren't tracking
+          var isFailed = status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed);
+          if (status.state === 'complete' || isFailed || status.overall_pct >= 100) {
             return;
           }
           S.activeAcquisitions[modelId] = { started: Date.now() };
