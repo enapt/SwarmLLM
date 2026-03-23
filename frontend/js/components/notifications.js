@@ -125,7 +125,7 @@
 
     // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
     if (modelId && App.dashboard && App.dashboard._logModelEvent) {
-      App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true);
+      App.dashboard._logModelEvent(modelId, icon, data.message || data.kind, true, data.kind);
     }
 
     // Auto-refresh pool tab when pool events arrive
@@ -334,7 +334,7 @@
         _networkEntries = [];
         _persistActivity();
         _persistNetwork();
-        try { sessionStorage.removeItem('swarmllm_model_events'); } catch (e2) {}
+        try { sessionStorage.removeItem('swarmllm_model_events'); sessionStorage.removeItem('swarmllm_model_net_events'); } catch (e2) {}
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'network');

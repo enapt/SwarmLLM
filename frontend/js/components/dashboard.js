@@ -9,25 +9,31 @@
   var S = App.state;
   var U = App.utils;
 
-  // Per-model event log — keyed by model ID, persisted to sessionStorage
+  // Per-model event logs — split into activity and network
   var MODEL_EVENTS_KEY = 'swarmllm_model_events';
+  var MODEL_NET_EVENTS_KEY = 'swarmllm_model_net_events';
   var _modelEvents = (function() {
-    try {
-      var stored = sessionStorage.getItem(MODEL_EVENTS_KEY);
-      if (stored) return JSON.parse(stored);
-    } catch (e) {}
+    try { var s = sessionStorage.getItem(MODEL_EVENTS_KEY); if (s) return JSON.parse(s); } catch (e) {}
+    return {};
+  })();
+  var _modelNetEvents = (function() {
+    try { var s = sessionStorage.getItem(MODEL_NET_EVENTS_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return {};
   })();
 
+  // Kinds that go to the network ticker on model cards
+  var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1, 'rebalance_peer_joined': 1 };
+
   function _persistModelEvents() {
     try {
-      // Keep max 10 events per model, max 20 models
       var slim = {};
-      var keys = Object.keys(_modelEvents);
-      keys.slice(0, 20).forEach(function(k) {
-        slim[k] = _modelEvents[k].slice(0, 10);
-      });
+      Object.keys(_modelEvents).slice(0, 20).forEach(function(k) { slim[k] = _modelEvents[k].slice(0, 10); });
       sessionStorage.setItem(MODEL_EVENTS_KEY, JSON.stringify(slim));
+    } catch (e) {}
+    try {
+      var slim2 = {};
+      Object.keys(_modelNetEvents).slice(0, 20).forEach(function(k) { slim2[k] = _modelNetEvents[k].slice(0, 10); });
+      sessionStorage.setItem(MODEL_NET_EVENTS_KEY, JSON.stringify(slim2));
     } catch (e) {}
   }
 
@@ -35,9 +41,11 @@
     _peersExpanded: false,
     _lastPeers: [],
 
-    _logModelEvent: function(modelId, icon, text, skipGlobal) {
-      if (!_modelEvents[modelId]) _modelEvents[modelId] = [];
-      var events = _modelEvents[modelId];
+    _logModelEvent: function(modelId, icon, text, skipGlobal, kind) {
+      var isNet = kind && MODEL_NET_KINDS[kind];
+      var store = isNet ? _modelNetEvents : _modelEvents;
+      if (!store[modelId]) store[modelId] = [];
+      var events = store[modelId];
       var ts = Date.now();
       events.unshift({ icon: icon, text: text, ts: ts });
       if (events.length > 15) events.pop();
@@ -45,38 +53,47 @@
       _persistModelEvents();
       App.dashboard._renderModelTicker(modelId);
 
-      // Also log to global activity (unless the caller already did via activity_event)
+      // Also log to global panel (unless the caller already did via activity_event)
       if (!skipGlobal) {
-        App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text, 'model', modelId);
+        App.notifications.logActivity(icon, U.formatModelDisplayName(modelId) + ': ' + text, isNet ? 'network' : 'model', modelId);
       }
     },
 
-    // Render the per-model ticker DOM from stored events (no side effects)
+    // Render the per-model ticker DOM — split into activity + network columns
     _renderModelTicker: function(modelId) {
-      var events = _modelEvents[modelId];
-      if (!events || events.length === 0) return;
+      var actEvents = _modelEvents[modelId] || [];
+      var netEvents = _modelNetEvents[modelId] || [];
+      if (actEvents.length === 0 && netEvents.length === 0) return;
+
       var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
       var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
       if (!ticker) return;
 
-      var latest = events[0];
       function _tickerTime(ts) {
         var d = new Date(ts);
         return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
       }
-      var historyHtml = '';
-      if (events.length > 1) {
-        historyHtml = '<div class="model-ticker-history">';
-        events.slice(1, 10).forEach(function(e) {
-          historyHtml += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
-        });
-        historyHtml += '</div>';
+      function _renderColumn(events, emptyText) {
+        if (events.length === 0) return '<div class="text-muted" style="font-size:0.68rem;padding:2px 0">' + emptyText + '</div>';
+        var latest = events[0];
+        var html = '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
+          '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
+          '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>';
+        if (events.length > 1) {
+          html += '<div class="model-ticker-history">';
+          events.slice(1, 6).forEach(function(e) {
+            html += '<div class="model-ticker-row"><span>' + e.icon + ' ' + U.escapeHtml(e.text) + '</span><span class="model-ticker-time" data-ts="' + e.ts + '">' + _tickerTime(e.ts) + ' ' + U.timeAgo(e.ts) + '</span></div>';
+          });
+          html += '</div>';
+        }
+        return html;
       }
+
       ticker.innerHTML =
-        '<div class="model-ticker-latest"><span class="model-ticker-icon">' + latest.icon + '</span>' +
-        '<span class="model-ticker-text">' + U.escapeHtml(latest.text) + '</span>' +
-        '<span class="model-ticker-time" data-ts="' + latest.ts + '">' + U.timeAgo(latest.ts) + '</span></div>' +
-        historyHtml;
+        '<div class="model-ticker-split">' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">Activity</div>' + _renderColumn(actEvents, 'No activity') + '</div>' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">Network</div>' + _renderColumn(netEvents, 'No network events') + '</div>' +
+        '</div>';
       ticker.style.display = '';
     },
 
