@@ -337,7 +337,7 @@
         try { sessionStorage.removeItem('swarmllm_model_events'); sessionStorage.removeItem('swarmllm_model_net_events'); } catch (e2) {}
       }
       S.wsWasConnected = true;
-      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'network');
+      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'system');
     };
 
     S.ws.onmessage = function(event) {
