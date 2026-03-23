@@ -779,6 +779,11 @@ impl SharedState {
             shutdown_tx,
         });
 
+        // Wire activity_tx into the process pool for spawn/unload notifications
+        state
+            .model_process_pool
+            .set_activity_tx(state.activity_tx.clone());
+
         (state, shutdown_rx, dht_query_rx)
     }
 

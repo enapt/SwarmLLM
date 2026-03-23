@@ -51,6 +51,9 @@ pub struct ModelProcessPool {
     /// Active shard windows: which shards each model worker should load.
     /// If absent, the worker loads all on-disk shards (default behavior).
     active_shard_windows: DashMap<ModelId, Vec<u32>>,
+    /// Activity event sender for dashboard notifications.
+    activity_tx:
+        std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
 }
 
 impl ModelProcessPool {
@@ -60,6 +63,21 @@ impl ModelProcessPool {
             spawn_lock: Mutex::new(()),
             data_dir,
             active_shard_windows: DashMap::new(),
+            activity_tx: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Set the activity event sender (called once after SharedState is created).
+    pub fn set_activity_tx(
+        &self,
+        tx: tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>,
+    ) {
+        let _ = self.activity_tx.set(tx);
+    }
+
+    fn emit_activity(&self, event: crate::daemon::state::ActivityEvent) {
+        if let Some(tx) = self.activity_tx.get() {
+            let _ = tx.send(event);
         }
     }
 
@@ -157,6 +175,20 @@ impl ModelProcessPool {
         }
 
         tracing::info!("Model worker subprocess started");
+
+        self.emit_activity(crate::daemon::state::ActivityEvent {
+            category: "model",
+            kind: "worker_spawned",
+            message: format!(
+                "Loading {} into memory (worker subprocess started)",
+                model_id.0
+            ),
+            model_id: Some(model_id.0.clone()),
+            model_name: None,
+            node_id: None,
+            detail_num: None,
+            detail_str: None,
+        });
 
         Ok(WorkerHandle {
             child,
@@ -349,6 +381,19 @@ impl ModelProcessPool {
             // Drop handle → kills child process → OS frees all CUDA memory
             drop(handle);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
+            self.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "model",
+                kind: "worker_unloaded",
+                message: format!(
+                    "Unloaded {} from memory (worker killed, GPU memory freed)",
+                    model_id.0
+                ),
+                model_id: Some(model_id.0.clone()),
+                model_name: None,
+                node_id: None,
+                detail_num: None,
+                detail_str: None,
+            });
         }
     }
 
