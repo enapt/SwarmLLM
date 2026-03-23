@@ -238,6 +238,10 @@ pub struct SharedState {
     /// Broadcast channel for rich activity events (verbose dashboard activity log).
     /// All subsystems emit events here; WebSocket pushes them as `activity_event` messages.
     pub activity_tx: broadcast::Sender<ActivityEvent>,
+    /// Recent activity events for replaying to new WebSocket clients.
+    /// Capped at 100 entries (ring buffer). New clients receive the full history
+    /// on connect so they see startup events even after page refresh.
+    pub activity_history: std::sync::Mutex<VecDeque<ActivityEvent>>,
     /// Cached mapping of cloud provider model IDs to provider names.
     /// Populated by `list_provider_models` so that `try_proxy_openai` can route
     /// models whose ID doesn't match a known prefix (e.g. NVIDIA NIM `01-ai/yi-large`).
@@ -749,6 +753,7 @@ impl SharedState {
             models_changed_tx: broadcast::channel(16).0,
             system_notify_tx: broadcast::channel(32).0,
             activity_tx: broadcast::channel(256).0,
+            activity_history: std::sync::Mutex::new(VecDeque::new()),
             provider_model_map: DashMap::new(),
             provider_models_cache: RwLock::new((Vec::new(), std::time::Instant::now())),
             ws_connection_count: std::sync::atomic::AtomicUsize::new(0),
@@ -810,6 +815,13 @@ impl SharedState {
     /// Emit a rich activity event to the dashboard.
     /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
     pub fn emit_activity(&self, event: ActivityEvent) {
+        // Store in history for replay to new WS clients
+        if let Ok(mut history) = self.activity_history.lock() {
+            history.push_back(event.clone());
+            if history.len() > 100 {
+                history.pop_front();
+            }
+        }
         let _ = self.activity_tx.send(event);
     }
 }

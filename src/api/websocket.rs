@@ -102,6 +102,25 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
             ))
             .await;
 
+        // Replay activity history so new clients see startup events
+        {
+            let events: Vec<_> = push_state
+                .activity_history
+                .lock()
+                .map(|h| h.iter().cloned().collect())
+                .unwrap_or_default();
+            for event in events {
+                let msg = serde_json::json!({
+                    "type": "activity_event",
+                    "data": event,
+                });
+                let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                if sender.send(Message::Text(msg_str)).await.is_err() {
+                    break;
+                }
+            }
+        }
+
         let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         // Track previous shard registry snapshot for change detection
