@@ -490,12 +490,17 @@ pub async fn check_and_load_model(
                 covering_shards.last().unwrap()
             )
         };
+        let mem_type = if shared.gpu_info.is_some() {
+            "VRAM"
+        } else {
+            "RAM"
+        };
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "model_loaded",
             message: format!(
-                "Loaded {} — {} (layers {}-{}) ready for inference",
-                manifest.name, shard_label, layer_start, layer_end
+                "Loaded {} into {} — {} (layers {}-{}) ready for inference",
+                manifest.name, mem_type, shard_label, layer_start, layer_end
             ),
             model_id: Some(model_id.0.clone()),
             model_name: Some(manifest.name.clone()),

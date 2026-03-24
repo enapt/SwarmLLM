@@ -902,6 +902,9 @@ pub async fn delete_model(
             .await;
     }
 
+    // Notify dashboard
+    let _ = shared.models_changed_tx.send(());
+
     tracing::info!(model = %model_id, files = files_removed, "Model deleted");
 
     Ok(Json(serde_json::json!({
@@ -971,8 +974,14 @@ pub async fn unload_model(
         category: "model",
         kind: "model_unloaded",
         message: format!(
-            "Unloaded {} from memory (~{}MB freed)",
-            model_display_name, estimated_mb
+            "Unloaded {} — ~{}MB {} freed",
+            model_display_name,
+            estimated_mb,
+            if shared.gpu_info.is_some() {
+                "VRAM"
+            } else {
+                "RAM"
+            }
         ),
         model_id: Some(model_id.clone()),
         model_name: Some(model_display_name.clone()),
@@ -1085,9 +1094,14 @@ pub async fn unload_shard(
             category: "model",
             kind: "shard_unloaded_memory",
             message: format!(
-                "Unloaded shard {} of {} — {}",
+                "Unloaded shard {} of {} from {} — {}",
                 shard_index + 1,
                 display,
+                if shared.gpu_info.is_some() {
+                    "VRAM"
+                } else {
+                    "RAM"
+                },
                 remaining
             ),
             model_id: Some(model_id.clone()),
@@ -1201,7 +1215,16 @@ pub async fn load_shard(
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "shard_loaded_memory",
-            message: format!("Loaded {} — {} now in memory", display, window_label),
+            message: format!(
+                "Loaded {} — {} now in {}",
+                display,
+                window_label,
+                if shared.gpu_info.is_some() {
+                    "VRAM"
+                } else {
+                    "RAM"
+                }
+            ),
             model_id: Some(model_id.clone()),
             model_name: mname,
             node_id: None,
@@ -1303,18 +1326,50 @@ pub async fn delete_shard(
             .await;
     }
 
+    // Notify dashboard so shard grid and model state update immediately
+    let _ = shared.models_changed_tx.send(());
+
     {
         let mname = shared
             .model_registry
             .get_manifest(&mid)
             .map(|m| m.name.clone());
+        let display = mname.as_deref().unwrap_or(&model_id);
+        // Check what shards remain loaded
+        let remaining_local: Vec<u32> = shared
+            .model_registry
+            .get_manifest(&mid)
+            .map(|m| {
+                m.shards
+                    .iter()
+                    .filter(|s| {
+                        let sid = crate::types::ShardId {
+                            model_id: mid.clone(),
+                            index: s.index,
+                        };
+                        shared
+                            .model_registry
+                            .shard_holders(&sid)
+                            .contains(&shared.identity.node_id().clone())
+                    })
+                    .map(|s| s.index + 1)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let status = if remaining_local.is_empty() {
+            "model fully removed".to_string()
+        } else {
+            let nums: Vec<_> = remaining_local.iter().map(|i| i.to_string()).collect();
+            format!("shards {} remain on disk", nums.join(", "))
+        };
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "shard_deleted",
             message: format!(
-                "Deleted shard {} of {} from disk",
+                "Deleted shard {} of {} — inference unloaded, {}",
                 shard_index + 1,
-                mname.as_deref().unwrap_or(&model_id)
+                display,
+                status
             ),
             model_id: Some(model_id.clone()),
             model_name: mname,
