@@ -892,6 +892,16 @@ pub(crate) async fn dispatch_network_messages(
                                     shared_state.hf_sources.insert(mid.clone(), source.clone());
                                     // Persist to DB
                                     let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
+                                    // Also write hf_source.json to disk so discover_hf_sources finds it on restart
+                                    let model_dir = shared_state.config.node.data_dir.join("models").join(
+                                        crate::model::shard::sanitize_path_component(&mid.0),
+                                    );
+                                    if model_dir.exists() {
+                                        let hf_path = model_dir.join("hf_source.json");
+                                        if !hf_path.exists() {
+                                            let _ = std::fs::write(&hf_path, serde_json::to_string_pretty(&source).unwrap_or_default());
+                                        }
+                                    }
                                     // Wake the AutoShardManager so it evaluates promptly
                                     shared_state.auto_manage_notify.notify_one();
                                 }

@@ -250,14 +250,14 @@ impl AutoShardManager {
         // 1. Check budget: how much storage do we have left?
         let budget = self.remaining_budget_bytes(config, &local_node_id);
         if budget == 0 {
-            tracing::debug!("AutoShardManager: no remaining storage budget");
+            tracing::info!("AutoShardManager: no remaining storage budget — skipping downloads");
             return;
         }
 
         // 2. Gather candidate shards across all known models (VRAM-aware scoring)
         let candidates = self.gather_candidates(&local_node_id, pool_vram);
         if candidates.is_empty() {
-            tracing::debug!("AutoShardManager: no candidate shards to download");
+            tracing::info!("AutoShardManager: no candidate shards to download");
             return;
         }
 
