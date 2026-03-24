@@ -1044,13 +1044,8 @@
                 cell.classList.add('shard-transitioning');
                 setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
                 // Log per-model activity
-                if (newClass === 'local' && oldClass !== 'local') {
-                  App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (sd.index + 1) + ' saved to this device');
-                } else if (newClass === 'downloading' && oldClass !== 'downloading') {
-                  App.dashboard._logModelEvent(modelId, '\u2B07', 'Downloading part ' + (sd.index + 1));
-                } else if (newClass === 'verifying') {
-                  App.dashboard._logModelEvent(modelId, '\u{1F50D}', 'Verifying part ' + (sd.index + 1));
-                }
+                // Shard state transition logging is handled by backend activity_event
+                // messages — no duplicate frontend logging needed here.
               }
               // Preserve lock, endpoint, and pinned classes
               var preserve = '';
@@ -1201,9 +1196,7 @@
               cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
               cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
               // Only log the first time a shard becomes local (not on vram toggle)
-              if (!wasLocal) {
-                App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' saved to this device');
-              }
+              // Shard state logging handled by backend activity_event
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
               cell.classList.add('shard-transitioning');
               setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
@@ -1218,7 +1211,7 @@
                 cell.appendChild(hBadge);
               }
               cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Available from ' + s.holders + ' peer(s)');
-              App.dashboard._logModelEvent(modelId, '\u{1F310}', 'Part ' + (s.index + 1) + ' found on ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : ''));
+              // Peer discovery logging handled by backend activity_event
             } else if (s.holders > 0) {
               // Update holder count on existing peer cells
               var hBadge2 = cell.querySelector('.shard-holders');

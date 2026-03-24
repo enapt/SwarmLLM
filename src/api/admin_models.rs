@@ -1074,13 +1074,21 @@ pub async fn unload_shard(
             .model_registry
             .get_manifest(&mid)
             .map(|m| m.name.clone());
+        let display = mname.as_deref().unwrap_or(&model_id);
+        let remaining = if new_window.is_empty() {
+            "model fully unloaded".to_string()
+        } else {
+            let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
+            format!("shards {} remain", nums.join(", "))
+        };
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "shard_unloaded_memory",
             message: format!(
-                "Unloaded shard {} of {} from memory",
+                "Unloaded shard {} of {} — {}",
                 shard_index + 1,
-                mname.as_deref().unwrap_or(&model_id)
+                display,
+                remaining
             ),
             model_id: Some(model_id.clone()),
             model_name: mname,
@@ -1183,14 +1191,17 @@ pub async fn load_shard(
             .model_registry
             .get_manifest(&mid)
             .map(|m| m.name.clone());
+        let display = mname.as_deref().unwrap_or(&model_id);
+        let window_label = if new_window.len() == 1 {
+            format!("shard {}", new_window[0] + 1)
+        } else {
+            let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
+            format!("shards {}", nums.join(", "))
+        };
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "shard_loaded_memory",
-            message: format!(
-                "Loaded shard {} of {} into memory",
-                shard_index + 1,
-                mname.as_deref().unwrap_or(&model_id)
-            ),
+            message: format!("Loaded {} — {} now in memory", display, window_label),
             model_id: Some(model_id.clone()),
             model_name: mname,
             node_id: None,

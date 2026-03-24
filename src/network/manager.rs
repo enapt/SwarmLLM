@@ -2224,6 +2224,11 @@ impl NetworkManager {
                                     .get(nid)
                                     .map(|r| r.nickname.clone())
                             })
+                            .or_else(|| {
+                                peer_node_id
+                                    .as_ref()
+                                    .map(|nid| format!("{}", nid).chars().take(8).collect())
+                            })
                             .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
                         self.shared_state
                             .emit_activity(crate::daemon::state::ActivityEvent {
