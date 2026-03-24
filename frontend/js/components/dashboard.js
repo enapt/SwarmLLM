@@ -1360,6 +1360,10 @@
           }
           S.activeAcquisitions[modelId] = { started: Date.now() };
         }
+        // Skip if already completed/failed — don't re-render the progress bar
+        if (S.activeAcquisitions[modelId]._completeFired || S.activeAcquisitions[modelId]._failFired) {
+          return;
+        }
         App.dashboard.renderAcquisitionPanel(modelId, status);
 
         if (status.state === 'downloading' && status.source === 'huggingface') {
@@ -1405,7 +1409,11 @@
             setTimeout(function() { _removeDownloadBar(modelId); }, 3000);
           }
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
-          setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3500);
+          // Keep activeAcquisitions entry with _completeFired flag for 30s so incoming
+          // stats_update messages don't re-create the download bar (backend removes
+          // acquisition_progress after 5s, but WS messages can arrive in between)
+          setTimeout(function() { App.dashboard.loadInitial(); }, 3500);
+          setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 30000);
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;
           _removeDownloadBar(modelId);
