@@ -109,6 +109,15 @@
     var category = data.category || '';
     var modelId = data.model_id || '';
     var ts = Date.now();
+
+    // Dedup: skip if the most recent entry has the same text within 3 seconds.
+    // This prevents duplicates from WS reconnect history replay and rapid-fire
+    // identical events (e.g. check_and_load_model called twice for same shard).
+    var targetList = NETWORK_KINDS[data.kind] ? _networkEntries : _activityEntries;
+    if (targetList.length > 0 && targetList[0].text === text && (ts - targetList[0].ts) < 3000) {
+      return;
+    }
+
     var entry = { icon: icon, text: text, ts: ts, category: category, modelId: modelId };
 
     if (NETWORK_KINDS[data.kind]) {
@@ -344,36 +353,8 @@
       try {
         var msg = JSON.parse(event.data);
         if (msg.type === 'stats_update') {
-          // Log first peer connection and acquisition starts for activity visibility
-          if (msg.data.peers !== undefined) {
-            var prevPeers = S._lastPeerCount || 0;
-            if (msg.data.peers > prevPeers && prevPeers === 0) {
-              logActivity('\u{1F310}', 'Connected to ' + msg.data.peers + ' peer' + (msg.data.peers !== 1 ? 's' : ''), 'network');
-            }
-            S._lastPeerCount = msg.data.peers;
-          }
-          if (msg.data.acquisitions && msg.data.acquisitions.length > 0) {
-            msg.data.acquisitions.forEach(function(acq) {
-              if (!acq.model_id) return;
-              var acqKey = 'acq_' + acq.model_id;
-              var modelName = acq.model_name || U.formatModelDisplayName(acq.model_id);
-              var source = acq.source === 'huggingface' ? 'HuggingFace' : 'peers';
-              if (acq.state === 'downloading' && !S[acqKey]) {
-                S[acqKey] = { shards: 0 };
-                var shardInfo = acq.total_shards ? ' (' + acq.total_shards + ' parts from ' + source + ')' : '';
-                logActivity('\u2B07', 'Auto-manage: caching ' + modelName + shardInfo, 'download', acq.model_id);
-              } else if (acq.state === 'downloading' && S[acqKey]) {
-                // Track per-shard completions
-                var newShards = acq.downloaded_shards || 0;
-                if (newShards > S[acqKey].shards) {
-                  S[acqKey].shards = newShards;
-                  logActivity('\u2705', 'Cached part ' + newShards + ' of ' + modelName, 'download', acq.model_id);
-                }
-              } else if (acq.state === 'complete' && S[acqKey]) {
-                delete S[acqKey];
-              }
-            });
-          }
+          // Download activity logging is handled by activity_event messages —
+          // stats_update only drives UI progress bars and data refreshes.
           App.dashboard.updateStats(msg.data);
           if (msg.data.acquisitions) App.dashboard.updateAcquisitionProgress(msg.data.acquisitions);
           App.dashboard.updateShardsLive(msg.data.acquisitions, msg.data.shard_registry || null, msg.data.peer_downloads || null);
@@ -405,21 +386,12 @@
         } else if (msg.type === 'activity_event') {
           _handleActivityEvent(msg.data || {});
         } else if (msg.type === 'models_changed') {
+          // Refresh model list — activity logging is handled by activity_event messages
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
           window._modelsChangedTimer = setTimeout(function() {
             App.models.load();
             App.modeIndicator.load();
           }, 1000);
-          // models_changed without reason is now supplemented by activity_events —
-          // only log if there's an explicit reason field (legacy compat)
-          var reason = msg.data && msg.data.reason;
-          if (reason === 'shard_downloaded') {
-            logActivity('\u2B07', 'Downloaded shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'), 'download', msg.data.model_id);
-          } else if (reason === 'model_loaded') {
-            logActivity('\u2705', 'Model loaded: ' + (msg.data.model_name || msg.data.model_id || 'model'), 'model', msg.data.model_id);
-          } else if (reason === 'shard_removed') {
-            logActivity('\u274C', 'Removed shard ' + (msg.data.shard_index || '?') + ' of ' + (msg.data.model_name || msg.data.model_id || 'model'), 'model', msg.data.model_id);
-          }
         }
       } catch (e) {}
     };

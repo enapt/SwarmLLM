@@ -2175,37 +2175,18 @@ impl NetworkManager {
                         {
                             let load_shared = self.shared_state.clone();
                             let load_mid = shard_id.model_id.clone();
-                            let load_shard_idx = shard_id.index;
                             tokio::spawn(async move {
                                 let vram_budget =
                                     crate::model::auto_manage::vram::compute_vram_budget(
                                         &load_shared,
                                     );
+                                // check_and_load_model emits model_loaded activity event
                                 crate::model::auto_manage::scan::check_and_load_model(
                                     &load_shared,
                                     &load_mid,
                                     vram_budget,
                                 )
                                 .await;
-                                // Emit shard-specific load activity
-                                let mname = load_shared
-                                    .model_registry
-                                    .get_manifest(&load_mid)
-                                    .map(|m| m.name.clone());
-                                load_shared.emit_activity(crate::daemon::state::ActivityEvent {
-                                    category: "model",
-                                    kind: "shard_loaded_memory",
-                                    message: format!(
-                                        "Part {} of {} loaded into memory",
-                                        load_shard_idx + 1,
-                                        mname.as_deref().unwrap_or(&load_mid.0)
-                                    ),
-                                    model_id: Some(load_mid.0.clone()),
-                                    model_name: mname,
-                                    node_id: None,
-                                    detail_num: Some(load_shard_idx as i64),
-                                    detail_str: None,
-                                });
                                 let _ = load_shared.models_changed_tx.send(());
                             });
                         }

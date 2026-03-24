@@ -34,36 +34,10 @@ impl AutoShardManager {
             "AutoShardManager: requesting shard download"
         );
 
-        // Emit activity event for download start
-        {
-            let mname = self
-                .shared_state
-                .model_registry
-                .get_manifest(&candidate.model_id)
-                .map(|m| m.name.clone());
-            let display = mname.as_deref().unwrap_or(&candidate.model_id.0);
-            let source = if candidate.holder_count > 0 {
-                "peers"
-            } else {
-                "HuggingFace"
-            };
-            self.shared_state
-                .emit_activity(crate::daemon::state::ActivityEvent {
-                    category: "download",
-                    kind: "shard_download_started",
-                    message: format!(
-                        "Downloading shard {} of {} from {}",
-                        candidate.shard_index + 1,
-                        display,
-                        source
-                    ),
-                    model_id: Some(candidate.model_id.0.clone()),
-                    model_name: mname,
-                    node_id: None,
-                    detail_num: Some(candidate.shard_index as i64),
-                    detail_str: Some(source.to_string()),
-                });
-        }
+        // Activity events are emitted at the point of download:
+        // - HF downloads: shard_download_started (below in HF path)
+        // - P2P downloads: shard_download_p2p (below in P2P path)
+        // This avoids double-logging when a generic start + specific start both fire.
 
         let model_dir = self.shared_state.config.node.data_dir.join("models").join(
             crate::model::shard::sanitize_path_component(&candidate.model_id.0),
@@ -262,6 +236,29 @@ impl AutoShardManager {
                     repo = %repo_id,
                     "AutoShardManager: downloading shard from HuggingFace"
                 );
+
+                // Emit HF-specific download start event
+                {
+                    let mname = shared
+                        .model_registry
+                        .get_manifest(&model_id)
+                        .map(|m| m.name.clone());
+                    let display = mname.as_deref().unwrap_or(&model_id.0);
+                    shared.emit_activity(crate::daemon::state::ActivityEvent {
+                        category: "download",
+                        kind: "shard_download_started",
+                        message: format!(
+                            "Downloading shard {} of {} from HuggingFace",
+                            shard_idx + 1,
+                            display
+                        ),
+                        model_id: Some(model_id.0.clone()),
+                        model_name: mname,
+                        node_id: None,
+                        detail_num: Some(shard_idx as i64),
+                        detail_str: Some("huggingface".to_string()),
+                    });
+                }
 
                 let net_tx = self.network_tx.clone();
 
