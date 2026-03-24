@@ -2003,9 +2003,25 @@ impl NetworkManager {
                                 },
                             ));
 
-                        // Notify so auto-manage can load the model
+                        // Load the model with the new shard (spawned async — can't block event loop)
+                        {
+                            let load_shared = self.shared_state.clone();
+                            let load_mid = shard_id.model_id.clone();
+                            tokio::spawn(async move {
+                                let vram_budget =
+                                    crate::model::auto_manage::vram::compute_vram_budget(
+                                        &load_shared,
+                                    );
+                                crate::model::auto_manage::scan::check_and_load_model(
+                                    &load_shared,
+                                    &load_mid,
+                                    vram_budget,
+                                )
+                                .await;
+                                let _ = load_shared.models_changed_tx.send(());
+                            });
+                        }
                         self.shared_state.auto_manage_notify.notify_one();
-                        let _ = self.shared_state.models_changed_tx.send(());
 
                         tracing::info!(
                             model = %shard_id.model_id,
