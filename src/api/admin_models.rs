@@ -1373,12 +1373,24 @@ pub async fn download_shard(
         .collect();
 
     if !holders.is_empty() {
-        // Pick a peer and send P2P shard request
+        // Pick the best peer: LAN first, then lowest latency, then highest trust
         let target = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::time::Instant::now().hash(&mut hasher);
-            holders[hasher.finish() as usize % holders.len()].clone()
+            let mut scored: Vec<_> = holders
+                .iter()
+                .filter_map(|nid| {
+                    shared.peer_registry.get(nid).map(|p| {
+                        let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
+                        let latency = p.latency_ms.unwrap_or(9999) as u64;
+                        let trust = (10000.0 - p.trust_score * 100.0) as u64;
+                        (nid.clone(), is_lan * 100_000 + latency * 100 + trust)
+                    })
+                })
+                .collect();
+            scored.sort_by_key(|(_, score)| *score);
+            scored
+                .first()
+                .map(|(nid, _)| nid.clone())
+                .unwrap_or_else(|| holders[0].clone())
         };
 
         let peer_id_bytes = shared

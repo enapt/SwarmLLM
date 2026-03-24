@@ -1881,6 +1881,54 @@ impl NetworkManager {
                         .unwrap_or(0);
                     let chunk_len = data.data.len() as u64;
 
+                    // Empty response = peer doesn't have the shard
+                    if data.total_size == 0 || data.data.is_empty() {
+                        tracing::warn!(
+                            %peer,
+                            model = %shard_id.model_id,
+                            shard = shard_id.index,
+                            "Peer returned empty shard data — shard not available on peer"
+                        );
+                        self.shard_download_progress.remove(&shard_id);
+                        let mname = self
+                            .shared_state
+                            .model_registry
+                            .get_manifest(&shard_id.model_id)
+                            .map(|m| m.name.clone());
+                        self.shared_state
+                            .emit_activity(crate::daemon::state::ActivityEvent {
+                                category: "download",
+                                kind: "shard_transfer_failed",
+                                message: format!(
+                                    "Peer doesn't have shard {} of {} — trying another source",
+                                    shard_id.index + 1,
+                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                                ),
+                                model_id: Some(shard_id.model_id.0.clone()),
+                                model_name: mname,
+                                node_id: Some(format!("{}", peer)),
+                                detail_num: Some(shard_id.index as i64),
+                                detail_str: Some("empty_response".to_string()),
+                            });
+                        // Clean up acquisition progress
+                        if let Some(mut entry) = self
+                            .shared_state
+                            .acquisition_progress
+                            .get_mut(&shard_id.model_id)
+                        {
+                            entry.state = crate::model::acquisition::AcquisitionState::Failed {
+                                reason: "Peer does not have this shard".into(),
+                            };
+                        }
+                        let cleanup_shared = self.shared_state.clone();
+                        let cleanup_mid = shard_id.model_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                        });
+                        return;
+                    }
+
                     // Forward to AcquisitionManager if it has a job for this model
                     // (user-initiated downloads via the "Download" button).
                     // Auto-manage P2P downloads don't have jobs, so we also write directly.
