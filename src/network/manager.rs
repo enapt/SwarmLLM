@@ -69,6 +69,8 @@ pub struct NetworkManager {
     pending_shard_requests: HashMap<OutboundRequestId, (libp2p::PeerId, crate::types::ShardId)>,
     /// Tracks bytes downloaded so far per shard for chunked transfers.
     shard_download_progress: HashMap<crate::types::ShardId, u64>,
+    /// P2P retry count per shard (max 5 before HF fallback).
+    shard_p2p_retries: HashMap<crate::types::ShardId, u32>,
     /// Reverse lookup: PeerId → NodeId for O(1) peer identification.
     peer_to_node: DashMap<libp2p::PeerId, crate::types::NodeId>,
     /// Buffered GossipSub messages that failed to publish at startup (no peers yet).
@@ -207,6 +209,7 @@ impl NetworkManager {
             shard_store,
             pending_shard_requests: HashMap::new(),
             shard_download_progress: HashMap::new(),
+            shard_p2p_retries: HashMap::new(),
             peer_to_node: DashMap::new(),
             buffered_gossip: Vec::new(),
             relay_activated: false,
@@ -1891,81 +1894,93 @@ impl NetworkManager {
                         );
                         self.shard_download_progress.remove(&shard_id);
 
-                        // Try next peer that holds this shard (excluding the failed one)
-                        let local_nid = self.shared_state.identity.node_id().clone();
-                        let failed_peer_nid = self.peer_to_node.get(&peer).map(|r| r.clone());
-                        let other_holders: Vec<_> = self
-                            .shared_state
-                            .model_registry
-                            .shard_holders(&shard_id)
-                            .into_iter()
-                            .filter(|n| {
-                                if *n == local_nid {
-                                    return false;
-                                }
-                                match &failed_peer_nid {
-                                    Some(fp) => n != fp,
-                                    None => true,
-                                }
-                            })
-                            .collect();
+                        // Track retry count — max 5 P2P attempts before HF fallback
+                        const MAX_P2P_RETRIES: u32 = 5;
+                        let retries = self.shard_p2p_retries.entry(shard_id.clone()).or_insert(0);
+                        *retries += 1;
+                        let retry_num = *retries;
 
-                        if !other_holders.is_empty() {
-                            // Retry with best remaining peer
-                            let mut scored: Vec<_> = other_holders
-                                .iter()
-                                .filter_map(|nid| {
-                                    self.shared_state.peer_registry.get(nid).map(|p| {
-                                        let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
-                                        let latency = p.latency_ms.unwrap_or(9999) as u64;
-                                        (nid.clone(), is_lan * 100_000 + latency)
-                                    })
+                        if retry_num > MAX_P2P_RETRIES {
+                            self.shard_p2p_retries.remove(&shard_id);
+                            // Fall through to HF fallback below
+                        } else {
+                            // Try next peer that holds this shard (excluding the failed one)
+                            let local_nid = self.shared_state.identity.node_id().clone();
+                            let failed_peer_nid = self.peer_to_node.get(&peer).map(|r| r.clone());
+                            let other_holders: Vec<_> = self
+                                .shared_state
+                                .model_registry
+                                .shard_holders(&shard_id)
+                                .into_iter()
+                                .filter(|n| {
+                                    if *n == local_nid {
+                                        return false;
+                                    }
+                                    match &failed_peer_nid {
+                                        Some(fp) => n != fp,
+                                        None => true,
+                                    }
                                 })
                                 .collect();
-                            scored.sort_by_key(|(_, s)| *s);
-                            let next_target = scored
-                                .first()
-                                .map(|(nid, _)| nid.clone())
-                                .unwrap_or_else(|| other_holders[0].clone());
 
-                            if let Some(next_bytes) = self
-                                .shared_state
-                                .peer_registry
-                                .get(&next_target)
-                                .and_then(|p| p.peer_id_bytes.clone())
-                            {
-                                let mname = self
+                            if !other_holders.is_empty() {
+                                // Retry with best remaining peer
+                                let mut scored: Vec<_> = other_holders
+                                    .iter()
+                                    .filter_map(|nid| {
+                                        self.shared_state.peer_registry.get(nid).map(|p| {
+                                            let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
+                                            let latency = p.latency_ms.unwrap_or(9999) as u64;
+                                            (nid.clone(), is_lan * 100_000 + latency)
+                                        })
+                                    })
+                                    .collect();
+                                scored.sort_by_key(|(_, s)| *s);
+                                let next_target = scored
+                                    .first()
+                                    .map(|(nid, _)| nid.clone())
+                                    .unwrap_or_else(|| other_holders[0].clone());
+
+                                if let Some(next_bytes) = self
                                     .shared_state
-                                    .model_registry
-                                    .get_manifest(&shard_id.model_id)
-                                    .map(|m| m.name.clone());
-                                self.shared_state.emit_activity(
-                                    crate::daemon::state::ActivityEvent {
-                                        category: "download",
-                                        kind: "shard_download_p2p",
-                                        message: format!(
-                                            "Retrying shard {} of {} from another peer",
-                                            shard_id.index + 1,
-                                            mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                        ),
-                                        model_id: Some(shard_id.model_id.0.clone()),
-                                        model_name: mname,
-                                        node_id: Some(format!("{}", next_target)),
-                                        detail_num: Some(shard_id.index as i64),
-                                        detail_str: Some("retry".to_string()),
-                                    },
-                                );
-                                let retry_req = crate::types::ShardRequest {
-                                    shard_id: shard_id.clone(),
-                                    chunk_offset: 0,
-                                    chunk_size: 32 * 1024 * 1024,
-                                };
-                                self.handle_send_shard_request(next_bytes, retry_req);
-                                return;
+                                    .peer_registry
+                                    .get(&next_target)
+                                    .and_then(|p| p.peer_id_bytes.clone())
+                                {
+                                    let mname = self
+                                        .shared_state
+                                        .model_registry
+                                        .get_manifest(&shard_id.model_id)
+                                        .map(|m| m.name.clone());
+                                    self.shared_state.emit_activity(
+                                        crate::daemon::state::ActivityEvent {
+                                            category: "download",
+                                            kind: "shard_download_p2p",
+                                            message: format!(
+                                                "Retrying shard {} of {} from another peer",
+                                                shard_id.index + 1,
+                                                mname.as_deref().unwrap_or(&shard_id.model_id.0),
+                                            ),
+                                            model_id: Some(shard_id.model_id.0.clone()),
+                                            model_name: mname,
+                                            node_id: Some(format!("{}", next_target)),
+                                            detail_num: Some(shard_id.index as i64),
+                                            detail_str: Some("retry".to_string()),
+                                        },
+                                    );
+                                    let retry_req = crate::types::ShardRequest {
+                                        shard_id: shard_id.clone(),
+                                        chunk_offset: 0,
+                                        chunk_size: 32 * 1024 * 1024,
+                                    };
+                                    self.handle_send_shard_request(next_bytes, retry_req);
+                                    return;
+                                }
                             }
-                        }
+                        } // end retry_num <= MAX_P2P_RETRIES
 
-                        // No more peers — fall back to HuggingFace if source exists
+                        // Retries exhausted or no more peers — fall back to HuggingFace
+                        self.shard_p2p_retries.remove(&shard_id);
                         if let Some(hf_src) = self.shared_state.hf_sources.get(&shard_id.model_id) {
                             let mname = self
                                 .shared_state
@@ -1977,7 +1992,8 @@ impl NetworkManager {
                                     category: "download",
                                     kind: "shard_download_started",
                                     message: format!(
-                                    "P2P failed — falling back to HuggingFace for shard {} of {}",
+                                    "P2P failed after {} retries — falling back to HuggingFace for shard {} of {}",
+                                    retry_num,
                                     shard_id.index + 1,
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 ),
@@ -2111,6 +2127,7 @@ impl NetworkManager {
                     } else {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
+                        self.shard_p2p_retries.remove(&shard_id);
 
                         // Mark acquisition as complete so frontend clears the download bar
                         if let Some(mut entry) = self
