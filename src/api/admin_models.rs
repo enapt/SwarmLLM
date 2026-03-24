@@ -1076,6 +1076,11 @@ pub async fn unload_shard(
         shared.split_models.retain(|key, _| key.0 != mid);
     }
 
+    // Clear stale model_loaded history so updated layer range emits fresh
+    if let Ok(mut history) = shared.activity_history.lock() {
+        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
+    }
+
     let _ = shared.models_changed_tx.send(());
 
     {
@@ -1197,6 +1202,10 @@ pub async fn load_shard(
         .await;
     // Clear split models so they reload with new window
     shared.split_models.retain(|key, _| key.0 != mid);
+    // Clear stale model_loaded history so the new layer range emits a fresh event
+    if let Ok(mut history) = shared.activity_history.lock() {
+        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
+    }
 
     let _ = shared.models_changed_tx.send(());
 
@@ -1324,6 +1333,29 @@ pub async fn delete_shard(
         let _ = ntx
             .send(crate::types::NetworkCommand::Broadcast(announce))
             .await;
+    }
+
+    // Clear stale model_loaded history entries so the reload emits a fresh event
+    // (the layer range may have changed after shard deletion)
+    if let Ok(mut history) = shared.activity_history.lock() {
+        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
+    }
+
+    // Reload remaining shards so the model stays available for inference
+    // (check_and_load_model will re-compute layer ranges from remaining shards)
+    {
+        let reload_shared = shared.clone();
+        let reload_mid = mid.clone();
+        tokio::spawn(async move {
+            let vram_budget = crate::model::auto_manage::vram::compute_vram_budget(&reload_shared);
+            crate::model::auto_manage::scan::check_and_load_model(
+                &reload_shared,
+                &reload_mid,
+                vram_budget,
+            )
+            .await;
+            let _ = reload_shared.models_changed_tx.send(());
+        });
     }
 
     // Notify dashboard so shard grid and model state update immediately
