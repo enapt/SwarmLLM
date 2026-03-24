@@ -87,17 +87,22 @@ pub async fn rescan_local_shards(
                 }
             }
 
-            // Register as holder
+            // Register as holder — only count as new if not already registered
+            let was_holder = shared
+                .model_registry
+                .shard_holders(&shard_id)
+                .contains(&local_node_id);
             shared
                 .model_registry
                 .record_shard_holder(shard_id, local_node_id.clone());
-            new_shards += 1;
-
-            tracing::info!(
-                model = %model_id_str,
-                shard = shard_info.index,
-                "Rescan: discovered new local shard"
-            );
+            if !was_holder {
+                new_shards += 1;
+                tracing::info!(
+                    model = %model_id_str,
+                    shard = shard_info.index,
+                    "Rescan: discovered new local shard"
+                );
+            }
         }
 
         if new_shards > 0 {
@@ -495,18 +500,34 @@ pub async fn check_and_load_model(
         } else {
             "RAM"
         };
-        shared.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "model",
-            kind: "model_loaded",
-            message: format!(
-                "Loaded {} into {} — {} (layers {}-{}) ready for inference",
-                manifest.name, mem_type, shard_label, layer_start, layer_end
-            ),
-            model_id: Some(model_id.0.clone()),
-            model_name: Some(manifest.name.clone()),
-            node_id: None,
-            detail_num: Some((layer_end - layer_start) as i64),
-            detail_str: Some(format!("[{}..{})", layer_start, layer_end)),
-        });
+        // Only emit once per model+range to avoid spamming on repeated check_and_load_model calls
+        let load_msg = format!(
+            "Loaded {} into {} — {} (layers {}-{}) ready for inference",
+            manifest.name, mem_type, shard_label, layer_start, layer_end
+        );
+        let already_emitted = shared
+            .activity_history
+            .lock()
+            .map(|h| {
+                h.iter().any(|e| {
+                    e.kind == "model_loaded"
+                        && e.model_id.as_deref() == Some(&model_id.0)
+                        && e.detail_str.as_deref()
+                            == Some(&format!("[{}..{})", layer_start, layer_end))
+                })
+            })
+            .unwrap_or(false);
+        if !already_emitted {
+            shared.emit_activity(crate::daemon::state::ActivityEvent {
+                category: "model",
+                kind: "model_loaded",
+                message: load_msg,
+                model_id: Some(model_id.0.clone()),
+                model_name: Some(manifest.name.clone()),
+                node_id: None,
+                detail_num: Some((layer_end - layer_start) as i64),
+                detail_str: Some(format!("[{}..{})", layer_start, layer_end)),
+            });
+        }
     }
 }
