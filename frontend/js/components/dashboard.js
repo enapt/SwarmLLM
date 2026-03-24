@@ -1403,10 +1403,17 @@
 
         if (isComplete && !S.activeAcquisitions[modelId]._completeFired) {
           S.activeAcquisitions[modelId]._completeFired = true;
-          _removeDownloadBar(modelId);
+          // Flash "Download complete" then fade out
+          var safeIdC = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+          var progBarC = document.querySelector('[data-model-progress="' + safeIdC + '"]');
+          if (progBarC) {
+            progBarC.innerHTML = '<div class="dl-complete-flash">\u2705 Download complete</div>';
+            progBarC.classList.add('dl-complete');
+            setTimeout(function() { _removeDownloadBar(modelId); }, 2000);
+          }
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
           App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
-          setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 2000);
+          setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 2500);
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;
           _removeDownloadBar(modelId);
