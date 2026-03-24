@@ -1890,7 +1890,7 @@ kbd {
 .model-status-pill.network { color: var(--text-muted); font-weight: 400; }
 
 .model-card .dl-progress { margin: 6px 14px 8px; transition: opacity 0.5s ease-out; }
-.model-card .dl-progress.dl-complete { opacity: 0; transition: opacity 1s ease-out 1s; }
+.model-card .dl-progress.dl-complete { opacity: 0; transition: opacity 1.2s ease-out 1.5s; }
 .dl-complete-flash {
   text-align: center; font-size: 0.8rem; font-weight: 600;
   color: var(--green, #22c55e); padding: 6px 0;
