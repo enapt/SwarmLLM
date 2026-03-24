@@ -727,7 +727,7 @@
           var triggerText = dlTrigger === 'auto_manage' ? 'Auto-manage' : (dlTrigger === 'user' ? 'Manual' : '');
           var sourceText = dlSource === 'huggingface' ? 'from HuggingFace' : (dlSource === 'peers' ? 'from peers' : '');
           if (isCachingLocally) {
-            shardLabel = (triggerText || 'Auto-manage') + ': caching locally (' + localNow + '/' + shardCount + ')';
+            shardLabel = (triggerText || 'Auto-manage') + ': saving to this device (' + localNow + '/' + shardCount + ')';
           } else {
             // Show which specific shard is downloading (from shard_details)
             var dlShardIdx = '';
@@ -1045,7 +1045,7 @@
                 setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
                 // Log per-model activity
                 if (newClass === 'local' && oldClass !== 'local') {
-                  App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (sd.index + 1) + ' cached locally');
+                  App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (sd.index + 1) + ' saved to this device');
                 } else if (newClass === 'downloading' && oldClass !== 'downloading') {
                   App.dashboard._logModelEvent(modelId, '\u2B07', 'Downloading part ' + (sd.index + 1));
                 } else if (newClass === 'verifying') {
@@ -1202,7 +1202,7 @@
               cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
               // Only log the first time a shard becomes local (not on vram toggle)
               if (!wasLocal) {
-                App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' now available locally');
+                App.dashboard._logModelEvent(modelId, '\u2705', 'Part ' + (s.index + 1) + ' saved to this device');
               }
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
               cell.classList.add('shard-transitioning');
@@ -1392,16 +1392,27 @@
           isComplete = true;
         }
 
+        // Remove download bar immediately on complete or fail
+        function _removeDownloadBar(mid) {
+          var safeId2 = mid.replace(/[^a-zA-Z0-9]/g, '_');
+          var progBar = document.querySelector('[data-model-progress="' + safeId2 + '"]');
+          if (progBar) progBar.remove();
+          var card2 = document.querySelector('[data-model-id="' + U.cssSafeAttr(mid) + '"]');
+          if (card2) card2.classList.remove('downloading');
+        }
+
         if (isComplete && !S.activeAcquisitions[modelId]._completeFired) {
           S.activeAcquisitions[modelId]._completeFired = true;
+          _removeDownloadBar(modelId);
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
           App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
-          setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3000);
+          setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 2000);
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;
+          _removeDownloadBar(modelId);
           var reason = (typeof status.state === 'object' && status.state.failed) ? (status.state.failed.reason || '') : '';
           App.notifications.showToast('Download failed: ' + (status.model_name || modelId) + (reason ? ' \u2014 ' + reason : ''), 'error', 8000);
-          setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 10000);
+          setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 5000);
         }
       });
     },
