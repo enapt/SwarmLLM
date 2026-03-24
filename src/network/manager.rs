@@ -1961,20 +1961,19 @@ impl NetworkManager {
                         // Download complete for this shard
                         self.shard_download_progress.remove(&shard_id);
 
-                        // Mark this shard as complete in acquisition_progress
+                        // Mark acquisition as complete so frontend clears the download bar
                         if let Some(mut entry) = self
                             .shared_state
                             .acquisition_progress
                             .get_mut(&shard_id.model_id)
                         {
                             entry.downloaded_shards = entry.downloaded_shards.saturating_add(1);
+                            entry.downloaded_bytes = entry.total_bytes;
+                            entry.state = crate::model::acquisition::AcquisitionState::Complete;
                             if let Some(sp) = entry.shard_progress.get_mut(&shard_id.index) {
                                 sp.state = crate::model::acquisition::ShardState::Complete;
                                 sp.downloaded_bytes = sp.total_bytes;
                             }
-                            // Don't mark the entire acquisition as Complete here —
-                            // we only track the P2P shards, not ALL model shards.
-                            // auto-manage's check_model_complete handles full model readiness.
                         }
                         // Remove the acquisition entry after a delay so UI sees the completion
                         {
