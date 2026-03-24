@@ -251,26 +251,30 @@ impl ShardStore {
                         continue;
                     }
 
-                    // Verify each shard's content hash against the manifest
+                    // Register shards immediately (size-check only) so the API server
+                    // starts fast. Full BLAKE3 verification runs in background after startup.
                     for shard_info in &manifest.shards {
                         let shard_path = self.shard_path(&model_id, shard_info.index);
                         if !shard_path.exists() {
                             continue;
                         }
 
-                        match self.verify_shard_with_options(&model_id, shard_info, true) {
-                            Ok(()) => {
-                                shards.push((model_id.clone(), shard_info.clone()));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    model = %model_id,
-                                    shard = shard_info.index,
-                                    error = %e,
-                                    "Shard verification failed on startup — quarantined"
-                                );
-                                rejected += 1;
-                            }
+                        // Quick size check: reject obviously truncated files
+                        let size_ok = std::fs::metadata(&shard_path)
+                            .map(|m| {
+                                shard_info.size_bytes == 0
+                                    || m.len() >= shard_info.size_bytes * 9 / 10
+                            })
+                            .unwrap_or(false);
+                        if size_ok {
+                            shards.push((model_id.clone(), shard_info.clone()));
+                        } else {
+                            tracing::warn!(
+                                model = %model_id,
+                                shard = shard_info.index,
+                                "Shard file too small — skipping registration"
+                            );
+                            rejected += 1;
                         }
                     }
                 }

@@ -980,6 +980,122 @@ impl Daemon {
             detail_str: None,
         });
 
+        // Background shard verification: BLAKE3 hash check runs after API is up
+        // so the dashboard is responsive immediately. Bad shards are quarantined.
+        {
+            let verify_state = shared_state.clone();
+            let verify_data_dir = self.config.node.data_dir.clone();
+            tokio::spawn(async move {
+                // Small delay to let the API server bind and first WS clients connect
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let shard_store = crate::model::shard::ShardStore::new(&verify_data_dir);
+                let mut verified = 0u32;
+                let mut quarantined = 0u32;
+                for manifest in verify_state.model_registry.models() {
+                    for shard_info in &manifest.shards {
+                        // Only verify shards we registered (i.e., we are a holder)
+                        let sid = crate::types::ShardId {
+                            model_id: manifest.id.clone(),
+                            index: shard_info.index,
+                        };
+                        if !verify_state
+                            .model_registry
+                            .shard_holders(&sid)
+                            .contains(verify_state.identity.node_id())
+                        {
+                            continue;
+                        }
+                        let shard_path = shard_store.shard_path(&manifest.id, shard_info.index);
+                        if !shard_path.exists() {
+                            continue;
+                        }
+                        // Skip zero-hash shards (hash not yet computed)
+                        if shard_info.hash == [0u8; 32] {
+                            verified += 1;
+                            continue;
+                        }
+                        // Run BLAKE3 verification in a blocking thread
+                        let mid = manifest.id.clone();
+                        let si = shard_info.clone();
+                        let store = crate::model::shard::ShardStore::new(&verify_data_dir);
+                        let result =
+                            tokio::task::spawn_blocking(move || store.verify_shard(&mid, &si))
+                                .await;
+                        match result {
+                            Ok(Ok(())) => {
+                                verified += 1;
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(
+                                    model = %manifest.id,
+                                    shard = shard_info.index,
+                                    error = %e,
+                                    "Background shard verification failed — quarantined"
+                                );
+                                // De-register as holder
+                                verify_state
+                                    .model_registry
+                                    .remove_shard_holder(&sid, verify_state.identity.node_id());
+                                verify_state.emit_activity(crate::daemon::state::ActivityEvent {
+                                    category: "model",
+                                    kind: "shard_verify_failed",
+                                    message: format!(
+                                        "Shard {} of {} failed verification — quarantined",
+                                        shard_info.index + 1,
+                                        manifest.name
+                                    ),
+                                    model_id: Some(manifest.id.0.clone()),
+                                    model_name: Some(manifest.name.clone()),
+                                    node_id: None,
+                                    detail_num: Some(shard_info.index as i64),
+                                    detail_str: Some(format!("{e}")),
+                                });
+                                quarantined += 1;
+                            }
+                            Err(_) => {
+                                // JoinError — spawn_blocking panicked
+                                quarantined += 1;
+                            }
+                        }
+                    }
+                }
+                if quarantined > 0 {
+                    tracing::warn!(
+                        verified,
+                        quarantined,
+                        "Background shard verification complete — some shards quarantined"
+                    );
+                } else {
+                    tracing::info!(
+                        verified,
+                        "Background shard verification complete — all shards OK"
+                    );
+                }
+                verify_state.emit_activity(crate::daemon::state::ActivityEvent {
+                    category: "system",
+                    kind: "shard_verified",
+                    message: format!(
+                        "Verified {} shards{}",
+                        verified,
+                        if quarantined > 0 {
+                            format!(" ({quarantined} quarantined)")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    model_id: None,
+                    model_name: None,
+                    node_id: None,
+                    detail_num: Some(verified as i64),
+                    detail_str: if quarantined > 0 {
+                        Some(format!("{quarantined} quarantined"))
+                    } else {
+                        None
+                    },
+                });
+            });
+        }
+
         // Auto-detect region via IP geolocation (non-blocking, best-effort)
         if shared_state.config.identity.region.is_none() {
             let geo_state = shared_state.clone();
