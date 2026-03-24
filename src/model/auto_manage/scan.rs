@@ -372,19 +372,32 @@ pub async fn check_and_load_model(
                         budget_mb = budget,
                         "VRAM budget full — skipping auto-load (shards remain on disk for P2P)"
                     );
-                    shared.emit_activity(crate::daemon::state::ActivityEvent {
-                        category: "model",
-                        kind: "model_load_skipped",
-                        message: format!(
-                            "Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
-                            manifest.name, budget - total_after
-                        ),
-                        model_id: Some(model_id.0.clone()),
-                        model_name: Some(manifest.name.clone()),
-                        node_id: None,
-                        detail_num: Some(estimated as i64),
-                        detail_str: Some("vram_budget".to_string()),
-                    });
+                    // Only emit once per model to avoid spamming on every scan cycle
+                    let already_notified = shared
+                        .activity_history
+                        .lock()
+                        .map(|h| {
+                            h.iter().any(|e| {
+                                e.kind == "model_load_skipped"
+                                    && e.model_id.as_deref() == Some(&model_id.0)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if !already_notified {
+                        shared.emit_activity(crate::daemon::state::ActivityEvent {
+                            category: "model",
+                            kind: "model_load_skipped",
+                            message: format!(
+                                "Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
+                                manifest.name, budget - total_after
+                            ),
+                            model_id: Some(model_id.0.clone()),
+                            model_name: Some(manifest.name.clone()),
+                            node_id: None,
+                            detail_num: Some(estimated as i64),
+                            detail_str: Some("vram_budget".to_string()),
+                        });
+                    }
                     continue;
                 }
             }

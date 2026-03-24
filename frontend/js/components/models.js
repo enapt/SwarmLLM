@@ -539,8 +539,6 @@
           var msg = name + ' unloaded from memory';
           if (freedMb > 0) msg += ' (~' + U.formatMB(freedMb) + ' freed)';
           App.notifications.showToast(msg, 'success');
-          App.notifications.logActivity('\u{1F4A4}', msg);
-          App.dashboard._logModelEvent(modelId, '\u{1F4A4}', 'Unloaded from memory' + (freedMb > 0 ? ' — ~' + U.formatMB(freedMb) + ' freed' : ''));
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
@@ -972,8 +970,7 @@
       try {
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load', { method: 'POST' });
         if (resp.ok) {
-          App.notifications.showToast('Loading part ' + (idx + 1) + ' into memory...', 'success');
-          App.notifications.logActivity('\u{1F4E5}', U.formatModelDisplayName(modelId) + ': loading part ' + (idx + 1) + ' into memory');
+          App.notifications.showToast('Loading shard ' + (idx + 1) + ' into memory...', 'success');
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });
@@ -989,7 +986,7 @@
       var idx = this.currentIndex;
       this.hide();
 
-      if (!confirm('Unload part ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart without this part. Active inference may be briefly interrupted.')) return;
+      if (!confirm('Unload shard ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart without this shard. Active inference may be briefly interrupted.')) return;
 
       try {
         // Unload this specific shard — narrows the shard window and restarts the worker.
@@ -997,9 +994,7 @@
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload', { method: 'POST' });
         if (resp.ok) {
           var name = U.formatModelDisplayName(modelId);
-          App.notifications.showToast('Part ' + (idx + 1) + ' of ' + name + ' unloaded from memory', 'success');
-          App.notifications.logActivity('\u{1F4A4}', name + ': part ' + (idx + 1) + ' unloaded (manual)');
-          App.dashboard._logModelEvent(modelId, '\u{1F4A4}', 'Part ' + (idx + 1) + ' unloaded from memory (manual)');
+          App.notifications.showToast('Shard ' + (idx + 1) + ' of ' + name + ' unloaded from memory', 'success');
           App.models.load();
         } else {
           var errData = await resp.json().catch(function() { return {}; });

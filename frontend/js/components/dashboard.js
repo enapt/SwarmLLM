@@ -1237,7 +1237,7 @@
           if (!wasPeerDl) {
             cell.classList.add('shard-transitioning');
             setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading part ' + (pd.shard_index + 1));
+            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading shard ' + (pd.shard_index + 1));
           }
           var pdPreserve = '';
           if (cell.classList.contains('locked')) pdPreserve += ' locked';
@@ -1405,7 +1405,6 @@
             setTimeout(function() { _removeDownloadBar(modelId); }, 3000);
           }
           App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
-          App.notifications.logActivity('\u2705', 'Download complete: ' + (status.model_name || modelId), 'download', modelId);
           setTimeout(function() { delete S.activeAcquisitions[modelId]; App.dashboard.loadInitial(); }, 3500);
         } else if (!isComplete && (status.state === 'failed' || (typeof status.state === 'object' && status.state && status.state.failed)) && !S.activeAcquisitions[modelId]._failFired) {
           S.activeAcquisitions[modelId]._failFired = true;
