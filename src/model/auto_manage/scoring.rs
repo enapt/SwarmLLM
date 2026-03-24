@@ -308,8 +308,15 @@ impl AutoShardManager {
                 // Consistent hash ring deduplication: use the pre-built ring to
                 // determine if this node is responsible for downloading this shard.
                 // On join/leave, only ~1/pool_size of assignments change.
+                // BYPASS: if we already host other shards of this model, always allow
+                // gap-filling so partial models get completed for local inference.
                 let peers = self.shared_state.peer_registry.len();
-                if holder_count < target_replicas && peers > 0 && !in_configured_range {
+                let already_hosting_model = local_shard_count > 0;
+                if holder_count < target_replicas
+                    && peers > 0
+                    && !in_configured_range
+                    && !already_hosting_model
+                {
                     let replicas_needed =
                         (target_replicas as u32).saturating_sub(holder_count as u32);
 

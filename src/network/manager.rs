@@ -2129,6 +2129,19 @@ impl NetworkManager {
                         self.shard_download_progress.remove(&shard_id);
                         self.shard_p2p_retries.remove(&shard_id);
 
+                        // Finalize: rename .tmp → .bin atomically
+                        if let Err(e) = self
+                            .shard_store
+                            .finalize_shard(&shard_id.model_id, shard_id.index)
+                        {
+                            tracing::error!(
+                                model = %shard_id.model_id,
+                                shard = shard_id.index,
+                                error = %e,
+                                "Failed to finalize P2P shard (.tmp → .bin rename)"
+                            );
+                        }
+
                         // Mark acquisition as complete so frontend clears the download bar
                         if let Some(mut entry) = self
                             .shared_state
