@@ -454,12 +454,35 @@ pub async fn check_and_load_model(
             "Auto-manage: model metadata loaded (subprocess will load on first inference)"
         );
 
+        // Determine which shard indices cover this layer range
+        let covering_shards: Vec<u32> = manifest
+            .shards
+            .iter()
+            .filter(|s| {
+                let (sl, se) = s.layer_range;
+                let (sl, se) = (sl as usize, se as usize);
+                // Shard overlaps with this segment's layer range
+                sl < layer_end && se > layer_start && local_shard_indices.contains(&s.index)
+            })
+            .map(|s| s.index + 1) // 1-indexed for display
+            .collect();
+        let shard_label = if covering_shards.len() == manifest.shard_count as usize {
+            "all shards".to_string()
+        } else if covering_shards.len() == 1 {
+            format!("shard {}", covering_shards[0])
+        } else {
+            format!(
+                "shards {}-{}",
+                covering_shards[0],
+                covering_shards.last().unwrap()
+            )
+        };
         shared.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "model_loaded",
             message: format!(
-                "Loaded {} into memory — layers [{}, {}) ready for inference",
-                manifest.name, layer_start, layer_end
+                "Loaded {} — {} (layers {}-{}) ready for inference",
+                manifest.name, shard_label, layer_start, layer_end
             ),
             model_id: Some(model_id.0.clone()),
             model_name: Some(manifest.name.clone()),

@@ -176,13 +176,23 @@ impl ModelProcessPool {
 
         tracing::info!("Model worker subprocess started");
 
+        // Build a descriptive message including shard window if available
+        let shard_info = self.active_shard_windows.get(model_id).map(|w| {
+            let indices: Vec<_> = w.iter().map(|i| (i + 1).to_string()).collect();
+            if indices.len() == 1 {
+                format!("shard {}", indices[0])
+            } else {
+                format!("shards {}", indices.join(", "))
+            }
+        });
+        let msg = match shard_info {
+            Some(shards) => format!("Spawning worker for {} ({})", model_id.0, shards),
+            None => format!("Spawning worker for {}", model_id.0),
+        };
         self.emit_activity(crate::daemon::state::ActivityEvent {
             category: "model",
             kind: "worker_spawned",
-            message: format!(
-                "Loading {} into memory (worker subprocess started)",
-                model_id.0
-            ),
+            message: msg,
             model_id: Some(model_id.0.clone()),
             model_name: None,
             node_id: None,
