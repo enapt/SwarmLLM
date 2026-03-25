@@ -816,13 +816,13 @@ pub async fn apply_update(
     let info = match &update_state.update_available {
         Some(info) if info.downloaded => info.clone(),
         Some(_) => {
-            return Err(ApiError(crate::error::SwarmError::Internal(
-                "Update not yet downloaded — call POST /api/admin/update/check first".to_string(),
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Update not yet downloaded — call POST /api/admin/update/check first".into(),
             )));
         }
         None => {
-            return Err(ApiError(crate::error::SwarmError::Internal(
-                "No update available".to_string(),
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "No update available".into(),
             )));
         }
     };

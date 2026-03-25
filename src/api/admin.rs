@@ -345,11 +345,11 @@ pub async fn shutdown_node(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !addr.ip().is_loopback() {
-        return Err(ApiError(crate::error::SwarmError::Internal(
+        return Err(ApiError(crate::error::SwarmError::Unauthorized(
             "Shutdown only allowed from localhost".into(),
         )));
     }
-    tracing::info!("Shutdown requested via API from {}", addr);
+    tracing::info!(addr = %addr, "Shutdown requested via API");
 
     // Signal all subsystems to shut down via the watch channel.
     // The daemon.rs supervisor loop will handle graceful draining,

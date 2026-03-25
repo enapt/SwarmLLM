@@ -146,7 +146,7 @@ pub async fn pool_accept(
         .into_iter()
         .find(|i| i.id == invitation_id)
         .ok_or_else(|| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::Validation(
                 "Invitation not found".into(),
             ))
         })?;

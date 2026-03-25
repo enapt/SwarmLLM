@@ -2377,7 +2377,7 @@ pub async fn embeddings(
     State(_state): State<AppState>,
     crate::api::server::JsonBody(_req): crate::api::server::JsonBody<EmbeddingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Err(ApiError(crate::error::SwarmError::Internal(
+    Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
         "Embeddings API not available with subprocess inference. Use a dedicated embedding model or provider.".into(),
     )))
 }

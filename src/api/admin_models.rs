@@ -2245,14 +2245,14 @@ pub async fn register_adapter(
     // Reject path traversal attempts (e.g. "../../../etc/passwd")
     for component in resolved.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err(ApiError(crate::error::SwarmError::Internal(
-                "Path traversal not allowed in adapter path".to_string(),
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Path traversal not allowed in adapter path".into(),
             )));
         }
     }
 
     if !resolved.exists() {
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Adapter file not found: {}",
             resolved.display()
         ))));
@@ -2296,7 +2296,7 @@ pub async fn delete_adapter(
             "message": format!("Adapter '{adapter_id}' removed"),
         })))
     } else {
-        Err(ApiError(crate::error::SwarmError::Internal(format!(
+        Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Adapter '{adapter_id}' not found"
         ))))
     }
