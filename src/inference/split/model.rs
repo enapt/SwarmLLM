@@ -3978,6 +3978,30 @@ impl SplitModel {
             .unwrap_or(1)
     }
 
+    /// Pre-split all layer weights for tensor parallelism.
+    ///
+    /// Reduces VRAM per rank by splitting attention heads and FFN columns.
+    /// Must be called once before any TP forward passes.
+    pub fn pre_split_for_tp(&mut self, tp_rank: usize, tp_size: usize) -> Result<(), SwarmError> {
+        if tp_size <= 1 {
+            return Ok(());
+        }
+        let device = self.device.clone();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            if let LayerVariant::Dense(ref mut lw) = layer {
+                lw.pre_split_for_tp(tp_rank, tp_size, &device)
+                    .map_err(|e| SwarmError::Internal(format!("TP split layer {i}: {e}")))?;
+            }
+        }
+        tracing::info!(
+            tp_rank,
+            tp_size,
+            layers = self.layers.len(),
+            "Pre-split weights for tensor parallelism"
+        );
+        Ok(())
+    }
+
     /// Return the head dimension from the first layer (for paged KV pool sizing).
     pub fn head_dim(&self) -> usize {
         self.layers

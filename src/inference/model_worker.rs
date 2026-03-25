@@ -349,6 +349,19 @@ async fn handle_forward(
         shard_window,
     )?;
 
+    // Pre-split weights for tensor parallelism on first TP forward
+    if let Some(ref tp) = fwd.tp_meta {
+        let model = models
+            .get_mut(&(layer_start, layer_end))
+            .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;
+        // Only split once — check if n_head already reflects tp splitting
+        let current_heads = model.n_kv_head();
+        let expected_heads = current_heads / (tp.tp_size as usize);
+        if expected_heads > 0 && current_heads > expected_heads {
+            model.pre_split_for_tp(tp.tp_rank as usize, tp.tp_size as usize)?;
+        }
+    }
+
     let model = models
         .get_mut(&(layer_start, layer_end))
         .ok_or_else(|| SwarmError::Internal("Model vanished after load".into()))?;

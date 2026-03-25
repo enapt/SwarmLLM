@@ -62,6 +62,54 @@ impl QMatMul {
         }
     }
 
+    /// Narrow the weight matrix for tensor parallelism.
+    ///
+    /// - `dim`: 0 = row-parallel (split input dim), 1 = column-parallel (split output dim)
+    /// - `offset`: starting index in the split dimension
+    /// - `len`: number of elements in the split dimension
+    ///
+    /// Dequantizes the quantized weight to f32, narrows, and wraps in a new QMatMul.
+    /// The dequantized slice uses more memory per element but the total is smaller
+    /// (1/tp_size of the original).
+    pub(crate) fn narrow_tp(
+        &self,
+        dim: usize,
+        offset: usize,
+        len: usize,
+        device: &Device,
+    ) -> CandleResult<Self> {
+        match &self.inner {
+            QMatMulInner::Standard(m) => {
+                // Dequantize the weight, narrow, store as f32 Tensor.
+                // Weight layout: matmul computes x @ W^T, so W is [out_dim, in_dim].
+                // column-parallel (dim=1): split out_dim → narrow dim 0
+                // row-parallel (dim=0): split in_dim → narrow dim 1
+                let weight_dim = if dim == 1 { 0 } else { 1 };
+                let dequant = match m {
+                    candle_core::quantized::QMatMul::QTensor(qt) => qt.dequantize(device)?,
+                    candle_core::quantized::QMatMul::Tensor(t)
+                    | candle_core::quantized::QMatMul::TensorF16(t) => t.clone(),
+                };
+                let sliced = dequant.narrow(weight_dim, offset, len)?.contiguous()?;
+                Ok(Self {
+                    inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(sliced)),
+                })
+            }
+            QMatMulInner::FusedSlice { fused, .. } => {
+                let weight_dim = if dim == 1 { 0 } else { 1 };
+                let dequant = match fused.as_ref() {
+                    candle_core::quantized::QMatMul::QTensor(qt) => qt.dequantize(device)?,
+                    candle_core::quantized::QMatMul::Tensor(t)
+                    | candle_core::quantized::QMatMul::TensorF16(t) => t.clone(),
+                };
+                let sliced = dequant.narrow(weight_dim, offset, len)?.contiguous()?;
+                Ok(Self {
+                    inner: QMatMulInner::Standard(candle_core::quantized::QMatMul::Tensor(sliced)),
+                })
+            }
+        }
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
         match &self.inner {
             QMatMulInner::Standard(m) => m.forward(xs),
@@ -621,6 +669,111 @@ pub(crate) struct LayerWeights {
     pub(crate) rope_dim: usize,
     /// If true, skip RoPE entirely for this layer (Llama 4 NoPE layers).
     pub(crate) skip_rope: bool,
+}
+
+impl LayerWeights {
+    /// Pre-split weights for tensor parallelism, reducing VRAM per rank.
+    ///
+    /// Follows the Megatron-LM TP strategy:
+    /// - Column-parallel (Q/K/V/gate/up): split output dim across heads/columns
+    /// - Row-parallel (output/down): split input dim to match column-parallel output
+    ///
+    /// Quantized weights are dequantized to f32 during splitting. The per-rank
+    /// slice is smaller (1/tp_size), so total VRAM per rank decreases despite
+    /// the f32 format.
+    pub(crate) fn pre_split_for_tp(
+        &mut self,
+        tp_rank: usize,
+        tp_size: usize,
+        device: &Device,
+    ) -> CandleResult<()> {
+        if tp_size <= 1 {
+            return Ok(());
+        }
+
+        let heads_per_rank = self.n_head / tp_size;
+        let kv_heads_per_rank = self.n_kv_head.div_ceil(tp_size);
+        let head_offset = tp_rank * heads_per_rank * self.head_dim;
+        let head_len = heads_per_rank * self.head_dim;
+        let kv_offset = tp_rank * kv_heads_per_rank * self.head_dim;
+        let kv_len = kv_heads_per_rank * self.head_dim;
+
+        // Column-parallel: Q, K, V (split output dim = dim 1)
+        self.attention_wq = self
+            .attention_wq
+            .narrow_tp(1, head_offset, head_len, device)?;
+        self.attention_wk = self.attention_wk.narrow_tp(1, kv_offset, kv_len, device)?;
+        self.attention_wv = self.attention_wv.narrow_tp(1, kv_offset, kv_len, device)?;
+
+        // Row-parallel: output projection (split input dim = dim 0)
+        self.attention_wo = self
+            .attention_wo
+            .narrow_tp(0, head_offset, head_len, device)?;
+
+        // Split biases if present
+        if let Some(ref bq) = self.attention_bq {
+            self.attention_bq = Some(bq.narrow(0, head_offset, head_len)?.contiguous()?);
+        }
+        if let Some(ref bk) = self.attention_bk {
+            self.attention_bk = Some(bk.narrow(0, kv_offset, kv_len)?.contiguous()?);
+        }
+        if let Some(ref bv) = self.attention_bv {
+            self.attention_bv = Some(bv.narrow(0, kv_offset, kv_len)?.contiguous()?);
+        }
+
+        // Split FFN weights
+        if let FfnVariant::Dense(ref mut mlp) = self.ffn {
+            // Get intermediate dim from ffn_down weight shape.
+            // ffn_down weight is [hidden, intermediate] (row-parallel target).
+            // Dequantize dim 1 to find intermediate size.
+            let inter_dim = match &mlp.ffn_down.inner {
+                QMatMulInner::Standard(m) => match m {
+                    candle_core::quantized::QMatMul::QTensor(qt) => {
+                        qt.shape().dims().get(1).copied().unwrap_or(0)
+                    }
+                    candle_core::quantized::QMatMul::Tensor(t)
+                    | candle_core::quantized::QMatMul::TensorF16(t) => {
+                        t.dims().get(1).copied().unwrap_or(0)
+                    }
+                },
+                QMatMulInner::FusedSlice { fused, .. } => match fused.as_ref() {
+                    candle_core::quantized::QMatMul::QTensor(qt) => {
+                        qt.shape().dims().get(1).copied().unwrap_or(0)
+                    }
+                    candle_core::quantized::QMatMul::Tensor(t)
+                    | candle_core::quantized::QMatMul::TensorF16(t) => {
+                        t.dims().get(1).copied().unwrap_or(0)
+                    }
+                },
+            };
+            if inter_dim == 0 {
+                return Err(candle_core::Error::Msg(
+                    "Cannot determine FFN intermediate dim for TP split".into(),
+                ));
+            }
+            let inter_per_rank = inter_dim / tp_size;
+            let inter_offset = tp_rank * inter_per_rank;
+
+            // Column-parallel: gate, up (split output dim)
+            if let Some(ref gate) = mlp.ffn_gate {
+                mlp.ffn_gate = Some(gate.narrow_tp(1, inter_offset, inter_per_rank, device)?);
+            }
+            mlp.ffn_up = mlp
+                .ffn_up
+                .narrow_tp(1, inter_offset, inter_per_rank, device)?;
+
+            // Row-parallel: down (split input dim)
+            mlp.ffn_down = mlp
+                .ffn_down
+                .narrow_tp(0, inter_offset, inter_per_rank, device)?;
+        }
+
+        // Update head counts to reflect the split
+        self.n_head = heads_per_rank;
+        self.n_kv_head = kv_heads_per_rank;
+
+        Ok(())
+    }
 }
 
 pub(crate) fn masked_fill(
