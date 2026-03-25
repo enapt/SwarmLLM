@@ -266,8 +266,14 @@ pub(crate) async fn dispatch_network_messages(
                                         tokio::spawn(async move {
                                             let _permit = permit;
                                             handle_layer_forward(ss, ntx, forward).await;
-                                            // Decrement per-peer count when done
-                                            pfc.get(&ps).map(|c| c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed));
+                                            // Decrement per-peer count; remove entry if zero to prevent unbounded growth
+                                            if let Some(c) = pfc.get(&ps) {
+                                                let prev = c.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                                drop(c); // release DashMap ref before remove
+                                                if prev <= 1 {
+                                                    pfc.remove(&ps);
+                                                }
+                                            }
                                         });
                                     }
                                     // StreamingToken: route to registered streaming channel

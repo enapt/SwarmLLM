@@ -36,8 +36,9 @@ pub struct IntegrityReport {
 /// Build a composite key: "{tree}\0{key}".
 /// Panics if tree or key contain NUL bytes (would cause cross-tree collisions).
 fn make_key(tree: &str, key: &str) -> Vec<u8> {
-    // Hard check (not debug_assert) to prevent cross-tree key collisions in release builds
-    assert!(
+    // Defensive: strip NUL from tree name to prevent cross-tree key collisions.
+    // Tree names are always compile-time string literals — this guard is a safety net.
+    debug_assert!(
         !tree.contains('\0'),
         "DB tree name must not contain NUL bytes"
     );

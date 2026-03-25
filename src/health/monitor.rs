@@ -523,6 +523,24 @@ impl HealthMonitor {
             }
         }
 
+        // pending_vision_results: remove entries where the oneshot receiver has been dropped
+        let stale_vision: Vec<_> = self
+            .shared_state
+            .pending_vision_results
+            .iter()
+            .filter(|entry| entry.value().1.is_closed())
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_vision.is_empty() {
+            tracing::info!(
+                count = stale_vision.len(),
+                "DIAG: cleaning up stale pending_vision_results"
+            );
+            for key in stale_vision {
+                self.shared_state.pending_vision_results.remove(&key);
+            }
+        }
+
         // streaming_token_txs: remove entries where the receiver has been dropped
         let stale_stream: Vec<_> = self
             .shared_state

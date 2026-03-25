@@ -987,9 +987,13 @@ impl Daemon {
         {
             let verify_state = shared_state.clone();
             let verify_data_dir = self.config.node.data_dir.clone();
+            let mut verify_shutdown = shutdown_rx.clone();
             tokio::spawn(async move {
                 // Small delay to let the API server bind and first WS clients connect
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::select! {
+                    _ = verify_shutdown.changed() => { return; }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
                 let shard_store = crate::model::shard::ShardStore::new(&verify_data_dir);
                 let mut verified = 0u32;
                 let mut quarantined = 0u32;
