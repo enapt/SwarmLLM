@@ -253,7 +253,7 @@
           var allIds = S._modelDropdownData.map(function(m) { return m.id; });
           var sessionModel = S.currentSessionId && S.sessions[S.currentSessionId] ? S.sessions[S.currentSessionId].model : null;
           var savedModel = null;
-          try { savedModel = localStorage.getItem('swarmllm_current_model'); } catch (e) {}
+          try { savedModel = localStorage.getItem(App.CURRENT_MODEL_KEY); } catch (e) {}
           var preferred = sessionModel || savedModel;
           var found = preferred && allIds.indexOf(preferred) !== -1;
           App.models.selectDropdown(found ? preferred : allIds[0], { silent: true });
@@ -366,7 +366,7 @@
       var prevModel = S.currentModel;
       S.currentModel = modelId;
       document.getElementById('model-select').value = modelId;
-      try { localStorage.setItem('swarmllm_current_model', modelId); } catch (e) {}
+      try { localStorage.setItem(App.CURRENT_MODEL_KEY, modelId); } catch (e) {}
 
       var item = S._modelDropdownData.find(function(m) { return m.id === modelId; });
       updateModelDropdownLabel(item ? item.name : modelId);

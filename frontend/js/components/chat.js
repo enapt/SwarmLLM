@@ -294,7 +294,7 @@
         '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>';
 
       if (encBanner) {
-        var modelData = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
+        var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
         var isDistributed = modelData && modelData.shard_count > 1;
         var isAllLocal = modelData && modelData.hosted_shards === modelData.shard_count && modelData.shard_count > 0;
         var canBoomerang = modelData && modelData.has_first_shard && modelData.has_last_shard && isDistributed && !isAllLocal;
@@ -329,7 +329,7 @@
 
       var sendBtn = document.getElementById('send-btn');
       if (sendBtn) {
-        var modelData2 = s.model ? (window._lastModelsData || []).find(function(m) { return m.id === s.model; }) : null;
+        var modelData2 = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;
         var sendEncActive = !!(modelData2 && modelData2.encrypted_pipeline && modelData2.shard_count > 1);
         sendBtn.innerHTML = sendEncActive
           ? App.utils.escapeHtml(I18n.t('chat.send')) + ' <span class="send-enc-lock" aria-hidden="true">&#128274;</span>'
@@ -401,7 +401,7 @@
       var session = S.sessions[S.currentSessionId];
       var displayText = text || (images.length > 0 ? '[Image]' : '');
       var _sendModel = session.model || S.currentModel || '';
-      var _sendModelData = _sendModel ? (window._lastModelsData || []).find(function(m) { return m.id === _sendModel; }) : null;
+      var _sendModelData = _sendModel ? (App.data.cache.models || []).find(function(m) { return m.id === _sendModel; }) : null;
       var msgEncrypted = !!(_sendModelData && _sendModelData.encrypted_pipeline && _sendModelData.shard_count > 1);
       session.messages.push({ role: 'user', content: displayText, images: images.map(function(i) { return i.data_url; }), encrypted: msgEncrypted });
 

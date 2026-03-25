@@ -70,7 +70,7 @@
       } catch (e) {}
       cache.models = models;
       cache.cloudModels = cloudModels;
-      window._lastModelsData = models;
+      // models cached in App.data.cache.models
       return { models: models, cloudModels: cloudModels };
     });
   }

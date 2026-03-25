@@ -481,7 +481,7 @@
       if (encToggle) {
         var encReady = (target.getAttribute('data-enc-ready') || (target.closest('[data-enc-ready]') || {}).getAttribute && (target.closest('[data-enc-ready]') || {}).getAttribute('data-enc-ready')) === '1';
         if (encReady) {
-          var encModelData = (window._lastModelsData || []).find(function(m) { return m.id === encToggle; });
+          var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
           var isActive = encModelData ? !!encModelData.encrypted_pipeline : (target.classList.contains('active') || target.closest('.active') != null);
           App.authFetch('/api/admin/models/' + encodeURIComponent(encToggle) + '/encrypted-pipeline', {
             method: 'PUT',
@@ -503,7 +503,7 @@
               return r.json();
             }).then(function(src) {
               if (!src) return;
-              var modelData = (window._lastModelsData || []).find(function(mm) { return mm.id === encToggle; });
+              var modelData = (App.data.cache.models || []).find(function(mm) { return mm.id === encToggle; });
               var missing = [];
               if (modelData) {
                 var first = modelData.shards[0];
@@ -539,7 +539,7 @@
       if (modelCard && !target.closest('button, a, summary, details, .shard-cell, .badge-encrypted, [data-cancel-download], [data-remove-model], [data-unload-model], [data-enc-toggle], [data-am-gear], input, select')) {
         var cardModelId = modelCard.getAttribute('data-model-id');
         if (cardModelId) {
-          var cardModel = (window._lastModelsData || []).find(function(mm) { return mm.id === cardModelId; });
+          var cardModel = (App.data.cache.models || []).find(function(mm) { return mm.id === cardModelId; });
           var cardReady = cardModel && (cardModel.status === 'loaded' || cardModel.status === 'ready' ||
             (cardModel.global_available === cardModel.shard_count && cardModel.shard_count > 0));
           if (cardReady) {
@@ -571,7 +571,7 @@
       if (historyRow) {
         var idx = parseInt(historyRow.getAttribute('data-compare-idx'), 10);
         try {
-          var hist = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+          var hist = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
           if (hist[idx]) App.compare.restoreFromHistory(hist[idx]);
         } catch (e) {}
         return;

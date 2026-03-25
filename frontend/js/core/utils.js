@@ -250,7 +250,7 @@
     if (S.currentModel) {
       item = S._modelDropdownData.find(function(m) { return m.id === S.currentModel; });
       modelName = item ? item.name : S.currentModel;
-      modelData = (window._lastModelsData || []).find(function(m) { return m.id === S.currentModel; });
+      modelData = (App.data.cache.models || []).find(function(m) { return m.id === S.currentModel; });
     }
 
     var title = modelName ? 'Chat with ' + escapeHtml(modelName) : 'Chat with AI';

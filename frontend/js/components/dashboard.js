@@ -10,8 +10,8 @@
   var U = App.utils;
 
   // Per-model event logs — split into activity and network
-  var MODEL_EVENTS_KEY = 'swarmllm_model_events';
-  var MODEL_NET_EVENTS_KEY = 'swarmllm_model_net_events';
+  var MODEL_EVENTS_KEY = App.MODEL_EVENTS_KEY;
+  var MODEL_NET_EVENTS_KEY = App.MODEL_NET_EVENTS_KEY;
   var _modelEvents = (function() {
     try { var s = sessionStorage.getItem(MODEL_EVENTS_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return {};
@@ -175,8 +175,8 @@
               if (vramLabel) vramLabel.textContent = 'VRAM';
               // GPU mode: show model-estimated VRAM for loaded models
               var activeVramMb = 0;
-              if (window._lastModelsData && window._lastModelsData.length) {
-                window._lastModelsData.forEach(function(m) {
+              if (App.data.cache.models && App.data.cache.models.length) {
+                App.data.cache.models.forEach(function(m) {
                   if (m.status === 'loaded' && m.estimated_vram_mb) activeVramMb += m.estimated_vram_mb;
                 });
               }
@@ -291,7 +291,7 @@
     },
 
     renderModels: function(models, cloudModels) {
-      window._lastModelsData = models || [];
+      // models cached in App.data.cache.models
       var list = document.getElementById('models-list');
       var empty = document.getElementById('models-empty');
       var loading = document.getElementById('models-loading');
@@ -422,7 +422,7 @@
           sortEl.addEventListener('change', function(e) {
             e.stopPropagation(); // Don't toggle the <details>
             S._swarmModelSort = this.value;
-            try { localStorage.setItem('swarmllm_model_sort', this.value); } catch(e2) {}
+            try { localStorage.setItem(App.MODEL_SORT_KEY, this.value); } catch(e2) {}
             App.models.load();
           });
           sortEl.addEventListener('click', function(e) { e.stopPropagation(); });

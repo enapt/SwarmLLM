@@ -40,13 +40,24 @@ window.App = {
     inputEl: null,
   },
 
-  // --- Storage keys ---
+  // --- Storage keys (single source of truth for all storage key strings) ---
+  // localStorage keys
   SESSIONS_KEY: 'swarmllm_sessions',
   ACTIVE_SESSION_KEY: 'swarmllm_active_session',
   SETUP_DONE_KEY: 'swarmllm_setup_done',
   CHAT_LAYOUT_KEY: 'swarmllm_chat_layout',
   HEALTH_INTERVAL_KEY: 'swarmllm_health_interval',
   THEME_KEY: 'swarmllm_theme',
+  MODEL_SORT_KEY: 'swarmllm_model_sort',
+  CURRENT_MODEL_KEY: 'swarmllm_current_model',
+  COMPARE_HISTORY_KEY: 'swarmllm_compare_history',
+  LANG_KEY: 'swarmllm_lang',
+  // sessionStorage keys
+  MODEL_STATUS_KEY: 'swarmllm_model_status',
+  ACTIVITY_KEY: 'swarmllm_activity',
+  NETWORK_LOG_KEY: 'swarmllm_network_log',
+  MODEL_EVENTS_KEY: 'swarmllm_model_events',
+  MODEL_NET_EVENTS_KEY: 'swarmllm_model_net_events',
 
   // --- Component namespaces (populated by component files) ---
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,
@@ -55,7 +66,7 @@ window.App = {
 
 // Initialize modelStatus from sessionStorage cache
 try {
-  var _cached = sessionStorage.getItem('swarmllm_model_status');
+  var _cached = sessionStorage.getItem(App.MODEL_STATUS_KEY);
   if (_cached) App.state.modelStatus = JSON.parse(_cached);
 } catch (e) {}
 

@@ -8,7 +8,7 @@ var I18n = (function() {
   var strings = {};
   var fallback = {};
   var currentLang = '';
-  var STORAGE_KEY = 'swarmllm_lang';
+  var STORAGE_KEY = 'swarmllm_lang'; // raw string — i18n.js loads before state.js
   var listeners = [];
 
   function detectLang(available) {

@@ -10,8 +10,8 @@
   var U = App.utils;
 
   // --- Activity + Network Logs (persisted to sessionStorage) ---
-  var ACTIVITY_STORAGE_KEY = 'swarmllm_activity';
-  var NETWORK_STORAGE_KEY = 'swarmllm_network_log';
+  var ACTIVITY_STORAGE_KEY = App.ACTIVITY_KEY;
+  var NETWORK_STORAGE_KEY = App.NETWORK_LOG_KEY;
   var _activityEntries = (function() {
     try { var s = sessionStorage.getItem(ACTIVITY_STORAGE_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return [];
@@ -371,7 +371,7 @@
         _networkEntries = [];
         _persistActivity();
         _persistNetwork();
-        try { sessionStorage.removeItem('swarmllm_model_events'); sessionStorage.removeItem('swarmllm_model_net_events'); } catch (e2) {}
+        try { sessionStorage.removeItem(App.MODEL_EVENTS_KEY); sessionStorage.removeItem(App.MODEL_NET_EVENTS_KEY); } catch (e2) {}
       }
       S.wsWasConnected = true;
       logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'system');
@@ -586,7 +586,7 @@
           S.modelStatus[m.model] = { status: m.status, latency_ms: m.latency_ms, ts: ts };
           delete S._modelStatusPending[m.model];
         });
-        try { sessionStorage.setItem('swarmllm_model_status', JSON.stringify(S.modelStatus)); } catch (e) {}
+        try { sessionStorage.setItem(App.MODEL_STATUS_KEY, JSON.stringify(S.modelStatus)); } catch (e) {}
         App.providerHealth.updateModelBadges();
       }).catch(function() {
         toProbe.forEach(function(id) { delete S._modelStatusPending[id]; });

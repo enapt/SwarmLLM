@@ -189,7 +189,7 @@
         App.compare.running = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Run Compare'; }
         try {
-          var history = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+          var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
           history.unshift({
             prompt: prompt.trim().substring(0, 200),
             models: App.compare.selected.slice(),
@@ -208,7 +208,7 @@
             }),
           });
           if (history.length > 20) history = history.slice(0, 20);
-          localStorage.setItem('swarmllm_compare_history', JSON.stringify(history));
+          localStorage.setItem(App.COMPARE_HISTORY_KEY, JSON.stringify(history));
           App.compare.renderHistory();
         } catch (e) {}
       });
@@ -218,7 +218,7 @@
       var container = document.getElementById('compare-history');
       if (!container) return;
       try {
-        var history = JSON.parse(localStorage.getItem('swarmllm_compare_history') || '[]');
+        var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
         if (history.length === 0) { container.style.display = 'none'; return; }
         container.style.display = '';
         var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Recent Comparisons</div>';
