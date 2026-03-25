@@ -86,7 +86,7 @@ pub async fn hf_search(
         return Ok(Json(vec![]));
     }
     if query.len() > 256 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Search query too long (max 256 chars)".into(),
         )));
     }
@@ -275,7 +275,7 @@ pub async fn hf_download(
     let filename = body.filename;
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "repo_id and filename are required".into(),
         )));
     }
@@ -298,7 +298,7 @@ pub async fn hf_download(
     // Sanitize repo_id to prevent path traversal — reject ".." and backslash
     let sanitized_repo = repo_id.replace(['/', '\\'], "_");
     if sanitized_repo.contains("..") || sanitized_repo.starts_with('.') {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Invalid repo_id: path traversal detected".into(),
         )));
     }
@@ -569,7 +569,7 @@ pub async fn hf_probe(
     let filename = params.filename.unwrap_or_default();
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "repo_id and filename query params are required".into(),
         )));
     }
@@ -680,7 +680,7 @@ pub async fn hf_download_shards(
     let peer_fair_share = body.peer_fair_share;
 
     if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "repo_id and filename are required".into(),
         )));
     }
@@ -698,13 +698,13 @@ pub async fn hf_download_shards(
     }
 
     if shard_indices.is_empty() && !peer_fair_share {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "shards array is required (e.g. [0, 1, 2])".into(),
         )));
     }
 
     if shard_indices.len() > 256 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Too many shards requested (max 256)".into(),
         )));
     }
@@ -1573,7 +1573,7 @@ pub async fn cancel_download(
         .unwrap_or(false);
 
     if !has_active {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "No active download found for model '{}'",
             model_id
         ))));
@@ -1741,7 +1741,7 @@ pub async fn hf_source(
         }
     }
 
-    Err(ApiError(crate::error::SwarmError::Config(format!(
+    Err(ApiError(crate::error::SwarmError::Validation(format!(
         "No HuggingFace source found for model '{}'",
         model_id
     ))))

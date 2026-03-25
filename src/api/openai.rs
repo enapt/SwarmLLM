@@ -359,24 +359,24 @@ fn decode_image_url(url: &str) -> Result<ImageData, crate::error::SwarmError> {
         if let Some(comma_pos) = rest.find(',') {
             let header = &rest[..comma_pos];
             if !header.contains("base64") {
-                return Err(crate::error::SwarmError::Config(
+                return Err(crate::error::SwarmError::Validation(
                     "Only base64 data URIs are supported for image_url".into(),
                 ));
             }
             &rest[comma_pos + 1..]
         } else {
-            return Err(crate::error::SwarmError::Config(
+            return Err(crate::error::SwarmError::Validation(
                 "Invalid data URI format".into(),
             ));
         }
     } else {
-        return Err(crate::error::SwarmError::Config(
+        return Err(crate::error::SwarmError::Validation(
             "Only data: URIs are supported for image_url (not remote URLs)".into(),
         ));
     };
 
     if base64_data.len() > MAX_IMAGE_BASE64_BYTES * 4 / 3 + 4 {
-        return Err(crate::error::SwarmError::Config(format!(
+        return Err(crate::error::SwarmError::Validation(format!(
             "Image too large (max {}MB)",
             MAX_IMAGE_BASE64_BYTES / (1024 * 1024)
         )));
@@ -385,18 +385,19 @@ fn decode_image_url(url: &str) -> Result<ImageData, crate::error::SwarmError> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64_data)
-        .map_err(|e| crate::error::SwarmError::Config(format!("Invalid base64 image: {e}")))?;
+        .map_err(|e| crate::error::SwarmError::Validation(format!("Invalid base64 image: {e}")))?;
 
     if bytes.len() > MAX_IMAGE_BASE64_BYTES {
-        return Err(crate::error::SwarmError::Config(format!(
+        return Err(crate::error::SwarmError::Validation(format!(
             "Decoded image too large: {}MB (max {}MB)",
             bytes.len() / (1024 * 1024),
             MAX_IMAGE_BASE64_BYTES / (1024 * 1024)
         )));
     }
 
-    let img = image::load_from_memory(&bytes)
-        .map_err(|e| crate::error::SwarmError::Config(format!("Failed to decode image: {e}")))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| {
+        crate::error::SwarmError::Validation(format!("Failed to decode image: {e}"))
+    })?;
 
     let rgb = img.to_rgb8();
     let (width, height) = (rgb.width(), rgb.height());
@@ -577,7 +578,7 @@ fn validate_chat_request(
     // Validate session_id length to prevent memory abuse
     if let Some(ref sid) = req.session_id {
         if sid.len() > 256 {
-            return Err(ApiError(crate::error::SwarmError::Config(
+            return Err(ApiError(crate::error::SwarmError::Validation(
                 "session_id too long (max 256 chars)".into(),
             )));
         }
@@ -613,7 +614,7 @@ fn validate_chat_request(
         ))));
     }
     if req.messages.len() > 4096 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Too many messages (max 4096)".into(),
         )));
     }

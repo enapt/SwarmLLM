@@ -280,7 +280,7 @@ pub async fn try_proxy_openai(
 /// private/internal IP ranges (SSRF prevention for custom providers).
 pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
     if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
-        return Err(crate::error::SwarmError::Config(
+        return Err(crate::error::SwarmError::Validation(
             "Provider base_url must use http or https scheme".into(),
         ));
     }
@@ -303,7 +303,7 @@ pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         if is_private_ip(ip) {
-            return Err(crate::error::SwarmError::Config(
+            return Err(crate::error::SwarmError::Validation(
                 "Provider base_url must not point to private/internal IP ranges".into(),
             ));
         }
@@ -315,7 +315,7 @@ pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::
         if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
             for addr in addrs {
                 if is_private_ip(addr.ip()) {
-                    return Err(crate::error::SwarmError::Config(format!(
+                    return Err(crate::error::SwarmError::Validation(format!(
                         "Provider base_url hostname '{}' resolves to private IP {}",
                         host,
                         addr.ip()
@@ -345,7 +345,7 @@ pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::
     let host_lower = host.to_lowercase();
     for blocked in &blocked_hosts {
         if host_lower.contains(blocked) {
-            return Err(crate::error::SwarmError::Config(
+            return Err(crate::error::SwarmError::Validation(
                 "Provider base_url points to blocked internal hostname".into(),
             ));
         }

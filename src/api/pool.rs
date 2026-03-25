@@ -61,7 +61,7 @@ pub async fn pool_create(
     tracing::debug!(name = %body.name, "DIAG: pool_create request");
     // Validate pool name length
     if body.name.trim().is_empty() || body.name.len() > 64 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Pool name must be 1-64 characters".into(),
         )));
     }
@@ -127,7 +127,7 @@ pub async fn pool_accept(
     Json(body): Json<PoolAcceptRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let invitation_id = uuid::Uuid::parse_str(&body.invitation_id).map_err(|_| {
-        ApiError(crate::error::SwarmError::Config(
+        ApiError(crate::error::SwarmError::Validation(
             "Invalid invitation ID".into(),
         ))
     })?;
@@ -153,7 +153,7 @@ pub async fn pool_accept(
 
     // Check expiry in the API layer before forwarding to pool manager
     if invitation.expires_at < chrono::Utc::now() {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Invitation expired at {}",
             invitation.expires_at.to_rfc3339()
         ))));
@@ -376,7 +376,7 @@ pub async fn pool_join(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let code = body.code.trim().to_uppercase();
     if code.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Invite code is required".into(),
         )));
     }
@@ -415,12 +415,12 @@ async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), Api
 
 fn parse_node_id(hex: &str) -> Result<NodeId, ApiError> {
     let bytes = hex::decode(hex).map_err(|_| {
-        ApiError(crate::error::SwarmError::Config(
+        ApiError(crate::error::SwarmError::Validation(
             "Invalid node_id hex".into(),
         ))
     })?;
     if bytes.len() != 32 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "node_id must be 32 bytes (64 hex chars)".into(),
         )));
     }
@@ -551,13 +551,13 @@ pub async fn pool_rates_set(
     ];
     for (name, value) in &positive_rates {
         if *value <= 0 {
-            return Err(ApiError(crate::error::SwarmError::Config(format!(
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
                 "{name} must be positive (got {value})"
             ))));
         }
     }
     if new_rates.penalty_serve_failure >= 0 {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "penalty_serve_failure must be negative (got {})",
             new_rates.penalty_serve_failure
         ))));
@@ -573,14 +573,14 @@ pub async fn pool_rates_set(
     ];
     for ((name, value), (_, default_val)) in positive_rates.iter().zip(default_positive.iter()) {
         if *value > default_val * 10 {
-            return Err(ApiError(crate::error::SwarmError::Config(format!(
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
                 "{name} cannot exceed 10x the default ({}) — got {value}",
                 default_val * 10
             ))));
         }
     }
     if new_rates.penalty_serve_failure < defaults.penalty_serve_failure * 10 {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "penalty_serve_failure cannot exceed 10x the default ({}) — got {}",
             defaults.penalty_serve_failure * 10,
             new_rates.penalty_serve_failure

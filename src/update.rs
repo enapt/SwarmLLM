@@ -174,7 +174,7 @@ impl UpdateChecker {
                 .download_url
                 .starts_with("https://objects.githubusercontent.com/")
         {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Update rejected: download URL is not from GitHub: {}",
                 info.download_url
             )));
@@ -211,7 +211,7 @@ impl UpdateChecker {
         const MAX_UPDATE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
         if let Some(content_length) = resp.content_length() {
             if content_length > MAX_UPDATE_SIZE {
-                return Err(SwarmError::Internal(format!(
+                return Err(SwarmError::Validation(format!(
                     "Update binary too large: {} bytes (max {} bytes)",
                     content_length, MAX_UPDATE_SIZE
                 )));

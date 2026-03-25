@@ -181,7 +181,7 @@ pub async fn update_config(
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
             .contains(&shard_size)
         {
-            return Err(ApiError(crate::error::SwarmError::Config(format!(
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
                 "shard_size_mb must be between {} and {} (got {})",
                 crate::config::SHARD_SIZE_MIN_MB,
                 crate::config::SHARD_SIZE_MAX_MB,
@@ -199,7 +199,7 @@ pub async fn update_config(
 
     // Write updated config to disk
     let toml_str = toml::to_string_pretty(&config)
-        .map_err(|e| ApiError(crate::error::SwarmError::Config(e.to_string())))?;
+        .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -802,7 +802,7 @@ pub async fn update_schedule(
     }
     if let Some(start) = body.reduced_hours_start {
         if start > 23 {
-            return Err(ApiError(crate::error::SwarmError::Config(
+            return Err(ApiError(crate::error::SwarmError::Validation(
                 "reduced_hours_start must be 0-23".to_string(),
             )));
         }
@@ -810,7 +810,7 @@ pub async fn update_schedule(
     }
     if let Some(end) = body.reduced_hours_end {
         if end > 23 {
-            return Err(ApiError(crate::error::SwarmError::Config(
+            return Err(ApiError(crate::error::SwarmError::Validation(
                 "reduced_hours_end must be 0-23".to_string(),
             )));
         }
@@ -825,7 +825,7 @@ pub async fn update_schedule(
                 schedule.prune_aggressiveness = aggressiveness.clone();
             }
             _ => {
-                return Err(ApiError(crate::error::SwarmError::Config(
+                return Err(ApiError(crate::error::SwarmError::Validation(
                     "prune_aggressiveness must be 'normal', 'aggressive', or 'conservative'"
                         .to_string(),
                 )));

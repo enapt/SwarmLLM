@@ -1170,7 +1170,7 @@ impl PoolManager {
     /// Set the credit split percentage (owner only). 0 = all to owner, 100 = all to member.
     async fn handle_set_credit_split(&mut self, pct: u8) -> Result<(), SwarmError> {
         if pct > 100 {
-            return Err(SwarmError::Internal("Split must be 0-100".into()));
+            return Err(SwarmError::Validation("Split must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
         let mut ps = self.shared_state.credits.pool_state.write().await;
@@ -1195,7 +1195,7 @@ impl PoolManager {
         level: u8,
     ) -> Result<(), SwarmError> {
         if level > 100 {
-            return Err(SwarmError::Internal("Level must be 0-100".into()));
+            return Err(SwarmError::Validation("Level must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
         let mut ps = self.shared_state.credits.pool_state.write().await;

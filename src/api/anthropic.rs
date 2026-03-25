@@ -312,7 +312,7 @@ pub async fn messages(
 
     // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
-        return Err(ApiError(crate::error::SwarmError::Config(
+        return Err(ApiError(crate::error::SwarmError::Validation(
             "Too many messages (max 4096)".into(),
         )));
     }

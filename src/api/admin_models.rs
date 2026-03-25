@@ -843,7 +843,7 @@ pub async fn delete_model(
 
     // Verify the model exists
     if shared.model_registry.get_manifest(&mid).is_none() {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Model '{}' not found",
             model_id
         ))));
@@ -1314,7 +1314,7 @@ pub async fn delete_shard(
     };
     let holders = shared.model_registry.shard_holders(&shard_id);
     if !holders.contains(&local_node_id) {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "Shard {} of model '{}' is not held locally",
             shard_index, model_id
         ))));
@@ -1824,7 +1824,7 @@ pub async fn set_model_encrypted_pipeline(
                 if !has_last {
                     missing.push(format!("last shard (shard {last_idx}, output head)"));
                 }
-                return Err(ApiError(crate::error::SwarmError::Config(format!(
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
                     "Cannot enable encrypted pipeline: this node is missing {}. \
                      Download the missing shard(s) first.",
                     missing.join(" and ")
@@ -1891,7 +1891,7 @@ pub async fn model_metadata(
     let header_path = model_dir.join("gguf_header.bin");
 
     if !header_path.exists() {
-        return Err(ApiError(crate::error::SwarmError::Config(format!(
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "No GGUF header found for model '{}'",
             model_id
         ))));
