@@ -250,6 +250,45 @@ fn ensure_model_loaded(
         })?
     };
 
+    // Initialize paged KV cache pool when the feature is enabled and model is on GPU
+    #[cfg(feature = "paged-attn")]
+    if model.device().is_cuda() {
+        let n_kv_heads = model.n_kv_head();
+        let head_dim = model.head_dim();
+        // Allocate 20% of VRAM (256 MB default) for the paged KV pool
+        let budget_mb = 256u64;
+        let num_blocks = crate::inference::paged_kv::PagedKvPool::auto_size(
+            budget_mb,
+            n_kv_heads,
+            head_dim,
+            candle_core::DType::F16,
+        );
+        if num_blocks > 0 {
+            match crate::inference::paged_kv::PagedKvPool::new(
+                num_blocks,
+                n_kv_heads,
+                head_dim,
+                candle_core::DType::F16,
+                model.device(),
+            ) {
+                Ok(pool) => {
+                    tracing::info!(
+                        num_blocks,
+                        n_kv_heads,
+                        head_dim,
+                        budget_mb,
+                        "model-worker: Initialized PagedKvPool"
+                    );
+                    // Store the pool — it will be used when the forward path supports paged attention
+                    let _ = pool; // TODO: wire into forward path when paged attention kernels are integrated
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "model-worker: Failed to create PagedKvPool, using standard KV cache");
+                }
+            }
+        }
+    }
+
     tracing::info!(
         model = %model_id,
         layers = format!("[{layer_start}..{layer_end})"),

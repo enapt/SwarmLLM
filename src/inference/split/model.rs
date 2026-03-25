@@ -3965,6 +3965,32 @@ impl SplitModel {
         &self.device
     }
 
+    /// Return the number of KV heads from the first layer (for paged KV pool sizing).
+    pub fn n_kv_head(&self) -> usize {
+        self.layers
+            .first()
+            .map(|l| match l {
+                LayerVariant::Dense(w) => w.n_kv_head,
+                LayerVariant::DeepSeek { .. } => 1, // MLA uses MQA
+                LayerVariant::Qwen35Attn { weights, .. } => weights.n_kv_head,
+                LayerVariant::Qwen35Ssm { .. } => 0,
+            })
+            .unwrap_or(1)
+    }
+
+    /// Return the head dimension from the first layer (for paged KV pool sizing).
+    pub fn head_dim(&self) -> usize {
+        self.layers
+            .first()
+            .map(|l| match l {
+                LayerVariant::Dense(w) => w.head_dim,
+                LayerVariant::DeepSeek { .. } => 128, // DeepSeek default
+                LayerVariant::Qwen35Attn { weights, .. } => weights.head_dim,
+                LayerVariant::Qwen35Ssm { .. } => 128,
+            })
+            .unwrap_or(128)
+    }
+
     /// Return the EOS token IDs loaded from GGUF metadata.
     pub fn eos_tokens(&self) -> &[u32] {
         &self.eos_tokens
