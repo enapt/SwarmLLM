@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed. Distributed inference stable and tested on real LAN. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node Proxmox deployments on real networks. 675 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -31,6 +31,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 - [API Endpoints](#api-endpoints)
 - [How SwarmLLM Compares](#how-swarmllm-compares)
 - [Documentation](#documentation)
+- [Development Transparency](#development-transparency)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -205,7 +206,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **End-to-End Encryption** — Three-tier encryption: pairwise sessions (X25519 + ChaCha20-Poly1305 with forward secrecy via key rotation), pipeline sealing (final segment encrypts output tokens for requester's X25519 key), and authenticated sealed gossip. All peer-to-peer traffic is encrypted in transit. Intermediate pipeline nodes process activation tensors but never see the plaintext output — see [Security Model](docs/book/src/architecture/security.md) for details. By comparison, Petals [explicitly warns](https://github.com/bigscience-workshop/petals/wiki/Security,-privacy,-and-AI-safety) that "peers can recover input data and model outputs" with no encryption layer, and Exo has no encryption at all
 - **Encrypted Pipeline** — Optional "boomerang" topology where the requesting node holds both the first shard (embedding) and last shard (token sampling), so **no remote node ever sees plaintext** — only intermediate activation tensors. Per-model toggle via API/dashboard or global config. Auto-enables local embedding privacy. Adds ~1 RTT per token for the return hop. Requires 3+ shard models. See [Encrypted Pipeline](docs/book/src/architecture/security.md#encrypted-pipeline)
 - **Security Hardened** — ~90-fix security audit across 5 rounds: authenticated P2P dispatch, signed DHT records, ephemeral key auth, path traversal fix, HF input validation, constant-time auth, CSP hardening, WebSocket Origin check, SSRF protection, resource caps, input limits, credit signature verification, XSS fixes
-- **Hidden States API** — `/v1/internal/hidden-states` endpoint for per-layer activations with real forward pass capture
+- **Local Embedding Privacy** — requesting node performs token→embedding locally so remote first-segment nodes never see raw tokens
 - **Sybil Resistance** — Ed25519-signed balance reports, peer reputation scoring with trust decay, subnet clustering detection, leaderboard spoofing protection
 - **API Authentication** — Bearer token middleware with auto-generated keys, CORS lockdown, SSRF protection, Content-Security-Policy, IP-based rate limiting
 
@@ -272,9 +273,9 @@ Key source directories:
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
 - `src/pool/` — device pool management, crypto, credit forwarding
-- `frontend/` — vanilla HTML/CSS/JS dashboard (12 component JS files, 12 HTML templates, 20 language translations)
+- `frontend/` — vanilla HTML/CSS/JS dashboard (13 component JS files, 13 HTML templates, 20 language translations)
 
-674 tests (606 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+675 tests (607 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -478,7 +479,7 @@ The `.env` file is loaded at startup and does not override existing environment 
 | `[resources.schedule]` | `enabled`, `reduced_hours_start/end`, `prune_aggressiveness` |
 | `[network]` | `bootstrap_peers`, `enable_mdns`, `enable_encryption`, `gossip_network_id`, `enable_relay`, `max_peers`, `tensor_compression` |
 | `[inference]` | `model_path`, `gpu_layers`, `session_timeout_seconds`, `max_batch_size`, `speculative_decoding`, `tp_max_latency_ms`, `local_embedding_privacy`, `encrypted_pipeline` |
-| `[api]` | `api_key`, `expose_hidden_states`, `rate_limit_rpm` |
+| `[api]` | `api_key`, `rate_limit_rpm` |
 | `[pool]` | `max_pool_size`, `invitation_ttl_hours`, `rate_limit_per_hour` |
 | `[auto_manage]` | `enabled`, `max_storage_mb`, `interval_minutes`, `max_concurrent_downloads`, `prune_enabled`, `min_replicas` |
 | `[providers]` | API keys for cloud providers (also via `OPENAI_API_KEY` env var / `.env` file), custom providers |
@@ -500,7 +501,6 @@ See the [Configuration Reference](docs/book/src/configuration/reference.md) for 
 | GET | `/v1/models` | List available models |
 | GET | `/v1/providers` | List configured cloud providers |
 | GET | `/v1/status` | Node status |
-| POST | `/v1/internal/hidden-states` | Extract per-layer activations (gated by config) |
 
 ### MCP Server
 | Method | Path | Description |
