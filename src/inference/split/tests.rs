@@ -539,8 +539,6 @@ fn forward_batch_empty_returns_empty() {
     assert!(out.is_empty());
 }
 
-// BatchForwarder test removed — batching now handled in worker subprocess
-
 #[test]
 fn flash_attn_cpu_vs_standard_attention() {
     // Compare CPU flash attention output vs standard matmul attention

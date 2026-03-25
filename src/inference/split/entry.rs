@@ -249,5 +249,3 @@ pub fn evict_split_models_lru(
 
     evicted
 }
-
-// BatchForwarder removed — batching is handled inside worker subprocesses now.

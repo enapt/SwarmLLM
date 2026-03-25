@@ -941,8 +941,7 @@ pub fn extract_stop_strings(template: Option<&str>) -> Vec<String> {
 
 /// Build a chat prompt using the given template, falling back to ChatML.
 ///
-/// This is the main entry point — all call sites should use this instead of
-/// the old hardcoded `build_chat_prompt`.
+/// This is the main entry point for chat prompt construction.
 pub fn build_prompt(
     messages: &[ChatMessage],
     template: Option<&str>,

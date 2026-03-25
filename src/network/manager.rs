@@ -59,7 +59,6 @@ pub struct NetworkManager {
     /// Each message carries the transport-authenticated sender identity.
     outbound_tx: mpsc::Sender<crate::types::AuthenticatedMessage>,
     /// Sends shard data to the AcquisitionManager when received from peers.
-    #[allow(dead_code)]
     acquisition_tx: Option<mpsc::Sender<AcquisitionCommand>>,
     /// Deferred broadcasts queued during swarm event handling (can't publish gossip inline).
     deferred_broadcasts: Vec<crate::types::SwarmMessage>,

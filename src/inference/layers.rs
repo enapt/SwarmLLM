@@ -499,7 +499,6 @@ impl MoeFfn {
 
 /// A transformer layer that is either a standard dense layer or a DeepSeek MLA+MoE layer.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) enum LayerVariant {
     /// Standard dense transformer layer (Llama, Qwen2, Gemma, etc.)
     Dense(LayerWeights),
@@ -528,7 +527,6 @@ pub(crate) enum LayerVariant {
 
 /// Qwen 3.5 full-attention layer weights.
 /// Similar to standard attention but with output gating from Q projection.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Qwen35AttnWeights {
     /// Fused QKV + gate projection: hidden → (q_dim + k_dim + v_dim + gate_dim)
@@ -562,7 +560,6 @@ pub(crate) struct Qwen35AttnWeights {
 /// 4. Run delta net scan: state = alpha * state + beta * (v ⊗ k), output = state @ q
 /// 5. Apply gated normalization: norm(output) * silu(z)
 /// 6. Project through ssm_out
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct DeltaNetWeights {
     /// Fused QKV+Z projection: hidden → (q_dim + k_dim + v_dim + z_dim)
@@ -599,7 +596,6 @@ pub(crate) struct DeltaNetWeights {
 
 /// Per-request SSM (delta net) recurrent state for Qwen 3.5 hybrid models.
 /// Analogous to KV-cache for attention layers, but stores conv state + recurrent state.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct SsmState {
     /// 1D convolution buffer: [batch, n_heads * head_dim, conv_kernel_dim - 1]
@@ -1131,7 +1127,6 @@ impl LayerWeights {
 
 // ── Qwen 3.5 full-attention layer forward ──
 
-#[allow(dead_code)]
 impl Qwen35AttnWeights {
     pub(crate) fn apply_rotary_emb(&self, x: &Tensor, index_pos: usize) -> CandleResult<Tensor> {
         let (_b_sz, _n_head, seq_len, n_embd) = x.dims4()?;
@@ -1248,7 +1243,6 @@ impl Qwen35AttnWeights {
 
 // ── Qwen 3.5 Gated Delta Network (SSM) layer forward ──
 
-#[allow(dead_code)]
 impl DeltaNetWeights {
     /// Forward pass for the Gated Delta Network (linear attention / SSM layer).
     pub(crate) fn forward_deltanet(
@@ -1543,7 +1537,6 @@ impl DeltaNetWeights {
 }
 
 /// Softplus activation: log(1 + exp(x))
-#[allow(dead_code)]
 fn softplus(x: &Tensor) -> CandleResult<Tensor> {
     let ones = x.ones_like()?;
     let exp_x = x.exp()?;

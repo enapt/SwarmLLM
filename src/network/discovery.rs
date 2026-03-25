@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use libp2p::kad;
 use libp2p::kad::RecordKey;
@@ -8,9 +8,8 @@ use libp2p::Multiaddr;
 use ed25519_dalek::Verifier;
 
 use crate::error::SwarmError;
-use crate::identity::Identity;
 use crate::network::behaviour::SwarmBehaviour;
-use crate::types::{NodeCapability, NodeId, ShardId};
+use crate::types::ShardId;
 
 /// Parse and dial bootstrap peers.
 ///
@@ -111,18 +110,6 @@ pub fn subscribe_topics(swarm: &mut Swarm<SwarmBehaviour>) -> Result<(), SwarmEr
     Ok(())
 }
 
-/// Sign a DHT record value with Ed25519 identity.
-/// Output format: `[32B pubkey][64B signature][payload]`
-fn sign_dht_value(identity: &Identity, payload: &[u8]) -> Vec<u8> {
-    let pubkey = identity.node_id().0;
-    let signature = identity.sign(payload);
-    let mut out = Vec::with_capacity(32 + 64 + payload.len());
-    out.extend_from_slice(&pubkey);
-    out.extend_from_slice(&signature);
-    out.extend_from_slice(payload);
-    out
-}
-
 /// Verify a signed DHT record value. Returns (node_id_bytes, payload) on success.
 pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> {
     if signed.len() < 32 + 64 {
@@ -143,90 +130,6 @@ pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> 
         .map_err(|_| SwarmError::InvalidSignature)?;
 
     Ok((pubkey_bytes, payload))
-}
-
-/// Announce local node capability to the DHT.
-pub fn announce_capability(
-    swarm: &mut Swarm<SwarmBehaviour>,
-    node_id: &NodeId,
-    capability: &NodeCapability,
-    identity: &Identity,
-) -> Result<(), SwarmError> {
-    let key = RecordKey::new(&format!("/swarm/node/{node_id}"));
-    let payload = serde_json::to_vec(capability).map_err(|e| SwarmError::Network(e.to_string()))?;
-    let value = sign_dht_value(identity, &payload);
-
-    // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
-    let record = kad::Record {
-        key,
-        value,
-        publisher: Some(*swarm.local_peer_id()),
-        expires: Some(Instant::now() + Duration::from_secs(3600)),
-    };
-
-    swarm
-        .behaviour_mut()
-        .kademlia
-        .put_record(record, kad::Quorum::One)
-        .map_err(|e| SwarmError::Network(format!("Failed to put capability record: {e}")))?;
-
-    tracing::debug!(node_id = %node_id, "Announced signed capability to DHT");
-    Ok(())
-}
-
-/// Announce shard holdings to the DHT.
-///
-/// NET-M4: Batches shards by model into a single DHT record per model,
-/// reducing DHT write pressure for nodes hosting many shards.
-pub fn announce_shards(
-    swarm: &mut Swarm<SwarmBehaviour>,
-    node_id: &NodeId,
-    shards: &[ShardId],
-    identity: &Identity,
-) -> Result<(), SwarmError> {
-    // Group shards by model_id for batched announcement
-    let mut by_model: std::collections::HashMap<&crate::types::ModelId, Vec<u32>> =
-        std::collections::HashMap::new();
-    for shard in shards {
-        by_model
-            .entry(&shard.model_id)
-            .or_default()
-            .push(shard.index);
-    }
-
-    for (model_id, indices) in &by_model {
-        // Per-node record: key includes node_id to prevent last-writer-wins collision
-        // between different nodes announcing shards for the same model.
-        let node_id_hex = hex::encode(&node_id.0[..8]);
-        let key = RecordKey::new(&format!("/swarm/shards/{model_id}/{node_id_hex}"));
-        let payload = serde_json::to_vec(&(node_id, indices))
-            .map_err(|e| SwarmError::Network(e.to_string()))?;
-        let value = sign_dht_value(identity, &payload);
-
-        // NET-I6: Set 1-hour TTL on DHT records with publisher for auto-republication
-        let record = kad::Record {
-            key,
-            value,
-            publisher: Some(*swarm.local_peer_id()),
-            expires: Some(Instant::now() + Duration::from_secs(3600)),
-        };
-
-        swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(record, kad::Quorum::One)
-            .map_err(|e| SwarmError::Network(format!("Failed to announce shards: {e}")))?;
-    }
-
-    if !shards.is_empty() {
-        tracing::info!(
-            count = shards.len(),
-            models = by_model.len(),
-            "Announced shards to DHT"
-        );
-    }
-
-    Ok(())
 }
 
 /// Discovery interval for periodic peer discovery.
