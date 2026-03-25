@@ -45,12 +45,12 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 
 ### Broadcast Channels
 
-| Channel | Subscribers | Fired By |
-|---------|------------|----------|
-| `prune_events_tx` | WebSocket | AutoShardManager (after prune) |
-| `models_changed_tx` | WebSocket | Admin API (after shard download), AutoShardManager (after download/prune/discovery) |
-| `lan_discovery_tx` | WebSocket | NetworkManager (mDNS peer found) |
-| `update_tx` | WebSocket | UpdateChecker (new version detected) |
+| Channel | Type | Subscribers | Purpose |
+|---------|------|------------|---------|
+| `activity_tx` | `broadcast::Sender<ActivityEvent>` (256) | WebSocket | Unified event bus — all subsystem events (shard ops, downloads, inference, pool, config changes). Events carry `toast_level` for frontend toast control. History replayed to new WS clients. |
+| `dashboard_tx` | `broadcast::Sender<DashboardSignal>` (32) | WebSocket | Dashboard refresh signals — `PeersChanged` (peer connect/disconnect), `ModelsChanged` (shard download/load/prune), `UpdateAvailable(UpdateInfo)` (new version). |
+
+> **Note**: Former separate channels (`prune_events_tx`, `models_changed_tx`, `lan_discovery_tx`, `system_notify_tx`, `peer_list_changed_tx`, `update_tx`) were consolidated into these two in the event system unification.
 
 ## Startup Sequence
 

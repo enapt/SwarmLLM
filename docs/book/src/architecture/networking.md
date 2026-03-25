@@ -8,7 +8,7 @@ libp2p Swarm
 ├── GossipSub — pub/sub for shard announcements, governance, identity, pools
 ├── request_response — unified protocol (/swarmllm/1.0.0, 300s timeout)
 ├── mDNS — optional LAN peer discovery
-├── connection_limits — max 2/peer, 500 total
+├── connection_limits — max 1/peer (>1 causes rr round-robin to dead connections), 500 total
 ├── Identify — protocol identification
 ├── AutoNAT — NAT detection
 ├── DCUtR — hole punching
@@ -20,6 +20,7 @@ libp2p Swarm
 The unified protocol uses a type-tag byte:
 - `0x00` — JSON control message (SwarmMessage, ShardRequest/Response)
 - `0x01` — Binary tensor payload (LayerForward, LayerResult)
+- `0x03` — Binary shard data (ShardResponse payload, raw bytes, 32MB max — bypasses 4MB JSON limit)
 
 ## Discovery Stack
 

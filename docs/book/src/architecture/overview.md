@@ -22,12 +22,10 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 │  │              Shared State (Arc)                     │  │
 │  │  DashMap<NodeId, PeerInfo>      — peer registry     │  │
 │  │  ModelRegistry                  — models + shards   │  │
-│  │  DashMap<ShardId, Vec<NodeId>>  — shard locations   │  │
-│  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
-│  │  TrustManager                   — peer trust scores │  │
-│  │  DashMap<ModelId, ModelTrust>   — model trust levels│  │
-│  │  DashMap<ModelId, Notify>       — loading models    │  │
-│  │  broadcast::Sender<()>          — models changed    │  │
+│  │  state.events (EventBus)        — activity + dashboard│ │
+│  │  state.credits (CreditPool)     — balance + pool     │  │
+│  │  state.models (ModelMgmt)       — acquisition + trust │  │
+│  │  state.metrics (MetricsProviders)— stats + providers │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```

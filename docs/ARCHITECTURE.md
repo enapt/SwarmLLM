@@ -807,7 +807,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 
 **Per-Shard Lock** — `PUT /api/admin/models/:id/shards/:index/lock` pins individual shards, preventing auto-pruning regardless of model-level settings.
 
-**Notifications** — prune events pushed via WebSocket (`prune_event` type), toast notifications in UI, prune history accessible via `GET /api/admin/prune-history`
+**Notifications** — prune events flow through the unified `activity_event` WebSocket message (kind: `shard_pruned`, with `toast_level: "info"` and structured prune data fields). Prune history accessible via `GET /api/admin/prune-history`.
 
 ### Model Trust System
 
@@ -1064,7 +1064,7 @@ allowing candle to parse the full tensor index while only loading assigned layer
 - `GET  /v1/models` — List available models
 - `GET  /v1/providers` — List configured cloud providers and their available models
 - `GET  /v1/status` — SwarmLLM node status
-- `POST /v1/internal/hidden-states` — Extract hidden states from model layers (gated by `api.expose_hidden_states` config)
+- ~~`POST /v1/internal/hidden-states`~~ — **Removed** (was always returning "not supported with subprocess inference"; endpoint and module deleted)
 
 ### Anthropic Messages API (`/v1/messages`)
 Full Anthropic Messages API compatibility for use as a Claude Code backend:
@@ -1175,15 +1175,21 @@ When a requested model isn't available locally or on the swarm, requests can opt
   - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`)
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/components/ui.js` — tab switching, sidebar, modals, mode indicator
+  - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
-  - `frontend/js/components/models.js` — model dropdown, HF search/download, shard context menu, auto-manage, metadata panel
-  - `frontend/js/components/settings.js` — settings panel + setup wizard
+  - `frontend/js/components/models.js` — model dropdown, HF search/download, auto-manage, metadata panel
+  - `frontend/js/components/shard-menu.js` — per-shard context menu (load/unload/delete/lock)
+  - `frontend/js/components/settings.js` — settings panel (API keys, config, contribution)
+  - `frontend/js/components/setup.js` — first-run setup wizard (3-step configuration)
   - `frontend/js/components/downloads.js` — download queue, prune history, resource schedule
-  - `frontend/js/components/network.js` — SVG network map, identity/leaderboard, model compare, network invite code
-  - `frontend/js/components/notifications.js` — toasts, WebSocket connection, REST polling, provider health probing
+  - `frontend/js/components/notifications.js` — unified event handler, toasts, WebSocket, REST polling, provider health
+  - `frontend/js/components/identity.js` — network invite code, nickname, leaderboard
+  - `frontend/js/components/network-map.js` — regional network map visualization
+  - `frontend/js/components/compare.js` — multi-model comparison tool
+  - `frontend/js/components/pool.js` — device pool management (create, join, members, contribution)
   - `frontend/js/init.js` — event binding, initialization, public API export (`window.SwarmLLM`)
-- **HTML templates**: 12 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
+- **HTML templates**: 13 `<template id="tmpl-*">` elements for repeating UI structures (session items, chat messages, toasts, provider badges, compare cards, leaderboard rows, HF result cards, download queue items, peer rows, prune rows, storage rows, compare chips, pool member rows). Components clone templates via `template.content.cloneNode(true)` instead of innerHTML string building.
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
