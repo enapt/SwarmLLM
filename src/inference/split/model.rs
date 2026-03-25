@@ -475,8 +475,10 @@ impl SplitModel {
                             .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                         FfnVariant::Dense(Mlp {
-                            ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_gate: Some(
+                                QMatMul::from_qtensor(ffn_gate)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ),
                             ffn_down: QMatMul::from_qtensor(ffn_down)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -552,8 +554,10 @@ impl SplitModel {
                         attn_q_norm: None,
                         attn_k_norm: None,
                         ffn: FfnVariant::Dense(Mlp {
-                            ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_gate: Some(
+                                QMatMul::from_qtensor(ffn_gate)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ),
                             ffn_down: QMatMul::from_qtensor(ffn_down)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -719,10 +723,10 @@ impl SplitModel {
                         n_experts_used,
                     })
                 } else {
-                    // Dense FFN
+                    // Dense FFN — gate is optional (absent in Starcoder2's 2-layer MLP)
                     let ffn_gate_t = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
+                        .ok();
                     let ffn_down_t = ct
                         .tensor(&mut file, &format!("{prefix}.ffn_down.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
@@ -730,13 +734,15 @@ impl SplitModel {
                         .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                     FfnVariant::Dense(Mlp {
-                        ffn_gate: QMatMul::from_qtensor(ffn_gate_t)
+                        ffn_gate: ffn_gate_t
+                            .map(QMatMul::from_qtensor)
+                            .transpose()
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_down: QMatMul::from_qtensor(ffn_down_t)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_up: QMatMul::from_qtensor(ffn_up_t)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        activation: Activation::SiLU,
+                        activation,
                     })
                 };
 
@@ -946,8 +952,10 @@ impl SplitModel {
                         .tensor(&mut file, &format!("{prefix}.ffn_up.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                     FfnVariant::Dense(Mlp {
-                        ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_gate: Some(
+                            QMatMul::from_qtensor(ffn_gate)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ),
                         ffn_down: QMatMul::from_qtensor(ffn_down)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -1421,7 +1429,7 @@ impl SplitModel {
                                 attn_q_norm,
                                 attn_k_norm,
                                 ffn: FfnVariant::Dense(Mlp {
-                                    ffn_gate: ffn_gate_mm,
+                                    ffn_gate: Some(ffn_gate_mm),
                                     ffn_down: ffn_down_mm,
                                     ffn_up: ffn_up_mm,
                                     activation,
@@ -2231,8 +2239,10 @@ impl SplitModel {
                             .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                         FfnVariant::Dense(Mlp {
-                            ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_gate: Some(
+                                QMatMul::from_qtensor(ffn_gate)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ),
                             ffn_down: QMatMul::from_qtensor(ffn_down)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -2308,8 +2318,10 @@ impl SplitModel {
                         attn_q_norm: None,
                         attn_k_norm: None,
                         ffn: FfnVariant::Dense(Mlp {
-                            ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_gate: Some(
+                                QMatMul::from_qtensor(ffn_gate)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ),
                             ffn_down: QMatMul::from_qtensor(ffn_down)
                                 .map_err(|e| SwarmError::Internal(e.to_string()))?,
                             ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -2494,8 +2506,10 @@ impl SplitModel {
                         .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
                     FfnVariant::Dense(Mlp {
-                        ffn_gate: QMatMul::from_qtensor(ffn_gate)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ffn_gate: Some(
+                            QMatMul::from_qtensor(ffn_gate)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        ),
                         ffn_down: QMatMul::from_qtensor(ffn_down)
                             .map_err(|e| SwarmError::Internal(e.to_string()))?,
                         ffn_up: QMatMul::from_qtensor(ffn_up)
@@ -2725,7 +2739,7 @@ impl SplitModel {
                     attn_q_norm,
                     attn_k_norm,
                     ffn: FfnVariant::Dense(Mlp {
-                        ffn_gate: ffn_gate_mm,
+                        ffn_gate: Some(ffn_gate_mm),
                         ffn_down: ffn_down_mm,
                         ffn_up: ffn_up_mm,
                         activation,

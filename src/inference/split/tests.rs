@@ -387,7 +387,7 @@ fn make_test_split_model(num_layers: usize, hidden_dim: usize) -> SplitModel {
             attn_q_norm: None,
             attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
-                ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4)),
                 ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                 ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
                 activation: Activation::SiLU,
@@ -764,7 +764,7 @@ fn make_gqa_test_model(
             attn_q_norm: None,
             attn_k_norm: None,
             ffn: FfnVariant::Dense(Mlp {
-                ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+                ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4)),
                 ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
                 ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
                 activation,
@@ -1157,7 +1157,7 @@ fn qwen2_forward_with_biases() {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: make_qmatmul(hidden_dim, hidden_dim * 4),
+            ffn_gate: Some(make_qmatmul(hidden_dim, hidden_dim * 4)),
             ffn_down: make_qmatmul(hidden_dim * 4, hidden_dim),
             ffn_up: make_qmatmul(hidden_dim, hidden_dim * 4),
             activation: Activation::SiLU,
@@ -1289,13 +1289,13 @@ fn mlp_activation_silu_vs_gelu() {
     let up = make_qmatmul(dim, dim * 4);
 
     let mlp_silu = Mlp {
-        ffn_gate: gate.clone(),
+        ffn_gate: Some(gate.clone()),
         ffn_down: down.clone(),
         ffn_up: up.clone(),
         activation: Activation::SiLU,
     };
     let mlp_gelu = Mlp {
-        ffn_gate: gate,
+        ffn_gate: Some(gate),
         ffn_down: down,
         ffn_up: up,
         activation: Activation::Gelu,
@@ -1778,7 +1778,7 @@ fn make_deepseek_test_model(hidden_dim: usize) -> SplitModel {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: make_qmatmul(hidden_dim, intermediate),
+            ffn_gate: Some(make_qmatmul(hidden_dim, intermediate)),
             ffn_down: make_qmatmul(intermediate, hidden_dim),
             ffn_up: make_qmatmul(hidden_dim, intermediate),
             activation: Activation::SiLU,
@@ -1943,7 +1943,7 @@ fn test_partial_rope_glm4_style() {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+            ffn_gate: Some(make_qmatmul(n_head * head_dim, n_head * head_dim * 4)),
             ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
             ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
             activation: Activation::SiLU,
@@ -2019,7 +2019,7 @@ fn test_nope_skip_rope() {
         attn_q_norm: None,
         attn_k_norm: None,
         ffn: FfnVariant::Dense(Mlp {
-            ffn_gate: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
+            ffn_gate: Some(make_qmatmul(n_head * head_dim, n_head * head_dim * 4)),
             ffn_down: make_qmatmul(n_head * head_dim * 4, n_head * head_dim),
             ffn_up: make_qmatmul(n_head * head_dim, n_head * head_dim * 4),
             activation: Activation::SiLU,
@@ -2168,7 +2168,7 @@ fn test_llama4_moe_layer_forward() {
         } else {
             // Dense FFN on even indices
             FfnVariant::Dense(Mlp {
-                ffn_gate: make_qmatmul(hidden_dim, intermediate),
+                ffn_gate: Some(make_qmatmul(hidden_dim, intermediate)),
                 ffn_down: make_qmatmul(intermediate, hidden_dim),
                 ffn_up: make_qmatmul(hidden_dim, intermediate),
                 activation: Activation::SiLU,

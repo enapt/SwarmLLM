@@ -68,7 +68,7 @@ impl ModelArch {
     /// Default activation function for this architecture's MLP.
     pub(crate) fn default_activation(&self) -> Activation {
         match self {
-            ModelArch::Gemma | ModelArch::Gemma2 => Activation::Gelu,
+            ModelArch::Gemma | ModelArch::Gemma2 | ModelArch::Starcoder2 => Activation::Gelu,
             _ => Activation::SiLU,
         }
     }
@@ -94,7 +94,9 @@ impl ModelArch {
             "gemma2",
             "phi3",
             "mistral",
+            "starcoder2",
             "deepseek2",
+            "glm4",
             "llama4",
             "qwen35",
             "qwen35moe",

@@ -78,7 +78,10 @@ impl QMatMul {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Mlp {
-    pub(crate) ffn_gate: QMatMul,
+    /// Gate projection (optional — absent in Starcoder2 which uses a 2-layer MLP).
+    /// When present: output = act(gate(x)) * up(x) → down (GLU-style).
+    /// When absent: output = act(up(x)) → down (simple MLP).
+    pub(crate) ffn_gate: Option<QMatMul>,
     pub(crate) ffn_down: QMatMul,
     pub(crate) ffn_up: QMatMul,
     pub(crate) activation: Activation,
@@ -90,21 +93,9 @@ impl Mlp {
         xs: &Tensor,
         lora: Option<(&LoraAdapter, usize)>,
     ) -> CandleResult<Tensor> {
-        let mut gate = self.ffn_gate.forward(xs)?;
         let mut up = self.ffn_up.forward(xs)?;
 
         if let Some((adapter, abs_layer)) = lora {
-            let key_gate = format!("blk.{abs_layer}.ffn_gate");
-            if let Some(lw) = adapter.weights.get(&key_gate) {
-                gate = crate::model::lora::apply_lora(
-                    &gate,
-                    xs,
-                    lw,
-                    adapter.metadata.alpha,
-                    adapter.metadata.rank,
-                )
-                .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_gate: {e}")))?;
-            }
             let key_up = format!("blk.{abs_layer}.ffn_up");
             if let Some(lw) = adapter.weights.get(&key_up) {
                 up = crate::model::lora::apply_lora(
@@ -118,11 +109,35 @@ impl Mlp {
             }
         }
 
-        let activated = match self.activation {
-            Activation::SiLU => candle_nn::ops::silu(&gate)?,
-            Activation::Gelu => gate.gelu()?,
+        // GLU-style (gate present): act(gate(x)) * up(x)
+        // Simple MLP (no gate): act(up(x))
+        let combined = if let Some(ref ffn_gate) = self.ffn_gate {
+            let mut gate = ffn_gate.forward(xs)?;
+            if let Some((adapter, abs_layer)) = lora {
+                let key_gate = format!("blk.{abs_layer}.ffn_gate");
+                if let Some(lw) = adapter.weights.get(&key_gate) {
+                    gate = crate::model::lora::apply_lora(
+                        &gate,
+                        xs,
+                        lw,
+                        adapter.metadata.alpha,
+                        adapter.metadata.rank,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(format!("LoRA ffn_gate: {e}")))?;
+                }
+            }
+            let activated = match self.activation {
+                Activation::SiLU => candle_nn::ops::silu(&gate)?,
+                Activation::Gelu => gate.gelu()?,
+            };
+            (activated * up)?
+        } else {
+            // No gate — simple activation on up projection
+            match self.activation {
+                Activation::SiLU => candle_nn::ops::silu(&up)?,
+                Activation::Gelu => up.gelu()?,
+            }
         };
-        let combined = (activated * up)?;
 
         let mut down = self.ffn_down.forward(&combined)?;
         if let Some((adapter, abs_layer)) = lora {
