@@ -605,7 +605,7 @@ See the full [mdBook documentation](docs/book/) for detailed guides on networkin
 
 SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code across 20+ build phases. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through extensive quality assurance: 675 passing tests, 5 rounds of security audit (~90 fixes), multiple parallel agent code sweeps (300+ issues found and fixed), 2-node distributed inference tested end-to-end, and comprehensive clippy/fmt/test CI gates on every commit.
+This is an honest disclosure. The project has been through extensive quality assurance: 675 passing tests, extensive security auditing (~90 fixes across multiple rounds), dozens of parallel multi-agent code sweeps (300+ issues found and fixed), multi-node distributed inference tested across Proxmox VMs (up to 5 nodes, multi-LAN), and comprehensive clippy/fmt/test CI gates on every commit.
 
 We believe in transparency about AI-assisted development. If you find issues, they should be judged on their technical merit — not on who (or what) wrote the code. Contributions, scrutiny, and feedback are all welcome.
 
