@@ -33,6 +33,12 @@ pub enum DaemonMsg {
         layer_start: usize,
         layer_end: usize,
     },
+    /// Speculative decoding: generate N draft tokens with their logit distributions.
+    /// Used when this worker runs the draft model.
+    SpeculativeDraft(IpcSpeculativeDraft),
+    /// Speculative decoding: verify N draft tokens against the target model.
+    /// Binary payload = activation bytes (initial hidden state).
+    SpeculativeVerify(IpcSpeculativeVerify),
     /// Graceful shutdown — worker exits cleanly.
     Shutdown,
 }
@@ -64,6 +70,10 @@ pub enum WorkerMsg {
     },
     /// Error for a specific request.
     Error { request_id: Uuid, message: String },
+    /// Speculative draft result: N proposed tokens with per-position logit distributions.
+    DraftResult(IpcDraftResult),
+    /// Speculative verify result: per-position target model logit distributions.
+    VerifyResult(IpcVerifyResult),
     /// Worker is about to exit.
     Bye,
 }
@@ -216,4 +226,55 @@ async fn recv_framed<R: AsyncReadExt + Unpin, T: for<'de> Deserialize<'de>>(
         r.read_exact(&mut payload).await?;
     }
     Ok((msg, payload))
+}
+
+// ── Speculative decoding IPC messages ───────────────────────────────────────
+
+/// Request to generate N draft tokens with logit distributions.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcSpeculativeDraft {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    /// Number of draft tokens to generate (gamma).
+    pub num_tokens: u32,
+    /// Current index position for KV cache.
+    pub index_pos: u32,
+    pub sampling: SamplingParams,
+}
+
+/// Request to verify draft tokens against the target model.
+/// Binary payload = activation bytes for the target model.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IpcSpeculativeVerify {
+    pub request_id: Uuid,
+    pub model_id: ModelId,
+    /// Draft token IDs to verify.
+    pub draft_tokens: Vec<u32>,
+    /// Current index position for KV cache.
+    pub index_pos: u32,
+    pub sampling: SamplingParams,
+}
+
+/// Draft result: proposed tokens and their probability distributions.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IpcDraftResult {
+    pub request_id: Uuid,
+    /// Proposed token IDs.
+    pub tokens: Vec<u32>,
+    /// Per-position logit distributions (flattened: [pos0_vocab..., pos1_vocab..., ...]).
+    /// Each position has `vocab_size` f32 values.
+    pub logits_flat: Vec<f32>,
+    /// Vocabulary size (for reshaping logits_flat).
+    pub vocab_size: usize,
+}
+
+/// Verify result: target model's probability distributions for draft positions.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IpcVerifyResult {
+    pub request_id: Uuid,
+    /// Per-position logit distributions (flattened: [pos0_vocab..., pos1_vocab..., ...]).
+    /// Has `draft_tokens.len() + 1` positions (extra for bonus token).
+    pub logits_flat: Vec<f32>,
+    /// Vocabulary size (for reshaping logits_flat).
+    pub vocab_size: usize,
 }

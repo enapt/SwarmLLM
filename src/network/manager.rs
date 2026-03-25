@@ -2393,6 +2393,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             NetworkCommand::SendShardRequest { .. } => "SendShardRequest",
             NetworkCommand::SendAllReduceRequest { .. } => "SendAllReduceRequest",
             NetworkCommand::SendAllReduceResponse { .. } => "SendAllReduceResponse",
+            NetworkCommand::SendRingChunk { .. } => "SendRingChunk",
             NetworkCommand::SendDirectMessage { .. } => "SendDirectMessage",
             NetworkCommand::DialAddress(_) => "DialAddress",
             NetworkCommand::StartProviding(_) => "StartProviding",
@@ -2445,6 +2446,16 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                     target_peer_bytes,
                     SwarmMessage::TpAllReduceResponse(response),
                     "AllReduceResponse",
+                );
+            }
+            NetworkCommand::SendRingChunk {
+                target_peer_bytes,
+                chunk,
+            } => {
+                self.handle_send_rr_message(
+                    target_peer_bytes,
+                    SwarmMessage::TpRingChunk(chunk),
+                    "RingChunk",
                 );
             }
             NetworkCommand::SendDirectMessage {

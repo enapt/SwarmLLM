@@ -124,6 +124,32 @@ pub async fn run_worker(
                 models.remove(&(layer_start, layer_end));
                 tracing::info!("model-worker: unloaded [{layer_start}..{layer_end})");
             }
+            DaemonMsg::SpeculativeDraft(draft) => {
+                // Draft model generates N tokens with logit distributions
+                let request_id = draft.request_id;
+                let _ = send_worker(
+                    &mut writer,
+                    &WorkerMsg::Error {
+                        request_id,
+                        message: "Speculative draft not yet implemented in worker".into(),
+                    },
+                    &[],
+                )
+                .await;
+            }
+            DaemonMsg::SpeculativeVerify(verify) => {
+                // Target model verifies draft tokens
+                let request_id = verify.request_id;
+                let _ = send_worker(
+                    &mut writer,
+                    &WorkerMsg::Error {
+                        request_id,
+                        message: "Speculative verify not yet implemented in worker".into(),
+                    },
+                    &[],
+                )
+                .await;
+            }
             DaemonMsg::Shutdown => {
                 let _ = send_worker(&mut writer, &WorkerMsg::Bye, &[]).await;
                 break;

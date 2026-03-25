@@ -732,6 +732,8 @@ pub enum SwarmMessage {
     // Tensor Parallelism — AllReduce coordination
     TpAllReduceRequest(TpAllReduceRequest),
     TpAllReduceResponse(TpAllReduceResponse),
+    /// Ring AllReduce: chunk sent between adjacent TP ranks.
+    TpRingChunk(TpRingChunk),
 
     // Geo-aware regional gossip — Phase 18
     RegionShardSummary(RegionShardSummary),
@@ -863,6 +865,32 @@ pub struct TpAllReduceResponse {
 pub enum AllReduceOp {
     /// Element-wise sum of partial tensors across TP ranks.
     Sum,
+}
+
+/// Ring AllReduce chunk message: sent between adjacent TP ranks during
+/// scatter-reduce and allgather phases.
+///
+/// Each step of the ring algorithm sends one chunk of the tensor to the
+/// right neighbor and receives one chunk from the left neighbor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TpRingChunk {
+    /// Inference request this belongs to.
+    pub request_id: uuid::Uuid,
+    /// Which layer is being reduced.
+    pub layer_idx: u32,
+    /// Ring step index (0..2*(tp_size-1)).
+    pub step: u32,
+    /// Chunk index within the partitioned tensor.
+    pub chunk_idx: u32,
+    /// Phase: scatter-reduce (accumulate) or allgather (broadcast).
+    pub is_allgather: bool,
+    /// Zstd-compressed chunk data (FP32).
+    pub chunk_data: Vec<u8>,
+    /// Total number of chunks (= tp_size).
+    pub num_chunks: u32,
+    /// Populated locally after receiving from the network.
+    #[serde(skip)]
+    pub sender_peer_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1201,6 +1229,11 @@ pub enum NetworkCommand {
     SendAllReduceResponse {
         target_peer_bytes: Vec<u8>,
         response: TpAllReduceResponse,
+    },
+    /// Send a ring AllReduce chunk to the right neighbor in the ring.
+    SendRingChunk {
+        target_peer_bytes: Vec<u8>,
+        chunk: TpRingChunk,
     },
     /// Send a SwarmMessage directly to a specific peer via request_response.
     SendDirectMessage {
