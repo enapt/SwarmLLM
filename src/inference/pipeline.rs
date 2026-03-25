@@ -2014,8 +2014,12 @@ impl PipelineExecutor {
             let mut current_activations_bytes = activation_bytes.to_vec();
 
             for abs_layer in layer_start..layer_end {
-                // Send this single layer to the worker subprocess with TP metadata
-                let layer_forward = crate::types::LayerForward {
+                // 2-phase TP protocol: AttnOnly → AllReduce → FfnOnly → AllReduce
+                // This ensures FFN norm is applied to the full post-attention tensor,
+                // not the partial pre-AllReduce output.
+
+                // Phase 1: AttnOnly — norm → head-sliced attention → partial output
+                let attn_forward = crate::types::LayerForward {
                     request_id,
                     sequence_num,
                     index_pos: index_pos as u32,
@@ -2027,45 +2031,97 @@ impl PipelineExecutor {
                         tp_rank: tp_rank as u8,
                         tp_size: tp_size as u8,
                         single_layer: abs_layer as u32,
+                        phase: crate::types::TpPhase::AttnOnly,
                     }),
                     vision_embeddings: None,
                     sender_peer_bytes: None,
                     requester_node_id: None,
                     pre_embedded: false,
                 };
-                let partial_result = self
+                let attn_partial = self
                     .shared_state
                     .model_process_pool
-                    .forward(layer_forward)
+                    .forward(attn_forward)
                     .await?;
 
-                // Compress partial tensor for AllReduce
-                let compressed =
-                    zstd::encode_all(std::io::Cursor::new(&partial_result.activations), 1)
-                        .map_err(|e| SwarmError::Internal(format!("Compress TP partial: {e}")))?;
-                // Infer shape from the result — the worker returns raw FP16 tensor bytes
-                let partial_tensor = split::bytes_to_tensor(&partial_result.activations)
-                    .map_err(|e| SwarmError::Internal(format!("Deserialize TP partial: {e}")))?;
-                let shape: Vec<u32> = partial_tensor.dims().iter().map(|&d| d as u32).collect();
+                // AllReduce attention partials → full post-attention output
+                let attn_compressed =
+                    zstd::encode_all(std::io::Cursor::new(&attn_partial.activations), 1)
+                        .map_err(|e| SwarmError::Internal(format!("Compress attn partial: {e}")))?;
+                let attn_tensor = split::bytes_to_tensor(&attn_partial.activations)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize attn partial: {e}")))?;
+                let attn_shape: Vec<u32> = attn_tensor.dims().iter().map(|&d| d as u32).collect();
 
-                // AllReduce: send partial to coordinator, wait for reduced result
-                let resp = crate::inference::allreduce::allreduce_sum(
+                // Use layer*2 as AllReduce step ID for attn phase, layer*2+1 for FFN phase
+                let attn_resp = crate::inference::allreduce::allreduce_sum(
                     &self.shared_state,
                     &self.network_tx,
                     &self.shared_state.allreduce_registry,
                     request_id,
-                    abs_layer as u32,
+                    abs_layer as u32 * 2,
                     tp_group,
                     tp_rank,
-                    compressed,
-                    shape,
+                    attn_compressed,
+                    attn_shape,
                 )
                 .await?;
 
-                // Decompress reduced tensor — this becomes input for next layer
+                // Decompress full post-attention tensor + residual add happens in worker
+                let post_attn_bytes =
+                    zstd::decode_all(std::io::Cursor::new(&attn_resp.reduced_data))
+                        .map_err(|e| SwarmError::Internal(format!("Decompress attn AR: {e}")))?;
+
+                // Phase 2: FfnOnly — ffn_norm → column-sliced FFN → partial output
+                let ffn_forward = crate::types::LayerForward {
+                    request_id,
+                    sequence_num,
+                    index_pos: index_pos as u32,
+                    activations: post_attn_bytes,
+                    format: crate::types::TensorFormat::FP16,
+                    model_id: model_id.clone(),
+                    layer_range: (layer_start as u32, layer_end as u32),
+                    tp_meta: Some(crate::types::TensorParallelMeta {
+                        tp_rank: tp_rank as u8,
+                        tp_size: tp_size as u8,
+                        single_layer: abs_layer as u32,
+                        phase: crate::types::TpPhase::FfnOnly,
+                    }),
+                    vision_embeddings: None,
+                    sender_peer_bytes: None,
+                    requester_node_id: None,
+                    pre_embedded: false,
+                };
+                let ffn_partial = self
+                    .shared_state
+                    .model_process_pool
+                    .forward(ffn_forward)
+                    .await?;
+
+                // AllReduce FFN partials → full post-FFN output
+                let ffn_compressed =
+                    zstd::encode_all(std::io::Cursor::new(&ffn_partial.activations), 1)
+                        .map_err(|e| SwarmError::Internal(format!("Compress ffn partial: {e}")))?;
+                let ffn_tensor = split::bytes_to_tensor(&ffn_partial.activations)
+                    .map_err(|e| SwarmError::Internal(format!("Deserialize ffn partial: {e}")))?;
+                let ffn_shape: Vec<u32> = ffn_tensor.dims().iter().map(|&d| d as u32).collect();
+
+                let ffn_resp = crate::inference::allreduce::allreduce_sum(
+                    &self.shared_state,
+                    &self.network_tx,
+                    &self.shared_state.allreduce_registry,
+                    request_id,
+                    abs_layer as u32 * 2 + 1,
+                    tp_group,
+                    tp_rank,
+                    ffn_compressed,
+                    ffn_shape,
+                )
+                .await?;
+
+                // Decompress full layer output — becomes input for next layer
                 current_activations_bytes =
-                    zstd::decode_all(std::io::Cursor::new(&resp.reduced_data))
-                        .map_err(|e| SwarmError::Internal(format!("Decompress AllReduce: {e}")))?;
+                    zstd::decode_all(std::io::Cursor::new(&ffn_resp.reduced_data))
+                        .map_err(|e| SwarmError::Internal(format!("Decompress ffn AR: {e}")))?;
             }
 
             if _is_last {

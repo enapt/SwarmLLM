@@ -602,6 +602,23 @@ impl TensorParallelGroup {
     }
 }
 
+/// Phase of a tensor-parallel layer computation.
+///
+/// Each transformer layer is split into two IPC calls so that FFN norm
+/// is applied to the AllReduced post-attention tensor (not the partial).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TpPhase {
+    /// Full layer (non-TP path, used when tp_meta is None).
+    #[default]
+    Full,
+    /// Phase 1: attn_norm → attention (head-sliced) → return partial.
+    /// Pipeline AllReduces, adds residual, then sends FfnOnly.
+    AttnOnly,
+    /// Phase 2: ffn_norm → FFN (column-sliced) → return partial.
+    /// Pipeline AllReduces, adds residual to get full layer output.
+    FfnOnly,
+}
+
 /// Tensor-parallel metadata attached to a LayerForward for TP execution.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TensorParallelMeta {
@@ -611,6 +628,9 @@ pub struct TensorParallelMeta {
     pub tp_size: u8,
     /// Process only this single layer (layer-by-layer TP execution).
     pub single_layer: u32,
+    /// Which phase of the layer to compute (default: Full for backwards compat).
+    #[serde(default)]
+    pub phase: TpPhase,
 }
 
 // ---- Network Messages ----
