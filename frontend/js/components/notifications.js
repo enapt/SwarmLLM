@@ -110,9 +110,24 @@
     _renderActivityLog();
   }
 
+  // Format activity event text — try i18n key, fall back to backend English message
+  function _formatEventText(data) {
+    var key = 'activity.' + data.kind;
+    var params = {
+      model: data.model_name || data.model_id || '',
+      node: data.node_id ? data.node_id.substring(0, 8) : '',
+      shard: data.shard_index != null ? String(data.shard_index + 1) : (data.detail_num != null ? String(data.detail_num) : ''),
+      detail: data.detail_str || '',
+      count: data.detail_num != null ? String(data.detail_num) : '',
+    };
+    var translated = I18n.t(key, params);
+    // If i18n returned the key itself (no translation), fall back to backend message
+    return (translated !== key) ? translated : (data.message || data.kind);
+  }
+
   function _handleActivityEvent(data) {
     var icon = ACTIVITY_ICONS[data.kind] || '\uD83D\uDD35'; // 🔵 default
-    var text = data.message || data.kind;
+    var text = _formatEventText(data);
     var category = data.category || '';
     var modelId = data.model_id || '';
     var ts = Date.now();

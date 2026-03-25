@@ -91,8 +91,8 @@
 
       ticker.innerHTML =
         '<div class="model-ticker-split">' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">Activity</div>' + _renderColumn(actEvents, 'No activity') + '</div>' +
-          '<div class="model-ticker-col"><div class="model-ticker-col-label">Network</div>' + _renderColumn(netEvents, 'No network events') + '</div>' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + I18n.t('activity.label_activity') + '</div>' + _renderColumn(actEvents, I18n.t('activity.none')) + '</div>' +
+          '<div class="model-ticker-col"><div class="model-ticker-col-label">' + I18n.t('activity.label_network') + '</div>' + _renderColumn(netEvents, I18n.t('activity.none_network')) + '</div>' +
         '</div>';
       ticker.style.display = '';
     },
