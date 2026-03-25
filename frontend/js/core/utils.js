@@ -224,10 +224,10 @@
       actions.className = 'msg-actions';
       var copyBtn = document.createElement('button');
       copyBtn.className = 'msg-action-btn'; copyBtn.dataset.action = 'copy';
-      copyBtn.title = 'Copy this response'; copyBtn.textContent = 'Copy';
+      copyBtn.title = 'Copy this response'; copyBtn.textContent = I18n.t('actions.copy');
       var compareBtn = document.createElement('button');
       compareBtn.className = 'msg-action-btn'; compareBtn.dataset.action = 'compare';
-      compareBtn.title = 'Ask other models the same question'; compareBtn.textContent = 'Try other models';
+      compareBtn.title = 'Ask other models the same question'; compareBtn.textContent = I18n.t('actions.try_other_models');
       actions.appendChild(copyBtn);
       actions.appendChild(compareBtn);
       div.querySelector('.msg-bubble').appendChild(actions);

@@ -44,26 +44,26 @@
       var lockBtn = document.getElementById('shard-ctx-lock');
       var warnEl = document.getElementById('shard-ctx-warn');
 
-      header.textContent = 'Part ' + (shardIndex + 1);
+      header.textContent = I18n.t('shard.part_n', { n: shardIndex + 1 });
 
       // Status line
       var statusText = '';
-      if (shardState === 'local' && isInVram) statusText = 'Active (loaded in memory)';
-      else if (shardState === 'local') statusText = 'On disk (not loaded)';
-      else if (shardState === 'downloading') statusText = 'Downloading...';
-      else if (shardState === 'peer') statusText = 'Available from peers';
-      else statusText = 'Not available';
+      if (shardState === 'local' && isInVram) statusText = I18n.t('shard.status_active');
+      else if (shardState === 'local') statusText = I18n.t('shard.status_on_disk');
+      else if (shardState === 'downloading') statusText = I18n.t('shard.status_downloading');
+      else if (shardState === 'peer') statusText = I18n.t('shard.status_peer');
+      else statusText = I18n.t('shard.status_unavailable');
       statusEl.textContent = statusText;
 
       // Primary action
       if (shardState === 'local') {
-        btn.textContent = 'Delete from disk';
+        btn.textContent = I18n.t('shard.delete');
         btn.className = 'shard-ctx-btn danger';
       } else if (shardState === 'downloading') {
-        btn.textContent = 'Cancel download';
+        btn.textContent = I18n.t('shard.cancel_download');
         btn.className = 'shard-ctx-btn danger';
       } else {
-        btn.textContent = 'Download this part';
+        btn.textContent = I18n.t('shard.download');
         btn.className = 'shard-ctx-btn';
       }
 
@@ -82,7 +82,7 @@
 
       // Lock button — only for local shards
       if (lockBtn) {
-        lockBtn.textContent = isLocked ? 'Unlock (unpin)' : 'Lock (pin)';
+        lockBtn.textContent = isLocked ? I18n.t('shard.unlock') : I18n.t('shard.lock');
         lockBtn.style.display = (shardState === 'local') ? '' : 'none';
       }
 
@@ -90,7 +90,7 @@
       if (warnEl) {
         warnEl.style.display = 'none';
         if (shardState === 'local') {
-          warnEl.innerHTML = '\u26a0 Auto-manage may re-download this part if demand is high';
+          warnEl.innerHTML = I18n.t('shard.auto_manage_warn');
           warnEl.style.display = '';
         }
       }

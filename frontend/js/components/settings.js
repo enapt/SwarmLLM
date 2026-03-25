@@ -48,12 +48,12 @@
         var toggle = document.createElement('button');
         toggle.type = 'button';
         toggle.className = 'password-toggle';
-        toggle.textContent = 'Show';
+        toggle.textContent = I18n.t('settings.show_password');
         toggle.setAttribute('aria-label', 'Toggle password visibility');
         toggle.addEventListener('click', function() {
           var isPass = input.type === 'password';
           input.type = isPass ? 'text' : 'password';
-          toggle.textContent = isPass ? 'Hide' : 'Show';
+          toggle.textContent = isPass ? I18n.t('settings.hide_password') : I18n.t('settings.show_password');
         });
         wrap.appendChild(toggle);
       });
@@ -99,12 +99,12 @@
           var data = await resp.json();
           var key = data.api_key || '';
           App.settings._apiKeyFull = key;
-          keyEl.value = key ? key.substring(0, 4) + '****' + key.substring(key.length - 4) : 'No API key';
+          keyEl.value = key ? key.substring(0, 4) + '****' + key.substring(key.length - 4) : I18n.t('settings.no_api_key');
         } else {
-          keyEl.value = 'Unavailable';
+          keyEl.value = I18n.t('settings.key_unavailable');
         }
       } catch (e) {
-        keyEl.value = 'Error loading';
+        keyEl.value = I18n.t('settings.key_error');
       }
     },
 
@@ -114,18 +114,18 @@
       try {
         await navigator.clipboard.writeText(App.settings._apiKeyFull);
         if (btn) {
-          btn.textContent = 'Copied!';
+          btn.textContent = I18n.t('settings.key_copied');
           btn.style.color = 'var(--green)';
           btn.style.borderColor = 'var(--green)';
           setTimeout(function() {
-            btn.textContent = 'Copy';
+            btn.textContent = I18n.t('settings.key_copy');
             btn.style.color = '';
             btn.style.borderColor = '';
           }, 2000);
         }
       } catch (e) {
-        if (btn) btn.textContent = 'Failed';
-        setTimeout(function() { if (btn) btn.textContent = 'Copy'; }, 2000);
+        if (btn) btn.textContent = I18n.t('settings.key_copy_failed');
+        setTimeout(function() { if (btn) btn.textContent = I18n.t('settings.key_copy'); }, 2000);
       }
     },
 

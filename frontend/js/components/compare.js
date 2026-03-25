@@ -86,15 +86,15 @@
       if (App.compare.running) return;
       var prompt = (document.getElementById('compare-prompt') || {}).value;
       if (!prompt || !prompt.trim()) {
-        App.notifications.showToast('Enter a prompt to compare', 'error');
+        App.notifications.showToast(I18n.t('compare.enter_prompt'), 'error');
         return;
       }
       if (App.compare.selected.length < 2) {
-        App.notifications.showToast('Select at least 2 models to compare', 'error');
+        App.notifications.showToast(I18n.t('compare.select_min'), 'error');
         return;
       }
       if (App.compare.selected.length > 10) {
-        App.notifications.showToast('Maximum 10 models per comparison', 'error');
+        App.notifications.showToast(I18n.t('compare.select_max'), 'error');
         return;
       }
 
@@ -104,7 +104,7 @@
 
       App.compare.running = true;
       var btn = document.getElementById('btn-compare-run');
-      if (btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+      if (btn) { btn.disabled = true; btn.textContent = I18n.t('compare.running'); }
 
       var resultsDiv = document.getElementById('compare-results');
       var n = App.compare.selected.length;
@@ -119,13 +119,13 @@
         card.querySelector('.compare-card-model').textContent = modelId;
         card.querySelector('.compare-card-model').title = modelId;
         card.querySelector('.compare-card-status').innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
-        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> Waiting for response...</div>';
+        card.querySelector('.compare-card-body').innerHTML = '<div class="compare-spinner"><div class="spinner"></div> ' + I18n.t('compare.waiting') + '</div>';
         card.querySelector('.compare-card-actions').style.display = 'none';
         resultsDiv.appendChild(card);
       });
 
       var statusDiv = document.getElementById('compare-status');
-      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Sending prompt to ' + n + ' models concurrently...</span>'; }
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.sending', { n: n }) + '</span>'; }
 
       var promises = App.compare.selected.map(function(modelId) {
         var body = {
@@ -164,9 +164,9 @@
           completed++;
           App.compare.renderCard(result);
           if (statusDiv) {
-            statusDiv.innerHTML = '<span class="text-muted">' + completed + ' / ' + n + ' models complete</span>';
+            statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.progress', { done: completed, total: n }) + '</span>';
             if (completed === n) {
-              statusDiv.innerHTML = '<span style="color:var(--green)">All ' + n + ' models complete</span>';
+              statusDiv.innerHTML = '<span style="color:var(--green)">' + I18n.t('compare.all_complete', { n: n }) + '</span>';
               setTimeout(function() { statusDiv.style.display = 'none'; }, 3000);
             }
           }
@@ -175,7 +175,7 @@
 
       Promise.all(promises).then(function(results) {
         App.compare.running = false;
-        if (btn) { btn.disabled = false; btn.textContent = 'Run Compare'; }
+        if (btn) { btn.disabled = false; btn.textContent = I18n.t('compare.run_compare'); }
         try {
           var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
           history.unshift({
@@ -209,7 +209,7 @@
         var history = JSON.parse(localStorage.getItem(App.COMPARE_HISTORY_KEY) || '[]');
         if (history.length === 0) { container.style.display = 'none'; return; }
         container.style.display = '';
-        var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">Recent Comparisons</div>';
+        var html = '<div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">' + I18n.t('compare.history_title') + '</div>';
         history.slice(0, 10).forEach(function(item, idx) {
           var ago = U.timeAgo(item.timestamp);
           var modelList = (item.models || []).map(function(m) {
@@ -248,7 +248,7 @@
       });
 
       var statusDiv = document.getElementById('compare-status');
-      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">Restored from history &middot; ' + U.timeAgo(item.timestamp) + '</span>'; }
+      if (statusDiv) { statusDiv.style.display = ''; statusDiv.innerHTML = '<span class="text-muted">' + I18n.t('compare.restored', { ago: U.timeAgo(item.timestamp) }) + '</span>'; }
     },
 
     renderCard: function(result) {

@@ -24,11 +24,11 @@
       App.setup.detectHardware();
 
       document.getElementById('contribution-slider').addEventListener('input', function() {
-        var levels = ['Minimal', 'Moderate', 'Maximum'];
+        var levels = [I18n.t('setup.contrib_minimal'), I18n.t('setup.contrib_moderate'), I18n.t('setup.contrib_maximum')];
         var descs = [
-          'Low impact: <5% CPU, limited storage. Best for shared or low-spec machines.',
-          'Balanced: ~25% CPU, moderate storage. Good for most users.',
-          'Full power: 75%+ CPU, 50%+ storage. Best for dedicated nodes.',
+          I18n.t('setup.contrib_minimal_desc'),
+          I18n.t('setup.contrib_moderate_desc'),
+          I18n.t('setup.contrib_maximum_desc'),
         ];
         var val = parseInt(this.value, 10);
         document.getElementById('contribution-label').textContent = levels[val];
@@ -141,23 +141,23 @@
       var connectors = document.querySelectorAll('.wizard-connector');
       connectors.forEach(function(c, idx) { c.classList.toggle('done', idx + 1 < App.setup.currentStep); });
       document.getElementById('btn-prev').classList.toggle('hidden', App.setup.currentStep === 1);
-      document.getElementById('btn-next').textContent = App.setup.currentStep === App.setup.totalSteps ? 'Start SwarmLLM' : 'Continue';
+      document.getElementById('btn-next').textContent = App.setup.currentStep === App.setup.totalSteps ? I18n.t('setup.start') : I18n.t('setup.continue');
     },
 
     populateSummary: function() {
       var nick = (document.getElementById('setup-nickname').value || '').trim();
-      document.getElementById('summary-nickname').textContent = nick || 'Anonymous';
+      document.getElementById('summary-nickname').textContent = nick || I18n.t('setup.summary_anonymous');
       var levels = ['minimal', 'moderate', 'maximum'];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
       document.getElementById('summary-contribution').textContent = U.capitalize(levels[val]);
       var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : 'CPU only';
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
-      document.getElementById('summary-auto-manage').textContent = autoManage ? 'Enabled' : 'Disabled';
+      document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('setup.summary_disabled');
 
       // Only show invite/provider rows if configured
       var inviteRow = document.getElementById('summary-invite-row');
-      if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = 'Connected'; }
+      if (App.setup._joinedPeer) { inviteRow.classList.remove('hidden'); document.getElementById('summary-invite').textContent = I18n.t('setup.summary_connected'); }
       var provRow = document.getElementById('summary-provider-row');
       var provNames = {openai:'OpenAI',deepseek:'DeepSeek',groq:'Groq',nvidia_nim:'NVIDIA NIM',cerebras:'Cerebras',sambanova:'SambaNova',anthropic:'Anthropic',mistral:'Mistral',fireworks:'Fireworks',together:'Together',deepinfra:'DeepInfra'};
       if (App.setup._savedProvider) {
@@ -167,11 +167,11 @@
 
       // Dynamic next steps
       var steps = [];
-      if (autoManage) steps.push('Your node will automatically download AI models that fit your hardware.');
-      if (App.setup._joinedPeer) steps.push('Connected to a peer — you\'ll share models with them.');
-      if (App.setup._savedProvider) steps.push('Cloud provider ready — you can chat immediately.');
-      if (!App.setup._savedProvider && !autoManage) steps.push('Browse Models on the dashboard to download one, or add a cloud provider in Settings.');
-      steps.push('Nodes on your local network will find each other automatically.');
+      if (autoManage) steps.push(I18n.t('setup.next_auto_manage'));
+      if (App.setup._joinedPeer) steps.push(I18n.t('setup.next_joined_peer'));
+      if (App.setup._savedProvider) steps.push(I18n.t('setup.next_provider'));
+      if (!App.setup._savedProvider && !autoManage) steps.push(I18n.t('setup.next_manual'));
+      steps.push(I18n.t('setup.next_lan'));
       document.getElementById('summary-next-list').innerHTML = steps.map(function(s) { return '<p style="margin:4px 0">\u2022 ' + s + '</p>'; }).join('');
     },
 

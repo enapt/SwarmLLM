@@ -250,54 +250,54 @@
     var banner = document.createElement('div');
     banner.id = 'update-banner';
     banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--yellow, #eab308);color:var(--bg-primary, #0a0e14);padding:0.6rem 1rem;display:flex;align-items:center;justify-content:center;gap:1rem;font-size:0.85rem;font-weight:500;box-shadow:0 2px 8px rgba(0,0,0,0.3)';
-    var text = 'Update available: v' + U.escapeHtml(data.current_version) + ' \u2192 v' + U.escapeHtml(data.latest_version);
-    banner.innerHTML = '<span>' + text + '</span>';
+    var text = I18n.t('update.available', { from: data.current_version, to: data.latest_version });
+    banner.innerHTML = '<span>' + U.escapeHtml(text) + '</span>';
     if (data.downloaded) {
       var applyBtn = document.createElement('button');
-      applyBtn.textContent = 'Apply & Restart';
+      applyBtn.textContent = I18n.t('update.apply_restart');
       applyBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       applyBtn.onclick = async function() {
         applyBtn.disabled = true;
-        applyBtn.textContent = 'Applying...';
+        applyBtn.textContent = I18n.t('update.applying');
         try {
           var resp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
           if (resp.ok) {
-            banner.querySelector('span').textContent = 'Update applied! Restart SwarmLLM to use v' + U.escapeHtml(data.latest_version);
+            banner.querySelector('span').textContent = I18n.t('update.applied', { version: data.latest_version });
             applyBtn.style.display = 'none';
           } else {
-            applyBtn.textContent = 'Failed';
-            setTimeout(function() { applyBtn.textContent = 'Retry'; applyBtn.disabled = false; }, 3000);
+            applyBtn.textContent = I18n.t('update.failed');
+            setTimeout(function() { applyBtn.textContent = I18n.t('update.retry'); applyBtn.disabled = false; }, 3000);
           }
         } catch (e) {
-          applyBtn.textContent = 'Error';
-          setTimeout(function() { applyBtn.textContent = 'Retry'; applyBtn.disabled = false; }, 3000);
+          applyBtn.textContent = I18n.t('update.error');
+          setTimeout(function() { applyBtn.textContent = I18n.t('update.retry'); applyBtn.disabled = false; }, 3000);
         }
       };
       banner.appendChild(applyBtn);
     } else {
       var dlBtn = document.createElement('button');
-      dlBtn.textContent = 'Download & Apply';
+      dlBtn.textContent = I18n.t('update.download_apply');
       dlBtn.style.cssText = 'background:var(--bg-primary, #0a0e14);color:var(--yellow, #eab308);border:none;border-radius:4px;padding:0.3rem 0.8rem;cursor:pointer;font-size:0.8rem;font-weight:600';
       dlBtn.onclick = async function() {
         dlBtn.disabled = true;
-        dlBtn.textContent = 'Checking...';
+        dlBtn.textContent = I18n.t('update.checking');
         try {
           var resp = await App.authFetch('/api/admin/update/check', { method: 'POST' });
           if (resp.ok) {
             var result = await resp.json();
             if (result.status === 'update_available' && result.info && result.info.downloaded) {
-              dlBtn.textContent = 'Applying...';
+              dlBtn.textContent = I18n.t('update.applying');
               var applyResp = await App.authFetch('/api/admin/update/apply', { method: 'POST' });
               if (applyResp.ok) {
-                banner.querySelector('span').textContent = 'Update applied! Restart SwarmLLM to use v' + U.escapeHtml(data.latest_version);
+                banner.querySelector('span').textContent = I18n.t('update.applied', { version: data.latest_version });
                 dlBtn.style.display = 'none';
               }
             }
           }
         } catch (e) {
-          dlBtn.textContent = 'Error';
+          dlBtn.textContent = I18n.t('update.error');
         }
-        setTimeout(function() { dlBtn.textContent = 'Download & Apply'; dlBtn.disabled = false; }, 3000);
+        setTimeout(function() { dlBtn.textContent = I18n.t('update.download_apply'); dlBtn.disabled = false; }, 3000);
       };
       banner.appendChild(dlBtn);
     }
@@ -329,8 +329,8 @@
     if (!cover) return;
     if (show) {
       cover.classList.add('visible');
-      var msg = S.wsWasConnected ? 'Reconnecting to SwarmLLM\u2026' : 'Connecting to SwarmLLM\u2026';
-      var sub = S.wsWasConnected ? 'Lost connection \u2014 retrying every 3 seconds' : 'Waiting for the daemon to respond';
+      var msg = S.wsWasConnected ? I18n.t('connection.reconnecting') : I18n.t('connection.connecting');
+      var sub = S.wsWasConnected ? I18n.t('connection.lost') : I18n.t('connection.waiting');
       cover.querySelector('.cover-msg').textContent = msg;
       cover.querySelector('.cover-sub').textContent = sub;
     } else {
