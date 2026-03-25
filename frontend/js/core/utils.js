@@ -387,6 +387,42 @@
       '<span class="chat-dl-text">' + escapeHtml(text) + '</span>';
   }
 
+  // --- Unified API error handler ---
+  // Extracts error message from response body and shows a toast.
+  // Usage: var ok = await App.utils.handleApiError(resp, 'Action failed');
+  // Returns true if response was ok, false if error was shown.
+  async function handleApiError(resp, fallbackMsg) {
+    if (resp && resp.ok) return true;
+    var msg = fallbackMsg || 'Request failed';
+    try {
+      var body = await resp.json();
+      if (body && body.error) {
+        msg = body.error.message || body.error || msg;
+      }
+    } catch (e) {}
+    if (App.notifications && App.notifications.showToast) {
+      App.notifications.showToast(msg, 'error', 6000);
+    }
+    return false;
+  }
+
+  // --- Loading state helpers ---
+  function showLoading(el) {
+    if (!el) return;
+    el.setAttribute('data-prev-html', el.innerHTML);
+    el.innerHTML = '<div class="loading-spinner" style="display:flex;align-items:center;justify-content:center;padding:1rem;gap:0.5rem;color:var(--text-muted)">' +
+      '<span class="spinner"></span> Loading\u2026</div>';
+  }
+
+  function hideLoading(el) {
+    if (!el) return;
+    var prev = el.getAttribute('data-prev-html');
+    if (prev !== null) {
+      el.innerHTML = prev;
+      el.removeAttribute('data-prev-html');
+    }
+  }
+
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
@@ -410,5 +446,8 @@
     updateTokenCounter: updateTokenCounter,
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
+    handleApiError: handleApiError,
+    showLoading: showLoading,
+    hideLoading: hideLoading,
   };
 })();
