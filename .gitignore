@@ -26,8 +26,11 @@ Thumbs.db
 *.key
 *.p12
 
-# Claude Code (entire directory — dev tooling, not part of the project)
-.claude/
+# Claude Code — commit team config, ignore personal/local
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/logs/
+.claude/agent-memory-local/
 CLAUDE.md
 
 # Peon notification sounds (dev environment)

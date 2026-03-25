@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Bash(cargo *)",
+      "Bash(cargo)",
+      "Bash(rustup *)",
+      "Bash(git *)",
+      "Bash(git)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(mkdir *)",
+      "Bash(wc *)",
+      "Bash(rm -rf *)",
+      "Bash(rm -r *)",
+      "Bash(rm *)",
+      "Bash(killall *)",
+      "Bash(kill *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(curl *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rustc *)",
+      "Bash(chmod *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(diff *)",
+      "Bash(echo *)",
+      "Bash(pgrep *)",
+      "Bash(pkill *)",
+      "Bash(ps *)",
+      "Bash(lsof *)",
+      "Bash(ss *)",
+      "Bash(tput *)",
+      "Bash(seq *)",
+      "Bash(test *)",
+      "Bash(expr *)",
+      "Bash(sort *)",
+      "Bash(uniq *)",
+      "Bash(cut *)",
+      "Bash(tr *)",
+      "Bash(xargs *)",
+      "Bash(stat *)",
+      "Bash(python3 *)",
+      "Bash(node *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Bash(timeout *)",
+      "Bash(pip3 *)",
+      "Bash(sleep *)",
+      "Bash(docker *)",
+      "Task(Explore)",
+      "Task(Plan)",
+      "Task(Bash)",
+      "Task(general-purpose)",
+      "Task(feature-dev:code-explorer)",
+      "Task(feature-dev:code-architect)",
+      "Task(feature-dev:code-reviewer)"
+    ],
+    "deny": [
+      "Bash(cargo publish *)",
+      "Read(/home/user/.claude/.credentials.json)",
+      "Read(./.env)",
+      "Read(./.env.*)"
+    ]
+  },
+  "includeGitInstructions": false,
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/user/SwarmLLM/.claude/scripts/pre-edit-check.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/user/SwarmLLM/.claude/scripts/post-edit-lint.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/user/SwarmLLM/.claude/scripts/pre-compact-save.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/user/SwarmLLM/.claude/scripts/on-stop-verify.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
