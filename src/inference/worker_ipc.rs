@@ -87,6 +87,10 @@ pub struct IpcForward {
     #[serde(default)]
     pub pre_embedded: bool,
     pub sampling: SamplingParams,
+    /// LoRA adapter ID to apply during inference. The worker loads the adapter
+    /// from the data_dir/adapters/ directory on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
 }
 
 /// Forward-pass result header (activation bytes are the binary payload).

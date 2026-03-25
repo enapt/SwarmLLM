@@ -377,6 +377,28 @@ async fn handle_forward(
             None
         };
 
+    // Load LoRA adapter if requested
+    let lora_adapter = if let Some(ref adapter_id) = fwd.adapter_id {
+        let adapter_dir = data_dir.join("adapters").join(adapter_id);
+        if adapter_dir.exists() {
+            match crate::model::lora::load_adapter_from_dir(&adapter_dir) {
+                Ok(adapter) => {
+                    tracing::debug!(adapter_id, "Loaded LoRA adapter for inference");
+                    Some(adapter)
+                }
+                Err(e) => {
+                    tracing::warn!(adapter_id, error = %e, "Failed to load LoRA adapter, proceeding without");
+                    None
+                }
+            }
+        } else {
+            tracing::warn!(adapter_id, "LoRA adapter directory not found");
+            None
+        }
+    } else {
+        None
+    };
+
     // Run forward pass — CPU-bound, use block_in_place
     let compute_result =
         tokio::task::block_in_place(|| -> Result<crate::types::LayerResult, String> {
@@ -401,7 +423,13 @@ async fn handle_forward(
                     .map_err(|e| format!("Forward multimodal: {e}"))?
             } else {
                 model
-                    .forward(&input_tensor, fwd.index_pos as usize, kv_store, &req_id_str)
+                    .forward_with_lora(
+                        &input_tensor,
+                        fwd.index_pos as usize,
+                        kv_store,
+                        &req_id_str,
+                        lora_adapter.as_ref(),
+                    )
                     .map_err(|e| format!("Forward: {e}"))?
             };
 

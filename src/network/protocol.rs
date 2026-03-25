@@ -570,6 +570,7 @@ pub fn decode_layer_forward(data: &[u8]) -> Result<LayerForward, SwarmError> {
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: false,
+        adapter_id: None,
     })
 }
 
@@ -895,6 +896,7 @@ pub fn decode_layer_forward_encrypted(
         sender_peer_bytes: None,
         requester_node_id: None,
         pre_embedded: false,
+        adapter_id: None,
     };
 
     Ok((forward, sealed, aad))
@@ -1094,6 +1096,7 @@ mod tests {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
+            adapter_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1127,6 +1130,7 @@ mod tests {
                 sender_peer_bytes: None,
                 requester_node_id: None,
                 pre_embedded: false,
+                adapter_id: None,
             };
             let encoded = encode_layer_forward(&forward).unwrap();
             assert_eq!(encoded[25], tag); // tag(1) + uuid(16) + seq(4) + index_pos(4) = 25
@@ -1156,6 +1160,7 @@ mod tests {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
+            adapter_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1179,6 +1184,7 @@ mod tests {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
+            adapter_id: None,
         };
 
         let encoded = encode_layer_forward(&forward).unwrap();
@@ -1207,6 +1213,7 @@ mod tests {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
+            adapter_id: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
         // Trim to remove the trailer — simulates an old encoder
@@ -1370,6 +1377,7 @@ mod tests {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded: false,
+            adapter_id: None,
         };
         let encoded = encode_layer_forward(&forward).unwrap();
 

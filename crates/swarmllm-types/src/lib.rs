@@ -786,6 +786,10 @@ pub struct LayerForward {
     /// IDs or prompt text. The receiving node skips its embedding lookup.
     #[serde(default)]
     pub pre_embedded: bool,
+    /// LoRA adapter ID to apply during inference. When set, the worker loads the
+    /// adapter from the data_dir and applies its low-rank deltas per-layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

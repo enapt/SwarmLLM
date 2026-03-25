@@ -239,6 +239,7 @@ impl ModelProcessPool {
             sender_peer_bytes: _,
             requester_node_id,
             pre_embedded,
+            adapter_id,
         } = forward;
 
         let ipc_fwd = IpcForward {
@@ -253,6 +254,7 @@ impl ModelProcessPool {
             requester_node_id,
             pre_embedded,
             sampling: Default::default(),
+            adapter_id,
         };
 
         let mut sock = handle.socket.lock().await;

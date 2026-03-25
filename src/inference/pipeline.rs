@@ -1399,6 +1399,7 @@ impl PipelineExecutor {
                     // Local embedding privacy: only the first segment of the first
                     // forward needs this flag (subsequent segments receive hidden states anyway).
                     pre_embedded: pre_embedded && idx == 0,
+                    adapter_id: None,
                 };
 
                 // Look up the peer's libp2p PeerId bytes. Use peer_id_map (persistent,
@@ -1663,6 +1664,7 @@ impl PipelineExecutor {
             sender_peer_bytes: None,
             requester_node_id: None,
             pre_embedded,
+            adapter_id: None,
         };
         let layer_result = self
             .shared_state
@@ -1819,6 +1821,7 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                     requester_node_id: Some(self.shared_state.identity.node_id().0),
                     pre_embedded: false,
+                    adapter_id: None,
                 };
 
                 let target_peer_bytes = match self
@@ -2037,6 +2040,7 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                     requester_node_id: None,
                     pre_embedded: false,
+                    adapter_id: None,
                 };
                 let attn_partial = self
                     .shared_state
@@ -2090,6 +2094,7 @@ impl PipelineExecutor {
                     sender_peer_bytes: None,
                     requester_node_id: None,
                     pre_embedded: false,
+                    adapter_id: None,
                 };
                 let ffn_partial = self
                     .shared_state
@@ -2154,6 +2159,7 @@ impl PipelineExecutor {
                 sender_peer_bytes: None,
                 requester_node_id: None,
                 pre_embedded: false,
+                adapter_id: None,
             };
             let layer_result = self
                 .shared_state

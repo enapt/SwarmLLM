@@ -60,6 +60,68 @@ pub struct LoraLayerWeights {
     pub b: Tensor,
 }
 
+/// Load a LoRA adapter from a directory containing a safetensors file and
+/// an `adapter_config.json` metadata file.
+///
+/// Used by the model_worker subprocess which doesn't have access to the
+/// AdapterRegistry. The config JSON must have: name, base_model, rank, alpha.
+pub fn load_adapter_from_dir(dir: &Path) -> Result<LoraAdapter, SwarmError> {
+    let config_path = dir.join("adapter_config.json");
+    let config_str = std::fs::read_to_string(&config_path)
+        .map_err(|e| SwarmError::Internal(format!("Cannot read adapter_config.json: {e}")))?;
+
+    #[derive(Deserialize)]
+    struct AdapterConfig {
+        #[serde(default)]
+        adapter_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        base_model_name_or_path: Option<String>,
+        #[serde(default, alias = "rank")]
+        r: Option<usize>,
+        #[serde(default)]
+        lora_alpha: Option<f32>,
+    }
+
+    let config: AdapterConfig = serde_json::from_str(&config_str)
+        .map_err(|e| SwarmError::Internal(format!("Invalid adapter_config.json: {e}")))?;
+
+    let adapter_id = config
+        .adapter_id
+        .unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().into());
+    let name = config.name.unwrap_or_else(|| adapter_id.clone());
+    let base_model = config.base_model_name_or_path.unwrap_or_default();
+    let rank = config.r.unwrap_or(16);
+    let alpha = config.lora_alpha.unwrap_or(rank as f32);
+
+    // Find the safetensors file in the directory
+    let safetensors_path = std::fs::read_dir(dir)
+        .map_err(|e| SwarmError::Internal(format!("Cannot read adapter dir: {e}")))?
+        .filter_map(|entry| entry.ok())
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "safetensors")
+        })
+        .map(|entry| entry.path())
+        .ok_or_else(|| {
+            SwarmError::Internal("No .safetensors file found in adapter directory".into())
+        })?;
+
+    let device = Device::Cpu;
+    load_adapter(
+        &safetensors_path,
+        &adapter_id,
+        &name,
+        &base_model,
+        rank,
+        alpha,
+        &device,
+    )
+}
+
 /// Load a LoRA adapter from a safetensors file.
 ///
 /// Safetensors LoRA files contain tensors named like:
