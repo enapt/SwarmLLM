@@ -295,6 +295,14 @@ impl PoolManager {
             name = %state.name,
             "Created device pool"
         );
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "pool",
+                "pool_created",
+                format!("Device pool '{}' created", state.name),
+            )
+            .with_toast("success", 5000),
+        );
 
         Ok(state)
     }
@@ -451,8 +459,8 @@ impl PoolManager {
                 node_id: Some(format!("{}", invitation.pool_id)),
                 detail_num: None,
                 detail_str: None,
-                toast_level: None,
-                toast_duration_ms: None,
+                toast_level: Some("success"),
+                toast_duration_ms: Some(5000),
                 shard_index: None,
                 freed_bytes: None,
                 holder_count_before: None,
@@ -507,6 +515,15 @@ impl PoolManager {
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
         tracing::info!(removed = %node_id, "Removed member from pool");
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "pool",
+                "pool_member_removed",
+                format!("Device {} removed from pool", &format!("{}", node_id)[..16]),
+            )
+            .with_node(format!("{}", node_id))
+            .with_toast("info", 5000),
+        );
 
         Ok(())
     }
@@ -561,8 +578,8 @@ impl PoolManager {
                 node_id: None,
                 detail_num: None,
                 detail_str: None,
-                toast_level: None,
-                toast_duration_ms: None,
+                toast_level: Some("info"),
+                toast_duration_ms: Some(5000),
                 shard_index: None,
                 freed_bytes: None,
                 holder_count_before: None,

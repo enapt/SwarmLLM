@@ -767,8 +767,8 @@ impl NetworkManager {
                                 node_id: Some(format!("{}", peer)),
                                 detail_num: Some(shard_id.index as i64),
                                 detail_str: Some(format!("{}", error)),
-                                toast_level: None,
-                                toast_duration_ms: None,
+                                toast_level: Some("warning"),
+                                toast_duration_ms: Some(6000),
                                 shard_index: None,
                                 freed_bytes: None,
                                 holder_count_before: None,
@@ -2082,8 +2082,8 @@ impl NetworkManager {
                                     node_id: None,
                                     detail_num: Some(shard_id.index as i64),
                                     detail_str: Some("no_source".to_string()),
-                                    toast_level: None,
-                                    toast_duration_ms: None,
+                                    toast_level: Some("warning"),
+                                    toast_duration_ms: Some(6000),
                                     shard_index: None,
                                     freed_bytes: None,
                                     holder_count_before: None,
@@ -2137,6 +2137,21 @@ impl NetworkManager {
                             shard = shard_id.index,
                             error = %e,
                             "Failed to write P2P shard chunk to disk"
+                        );
+                        self.shared_state.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "download",
+                                "shard_write_failed",
+                                format!(
+                                    "Failed to write shard {} of {} to disk: {}",
+                                    shard_id.index + 1,
+                                    shard_id.model_id,
+                                    e
+                                ),
+                            )
+                            .with_model(shard_id.model_id.0.clone())
+                            .with_detail_num(shard_id.index as i64)
+                            .with_toast("error", 6000),
                         );
                     }
 
@@ -2203,6 +2218,21 @@ impl NetworkManager {
                                 shard = shard_id.index,
                                 error = %e,
                                 "Failed to finalize P2P shard (.tmp → .bin rename)"
+                            );
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "download",
+                                    "shard_finalize_failed",
+                                    format!(
+                                        "Failed to finalize shard {} of {}: {}",
+                                        shard_id.index + 1,
+                                        shard_id.model_id,
+                                        e
+                                    ),
+                                )
+                                .with_model(shard_id.model_id.0.clone())
+                                .with_detail_num(shard_id.index as i64)
+                                .with_toast("error", 6000),
                             );
                         }
 

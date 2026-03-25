@@ -161,6 +161,17 @@ pub async fn update_config(
             // Wake the AutoShardManager so it evaluates promptly
             state.shared_state.auto_manage_notify.notify_one();
         }
+        state.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "system",
+                "config_updated",
+                format!(
+                    "Auto-manage {}",
+                    if auto_manage { "enabled" } else { "disabled" }
+                ),
+            )
+            .with_toast("info", 4000),
+        );
     }
     if let Some(max_storage) = body.auto_manage_max_storage_mb {
         config.auto_manage.max_storage_mb = max_storage;

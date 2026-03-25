@@ -1237,7 +1237,7 @@
           if (!wasPeerDl) {
             cell.classList.add('shard-transitioning');
             setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading shard ' + (pd.shard_index + 1));
+            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading shard ' + (pd.shard_index + 1), true);
           }
           var pdPreserve = '';
           if (cell.classList.contains('locked')) pdPreserve += ' locked';
@@ -1408,7 +1408,7 @@
             progBarC.classList.add('dl-complete');
             setTimeout(function() { _removeDownloadBar(modelId); }, 3000);
           }
-          App.notifications.showToast('Download complete: ' + (status.model_name || modelId), 'success');
+          // Toast handled by backend activity_event (model_download_complete / hf_download_complete)
           // Keep activeAcquisitions entry with _completeFired flag for 30s so incoming
           // stats_update messages don't re-create the download bar (backend removes
           // acquisition_progress after 5s, but WS messages can arrive in between)
@@ -1418,7 +1418,7 @@
           S.activeAcquisitions[modelId]._failFired = true;
           _removeDownloadBar(modelId);
           var reason = (typeof status.state === 'object' && status.state.failed) ? (status.state.failed.reason || '') : '';
-          App.notifications.showToast('Download failed: ' + (status.model_name || modelId) + (reason ? ' \u2014 ' + reason : ''), 'error', 8000);
+          // Toast handled by backend activity_event (shard_download_failed / hf_download_failed)
           setTimeout(function() { delete S.activeAcquisitions[modelId]; }, 5000);
         }
       });

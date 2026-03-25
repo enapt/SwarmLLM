@@ -468,6 +468,16 @@ pub async fn hf_download(
                     entry.failed_shards = 1;
                     entry.log.push(format!("Download failed: {}", e));
                 }
+                download_shared.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "download",
+                        "hf_download_failed",
+                        format!("Download failed: {}", e),
+                    )
+                    .with_model(download_mid.0.clone())
+                    .with_detail_str(e)
+                    .with_toast("error", 8000),
+                );
             }
         }
 
@@ -923,6 +933,16 @@ pub async fn hf_download_shards(
                     crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
                 entry.log.push(format!("Header download failed: {}", e));
             }
+            download_shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "hf_download_failed",
+                    format!("GGUF header download failed: {}", e),
+                )
+                .with_model(download_mid.0.clone())
+                .with_detail_str(e)
+                .with_toast("error", 6000),
+            );
             return;
         }
 
@@ -1221,6 +1241,17 @@ pub async fn hf_download_shards(
                         entry.failed_shards += 1;
                         entry.log.push(format!("Shard {} failed: {}", shard_idx, e));
                     }
+                    download_shared.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "download",
+                            "shard_download_failed",
+                            format!("Shard {} download failed: {}", shard_idx + 1, e),
+                        )
+                        .with_model(download_mid.0.clone())
+                        .with_detail_num(shard_idx as i64)
+                        .with_detail_str(e.to_string())
+                        .with_toast("error", 6000),
+                    );
                     failed = true;
                     break;
                 }
@@ -1289,8 +1320,8 @@ pub async fn hf_download_shards(
                 node_id: None,
                 detail_num: None,
                 detail_str: Some("huggingface".to_string()),
-                toast_level: None,
-                toast_duration_ms: None,
+                toast_level: Some("success"),
+                toast_duration_ms: Some(8000),
                 shard_index: None,
                 freed_bytes: None,
                 holder_count_before: None,

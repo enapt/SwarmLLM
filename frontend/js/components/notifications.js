@@ -74,6 +74,12 @@
     'worker_spawned': '\uD83D\uDCE5',    // 📥
     'worker_unloaded': '\uD83D\uDCE4',   // 📤
     'lan_peer_discovered': '\uD83C\uDF10', // 🌐
+    'hf_download_failed': '\u274C',      // ❌
+    'shard_write_failed': '\u274C',      // ❌
+    'shard_finalize_failed': '\u274C',   // ❌
+    'pool_created': '\u2795',            // ➕
+    'pool_member_removed': '\u26D4',     // ⛔
+    'config_updated': '\u2699\uFE0F',    // ⚙️
   };
 
   // Category CSS class for color coding
