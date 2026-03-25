@@ -110,6 +110,9 @@ pub struct NetworkManager {
     dht_query_rx: mpsc::Receiver<crate::types::ModelId>,
     /// S5: Maps Kademlia QueryId → ShardId for routing GetProviders results.
     pending_provider_queries: HashMap<libp2p::kad::QueryId, crate::types::ShardId>,
+    /// Aggregate PEX rate limiter: timestamps of recent inbound PEX requests.
+    /// Bounded to a sliding window — rejects requests when the budget is exhausted.
+    pex_inbound_timestamps: Vec<std::time::Instant>,
 }
 
 impl NetworkManager {
@@ -221,6 +224,7 @@ impl NetworkManager {
             pending_redial: Vec::new(),
             dht_query_rx,
             pending_provider_queries: HashMap::new(),
+            pex_inbound_timestamps: Vec::new(),
         })
     }
 
@@ -1024,7 +1028,12 @@ impl NetworkManager {
                 drop(existing);
                 let peer_info = PeerInfo {
                     node_id: node_id.clone(),
-                    addresses: info.listen_addrs.iter().map(|a| a.to_string()).collect(),
+                    addresses: info
+                        .listen_addrs
+                        .iter()
+                        .take(8)
+                        .map(|a| a.to_string())
+                        .collect(),
                     capability,
                     last_seen: chrono::Utc::now(),
                     latency_ms: None,
@@ -1345,6 +1354,16 @@ impl NetworkManager {
                 );
                 // Track which address each connection uses — the Identify handler
                 // uses this to add only the connected address to Kademlia.
+                // SEC: Cap connection_addrs to prevent unbounded memory growth.
+                const MAX_CONNECTION_ADDRS: usize = 1024;
+                if self.connection_addrs.len() >= MAX_CONNECTION_ADDRS {
+                    // Evict oldest half — stale ConnectionIds from missed close events.
+                    let mut ids: Vec<_> = self.connection_addrs.keys().cloned().collect();
+                    ids.sort();
+                    for id in ids.iter().take(MAX_CONNECTION_ADDRS / 2) {
+                        self.connection_addrs.remove(id);
+                    }
+                }
                 self.connection_addrs
                     .insert(connection_id, remote_addr.clone());
                 self.update_peer_count();
@@ -1567,6 +1586,22 @@ impl NetworkManager {
                 // Handle PEX messages inline instead of forwarding to dispatcher
                 match *msg {
                     SwarmMessage::PeerExchangeRequest => {
+                        // Aggregate PEX rate limiter: max 50 inbound PEX requests per 60s window
+                        const PEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+                        const PEX_MAX_PER_WINDOW: usize = 50;
+                        let now_pex = std::time::Instant::now();
+                        self.pex_inbound_timestamps
+                            .retain(|t| now_pex.duration_since(*t) < PEX_WINDOW);
+                        if self.pex_inbound_timestamps.len() >= PEX_MAX_PER_WINDOW {
+                            tracing::debug!(%peer, "PEX rate limit exceeded ({PEX_MAX_PER_WINDOW}/{}s), dropping request", PEX_WINDOW.as_secs());
+                            let _ = self
+                                .swarm
+                                .behaviour_mut()
+                                .request_response
+                                .send_response(channel, SwarmResponse::Ack);
+                            return;
+                        }
+                        self.pex_inbound_timestamps.push(now_pex);
                         tracing::debug!(%peer, "Handling PEX request");
                         // Respond with up to 20 known peer addresses (filter out self)
                         let local_node_id = self.shared_state.identity.node_id();

@@ -1250,15 +1250,20 @@ impl DeltaNetWeights {
         }
     }
 
-    /// Delta net recurrent scan.
+    /// Delta net recurrent scan with per-timestep alpha (decay) and beta (input gate).
+    ///
+    /// alpha: `[b, seq, n_head * key_head_dim]` — softplus(ssm_alpha + ssm_dt(x))
+    /// beta:  `[b, seq, q_dim + k_dim + v_dim]` — sigmoid(ssm_beta)
+    ///
+    /// State update: `state_t = diag(alpha_t) * state_{t-1} + (beta_v * v) ⊗ (beta_k * k)`
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn delta_net_scan(
         &self,
         q: &Tensor, // [b, n_head, seq, key_head_dim]
         k: &Tensor, // [b, n_kv_head, seq, key_head_dim]
         v: &Tensor, // [b, n_v_head, seq, value_head_dim]
-        _alpha: &Tensor,
-        _beta: &Tensor,
+        alpha: &Tensor,
+        beta: &Tensor,
         ssm_state: &mut Option<SsmState>,
         b_sz: usize,
         seq_len: usize,
@@ -1286,6 +1291,38 @@ impl DeltaNetWeights {
             v.clone()
         };
 
+        // Pre-split beta into Q/K/V portions along dim 2
+        let q_dim = self.n_head * self.key_head_dim;
+        let k_dim = self.n_kv_head * self.key_head_dim;
+        let v_dim = self.n_v_head * self.value_head_dim;
+        let beta_k_all = beta.narrow(2, q_dim, k_dim)?;
+        let beta_v_all = beta.narrow(2, q_dim + k_dim, v_dim)?;
+
+        // Reshape beta_k/v to per-head: [b, seq, n_heads, head_dim]
+        let beta_k_heads = beta_k_all
+            .reshape((b_sz, seq_len, self.n_kv_head, self.key_head_dim))?
+            .transpose(1, 2)?;
+        let beta_v_heads = beta_v_all
+            .reshape((b_sz, seq_len, self.n_v_head, self.value_head_dim))?
+            .transpose(1, 2)?;
+
+        // Repeat KV beta heads for GQA to match expanded k/v
+        let beta_k_heads = if self.n_head > self.n_kv_head {
+            candle_transformers::utils::repeat_kv(beta_k_heads, self.n_head / self.n_kv_head)?
+        } else {
+            beta_k_heads
+        };
+        let beta_v_heads = if self.n_head > self.n_v_head {
+            candle_transformers::utils::repeat_kv(beta_v_heads, self.n_head / self.n_v_head)?
+        } else {
+            beta_v_heads
+        };
+
+        // Reshape alpha: [b, seq, n_head * key_head_dim] → [b, n_head, seq, key_head_dim]
+        let alpha_heads = alpha
+            .reshape((b_sz, seq_len, self.n_head, self.key_head_dim))?
+            .transpose(1, 2)?;
+
         let mut outputs = Vec::with_capacity(seq_len);
 
         for t in 0..seq_len {
@@ -1293,18 +1330,33 @@ impl DeltaNetWeights {
             let k_t = k.narrow(2, t, 1)?.squeeze(2)?;
             let v_t = v.narrow(2, t, 1)?.squeeze(2)?;
 
-            // outer product: v_t ⊗ k_t → [b, n_head, value_head_dim, key_head_dim]
-            let v_col = v_t.unsqueeze(3)?;
-            let k_row = k_t.unsqueeze(2)?;
-            let outer = v_col.matmul(&k_row)?;
+            // Alpha decay: g_t = exp(-alpha_t) ∈ (0, 1]
+            let alpha_t = alpha_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, key_head_dim]
+            let decay = alpha_t.neg()?.exp()?;
+            // Broadcast decay over value_head_dim: [b, n_head, 1, key_head_dim]
+            let decay_expanded = decay.unsqueeze(2)?;
 
-            // TODO(qwen35): Implement proper per-timestep alpha/beta gating.
-            // Correct: state = diag(alpha_t) * state + beta_t * outer
-            // Current: fixed 0.95 decay — produces approximate outputs for Qwen 3.5.
-            // The alpha/beta tensors are passed to this function but not yet integrated
-            // because the reshape from [b, seq, hidden] to per-head state dims requires
-            // model-size-specific head decomposition. See CLAUDE.md "Deferred Items".
-            state = (&state * 0.95_f64 + outer)?;
+            // Decay the state: decayed = g_t * S_{t-1}
+            let decayed_state = (&state * &decay_expanded)?;
+
+            // Beta gates for K and V at this timestep
+            let bk_t = beta_k_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, key_head_dim]
+            let bv_t = beta_v_heads.narrow(2, t, 1)?.squeeze(2)?; // [b, n_head, value_head_dim]
+
+            // Gate K and V with beta: k_gated = β_k * k, v_gated = β_v * v
+            let k_gated = (&k_t * &bk_t)?;
+            let v_gated = (&v_t * &bv_t)?;
+
+            // Prediction error (delta rule): error = v_gated - decayed_state @ k_gated
+            let k_col = k_gated.unsqueeze(3)?; // [b, n_head, key_head_dim, 1]
+            let prediction = decayed_state.matmul(&k_col)?.squeeze(3)?; // [b, n_head, value_head_dim]
+            let error = (&v_gated - &prediction)?;
+
+            // Error-correcting state update: S_t = decayed + error ⊗ k_gated^T
+            let err_col = error.unsqueeze(3)?; // [b, n_head, value_head_dim, 1]
+            let k_row = k_gated.unsqueeze(2)?; // [b, n_head, 1, key_head_dim]
+            let update = err_col.matmul(&k_row)?; // [b, n_head, value_head_dim, key_head_dim]
+            state = (&decayed_state + &update)?;
 
             // Output: state @ q → [b, n_head, value_head_dim]
             let q_col = q_t.unsqueeze(3)?;
