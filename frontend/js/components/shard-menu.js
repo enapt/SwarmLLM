@@ -121,8 +121,7 @@
             App.ui.showBanner('success', 'Shard ' + idx + ' removed');
             App.models.load();
           } else {
-            var errData = await resp.json().catch(function() { return {}; });
-            App.ui.showBanner('error', errData.error ? errData.error.message : 'Failed to remove shard');
+            App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to remove shard'));
           }
         } catch (e) {
           App.ui.showBanner('error', 'Remove failed: ' + e.message);
@@ -148,8 +147,7 @@
               App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from HuggingFace');
               App.models.load();
             } else {
-              var errHf = await hfResp.json().catch(function() { return {}; });
-              App.ui.showBanner('error', errHf.error ? errHf.error.message : 'Download failed');
+              App.ui.showBanner('error', await U.getApiErrorMessage(hfResp, 'Download failed'));
             }
           } else if (dlData.status === 'already_local') {
             App.ui.showBanner('info', 'Part ' + (idx + 1) + ' is already on this device');
@@ -195,8 +193,7 @@
           App.notifications.showToast('Loading shard ' + (idx + 1) + ' into memory...', 'success');
           App.models.load();
         } else {
-          var errData = await resp.json().catch(function() { return {}; });
-          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to load shard', 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to load shard'), 'error');
         }
       } catch (e) {
         App.notifications.showToast('Load failed: ' + e.message, 'error');
@@ -219,8 +216,7 @@
           App.notifications.showToast('Shard ' + (idx + 1) + ' of ' + name + ' unloaded from memory', 'success');
           App.models.load();
         } else {
-          var errData = await resp.json().catch(function() { return {}; });
-          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to unload', 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to unload'), 'error');
         }
       } catch (e) {
         App.notifications.showToast('Unload failed: ' + e.message, 'error');

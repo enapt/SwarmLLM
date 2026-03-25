@@ -406,6 +406,20 @@
     return false;
   }
 
+  // --- Extract error message string from a failed response ---
+  // Parses the JSON body and returns the error message string, or fallback.
+  // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
+  async function getApiErrorMessage(resp, fallback) {
+    var msg = fallback || 'Request failed';
+    try {
+      var body = await resp.json();
+      if (body && body.error) {
+        msg = body.error.message || body.error || msg;
+      }
+    } catch (e) {}
+    return msg;
+  }
+
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
@@ -430,5 +444,6 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     handleApiError: handleApiError,
+    getApiErrorMessage: getApiErrorMessage,
   };
 })();

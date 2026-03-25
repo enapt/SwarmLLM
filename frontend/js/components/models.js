@@ -503,8 +503,7 @@
           delete S.activeAcquisitions[modelId];
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
         } else {
-          var errData = await resp.json().catch(function() { return {}; });
-          App.ui.showBanner('error', errData.error ? errData.error.message : 'Failed to cancel download');
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to cancel download'));
         }
       } catch (e) {
         App.ui.showBanner('error', 'Cancel failed: ' + e.message);
@@ -521,8 +520,7 @@
           if (card) card.remove();
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
         } else {
-          var errData = await resp.json().catch(function() { return {}; });
-          App.ui.showBanner('error', errData.error ? errData.error.message : 'Failed to remove model');
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to remove model'));
         }
       } catch (e) {
         App.ui.showBanner('error', 'Remove failed: ' + e.message);
@@ -541,8 +539,7 @@
           App.notifications.showToast(msg, 'success');
           App.models.load();
         } else {
-          var errData = await resp.json().catch(function() { return {}; });
-          App.notifications.showToast(errData.error ? errData.error.message : 'Failed to unload model', 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to unload model'), 'error');
         }
       } catch (e) {
         App.notifications.showToast('Unload failed: ' + e.message, 'error');

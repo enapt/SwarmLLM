@@ -45,8 +45,7 @@
           }),
         });
         if (!resp.ok) {
-          var err = await resp.json().catch(function() { return {}; });
-          App.ui.showBanner('error', err.error ? err.error.message : 'Failed to set nickname');
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to set nickname'));
         }
       } catch (e) {
         App.ui.showBanner('error', 'Error saving nickname: ' + e.message);

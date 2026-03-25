@@ -191,19 +191,8 @@
       });
     },
 
-    cancelDownload: async function(modelId) {
-      try {
-        var resp = await App.authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
-        if (resp.ok) {
-          App.ui.showBanner('success', 'Download cancelled');
-          setTimeout(function() { App.downloads.load(); App.models.load(); }, 1000);
-        } else {
-          var err = await resp.json().catch(function() { return {}; });
-          App.ui.showBanner('error', err.error ? (err.error.message || err.error) : 'Failed to cancel download');
-        }
-      } catch (e) {
-        App.ui.showBanner('error', 'Cancel failed: ' + e.message);
-      }
+    cancelDownload: function(modelId) {
+      return App.models.cancelDownload(modelId);
     }
   };
 
@@ -263,8 +252,7 @@
       if (resp.ok) {
         App.ui.showBanner('success', 'Resource schedule saved');
       } else {
-        var err = await resp.json().catch(function() { return {}; });
-        App.ui.showBanner('error', err.error ? err.error.message : 'Save failed');
+        App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Save failed'));
       }
     } catch (e) {
       App.ui.showBanner('error', 'Save failed: ' + e.message);
