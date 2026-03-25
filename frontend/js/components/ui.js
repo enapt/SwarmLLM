@@ -7,6 +7,7 @@
 
 (function() {
   var S = App.state;
+  var U = App.utils;
 
   App.ui = {
     switchTab: function(tab, skipHistory) {
@@ -177,19 +178,19 @@
       var modeName, dotClass, modeClass, modeHelp;
 
       if (peers > 0 && hasLocalModel && cloudCount > 0) {
-        modeName = 'SWARM \u00b7 CLOUD'; dotClass = 'swarm'; modeClass = 'mode-hybrid'; modeHelp = 'Full power — swarm inference with cloud fallback';
+        modeName = I18n.t('mode.swarm_cloud'); dotClass = 'swarm'; modeClass = 'mode-hybrid'; modeHelp = I18n.t('mode.help_swarm_cloud');
       } else if (peers > 0 && hasLocalModel) {
-        modeName = 'SWARM'; dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = 'Running inference locally and with peers';
+        modeName = I18n.t('mode.swarm'); dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = I18n.t('mode.help_swarm');
       } else if (peers > 0) {
-        modeName = 'SWARM \u00b7 REMOTE'; dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = 'Using peer nodes for inference (no local model)';
+        modeName = I18n.t('mode.swarm_remote'); dotClass = 'swarm'; modeClass = 'mode-swarm'; modeHelp = I18n.t('mode.help_swarm_remote');
       } else if (hasLocalModel && cloudCount > 0) {
-        modeName = 'LOCAL \u00b7 CLOUD'; dotClass = 'hybrid'; modeClass = 'mode-hybrid'; modeHelp = 'Local inference with cloud fallback';
+        modeName = I18n.t('mode.local_cloud'); dotClass = 'hybrid'; modeClass = 'mode-hybrid'; modeHelp = I18n.t('mode.help_local_cloud');
       } else if (hasLocalModel) {
-        modeName = 'SOLO'; dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = 'Local inference only — connect peers to unlock bigger models';
+        modeName = I18n.t('mode.solo'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_solo');
       } else if (cloudCount > 0) {
-        modeName = 'CLOUD'; dotClass = 'cloud'; modeClass = 'mode-cloud'; modeHelp = 'Using cloud providers — download models for free local AI';
+        modeName = I18n.t('mode.cloud'); dotClass = 'cloud'; modeClass = 'mode-cloud'; modeHelp = I18n.t('mode.help_cloud');
       } else {
-        modeName = 'OFFLINE'; dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = 'Download a model or add a cloud provider to get started';
+        modeName = I18n.t('mode.offline'); dotClass = 'offline'; modeClass = 'mode-offline'; modeHelp = I18n.t('mode.help_offline');
       }
 
       dot.className = 'mode-dot ' + dotClass;
@@ -213,7 +214,7 @@
       if (parts.length > 0) {
         detailHtml = parts.join('<span class="mode-separator">\u00b7</span>');
       } else {
-        detailHtml = '<span class="mode-action" data-goto-hf="1">Connect to peers to access models, or add a cloud provider for instant chat</span>';
+        detailHtml = '<span class="mode-action" data-goto-hf="1">' + U.escapeHtml(I18n.t('mode.empty_cta')) + '</span>';
       }
       detail.innerHTML = detailHtml;
     },

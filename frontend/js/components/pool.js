@@ -77,7 +77,7 @@
           if (status) { status.textContent = I18n.t('pool.code_invalid'); status.style.color = 'var(--red)'; }
           return;
         }
-        if (status) { status.textContent = 'Linking...'; status.style.color = 'var(--text-muted)'; }
+        if (status) { status.textContent = I18n.t('pool.linking'); status.style.color = 'var(--text-muted)'; }
         App.authFetch('/api/pool/join', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -86,11 +86,11 @@
           if (data.error) {
             if (status) { status.textContent = data.error; status.style.color = 'var(--red)'; }
           } else {
-            if (status) { status.textContent = '\u2713 Link request sent — will be added shortly'; status.style.color = 'var(--green)'; }
+            if (status) { status.textContent = I18n.t('pool.link_sent'); status.style.color = 'var(--green)'; }
             if (input) input.value = '';
           }
         }).catch(function (e) {
-          if (status) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+          if (status) { status.textContent = I18n.t('pool.failed_generic', { error: e.message }); status.style.color = 'var(--red)'; }
         });
       });
 
@@ -187,8 +187,8 @@
         if (splitLabel) {
           var pct = data.member_credit_split_pct;
           splitLabel.textContent = pct === 0
-            ? I18n.t('pool.split_all_owner') || 'All to owner'
-            : pct + '% kept by member, ' + (100 - pct) + '% to owner';
+            ? I18n.t('pool.split_all_owner')
+            : I18n.t('pool.credit_split_label', { kept: pct, forwarded: (100 - pct) });
         }
       }
 
@@ -329,7 +329,7 @@
           this.load();
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -356,7 +356,7 @@
           setTimeout(function () { App.pool.load(); }, 15000);
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -378,7 +378,7 @@
         // Also generate QR code
         this.renderQR(code);
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -476,11 +476,11 @@
         if (data.error) {
           App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
-          App.notifications.showToast(I18n.t('pool.name_saved') || 'Device name saved', 'success');
+          App.notifications.showToast(I18n.t('pool.name_saved'), 'success');
           this.load();
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -497,10 +497,10 @@
         if (data.error) {
           App.notifications.showToast((data.error.message || data.error), 'error');
         } else {
-          App.notifications.showToast(I18n.t('pool.split_saved') || 'Credit split saved', 'success');
+          App.notifications.showToast(I18n.t('pool.split_saved'), 'success');
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -516,7 +516,7 @@
           this.load();
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -536,7 +536,7 @@
           this.load();
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -552,7 +552,7 @@
           App.notifications.showToast((data.error.message || data.error), 'error');
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     },
 
@@ -606,7 +606,7 @@
         var leaveResp = await App.authFetch('/api/pool/leave', { method: 'POST' });
         var leaveData = await leaveResp.json();
         if (leaveData.error) {
-          App.notifications.showToast('Failed to unlink: ' + leaveData.error, 'error');
+          App.notifications.showToast(I18n.t('pool.failed_unlink', { error: leaveData.error }), 'error');
           return;
         }
         // Now join with new code
@@ -625,7 +625,7 @@
           setTimeout(function () { App.pool.load(); }, 5000);
         }
       } catch (e) {
-        App.notifications.showToast('Failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     }
   };

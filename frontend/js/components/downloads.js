@@ -213,7 +213,7 @@
     var el = document.getElementById('prune-history-list');
     if (!el) return;
     if (events.length === 0) {
-      el.innerHTML = '<div class="text-muted" style="padding:0.5rem">No prune events yet</div>';
+      el.innerHTML = '<div class="text-muted" style="padding:0.5rem">' + U.escapeHtml(I18n.t('downloads.no_prune_events')) + '</div>';
       return;
     }
     el.innerHTML = '';
@@ -226,12 +226,12 @@
     var el = document.getElementById('schedule-form');
     if (!el) return;
     el.innerHTML =
-      '<div class="am-row"><label><input type="checkbox" id="sched-enabled"' + (s.enabled ? ' checked' : '') + '> Enable reduced hours</label></div>' +
-      '<div class="am-row"><label>Start hour (0-23):</label> <input type="number" id="sched-start" value="' + (s.reduced_hours_start || 22) + '" min="0" max="23" style="width:3rem"></div>' +
-      '<div class="am-row"><label>End hour (0-23):</label> <input type="number" id="sched-end" value="' + (s.reduced_hours_end || 8) + '" min="0" max="23" style="width:3rem"></div>' +
-      '<div class="am-row"><label>Contribution:</label> <select id="sched-contrib"><option value="minimal"' + (s.reduced_contribution === 'minimal' ? ' selected' : '') + '>Minimal</option><option value="moderate"' + (s.reduced_contribution === 'moderate' ? ' selected' : '') + '>Moderate</option></select></div>' +
-      '<div class="am-row"><label>Prune aggressiveness:</label> <select id="sched-prune-agg"><option value="conservative"' + (s.prune_aggressiveness === 'conservative' ? ' selected' : '') + '>Conservative</option><option value="normal"' + (s.prune_aggressiveness === 'normal' ? ' selected' : '') + '>Normal</option><option value="aggressive"' + (s.prune_aggressiveness === 'aggressive' ? ' selected' : '') + '>Aggressive</option></select></div>' +
-      '<div class="am-row"><button class="btn btn-sm btn-primary" id="sched-save-btn">Save Schedule</button></div>';
+      '<div class="am-row"><label><input type="checkbox" id="sched-enabled"' + (s.enabled ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('downloads.enable_reduced')) + '</label></div>' +
+      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.start_hour')) + '</label> <input type="number" id="sched-start" value="' + (s.reduced_hours_start || 22) + '" min="0" max="23" style="width:3rem"></div>' +
+      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.end_hour')) + '</label> <input type="number" id="sched-end" value="' + (s.reduced_hours_end || 8) + '" min="0" max="23" style="width:3rem"></div>' +
+      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.contribution')) + '</label> <select id="sched-contrib"><option value="minimal"' + (s.reduced_contribution === 'minimal' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_minimal')) + '</option><option value="moderate"' + (s.reduced_contribution === 'moderate' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_moderate')) + '</option></select></div>' +
+      '<div class="am-row"><label>' + U.escapeHtml(I18n.t('downloads.prune_aggressiveness')) + '</label> <select id="sched-prune-agg"><option value="conservative"' + (s.prune_aggressiveness === 'conservative' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_conservative')) + '</option><option value="normal"' + (s.prune_aggressiveness === 'normal' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_normal')) + '</option><option value="aggressive"' + (s.prune_aggressiveness === 'aggressive' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('downloads.level_aggressive')) + '</option></select></div>' +
+      '<div class="am-row"><button class="btn btn-sm btn-primary" id="sched-save-btn">' + U.escapeHtml(I18n.t('downloads.save_schedule')) + '</button></div>';
     var saveBtn = document.getElementById('sched-save-btn');
     if (saveBtn) saveBtn.addEventListener('click', saveSchedule);
   }
@@ -250,7 +250,7 @@
         }),
       });
       if (resp.ok) {
-        App.ui.showBanner('success', 'Resource schedule saved');
+        App.ui.showBanner('success', I18n.t('downloads.schedule_saved'));
       } else {
         App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Save failed'));
       }
@@ -268,7 +268,7 @@
         renderPruneHistory(data.events || []);
       } catch (e) {
         var el = document.getElementById('prune-history-list');
-        if (el) el.innerHTML = '<div class="text-muted" style="padding:0.5rem">Could not load prune history</div>';
+        if (el) el.innerHTML = '<div class="text-muted" style="padding:0.5rem">' + App.utils.escapeHtml(I18n.t('downloads.prune_load_error')) + '</div>';
       }
     },
 
@@ -277,7 +277,7 @@
       try {
         var resp = await App.authFetch('/api/admin/schedule');
         if (!resp.ok) {
-          if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">No schedule configured</div>';
+          if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + App.utils.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
           return;
         }
         var s = await resp.json();

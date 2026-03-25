@@ -13,7 +13,7 @@
   function addPendingImage(file) {
     if (!file.type.startsWith('image/')) return;
     if (S.pendingImages.length >= 4) {
-      App.ui.showBanner('warning', 'Maximum 4 images per message');
+      App.ui.showBanner('warning', I18n.t('chat.max_images'));
       return;
     }
     var reader = new FileReader();
@@ -80,7 +80,7 @@
     if (!container) return;
     var isMessenger = container.classList.toggle('chat-messenger');
     if (icon) icon.innerHTML = isMessenger ? '&#9900;' : '&#9776;';
-    if (label) label.textContent = isMessenger ? 'Messenger' : 'Linear';
+    if (label) label.textContent = isMessenger ? I18n.t('chat.layout_messenger') : I18n.t('chat.layout_linear');
     if (btn) btn.classList.toggle('active', isMessenger);
     try { localStorage.setItem(App.CHAT_LAYOUT_KEY, isMessenger ? 'messenger' : 'linear'); } catch(e) {}
     App.chat.scrollToBottom();
@@ -96,7 +96,7 @@
         var btn = document.getElementById('chat-layout-toggle');
         if (container) container.classList.add('chat-messenger');
         if (icon) icon.innerHTML = '&#9900;';
-        if (label) label.textContent = 'Messenger';
+        if (label) label.textContent = I18n.t('chat.layout_messenger');
         if (btn) btn.classList.add('active');
       }
     } catch(e) {}
@@ -135,14 +135,14 @@
         }
       });
       var id = 'session_' + Date.now();
-      S.sessions[id] = { id: id, title: 'New Chat', messages: [], created: Date.now(), model: S.currentModel || '' };
+      S.sessions[id] = { id: id, title: I18n.t('chat.new_chat'), messages: [], created: Date.now(), model: S.currentModel || '' };
       S.currentSessionId = id;
       App.chat.saveSessions();
       App.chat.renderSessionList();
       App.chat.renderMessages();
       App.chat.updateChatHeader();
       if (emptied.length > 0) {
-        App.notifications.showToast('Cleaned up ' + emptied.length + ' empty session' + (emptied.length > 1 ? 's' : ''), 'info', 3000);
+        App.notifications.showToast(I18n.t('chat.cleaned_sessions', { count: emptied.length }), 'info', 3000);
       }
       App.ui.switchTab('chat');
     },
@@ -158,7 +158,7 @@
         if (allIds.indexOf(s.model) !== -1) {
           App.models.selectDropdown(s.model, { silent: true });
         } else if (s.messages.length > 0) {
-          App.notifications.showToast('Model "' + U.formatModelDisplayName(s.model) + '" is no longer available. Session is read-only until model returns.', 'warning');
+          App.notifications.showToast(I18n.t('chat.model_unavailable_readonly', { model: U.formatModelDisplayName(s.model) }), 'warning');
         }
       }
 
@@ -184,7 +184,7 @@
       var list = document.getElementById('session-list');
       var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
       if (sorted.length === 0) {
-        list.innerHTML = '<div class="text-muted" style="padding:12px;font-size:0.8rem">No chats yet. Type a message below to start.</div>';
+        list.innerHTML = '<div class="text-muted" style="padding:12px;font-size:0.8rem">' + U.escapeHtml(I18n.t('chat.no_chats_yet')) + '</div>';
         return;
       }
       list.innerHTML = '';
@@ -373,14 +373,14 @@
     send: async function() {
       if (S.isStreaming) return;
       if (!S.currentModel) {
-        App.ui.showBanner('warning', 'No model selected \u2014 pick one from the dropdown above, or click + to download one');
+        App.ui.showBanner('warning', I18n.t('chat.no_model_warning'));
         return;
       }
 
       if (S.currentSessionId && S.sessions[S.currentSessionId] && S.sessions[S.currentSessionId].model) {
         var allIds = S._modelDropdownData.map(function(m) { return m.id; });
         if (allIds.indexOf(S.sessions[S.currentSessionId].model) === -1) {
-          App.ui.showBanner('warning', 'Model "' + U.formatModelDisplayName(S.sessions[S.currentSessionId].model) + '" is no longer available. Start a new session with a different model.');
+          App.ui.showBanner('warning', I18n.t('chat.model_unavailable_new', { model: U.formatModelDisplayName(S.sessions[S.currentSessionId].model) }));
           return;
         }
       }
@@ -424,7 +424,7 @@
 
       var assistantEl = U.appendMessageToDOM('assistant', '', false, { encrypted: msgEncrypted });
       var contentEl = assistantEl.querySelector('.msg-content');
-      contentEl.innerHTML = '<span class="typing-indicator">Thinking...</span>';
+      contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
 
       S.isStreaming = true;
       document.getElementById('send-btn').disabled = true;
@@ -507,7 +507,7 @@
                   if (!thinkingEl) {
                     thinkingEl = document.createElement('details');
                     thinkingEl.className = 'reasoning-block';
-                    thinkingEl.innerHTML = '<summary>Reasoning...</summary><pre class="reasoning-content"></pre>';
+                    thinkingEl.innerHTML = '<summary>' + U.escapeHtml(I18n.t('chat.reasoning_label')) + '</summary><pre class="reasoning-content"></pre>';
                     thinkingEl.open = true;
                     contentEl.appendChild(thinkingEl);
                   }

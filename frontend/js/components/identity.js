@@ -116,7 +116,7 @@
       var btn = document.getElementById('btn-copy-network-code');
       if (input && input.value) {
         navigator.clipboard.writeText(input.value).then(function() {
-          if (btn) { btn.textContent = 'Copied!'; btn.style.color = 'var(--green)'; setTimeout(function() { btn.textContent = 'Copy'; btn.style.color = ''; }, 2000); }
+          if (btn) { btn.textContent = I18n.t('identity.copied'); btn.style.color = 'var(--green)'; setTimeout(function() { btn.textContent = I18n.t('actions.copy'); btn.style.color = ''; }, 2000); }
           App.notifications.showToast('Network code copied to clipboard', 'success');
         }).catch(function() {
           App.ui.showBanner('error', 'Failed to copy \u2014 try selecting and copying manually');
@@ -129,7 +129,7 @@
       var status = document.getElementById('join-status');
       if (!input || !input.value.trim()) return;
 
-      if (status) { status.textContent = 'Connecting...'; status.style.color = 'var(--text-muted)'; }
+      if (status) { status.textContent = I18n.t('identity.connecting'); status.style.color = 'var(--text-muted)'; }
 
       try {
         var resp = await App.authFetch('/api/admin/join-network', {
@@ -139,12 +139,12 @@
         });
         var data = await resp.json();
         if (resp.ok) {
-          if (status) { status.textContent = 'Connected! Peer added.'; status.style.color = 'var(--green)'; }
+          if (status) { status.textContent = I18n.t('identity.connected'); status.style.color = 'var(--green)'; }
           input.value = '';
           App.notifications.showToast('Peer connected successfully', 'success');
           setTimeout(function() { App.networkCode.load(); }, 2000);
         } else {
-          if (status) { status.textContent = (data.error ? (data.error.message || data.error) : 'Failed to join'); status.style.color = 'var(--red, #ff6464)'; }
+          if (status) { status.textContent = (data.error ? (data.error.message || data.error) : I18n.t('identity.failed_to_join')); status.style.color = 'var(--red, #ff6464)'; }
         }
       } catch (e) {
         if (status) { status.textContent = 'Network error'; status.style.color = 'var(--red, #ff6464)'; }

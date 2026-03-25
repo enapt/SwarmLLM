@@ -169,7 +169,7 @@
           return;
         }
         if (data.status === 'started') {
-          App.notifications.showToast('Download started \u2014 model data will be ready soon', 'success');
+          App.notifications.showToast(I18n.t('models.download_started'), 'success');
           App.ui.closeModelBrowser();
         } else {
           App.notifications.showToast(data.message || 'Download could not be started', 'warning');
@@ -473,7 +473,7 @@
 
     select: function(modelId) {
       App.models.selectDropdown(modelId);
-      App.ui.showBanner('success', 'Model selected: ' + modelId);
+      App.ui.showBanner('success', I18n.t('models.model_selected', { model: modelId }));
       App.models.load();
     },
 
@@ -482,7 +482,7 @@
       try {
         var resp = await App.authFetch('/api/admin/downloads/' + encodeURIComponent(modelId) + '/cancel', { method: 'POST' });
         if (resp.ok) {
-          App.ui.showBanner('success', 'Download cancelled');
+          App.ui.showBanner('success', I18n.t('models.download_cancelled'));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) {
             var progress = card.querySelector('.dl-progress');
@@ -515,7 +515,7 @@
       try {
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
         if (resp.ok) {
-          App.ui.showBanner('success', 'Model removed: ' + modelId);
+          App.ui.showBanner('success', I18n.t('models.model_removed', { model: modelId }));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           if (card) card.remove();
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
@@ -534,8 +534,9 @@
           var result = await resp.json().catch(function() { return {}; });
           var freedMb = result.estimated_freed_mb || 0;
           var name = result.model_name || U.formatModelDisplayName(modelId);
-          var msg = name + ' unloaded from memory';
-          if (freedMb > 0) msg += ' (~' + U.formatMB(freedMb) + ' freed)';
+          var msg = freedMb > 0
+            ? I18n.t('models.unloaded_freed', { name: name, freed: U.formatMB(freedMb) })
+            : I18n.t('models.unloaded', { name: name });
           App.notifications.showToast(msg, 'success');
           App.models.load();
         } else {
@@ -635,7 +636,7 @@
         }
 
         if (amResp.ok && !encErr) {
-          App.ui.showBanner('success', 'Model policy saved');
+          App.ui.showBanner('success', I18n.t('models.policy_saved'));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
           var panel = card ? card.querySelector('.auto-manage-panel') : null;
           if (panel) panel.remove();
@@ -675,7 +676,7 @@
     },
 
     shutdown: async function() {
-      if (!confirm('Shut down SwarmLLM node?')) return;
+      if (!confirm(I18n.t('models.confirm_shutdown'))) return;
       try {
         await App.authFetch('/api/admin/shutdown', { method: 'POST' });
         document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">SwarmLLM has been shut down.</div>';

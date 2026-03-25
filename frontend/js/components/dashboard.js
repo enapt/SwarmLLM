@@ -400,7 +400,7 @@
           (swarmReadyCount > 0 ? ' \u00b7 ' + swarmReadyCount + ' ready' : '');
         swarmSection.innerHTML = '<summary class="models-section-header">' +
           '<img src="/static/icons/swarm.svg" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo">' +
-          '<span class="models-section-title">Swarm Models</span>' +
+          '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.swarm_models')) + '</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
           '<select class="swarm-model-sort" id="swarm-model-sort" title="Sort models">' +
             '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>A\u2013Z</option>' +
@@ -448,17 +448,17 @@
         // Status pill — Ready takes priority over Downloading when model is usable
         var statusHtml = '';
         if (m.status === 'loaded') {
-          statusHtml = '<span class="model-status-pill active">\u25CF Active</span>';
+          statusHtml = '<span class="model-status-pill active">\u25CF ' + U.escapeHtml(I18n.t('dashboard.status_active')) + '</span>';
         } else if (isReady && !isDownloading) {
-          statusHtml = '<span class="model-status-pill ready">Ready</span>';
+          statusHtml = '<span class="model-status-pill ready">' + U.escapeHtml(I18n.t('dashboard.status_ready')) + '</span>';
         } else if (isCachingLocally) {
-          statusHtml = '<span class="model-status-pill ready">Ready</span>';
+          statusHtml = '<span class="model-status-pill ready">' + U.escapeHtml(I18n.t('dashboard.status_ready')) + '</span>';
         } else if (isDownloading) {
-          statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>Downloading</span>';
+          statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>' + U.escapeHtml(I18n.t('dashboard.status_downloading')) + '</span>';
         } else if (isPartial) {
           statusHtml = '<span class="model-status-pill partial">' + hostedShards + '/' + shardCount + ' local</span>';
         } else {
-          statusHtml = '<span class="model-status-pill network">On network</span>';
+          statusHtml = '<span class="model-status-pill network">' + U.escapeHtml(I18n.t('dashboard.status_on_network')) + '</span>';
         }
 
         // Trust level badge
@@ -596,11 +596,11 @@
           var hasMissing = missingCount > 0;
 
           var legendParts = [];
-          if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>On this PC</span>');
-          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>Active (in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')</span>');
-          if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>On peers</span>');
-          if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>Downloading</span>');
-          if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>Missing</span>');
+          if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_pc')) + '</span>');
+          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.status_active')) + ' (in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')</span>');
+          if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_peers')) + '</span>');
+          if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>' + U.escapeHtml(I18n.t('dashboard.shard_downloading')) + '</span>');
+          if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>' + U.escapeHtml(I18n.t('dashboard.shard_missing')) + '</span>');
           if (legendParts.length > 0) {
             shardHtml += '<div class="shard-legend-bar">' + legendParts.join('') + '</div>';
           }
@@ -723,10 +723,10 @@
           var localNow = shards.filter(function(s) { return s.local; }).length;
           var dlSource = ap.source || '';
           var dlTrigger = ap.trigger || '';
-          var triggerText = dlTrigger === 'auto_manage' ? 'Auto-manage' : (dlTrigger === 'user' ? 'Manual' : '');
+          var triggerText = dlTrigger === 'auto_manage' ? I18n.t('dashboard.auto_manage') : (dlTrigger === 'user' ? I18n.t('dashboard.manual') : '');
           var sourceText = dlSource === 'huggingface' ? 'from HuggingFace' : (dlSource === 'peers' ? 'from peers' : '');
           if (isCachingLocally) {
-            shardLabel = (triggerText || 'Auto-manage') + ': saving to this device (' + localNow + '/' + shardCount + ')';
+            shardLabel = (triggerText || I18n.t('dashboard.auto_manage')) + ': saving to this device (' + localNow + '/' + shardCount + ')';
           } else {
             // Show which specific shard is downloading (from shard_details)
             var dlShardIdx = '';
@@ -800,18 +800,18 @@
         // Action buttons
         var actionHtml = '';
         if (m.status === 'loaded') {
-          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="Unload all parts from memory — frees RAM/VRAM but keeps files on disk">Unload all</button>';
+          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="Unload all parts from memory — frees RAM/VRAM but keeps files on disk">' + U.escapeHtml(I18n.t('dashboard.btn_unload_all')) + '</button>';
         } else if (isReady) {
-          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">Use</button>';
+          actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
         } else if (isDownloading) {
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="Cancel download">&times; Cancel</button>';
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="Cancel download">&times; ' + U.escapeHtml(I18n.t('dashboard.btn_cancel')) + '</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">Download</button>';
+          actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_download')) + '</button>';
         }
 
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = '<button class="model-remove-btn" data-remove-model="' + U.escapeHtml(m.id) + '">Remove</button>';
+          removeHtml = '<button class="model-remove-btn" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove')) + '</button>';
         }
 
         var name = U.formatModelDisplayName(m.name || m.id);
@@ -1372,7 +1372,7 @@
             if (!acqInfo._slowSince) acqInfo._slowSince = Date.now();
             else if (Date.now() - acqInfo._slowSince > 30000 && !acqInfo._throttleWarned) {
               acqInfo._throttleWarned = true;
-              App.notifications.showToast('Download is slow (' + U.formatSpeed(speed) + ') \u2014 this can happen with popular models. It will keep going.', 'warning', 10000);
+              App.notifications.showToast(I18n.t('models.download_slow', { speed: U.formatSpeed(speed) }), 'warning', 10000);
             }
           } else {
             acqInfo._slowSince = null;
