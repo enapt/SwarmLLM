@@ -765,24 +765,91 @@ pub async fn download_shard_v2(
     let total_download_bytes: u64 = coalesced.iter().map(|(s, e)| e - s).sum();
     let expected_tensor_bytes: u64 = layout.tensors.iter().map(|(_, _, sz)| sz).sum();
 
+    // Pre-compute how many tensor bytes each coalesced range contributes for resume support
+    let mut range_tensor_bytes: Vec<u64> = Vec::with_capacity(coalesced.len());
+    for (range_start, range_end) in &coalesced {
+        let bytes: u64 = layout
+            .tensors
+            .iter()
+            .filter(|(_, off, sz)| *off >= *range_start && *off + *sz <= *range_end)
+            .map(|(_, _, sz)| sz)
+            .sum();
+        range_tensor_bytes.push(bytes);
+    }
+
+    // Resume support: check if tmp file exists with partial data
+    let existing_bytes = tokio::fs::metadata(&tmp_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut ranges_to_skip: usize = 0;
+    if existing_bytes > 0 {
+        // Determine how many complete ranges are already in the tmp file
+        let mut cumulative = 0u64;
+        for &rb in &range_tensor_bytes {
+            if cumulative + rb <= existing_bytes {
+                cumulative += rb;
+                ranges_to_skip += 1;
+            } else {
+                break;
+            }
+        }
+        if ranges_to_skip > 0 && cumulative == existing_bytes {
+            tracing::info!(
+                shard = shard_index,
+                existing_bytes,
+                ranges_complete = ranges_to_skip,
+                ranges_total = coalesced.len(),
+                "Resuming shard download from partial .tmp file"
+            );
+        } else if cumulative != existing_bytes {
+            // Partial range — can't resume cleanly, restart
+            ranges_to_skip = 0;
+            tracing::info!(
+                shard = shard_index,
+                existing_bytes,
+                expected_boundary = cumulative,
+                "Partial .tmp file doesn't align to range boundary, restarting download"
+            );
+        }
+    }
+
     tracing::info!(
         shard = shard_index,
         tensors = layout.tensors.len(),
         ranges = coalesced.len(),
         download_bytes = total_download_bytes,
         tensor_bytes = expected_tensor_bytes,
+        resuming_from_range = ranges_to_skip,
         "Starting shard download"
     );
 
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(|e| format!("Failed to create tmp file: {e}"))?;
+    let mut file = if ranges_to_skip > 0 {
+        // Append mode — open existing tmp file for appending
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&tmp_path)
+            .await
+            .map_err(|e| format!("Failed to open tmp file for resume: {e}"))?
+    } else {
+        tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|e| format!("Failed to create tmp file: {e}"))?
+    };
 
-    let mut downloaded: u64 = 0;
+    // Account for already-downloaded bytes in progress tracking
+    let mut downloaded: u64 = if ranges_to_skip > 0 {
+        coalesced[..ranges_to_skip].iter().map(|(s, e)| e - s).sum()
+    } else {
+        0
+    };
 
-    // Download each coalesced range and write to file
-    for (range_start, range_end) in &coalesced {
+    // Download each coalesced range and write to file (skip already-completed ranges)
+    for (range_idx, (range_start, range_end)) in coalesced.iter().enumerate() {
+        if range_idx < ranges_to_skip {
+            continue;
+        }
         let http_retry_delays = [5u64, 30, 120];
         let mut resp = None;
 

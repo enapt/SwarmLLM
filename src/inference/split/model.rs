@@ -3662,17 +3662,16 @@ impl SplitModel {
         let model_key = &self.kv_model_key;
         let num_layers = self.layers.len();
 
-        // Extract all per-request KV-caches up front (drop DashMap guards immediately).
+        // Extract all per-request KV-caches and SSM states up front (drop DashMap guards immediately).
         // Use mem::take instead of clone to avoid deep-copying all KV tensors.
-        let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = items
-            .iter()
-            .map(|item| {
-                let mut entry =
-                    kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
-                entry.last_accessed = std::time::Instant::now();
-                std::mem::take(&mut entry.layers)
-            })
-            .collect();
+        let mut all_kv_caches: Vec<Vec<Option<KvCache>>> = Vec::with_capacity(batch_size);
+        let mut all_ssm_states: Vec<Vec<Option<SsmState>>> = Vec::with_capacity(batch_size);
+        for item in items.iter() {
+            let mut entry = kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
+            entry.last_accessed = std::time::Instant::now();
+            all_kv_caches.push(std::mem::take(&mut entry.layers));
+            all_ssm_states.push(std::mem::take(&mut entry.ssm_states));
+        }
 
         let max_seq_len = self.max_seq_len;
 
@@ -3790,18 +3789,107 @@ impl SplitModel {
                     batched =
                         (&ffn_out + &residual).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
-                LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
-                    return Err(SwarmError::Internal(
-                        "Qwen 3.5 batched inference requires per-request SSM state splitting — use batch_size=1".into(),
-                    ));
+                LayerVariant::Qwen35Attn {
+                    ref weights,
+                    ref ffn,
+                    ref attention_norm,
+                    ref post_attention_norm,
+                } => {
+                    // Qwen 3.5 attention: per-request attention + batched FFN (same as Dense pattern)
+                    let residual = batched.clone();
+                    let normed = attention_norm
+                        .forward(&batched)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_attn_norm: {e}")))?;
+
+                    let mut attn_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+                    for (req_idx, item) in items.iter().enumerate() {
+                        let x_i = normed
+                            .narrow(0, req_idx, 1)
+                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                        let attn_out = weights
+                            .forward_attn(
+                                &x_i,
+                                None,
+                                item.index_pos,
+                                &mut all_kv_caches[req_idx][layer_idx],
+                                max_seq_len,
+                            )
+                            .map_err(|e| SwarmError::Internal(format!("q35b_attn: {e}")))?;
+                        attn_outputs.push(attn_out);
+                    }
+                    let attn_refs: Vec<&Tensor> = attn_outputs.iter().collect();
+                    let attn_batched = Tensor::cat(&attn_refs, 0)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_attn_restack: {e}")))?;
+                    let x = (&attn_batched + &residual)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+                    let residual2 = x.clone();
+                    let normed2 = post_attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_post_attn_norm: {e}")))?;
+                    let ffn_out = match ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&normed2, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&normed2)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_moe: {e}")))?,
+                    };
+                    batched =
+                        (&ffn_out + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
+                }
+                LayerVariant::Qwen35Ssm {
+                    ref weights,
+                    ref ffn,
+                    ref attention_norm,
+                    ref post_attention_norm,
+                } => {
+                    // Qwen 3.5 SSM: per-request DeltaNet (SSM state is per-request) + batched FFN
+                    let residual = batched.clone();
+                    let normed = attention_norm
+                        .forward(&batched)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_norm: {e}")))?;
+
+                    let mut ssm_outputs: Vec<Tensor> = Vec::with_capacity(batch_size);
+                    for (req_idx, req_ssm) in all_ssm_states.iter_mut().enumerate().take(batch_size)
+                    {
+                        let x_i = normed
+                            .narrow(0, req_idx, 1)
+                            .map_err(|e| SwarmError::Internal(format!("narrow: {e}")))?;
+                        let ssm_out = weights
+                            .forward_deltanet(&x_i, &mut req_ssm[layer_idx])
+                            .map_err(|e| SwarmError::Internal(format!("q35b_deltanet: {e}")))?;
+                        ssm_outputs.push(ssm_out);
+                    }
+                    let ssm_refs: Vec<&Tensor> = ssm_outputs.iter().collect();
+                    let ssm_batched = Tensor::cat(&ssm_refs, 0)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_ssm_restack: {e}")))?;
+                    let x = (&ssm_batched + &residual)
+                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
+
+                    let residual2 = x.clone();
+                    let normed2 = post_attention_norm
+                        .forward(&x)
+                        .map_err(|e| SwarmError::Internal(format!("q35b_post_ssm_norm: {e}")))?;
+                    let ffn_out = match ffn {
+                        FfnVariant::Dense(mlp) => mlp
+                            .forward(&normed2, None)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_mlp: {e}")))?,
+                        FfnVariant::MoE(moe) => moe
+                            .forward(&normed2)
+                            .map_err(|e| SwarmError::Internal(format!("q35b_ssm_moe: {e}")))?,
+                    };
+                    batched =
+                        (&ffn_out + &residual2).map_err(|e| SwarmError::Internal(e.to_string()))?;
                 }
             }
         }
 
-        // Write updated KV-caches back (take instead of clone to avoid copying)
+        // Write updated KV-caches and SSM states back (take instead of clone to avoid copying)
         for (req_idx, item) in items.iter().enumerate() {
             let mut entry = kv_cache_store.get_or_create(model_key, item.request_id, num_layers);
             entry.layers = std::mem::take(&mut all_kv_caches[req_idx]);
+            entry.ssm_states = std::mem::take(&mut all_ssm_states[req_idx]);
             entry.last_accessed = std::time::Instant::now();
         }
 
