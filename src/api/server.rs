@@ -10,8 +10,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
 use crate::api::{
-    admin, anthropic, identity, internal, mcp, metrics, middleware, openai, pool, providers,
-    websocket,
+    admin, anthropic, identity, mcp, metrics, middleware, openai, pool, providers, websocket,
 };
 use crate::config::Config;
 use crate::daemon::SharedState;
@@ -86,8 +85,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/providers", get(providers::list_providers))
         // SwarmLLM extensions
         .route("/v1/status", get(openai::status))
-        // Internal research API (gated by api.expose_hidden_states config)
-        .route("/v1/internal/hidden-states", post(internal::hidden_states))
         // Admin API
         .route("/api/admin/stats", get(admin::stats))
         .route(

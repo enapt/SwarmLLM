@@ -24,11 +24,6 @@ use super::{
     DEFAULT_MAX_SEQ_LEN,
 };
 
-// BatchForwarder removed — batching is handled inside worker subprocesses now.
-
-// ── Split model: loads only a range of layers from a GGUF ──
-// ── Split model: loads only a range of layers from a GGUF ──
-
 /// A partial transformer model that loads and runs only a specific range of layers.
 /// Used for split inference where each node holds different layers.
 /// Supports multiple architectures: Llama, Qwen2, Gemma 2, Phi-3, Mistral, Qwen 3.5.
@@ -3009,27 +3004,6 @@ impl SplitModel {
         self.forward_with_lora(input, index_pos, kv_cache_store, request_id, None)
     }
 
-    /// Forward pass that captures hidden states at specified layers.
-    /// Returns (output_tensor, captured_hidden_states) where captured is
-    /// a HashMap from absolute layer index to the post-layer hidden state tensor.
-    pub fn forward_with_hidden_capture(
-        &mut self,
-        input: &Tensor,
-        index_pos: usize,
-        kv_cache_store: &KvCacheStore,
-        request_id: &str,
-        capture_layers: &std::collections::HashSet<usize>,
-    ) -> Result<(Tensor, HashMap<usize, Tensor>), SwarmError> {
-        self.forward_inner(
-            input,
-            index_pos,
-            kv_cache_store,
-            request_id,
-            None,
-            Some(capture_layers),
-        )
-    }
-
     /// Forward pass with pre-embedded hidden states (local embedding privacy).
     ///
     /// The input tensor is already in hidden-state space (shape [1, seq, hidden_dim])
@@ -3441,150 +3415,6 @@ impl SplitModel {
     ///   row-parallel down)
     ///
     /// Returns a **partial** hidden state that must be summed (AllReduced) across all
-    /// TP nodes to produce the correct full output. The caller (pipeline executor)
-    /// coordinates the AllReduce between layers.
-    ///
-    /// `abs_layer_idx` is the absolute layer index in the full model (not relative
-    /// to this segment's layer_start).
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_tp_layer(
-        &mut self,
-        input: &Tensor,
-        abs_layer_idx: usize,
-        index_pos: usize,
-        tp_rank: usize,
-        tp_size: usize,
-        kv_cache_store: &KvCacheStore,
-        request_id: &str,
-    ) -> Result<Tensor, SwarmError> {
-        // Map absolute layer index to our local layer array index
-        let local_idx = abs_layer_idx.checked_sub(self.layer_start).ok_or_else(|| {
-            SwarmError::Internal(format!(
-                "Layer {abs_layer_idx} not in segment [{}, {})",
-                self.layer_start, self.layer_end
-            ))
-        })?;
-        if local_idx >= self.layers.len() {
-            return Err(SwarmError::Internal(format!(
-                "Layer index {local_idx} out of range (have {} layers)",
-                self.layers.len()
-            )));
-        }
-
-        let input = input
-            .to_device(&self.device)
-            .map_err(|e| SwarmError::Internal(format!("Device transfer: {e}")))?;
-
-        let seq_len = input
-            .dim(1)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
-
-        // KV-cache keyed by model key + request_id
-        let model_key = format!(
-            "tp{}-{}-{}-{}",
-            tp_rank, self.layer_start, self.layer_end, self.total_layers
-        );
-        let num_layers = self.layers.len();
-        let cache_key = KvCacheStore::cache_key(&model_key, request_id);
-        let mut layer_kv_caches: Vec<Option<KvCache>> = {
-            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            std::mem::take(&mut entry.layers)
-        };
-
-        let mask = if seq_len == 1 {
-            None
-        } else {
-            Some(
-                self.mask(seq_len)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
-        };
-
-        let layer = &self.layers[local_idx];
-        let x = &input;
-
-        // DeepSeek layers don't support tensor parallelism yet (MoE expert routing
-        // makes TP significantly more complex). Return error for TP + DeepSeek.
-        let lw = match layer {
-            LayerVariant::Dense(lw) => lw,
-            LayerVariant::DeepSeek { .. } => {
-                // Restore KV cache before returning to prevent permanent cache loss
-                let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-                entry.layers = layer_kv_caches;
-                return Err(SwarmError::Internal(
-                    "Tensor parallelism is not supported for DeepSeek MoE/MLA layers. \
-                     Use pipeline parallelism (shard splitting) instead."
-                        .into(),
-                ));
-            }
-            LayerVariant::Qwen35Attn { .. } | LayerVariant::Qwen35Ssm { .. } => {
-                // Restore KV cache before returning to prevent permanent cache loss
-                let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-                entry.layers = layer_kv_caches;
-                return Err(SwarmError::Internal(
-                    "Tensor parallelism is not supported for Qwen 3.5 layers. \
-                     Use pipeline parallelism (shard splitting) instead."
-                        .into(),
-                ));
-            }
-        };
-
-        // Attention norm (full — not split)
-        let normed = lw
-            .attention_norm
-            .forward(x)
-            .map_err(|e| SwarmError::Internal(format!("attn_norm: {e}")))?;
-
-        // Head-parallel attention: only compute assigned heads
-        let attn_partial = lw
-            .forward_attn_tp(
-                &normed,
-                mask.as_ref(),
-                index_pos,
-                &mut layer_kv_caches[local_idx],
-                self.max_seq_len,
-                tp_rank,
-                tp_size,
-            )
-            .map_err(|e| SwarmError::Internal(format!("attn_tp: {e}")))?;
-
-        // Partial attention result — needs AllReduce with other TP nodes.
-        // The residual connection is applied AFTER AllReduce by the coordinator:
-        //   full_attn = sum(attn_partial_0, attn_partial_1, ...) + residual
-
-        // FFN norm on full input (not the partial attention — norm goes before residual add)
-        let ffn_normed = lw
-            .ffn_norm
-            .forward(x)
-            .map_err(|e| SwarmError::Internal(format!("ffn_norm: {e}")))?;
-
-        // Column-parallel MLP: each TP node handles a fraction of the intermediate dimension
-        let mlp_partial = match &lw.ffn {
-            FfnVariant::Dense(mlp) => mlp
-                .forward_tp(&ffn_normed, tp_rank, tp_size)
-                .map_err(|e| SwarmError::Internal(format!("mlp_tp: {e}")))?,
-            FfnVariant::MoE(_) => {
-                return Err(SwarmError::Internal(
-                    "Tensor parallelism not supported for MoE layers".to_string(),
-                ));
-            }
-        };
-
-        // Return partial = attn_partial + mlp_partial
-        // The coordinator will AllReduce this and add the residual (input)
-        let partial =
-            (attn_partial + mlp_partial).map_err(|e| SwarmError::Internal(e.to_string()))?;
-
-        // Write updated KV cache back (reuses cache_key — zero alloc)
-        {
-            let mut entry = kv_cache_store.get_or_create_keyed(&cache_key, num_layers);
-            entry.layers = layer_kv_caches;
-            entry.last_accessed = std::time::Instant::now();
-        }
-
-        Ok(partial)
-    }
-
     /// Forward pass for multimodal (vision + text) inference.
     ///
     /// If this is the first segment and `vision_embeddings` is provided, the input
@@ -4099,36 +3929,6 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
             .unsqueeze(0)
             .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))
-    }
-
-    pub fn tokenize_and_embed(&self, prompt: &str) -> Result<Tensor, SwarmError> {
-        let emb = self
-            .tok_embeddings
-            .as_ref()
-            .ok_or_else(|| SwarmError::Internal("No embedding table (not first segment)".into()))?;
-
-        // Tokenize — BpeTokenizer returns Vec<i64>
-        let token_ids: Vec<i64> = if let Some(ref tokenizer) = self.tokenizer {
-            tokenizer.encode(prompt)
-        } else {
-            // Fallback: byte-level encoding
-            prompt.bytes().map(|b| b as i64).collect()
-        };
-
-        // DIAG: dump token IDs for debugging tokenizer issues
-        tracing::info!(
-            num_tokens = token_ids.len(),
-            tokens = ?&token_ids[..token_ids.len().min(50)],
-            "DIAG: tokenize_and_embed token IDs"
-        );
-
-        let input = Tensor::new(&token_ids[..], &self.device)
-            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
-            .unsqueeze(0)
-            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
-
-        emb.forward(&input)
-            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))
     }
 
     /// Embed a single token ID into hidden states.

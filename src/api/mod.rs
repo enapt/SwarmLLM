@@ -4,7 +4,6 @@ pub mod admin_models;
 pub mod admin_providers;
 pub mod anthropic;
 pub mod identity;
-pub mod internal;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;

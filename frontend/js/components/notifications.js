@@ -190,7 +190,7 @@
     var log = document.getElementById(logId);
     if (!log) return;
     var countEl = document.getElementById(countId);
-    if (countEl) countEl.textContent = entries.length + ' events';
+    if (countEl) countEl.textContent = I18n.t('activity.count', { count: entries.length });
 
     var html = '';
     var show = entries.slice(0, MAX_DISPLAY);
@@ -209,7 +209,7 @@
     }
     if (entries.length > MAX_DISPLAY) {
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
-        (entries.length - MAX_DISPLAY) + ' older events</div>';
+        I18n.t('activity.overflow', { count: entries.length - MAX_DISPLAY }) + '</div>';
     }
     log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">' + emptyText + '</div>';
   }
@@ -364,7 +364,7 @@
         try { sessionStorage.removeItem(App.MODEL_EVENTS_KEY); sessionStorage.removeItem(App.MODEL_NET_EVENTS_KEY); } catch (e2) {}
       }
       S.wsWasConnected = true;
-      logActivity('\u{1F4E1}', 'Connected to SwarmLLM node', 'system');
+      logActivity('\u{1F4E1}', I18n.t('activity.connected'), 'system');
     };
 
     S.ws.onmessage = function(event) {

@@ -226,6 +226,9 @@
   "map.regional_health": "Regional Health",
   "map.replication_target": "Replication Target",
 
+  "activity.count": "{count} events",
+  "activity.overflow": "{count} older events",
+  "activity.connected": "Connected to SwarmLLM node",
   "activity.label_activity": "Activity",
   "activity.label_network": "Network",
   "activity.none": "No activity",

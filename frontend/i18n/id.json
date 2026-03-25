@@ -240,5 +240,8 @@
   "activity.label_activity": "Activity",
   "activity.label_network": "Network",
   "activity.none": "No activity",
-  "activity.none_network": "No network events"
+  "activity.none_network": "No network events",
+  "activity.count": "{count} events",
+  "activity.overflow": "{count} older events",
+  "activity.connected": "Connected to SwarmLLM node"
 }

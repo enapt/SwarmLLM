@@ -104,11 +104,10 @@
       if (now - (App.dashboard._lastLoadTime || 0) < 5000) return;
       App.dashboard._loading = true;
       App.dashboard._lastLoadTime = now;
-      var statsResult, modelsResult;
+      var statsResult;
       try {
         var results = await Promise.all([App.data.loadStats(), App.models.load()]);
         statsResult = results[0];
-        modelsResult = results[1];
       } catch (e) {
         App.dashboard._loading = false;
         App.ui.showBanner('error', I18n.t('errors.server_unreachable'));
