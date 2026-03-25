@@ -218,12 +218,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // Staleness check: verify model directory still exists on disk.
         // If files were deleted while the process is running, skip this entry
         // to avoid confusing the UI with a "loaded" model that can't run.
-        let loaded_model_dir = state.config.node.data_dir.join("models").join(
-            info.name
-                .to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', ""),
-        );
+        let loaded_model_dir = state
+            .config
+            .node
+            .data_dir
+            .join("models")
+            .join(crate::types::slugify_model_name(&info.name));
         let has_shard_files = loaded_model_dir.exists()
             && std::fs::read_dir(&loaded_model_dir)
                 .ok()
@@ -247,11 +247,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             // Try both the display name and the slugified ID to avoid duplicates.
             // The registry may use a slug like "qwen2.5-coder-7b-instruct" while
             // loaded_model_info.name is "Qwen2.5 Coder 7B Instruct".
-            let slug = info
-                .name
-                .to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            let slug = crate::types::slugify_model_name(&info.name);
             seen_ids.insert(slug.clone());
 
             let mid = crate::types::ModelId(info.name.clone());

@@ -414,11 +414,7 @@ pub async fn messages(
     {
         let info = state.shared_state.loaded_model_info.read().await;
         if let Some(i) = info.as_ref() {
-            let slug = i
-                .name
-                .to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            let slug = crate::types::slugify_model_name(&i.name);
             // Only resolve if the requested model matches the loaded model by slug or registry ID
             let registry_id = state
                 .shared_state
@@ -495,11 +491,7 @@ pub async fn messages(
         let info = state.shared_state.loaded_model_info.read().await;
         info.as_ref()
             .map(|i| {
-                let slug = i
-                    .name
-                    .to_lowercase()
-                    .replace(' ', "-")
-                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+                let slug = crate::types::slugify_model_name(&i.name);
                 model == slug
                     || model == i.name
                     || state
@@ -798,13 +790,13 @@ async fn anthropic_non_stream(
         })
         .await
         .map_err(|_| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Router unavailable".into(),
             ))
         })?;
 
     let output = result_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Router dropped the request".into(),
         ))
     })??;
@@ -862,7 +854,7 @@ async fn anthropic_stream(
         })
         .await
         .map_err(|_| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Router unavailable".into(),
             ))
         })?;

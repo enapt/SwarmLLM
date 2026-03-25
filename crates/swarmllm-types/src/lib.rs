@@ -710,14 +710,6 @@ pub enum SwarmMessage {
     // HuggingFace source gossip — tells peers where to download model shards from HF
     HfSourceGossip(HfSourceGossip),
 
-    // Encryption
-    SealedInferenceRequest(SealedPrompt),
-    PeerKeyAdvertise {
-        node_id: NodeId,
-        x25519_public: [u8; 32],
-        signature: Vec<u8>,
-    },
-
     // Forward secrecy — ephemeral ECDH key exchange
     EphemeralKeyExchange(EphemeralKeyExchange),
 

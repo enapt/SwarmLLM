@@ -18,6 +18,36 @@ use serde_json::{json, Value};
 
 use crate::api::server::AppState;
 
+/// Extract text content and token usage from an Anthropic Messages API response body.
+fn extract_anthropic_response(body: &serde_json::Value) -> (String, u64, u64) {
+    let content = body["content"]
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .next()
+        })
+        .unwrap_or("")
+        .to_string();
+    let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
+    let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+    (content, input_tokens, output_tokens)
+}
+
+/// Scrub API keys from an error body and truncate to 512 chars (char-boundary safe).
+fn scrub_truncate_error(body: String) -> String {
+    let scrubbed = crate::crypto::scrub_api_keys(&body);
+    if scrubbed.len() > 512 {
+        let mut idx = 512;
+        while !scrubbed.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        format!("{}…[truncated]", &scrubbed[..idx])
+    } else {
+        scrubbed
+    }
+}
+
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -596,11 +626,7 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
 
     // Local loaded model
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = info
-            .name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        let slug = crate::types::slugify_model_name(&info.name);
         seen.insert(slug.clone());
         seen.insert(info.name.clone());
         models.push(json!({
@@ -743,18 +769,8 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                         .json()
                         .await
                         .unwrap_or(json!({"error": "parse failed"}));
-                    // Extract text from Anthropic response
-                    let content = resp_body["content"]
-                        .as_array()
-                        .and_then(|arr| {
-                            arr.iter()
-                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                                .next()
-                        })
-                        .unwrap_or("")
-                        .to_string();
-                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                    let (content, input_tokens, output_tokens) =
+                        extract_anthropic_response(&resp_body);
 
                     json!({
                         "model": model_id,
@@ -768,18 +784,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    let scrubbed = crate::crypto::scrub_api_keys(&body);
-                    let truncated = if scrubbed.len() > 512 {
-                        {
-                            let mut idx = 512;
-                            while !scrubbed.is_char_boundary(idx) {
-                                idx -= 1;
-                            }
-                            format!("{}…[truncated]", &scrubbed[..idx])
-                        }
-                    } else {
-                        scrubbed
-                    };
+                    let truncated = scrub_truncate_error(body);
                     json!({
                         "model": model_id,
                         "error": format!("HTTP {status}: {truncated}"),
@@ -866,11 +871,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         // from MCP clients triggering paid API calls without explicit model selection.
         let mut auto_models = Vec::new();
         if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-            let slug = info
-                .name
-                .to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            let slug = crate::types::slugify_model_name(&info.name);
             auto_models.push(slug);
         }
         // Only add network-available models (not cloud providers)
@@ -938,17 +939,8 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                         .json()
                         .await
                         .unwrap_or(json!({"error": "parse failed"}));
-                    let content = resp_body["content"]
-                        .as_array()
-                        .and_then(|arr| {
-                            arr.iter()
-                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                                .next()
-                        })
-                        .unwrap_or("")
-                        .to_string();
-                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                    let (content, input_tokens, output_tokens) =
+                        extract_anthropic_response(&resp_body);
 
                     json!({
                         "model": model_id,
@@ -962,18 +954,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    let scrubbed = crate::crypto::scrub_api_keys(&body);
-                    let truncated = if scrubbed.len() > 512 {
-                        {
-                            let mut idx = 512;
-                            while !scrubbed.is_char_boundary(idx) {
-                                idx -= 1;
-                            }
-                            format!("{}…[truncated]", &scrubbed[..idx])
-                        }
-                    } else {
-                        scrubbed
-                    };
+                    let truncated = scrub_truncate_error(body);
                     json!({
                         "model": model_id,
                         "error": format!("HTTP {status}: {truncated}"),
@@ -1134,17 +1115,8 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
                         .json()
                         .await
                         .unwrap_or(json!({"error": "parse failed"}));
-                    let content = resp_body["content"]
-                        .as_array()
-                        .and_then(|arr| {
-                            arr.iter()
-                                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                                .next()
-                        })
-                        .unwrap_or("")
-                        .to_string();
-                    let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                    let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                    let (content, input_tokens, output_tokens) =
+                        extract_anthropic_response(&resp_body);
 
                     json!({
                         "task_id": task_id,
@@ -1159,17 +1131,7 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    // SEC: Scrub API keys from error bodies before exposing to MCP client
-                    let scrubbed = crate::crypto::scrub_api_keys(&body);
-                    let truncated = if scrubbed.len() > 512 {
-                        let mut idx = 512;
-                        while !scrubbed.is_char_boundary(idx) {
-                            idx -= 1;
-                        }
-                        format!("{}…[truncated]", &scrubbed[..idx])
-                    } else {
-                        scrubbed
-                    };
+                    let truncated = scrub_truncate_error(body);
                     json!({
                         "task_id": task_id,
                         "model": model_id,
@@ -1253,11 +1215,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
 
     // Local loaded model — always fastest
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = info
-            .name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        let slug = crate::types::slugify_model_name(&info.name);
         candidates.push((slug, "local", info.size_bytes));
     }
 
@@ -1375,17 +1333,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
                 .json()
                 .await
                 .unwrap_or(json!({"error": "parse failed"}));
-            let content = resp_body["content"]
-                .as_array()
-                .and_then(|arr| {
-                    arr.iter()
-                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                        .next()
-                })
-                .unwrap_or("")
-                .to_string();
-            let input_tokens = resp_body["usage"]["input_tokens"].as_u64().unwrap_or(0);
-            let output_tokens = resp_body["usage"]["output_tokens"].as_u64().unwrap_or(0);
+            let (content, input_tokens, output_tokens) = extract_anthropic_response(&resp_body);
 
             let result = json!({
                 "model": model_id,
@@ -1556,11 +1504,7 @@ async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse
 
     // Local loaded model
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
-        let slug = info
-            .name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        let slug = crate::types::slugify_model_name(&info.name);
         models.push(json!({
             "id": slug,
             "name": info.name,

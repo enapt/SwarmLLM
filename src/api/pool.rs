@@ -84,7 +84,7 @@ pub async fn pool_create(
             "name": ps.name,
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -115,7 +115,7 @@ pub async fn pool_invite(
             "expires_at": inv.expires_at.to_rfc3339(),
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -137,7 +137,7 @@ pub async fn pool_accept(
     send_pool_command(&state, PoolCommand::GetInvitations { reply: inv_tx }).await?;
 
     let invitations = inv_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))
     })?;
@@ -174,7 +174,7 @@ pub async fn pool_accept(
             "status": "accepted",
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -195,7 +195,7 @@ pub async fn pool_remove(
             "status": "removed",
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -214,7 +214,7 @@ pub async fn pool_leave(
             "status": "left",
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -229,7 +229,7 @@ pub async fn pool_invitations(
     send_pool_command(&state, PoolCommand::GetInvitations { reply: tx }).await?;
 
     let invitations = rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))
     })?;
@@ -259,7 +259,7 @@ pub async fn pool_leaderboard(
     send_pool_command(&state, PoolCommand::GetLeaderboard { reply: tx }).await?;
 
     let entries = rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))
     })?;
@@ -295,7 +295,7 @@ pub async fn pool_set_device_name(
     match rx.await {
         Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -318,7 +318,7 @@ pub async fn pool_set_credit_split(
     match rx.await {
         Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -343,7 +343,7 @@ pub async fn pool_set_contribution(
     match rx.await {
         Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -363,7 +363,7 @@ pub async fn pool_generate_code(
             "code": code,
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -391,7 +391,7 @@ pub async fn pool_join(
             "message": "Join request broadcast. You will be added to the pool once the owner's node processes the request.",
         }))),
         Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::Internal(
+        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager unavailable".into(),
         ))),
     }
@@ -402,12 +402,12 @@ pub async fn pool_join(
 async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), ApiError> {
     let tx_lock = state.shared_state.credits.pool_tx.read().await;
     let tx = tx_lock.as_ref().ok_or_else(|| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager not running".into(),
         ))
     })?;
     tx.send(cmd).await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Pool manager channel closed".into(),
         ))
     })

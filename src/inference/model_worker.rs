@@ -58,7 +58,7 @@ pub async fn run_worker(
         let (msg, payload) = match recv_daemon(&mut reader).await {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("model-worker: socket read error: {e}");
+                tracing::warn!(error = %e, "model-worker: socket read error");
                 break;
             }
         };
@@ -122,7 +122,7 @@ pub async fn run_worker(
                 layer_end,
             } => {
                 models.remove(&(layer_start, layer_end));
-                tracing::info!("model-worker: unloaded [{layer_start}..{layer_end})");
+                tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
             }
             DaemonMsg::SpeculativeDraft(draft) => {
                 // Draft model generates N tokens with logit distributions

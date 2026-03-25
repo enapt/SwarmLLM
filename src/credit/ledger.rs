@@ -17,7 +17,6 @@ use crate::types::{
 /// and the consumer spends 10*100=1000 credits — balanced.
 /// All rates are configurable via `[pool.credit_rates]` in config.toml.
 pub const RATE_INFERENCE_SERVE: i64 = 10; // per token served (not per layer)
-pub const RATE_SHARD_SEEDING: i64 = 5; // per GB transferred
 pub const RATE_INFERENCE_CONSUME: i64 = 10; // per token consumed — balanced with serve
 
 /// Minimum credit balance required to submit inference requests.

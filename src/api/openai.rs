@@ -798,11 +798,7 @@ pub async fn chat_completions(
             let info = state.shared_state.loaded_model_info.read().await;
             info.as_ref().and_then(|i| {
                 // Find the registry key for this loaded model (may differ from display name)
-                let slug = i
-                    .name
-                    .to_lowercase()
-                    .replace(' ', "-")
-                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+                let slug = crate::types::slugify_model_name(&i.name);
                 let registry_id = state
                     .shared_state
                     .model_registry
@@ -854,11 +850,7 @@ pub async fn chat_completions(
         let cached_name = info.as_ref().map(|i| i.name.clone());
         // Check if the cached info matches the requested model
         let matches_request = info.as_ref().is_some_and(|i| {
-            let slug = i
-                .name
-                .to_lowercase()
-                .replace(' ', "-")
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+            let slug = crate::types::slugify_model_name(&i.name);
             slug == req.model || i.name == req.model
         });
         drop(info);
@@ -1229,9 +1221,11 @@ pub async fn chat_completions(
         )
         .await
     } else {
-        Err(crate::error::ApiError(crate::error::SwarmError::Internal(
-            "Inference router not available".to_string(),
-        )))
+        Err(crate::error::ApiError(
+            crate::error::SwarmError::ServiceUnavailable(
+                "Inference router not available".to_string(),
+            ),
+        ))
     }
 }
 
@@ -1502,13 +1496,13 @@ async fn router_inference(
         })
         .await
         .map_err(|_| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Router unavailable".into(),
             ))
         })?;
 
     let output = result_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::Internal(
+        ApiError(crate::error::SwarmError::ServiceUnavailable(
             "Router dropped the request".into(),
         ))
     })??;
@@ -1601,7 +1595,7 @@ async fn router_inference_stream(
         })
         .await
         .map_err(|_| {
-            ApiError(crate::error::SwarmError::Internal(
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
                 "Router unavailable".into(),
             ))
         })?;
@@ -1741,7 +1735,7 @@ async fn router_inference_stream(
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!("DIAG: SSE fallback got pipeline error: {e}");
+                    tracing::debug!(error = %e, "DIAG: SSE fallback got pipeline error");
                     if sse_tx
                         .send(StreamEvent::Error {
                             message: format!("{e}"),
@@ -2173,7 +2167,7 @@ async fn stream_response(
         let finish = match result {
             Ok(r) => r.finish_reason.as_str().to_string(),
             Err(ref e) => {
-                tracing::error!("DIAG: local stream generate_stream error: {e}");
+                tracing::error!(error = %e, "DIAG: local stream generate_stream error");
                 "error".to_string()
             }
         };
@@ -2267,11 +2261,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
     // Use cached model info (lock-free, no executor contention)
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
         seen.insert(info.name.clone());
-        let slug = info
-            .name
-            .to_lowercase()
-            .replace(' ', "-")
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "");
+        let slug = crate::types::slugify_model_name(&info.name);
         seen.insert(slug.clone());
 
         // Find the registry manifest for this model so we can use its canonical ID

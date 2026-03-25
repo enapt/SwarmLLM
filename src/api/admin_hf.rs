@@ -93,7 +93,7 @@ pub async fn hf_search(
 
     let results = crate::model::huggingface::search_gguf_models(&query)
         .await
-        .map_err(|e| ApiError(crate::error::SwarmError::Internal(e)))?;
+        .map_err(|e| ApiError(crate::error::SwarmError::ServiceUnavailable(e)))?;
 
     // Available VRAM for fits_vram check (pool VRAM or local GPU)
     let available_vram_bytes: u64 = state
@@ -655,7 +655,7 @@ pub async fn hf_probe(
                 "network_replicas": network_replicas,
             })))
         }
-        Err(e) => Err(ApiError(crate::error::SwarmError::Internal(e))),
+        Err(e) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(e))),
     }
 }
 
@@ -799,7 +799,7 @@ pub async fn hf_download_shards(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "HuggingFace probe failed");
-                ApiError(crate::error::SwarmError::Internal(format!(
+                ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
                     "HuggingFace probe failed: {e}"
                 )))
             })?;
@@ -813,7 +813,7 @@ pub async fn hf_download_shards(
             crate::inference::split::ModelArch::supported_list().join(", ")
         );
         tracing::warn!(%arch_str, "Refusing download: unsupported architecture");
-        return Err(ApiError(crate::error::SwarmError::Internal(msg)));
+        return Err(ApiError(crate::error::SwarmError::Validation(msg)));
     }
 
     // Create initial acquisition progress entry with per-shard progress so that

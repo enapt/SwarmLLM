@@ -175,19 +175,6 @@ impl ModelRegistry {
         self.manifests.len()
     }
 
-    /// Get the number of tracked shards.
-    pub fn shard_count(&self) -> usize {
-        self.shard_holders.len()
-    }
-
-    /// Check if a specific shard is tracked.
-    pub fn has_shard(&self, shard_id: &ShardId) -> bool {
-        self.shard_holders
-            .get(shard_id)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-    }
-
     /// Remove a model manifest from the registry.
     pub fn remove_manifest(&self, model_id: &ModelId) {
         self.manifests.remove(model_id);
@@ -256,20 +243,6 @@ impl ModelRegistry {
             .collect();
         indices.sort_unstable();
         indices
-    }
-
-    /// Get unique model IDs held by a specific node.
-    pub fn models_for_node(&self, node_id: &NodeId) -> Vec<ModelId> {
-        self.node_shards
-            .get(node_id)
-            .map(|shards| {
-                let mut models: HashSet<ModelId> = HashSet::new();
-                for shard in shards.iter() {
-                    models.insert(shard.model_id.clone());
-                }
-                models.into_iter().collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Iterate over all tracked shard entries (shard_id, holders).

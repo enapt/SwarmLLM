@@ -25,7 +25,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **HealthMonitor** | `src/health/monitor.rs` | Periodic health pings, rebalancing triggers |
 | **ShardRebalancer** | `src/health/rebalancer.rs` | Shard redistribution on node join/leave |
 | **AcquisitionManager** | `src/model/acquisition.rs` | BLAKE3-verified model downloads from peers and HuggingFace |
-| **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI API + admin dashboard + WebSocket |
+| **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager.rs` | Device pool management, credit forwarding |
 | **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
 
