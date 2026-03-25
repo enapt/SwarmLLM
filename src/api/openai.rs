@@ -567,11 +567,13 @@ pub struct ModelInfo {
 // ---- Handlers ----
 
 /// POST /v1/chat/completions
-pub async fn chat_completions(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    crate::api::server::JsonBody(mut req): crate::api::server::JsonBody<ChatCompletionRequest>,
-) -> Result<axum::response::Response, ApiError> {
+/// Validate and sanitize a chat completion request.
+/// Checks session_id, model, messages, temperature, content sizes, tools, stop sequences.
+/// Binds session_id to caller's API key to prevent cross-user KV-cache hijacking.
+fn validate_chat_request(
+    req: &mut ChatCompletionRequest,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), ApiError> {
     // Validate session_id length to prevent memory abuse
     if let Some(ref sid) = req.session_id {
         if sid.len() > 256 {
@@ -594,29 +596,22 @@ pub async fn chat_completions(
         *sid = format!("{}:{}", key_hash, sid);
     }
 
-    // Validate model field length to prevent DashMap memory exhaustion from unique keys
     if req.model.len() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "model name too long (max 256 chars)".into(),
         )));
     }
-
-    // Validate messages array is not empty
     if req.messages.is_empty() {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "messages array must not be empty".into(),
         )));
     }
-
-    // Validate temperature range — OpenAI API spec: 0.0..2.0
     if req.temperature < 0.0 || req.temperature > 2.0 {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(
             "temperature must be between 0 and 2, got {}",
             req.temperature
         ))));
     }
-
-    // Limit message count to prevent excessive prompt construction overhead
     if req.messages.len() > 4096 {
         return Err(ApiError(crate::error::SwarmError::Config(
             "Too many messages (max 4096)".into(),
@@ -624,8 +619,8 @@ pub async fn chat_completions(
     }
 
     // SEC: Cap individual message content size and total prompt size
-    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024; // 2 MB per message
-    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024; // 4 MB total (Claude Code tool results can be large)
+    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
     let mut total_content_bytes: usize = 0;
     for msg in &req.messages {
         let content_len = match &msg.content {
@@ -652,14 +647,12 @@ pub async fn chat_completions(
         ))));
     }
 
-    // Limit tools array to prevent system prompt explosion in format_tool_system_prompt
     if let Some(ref tools) = req.tools {
         if tools.len() > 128 {
             return Err(ApiError(crate::error::SwarmError::Validation(
                 "Too many tools (max 128)".into(),
             )));
         }
-        // SEC: Limit individual tool field sizes to prevent OOM via format_tool_system_prompt
         for t in tools {
             if t.function.name.len() > 256 {
                 return Err(ApiError(crate::error::SwarmError::Validation(
@@ -681,7 +674,6 @@ pub async fn chat_completions(
         }
     }
 
-    // Validate lora_adapter to prevent path traversal and DashMap memory abuse
     if let Some(ref adapter) = req.lora_adapter {
         if adapter.len() > 256 {
             return Err(ApiError(crate::error::SwarmError::Validation(
@@ -695,7 +687,6 @@ pub async fn chat_completions(
         }
     }
 
-    // Limit stop sequences to prevent excessive tokenization overhead
     if let Some(crate::api::openai::StopSequence::Multiple(ref v)) = req.stop {
         if v.len() > 16 {
             return Err(ApiError(crate::error::SwarmError::Validation(
@@ -715,6 +706,16 @@ pub async fn chat_completions(
             )));
         }
     }
+
+    Ok(())
+}
+
+pub async fn chat_completions(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    crate::api::server::JsonBody(mut req): crate::api::server::JsonBody<ChatCompletionRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    validate_chat_request(&mut req, &headers)?;
 
     // Convert API messages to internal format (decode base64 images if present)
     let internal_messages = req.to_internal_messages().map_err(ApiError)?;
