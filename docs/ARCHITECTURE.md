@@ -327,7 +327,7 @@ Qwen 3.5 introduces a hybrid architecture combining SSM (Gated Delta Networks) w
 - **Attention layers**: Standard attention with sigmoid output gate + partial RoPE (25% of head_dim)
 - **State management**: `SsmState` (conv_state + recurrent_state) alongside KV-cache for attention layers
 - **Per-layer detection**: SSM vs attention determined by presence of `ssm_alpha.weight` tensor in GGUF
-- **Note**: `ssm_alpha.weight` and `ssm_beta.weight` are present in the GGUF but not yet read — `delta_net_scan` uses a hardcoded 0.95 decay stub. Dynamic per-step alpha/beta is deferred (see Deferred Items).
+- **Per-step alpha/beta gating**: `ssm_alpha.weight` and `ssm_beta.weight` tensors are read from the GGUF and applied per timestep via the Gated DeltaNet formula: decay `g_t = exp(-softplus(α + dt))`, prediction error `error = β_v·v - g·S@(β_k·k)`, state update `S_t = g·S + error ⊗ (β_k·k)^T`.
 
 ### Tensor Parallelism (AllReduce)
 
