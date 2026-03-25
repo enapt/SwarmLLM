@@ -86,6 +86,35 @@ pub struct NodeConfig {
     pub contribution: ContributionMode,
 }
 
+impl NodeConfig {
+    /// Path to the models directory (data_dir/models).
+    pub fn models_dir(&self) -> PathBuf {
+        self.data_dir.join("models")
+    }
+
+    /// Path to a specific model's directory (data_dir/models/<model_id>).
+    pub fn model_dir(&self, model_id: &str) -> PathBuf {
+        // Sanitize: only allow alphanumeric, dash, dot, underscore
+        let safe: String = model_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '.' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.data_dir.join("models").join(safe)
+    }
+
+    /// Path to a specific shard file (data_dir/models/<model_id>/shard_NNN.bin).
+    pub fn shard_path(&self, model_id: &str, index: u32) -> PathBuf {
+        self.model_dir(model_id)
+            .join(format!("shard_{:03}.bin", index))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResourceConfig {
     #[serde(default)]

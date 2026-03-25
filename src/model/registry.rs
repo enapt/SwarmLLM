@@ -237,6 +237,27 @@ impl ModelRegistry {
             .unwrap_or_default()
     }
 
+    /// Get sorted shard indices held locally for a model.
+    /// Convenience method that eliminates the common pattern of iterating manifest shards,
+    /// checking shard_holders().contains(&local_node_id), and collecting indices.
+    pub fn local_shard_indices(&self, model_id: &ModelId, node_id: &NodeId) -> Vec<u32> {
+        let manifest = match self.get_manifest(model_id) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let mut indices: Vec<u32> = (0..manifest.shard_count)
+            .filter(|&idx| {
+                let sid = crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: idx,
+                };
+                self.shard_holders(&sid).contains(node_id)
+            })
+            .collect();
+        indices.sort_unstable();
+        indices
+    }
+
     /// Get unique model IDs held by a specific node.
     pub fn models_for_node(&self, node_id: &NodeId) -> Vec<ModelId> {
         self.node_shards
