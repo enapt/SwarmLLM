@@ -99,6 +99,14 @@ impl ShardRebalancer {
                         node_id: Some(format!("{}", departed_peer)),
                         detail_num: None,
                         detail_str: Some("peer_left".to_string()),
+                        toast_level: None,
+                        toast_duration_ms: None,
+                        shard_index: None,
+                        freed_bytes: None,
+                        holder_count_before: None,
+                        holder_count_after: None,
+                        remaining_local_shards: None,
+                        timestamp: None,
                     });
                 self.pending_peer_left.push(departed_peer);
                 self.process_pending_departures().await;
@@ -121,6 +129,14 @@ impl ShardRebalancer {
                         node_id: Some(format!("{}", new_peer)),
                         detail_num: None,
                         detail_str: Some("peer_joined".to_string()),
+                        toast_level: None,
+                        toast_duration_ms: None,
+                        shard_index: None,
+                        freed_bytes: None,
+                        holder_count_before: None,
+                        holder_count_after: None,
+                        remaining_local_shards: None,
+                        timestamp: None,
                     });
                 self.handle_peer_joined().await;
             }
@@ -136,6 +152,14 @@ impl ShardRebalancer {
                         node_id: None,
                         detail_num: None,
                         detail_str: None,
+                        toast_level: None,
+                        toast_duration_ms: None,
+                        shard_index: None,
+                        freed_bytes: None,
+                        holder_count_before: None,
+                        holder_count_after: None,
+                        remaining_local_shards: None,
+                        timestamp: None,
                     });
                 self.check_all_shards().await;
             }

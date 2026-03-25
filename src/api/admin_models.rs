@@ -988,6 +988,14 @@ pub async fn unload_model(
         node_id: None,
         detail_num: Some(estimated_mb as i64),
         detail_str: None,
+        toast_level: None,
+        toast_duration_ms: None,
+        shard_index: None,
+        freed_bytes: None,
+        holder_count_before: None,
+        holder_count_after: None,
+        remaining_local_shards: None,
+        timestamp: None,
     });
 
     tracing::info!(model = %model_id, segments = segments_removed, "Model unloaded from memory");
@@ -1114,6 +1122,14 @@ pub async fn unload_shard(
             node_id: None,
             detail_num: Some(shard_index as i64),
             detail_str: None,
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
         });
     }
 
@@ -1239,6 +1255,14 @@ pub async fn load_shard(
             node_id: None,
             detail_num: Some(shard_index as i64),
             detail_str: None,
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
         });
     }
 
@@ -1408,6 +1432,14 @@ pub async fn delete_shard(
             node_id: None,
             detail_num: Some(shard_index as i64),
             detail_str: None,
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
         });
     }
 
@@ -1565,6 +1597,14 @@ pub async fn download_shard(
                 node_id: Some(format!("{}", target)),
                 detail_num: Some(shard_index as i64),
                 detail_str: Some("p2p".to_string()),
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
 
             return Ok(Json(serde_json::json!({

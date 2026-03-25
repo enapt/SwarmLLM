@@ -83,13 +83,10 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     let last_pong = std::sync::Arc::new(tokio::sync::Mutex::new(tokio::time::Instant::now()));
     let last_pong_push = last_pong.clone();
 
-    // Spawn a task to push stats every 2 seconds + ping every 30 seconds + prune/LAN events
+    // Spawn a task to push stats every 2 seconds + ping every 30 seconds + activity events
     let push_state = shared_state.clone();
-    let mut prune_rx = shared_state.prune_events_tx.subscribe();
-    let mut lan_rx = shared_state.lan_discovery_tx.subscribe();
     let mut update_rx = shared_state.update_tx.subscribe();
     let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
-    let mut system_rx = shared_state.system_notify_tx.subscribe();
     let mut peer_list_rx = shared_state.peer_list_changed_tx.subscribe();
     let mut activity_rx = shared_state.activity_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
@@ -153,42 +150,6 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                         break;
                     }
                 }
-                event = prune_rx.recv() => {
-                    if let Ok(event) = event {
-                        let msg = serde_json::json!({
-                            "type": "prune_event",
-                            "data": {
-                                "model_id": event.model_id.0,
-                                "model_name": event.model_name,
-                                "shard_index": event.shard_index,
-                                "reason": event.reason,
-                                "freed_bytes": event.freed_bytes,
-                                "remaining_local_shards": event.remaining_local_shards,
-                                "holder_count_before": event.holder_count_before,
-                                "holder_count_after": event.holder_count_after,
-                                "timestamp": event.timestamp.to_rfc3339(),
-                            }
-                        });
-                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                        if sender.send(Message::Text(msg_str)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                count = lan_rx.recv() => {
-                    if let Ok(count) = count {
-                        let msg = serde_json::json!({
-                            "type": "lan_peer_discovered",
-                            "data": {
-                                "peer_count": count,
-                            }
-                        });
-                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                        if sender.send(Message::Text(msg_str)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
                 _ = models_changed_rx.recv() => {
                     let msg = serde_json::json!({
                         "type": "models_changed",
@@ -196,18 +157,6 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     let msg_str = serde_json::to_string(&msg).unwrap_or_default();
                     if sender.send(Message::Text(msg_str)).await.is_err() {
                         break;
-                    }
-                }
-                notification = system_rx.recv() => {
-                    if let Ok(notif) = notification {
-                        let msg = serde_json::json!({
-                            "type": "system_notification",
-                            "data": notif,
-                        });
-                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                        if sender.send(Message::Text(msg_str)).await.is_err() {
-                            break;
-                        }
                     }
                 }
                 _ = peer_list_rx.recv() => {

@@ -767,6 +767,14 @@ impl NetworkManager {
                                 node_id: Some(format!("{}", peer)),
                                 detail_num: Some(shard_id.index as i64),
                                 detail_str: Some(format!("{}", error)),
+                                toast_level: None,
+                                toast_duration_ms: None,
+                                shard_index: None,
+                                freed_bytes: None,
+                                holder_count_before: None,
+                                holder_count_after: None,
+                                remaining_local_shards: None,
+                                timestamp: None,
                             });
                     }
                     // Clean up stale download progress entry to prevent resource leak
@@ -1069,6 +1077,14 @@ impl NetworkManager {
                             node_id: Some(node_id_str),
                             detail_num: None,
                             detail_str: Some(detail.to_string()),
+                            toast_level: None,
+                            toast_duration_ms: None,
+                            shard_index: None,
+                            freed_bytes: None,
+                            holder_count_before: None,
+                            holder_count_after: None,
+                            remaining_local_shards: None,
+                            timestamp: None,
                         });
                 }
 
@@ -1262,18 +1278,26 @@ impl NetworkManager {
                             if !peer.is_lan_peer {
                                 peer.is_lan_peer = true;
                                 drop(peer);
-                                // Increment LAN peer count and notify WebSocket clients
+                                // Increment LAN peer count and notify via unified activity event
                                 let count = self
                                     .shared_state
                                     .lan_peer_count
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                                     + 1;
-                                let _ = self.shared_state.lan_discovery_tx.send(count as u32);
-                                tracing::info!(
-                                    lan_peers = count,
+                                let msg = format!(
                                     "Found {} peer{} on your local network",
                                     count,
                                     if count == 1 { "" } else { "s" }
+                                );
+                                tracing::info!(lan_peers = count, "{}", msg);
+                                self.shared_state.emit_activity(
+                                    crate::daemon::state::ActivityEvent::new(
+                                        "network",
+                                        "lan_peer_discovered",
+                                        msg,
+                                    )
+                                    .with_detail_num(count as i64)
+                                    .with_toast("success", 8000),
                                 );
                             }
                         }
@@ -1470,6 +1494,14 @@ impl NetworkManager {
                                     node_id: Some(format!("{}", node_id)),
                                     detail_num: None,
                                     detail_str: None,
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
@@ -1814,12 +1846,20 @@ impl NetworkManager {
                                         .lan_peer_count
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                                         + 1;
-                                    let _ = self.shared_state.lan_discovery_tx.send(count as u32);
-                                    tracing::info!(
-                                        %peer,
-                                        rtt_ms,
-                                        lan_peers = count,
-                                        "Low-latency peer auto-detected as LAN"
+                                    let msg = format!(
+                                        "Found {} peer{} on your local network",
+                                        count,
+                                        if count == 1 { "" } else { "s" }
+                                    );
+                                    tracing::info!(%peer, rtt_ms, lan_peers = count, "{}", msg);
+                                    self.shared_state.emit_activity(
+                                        crate::daemon::state::ActivityEvent::new(
+                                            "network",
+                                            "lan_peer_discovered",
+                                            msg,
+                                        )
+                                        .with_detail_num(count as i64)
+                                        .with_toast("success", 8000),
                                     );
                                 } else {
                                     tracing::debug!(%peer, rtt_ms, "Peer RTT measured");
@@ -1966,6 +2006,14 @@ impl NetworkManager {
                                             node_id: Some(format!("{}", next_target)),
                                             detail_num: Some(shard_id.index as i64),
                                             detail_str: Some("retry".to_string()),
+                                            toast_level: None,
+                                            toast_duration_ms: None,
+                                            shard_index: None,
+                                            freed_bytes: None,
+                                            holder_count_before: None,
+                                            holder_count_after: None,
+                                            remaining_local_shards: None,
+                                            timestamp: None,
                                         },
                                     );
                                     let retry_req = crate::types::ShardRequest {
@@ -2002,6 +2050,14 @@ impl NetworkManager {
                                     node_id: None,
                                     detail_num: Some(shard_id.index as i64),
                                     detail_str: Some("hf_fallback".to_string()),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             // Wake auto-manage to pick up HF download
                             self.shared_state.auto_manage_notify.notify_one();
@@ -2026,6 +2082,14 @@ impl NetworkManager {
                                     node_id: None,
                                     detail_num: Some(shard_id.index as i64),
                                     detail_str: Some("no_source".to_string()),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                         }
 
@@ -2245,6 +2309,14 @@ impl NetworkManager {
                                 node_id: Some(format!("{}", peer)),
                                 detail_num: Some(shard_id.index as i64),
                                 detail_str: None,
+                                toast_level: None,
+                                toast_duration_ms: None,
+                                shard_index: None,
+                                freed_bytes: None,
+                                holder_count_before: None,
+                                holder_count_after: None,
+                                remaining_local_shards: None,
+                                timestamp: None,
                             });
                     }
                 } else {

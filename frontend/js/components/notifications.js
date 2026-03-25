@@ -26,7 +26,7 @@
   // Events that go to the Network panel instead of Activity
   var NETWORK_KINDS = {
     'peer_connected': true, 'peer_disconnected': true,
-    'shard_announced': true,
+    'shard_announced': true, 'lan_peer_discovered': true,
     'rebalance_peer_left': true, 'rebalance_peer_joined': true, 'rebalance_manual': true,
   };
 
@@ -73,6 +73,7 @@
     'model_load_skipped': '\u26A0\uFE0F', // ⚠️
     'worker_spawned': '\uD83D\uDCE5',    // 📥
     'worker_unloaded': '\uD83D\uDCE4',   // 📤
+    'lan_peer_discovered': '\uD83C\uDF10', // 🌐
   };
 
   // Category CSS class for color coding
@@ -130,6 +131,27 @@
       if (_activityEntries.length > MAX_ACTIVITY) _activityEntries.pop();
       _persistActivity();
       _renderActivityLog();
+    }
+
+    // --- Unified toast: backend controls when toasts appear via toast_level ---
+    if (data.toast_level) {
+      var toastType = data.toast_level === 'warn' ? 'warning' : (data.toast_level || 'info');
+      var toastMs = data.toast_duration_ms || 5000;
+      showToast(text, toastType, toastMs);
+    }
+
+    // --- Prune history: shard_pruned events carry structured prune data ---
+    if (data.kind === 'shard_pruned' && App.pruneSchedule && App.pruneSchedule.prependHistory) {
+      App.pruneSchedule.prependHistory({
+        model_id: data.model_id,
+        model_name: data.model_name,
+        shard_index: data.shard_index,
+        freed_bytes: data.freed_bytes || data.detail_num || 0,
+        holder_count_before: data.holder_count_before,
+        holder_count_after: data.holder_count_after,
+        remaining_local_shards: data.remaining_local_shards,
+        timestamp: data.timestamp,
+      });
     }
 
     // Route to per-model ticker if model_id is present (skipGlobal=true to avoid double-logging)
@@ -363,26 +385,10 @@
           if (msg.data.region_summary && S.activeTab === 'network-map') {
             App.networkMap.updateFromWs(msg.data.region_summary);
           }
-        } else if (msg.type === 'lan_peer_discovered') {
-          var count = msg.data.peer_count || 1;
-          showToast('Found ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on your local network \u2014 zero configuration needed!', 'success', 8000);
-          logActivity('\u{1F310}', 'Discovered ' + count + ' peer' + (count !== 1 ? 's' : '') + ' on local network', 'network');
         } else if (msg.type === 'update_available') {
           showUpdateBanner(msg.data);
         } else if (msg.type === 'peer_list') {
           App.dashboard.renderPeers((msg.data && msg.data.peers) || []);
-        } else if (msg.type === 'prune_event') {
-          var d = msg.data;
-          var freed = U.formatBytes(d.freed_bytes || 0);
-          var text = 'Pruned shard ' + U.escapeHtml(String(d.shard_index)) + ' of ' + U.escapeHtml(d.model_name || d.model_id) +
-            ' \u2014 ' + U.escapeHtml(String(d.holder_count_before)) + '\u2192' + U.escapeHtml(String(d.holder_count_after)) + ' holders (freed ' + U.escapeHtml(freed) + ')';
-          showToast(text, 'info', 6000);
-          logActivity('\u2702', 'Pruned shard ' + d.shard_index + ' of ' + (d.model_name || d.model_id) + ' (freed ' + U.formatBytes(d.freed_bytes || 0) + ')', 'auto_manage', d.model_id);
-          App.pruneSchedule.prependHistory(d);
-        } else if (msg.type === 'system_notification') {
-          var n = msg.data;
-          var level = n.level === 'error' ? 'error' : (n.level === 'warn' ? 'warning' : 'info');
-          showToast(n.title + ': ' + n.message, level, 10000);
         } else if (msg.type === 'activity_event') {
           _handleActivityEvent(msg.data || {});
         } else if (msg.type === 'models_changed') {

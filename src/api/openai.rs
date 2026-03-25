@@ -793,6 +793,14 @@ pub async fn chat_completions(
                 } else {
                     None
                 },
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
     }
 

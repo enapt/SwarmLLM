@@ -130,6 +130,14 @@ pub async fn rescan_local_shards(
                 node_id: None,
                 detail_num: Some(new_shards as i64),
                 detail_str: None,
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
         }
     }
@@ -401,6 +409,14 @@ pub async fn check_and_load_model(
                             node_id: None,
                             detail_num: Some(estimated as i64),
                             detail_str: Some("vram_budget".to_string()),
+                            toast_level: None,
+                            toast_duration_ms: None,
+                            shard_index: None,
+                            freed_bytes: None,
+                            holder_count_before: None,
+                            holder_count_after: None,
+                            remaining_local_shards: None,
+                            timestamp: None,
                         });
                     }
                     continue;
@@ -527,6 +543,14 @@ pub async fn check_and_load_model(
                 node_id: None,
                 detail_num: Some((layer_end - layer_start) as i64),
                 detail_str: Some(format!("[{}..{})", layer_start, layer_end)),
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
         }
     }

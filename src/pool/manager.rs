@@ -451,6 +451,14 @@ impl PoolManager {
                 node_id: Some(format!("{}", invitation.pool_id)),
                 detail_num: None,
                 detail_str: None,
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
 
         Ok(())
@@ -553,6 +561,14 @@ impl PoolManager {
                 node_id: None,
                 detail_num: None,
                 detail_str: None,
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
 
         Ok(())

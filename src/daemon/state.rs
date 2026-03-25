@@ -14,22 +14,10 @@ use crate::types::{CreditBalance, NodeId, NodeStats, PeerInfo, PipelineAssignmen
 
 use super::resolve_api_key;
 
-/// System notification for WebSocket push to the dashboard.
-#[derive(Clone, Debug, serde::Serialize)]
-pub struct SystemNotification {
-    /// Notification level: "info", "warn", "error"
-    pub level: String,
-    /// Short title for the toast
-    pub title: String,
-    /// Detailed message
-    pub message: String,
-    /// Optional model ID for context
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-}
-
-/// Rich activity event for the dashboard activity log.
-/// Pushed over WebSocket as `activity_event` messages for verbose real-time tracking.
+/// Unified activity event for the dashboard — the single event bus.
+/// Pushed over WebSocket as `activity_event` messages. Replaces the former
+/// separate `prune_event`, `lan_peer_discovered`, and `system_notification`
+/// WS message types (all now flow through this struct).
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ActivityEvent {
     /// Event category for frontend grouping/filtering.
@@ -53,6 +41,91 @@ pub struct ActivityEvent {
     /// Optional string detail (e.g. reason, source, error message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail_str: Option<String>,
+    /// If set, the frontend shows a toast at this level ("success", "info", "warning", "error").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toast_level: Option<&'static str>,
+    /// Toast auto-dismiss duration in ms (default 5000 if toast_level is set but this is None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toast_duration_ms: Option<u32>,
+    /// Shard index (for prune/shard events that need structured data beyond detail_num).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shard_index: Option<u32>,
+    /// Bytes freed (for prune events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freed_bytes: Option<u64>,
+    /// Holder count before an operation (for prune events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_count_before: Option<usize>,
+    /// Holder count after an operation (for prune events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_count_after: Option<usize>,
+    /// Remaining local shards after an operation (for prune events).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_local_shards: Option<u32>,
+    /// ISO 8601 timestamp for events that need a backend-authoritative time (e.g. prune).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+impl ActivityEvent {
+    /// Create an event with only the core fields; all extended fields default to None.
+    pub fn new(category: &'static str, kind: &'static str, message: String) -> Self {
+        Self {
+            category,
+            kind,
+            message,
+            model_id: None,
+            model_name: None,
+            node_id: None,
+            detail_num: None,
+            detail_str: None,
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
+        }
+    }
+
+    /// Builder: set model_id.
+    pub fn with_model(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
+        self
+    }
+
+    /// Builder: set model_name.
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = Some(name.into());
+        self
+    }
+
+    /// Builder: set node_id.
+    pub fn with_node(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    /// Builder: set detail_num.
+    pub fn with_detail_num(mut self, n: i64) -> Self {
+        self.detail_num = Some(n);
+        self
+    }
+
+    /// Builder: set detail_str.
+    pub fn with_detail_str(mut self, s: impl Into<String>) -> Self {
+        self.detail_str = Some(s.into());
+        self
+    }
+
+    /// Builder: request a frontend toast.
+    pub fn with_toast(mut self, level: &'static str, duration_ms: u32) -> Self {
+        self.toast_level = Some(level);
+        self.toast_duration_ms = Some(duration_ms);
+        self
+    }
 }
 
 /// Thread-safe shared state accessible by all daemon tasks.
@@ -196,8 +269,8 @@ pub struct SharedState {
     pub model_request_counts: DashMap<crate::types::ModelId, AtomicU64>,
     /// Runtime-mutable resource schedule (initialized from config, overridable via API).
     pub resource_schedule: RwLock<crate::config::ResourceSchedule>,
-    /// Broadcast channel for prune events (WebSocket push + history).
-    pub prune_events_tx: broadcast::Sender<crate::types::PruneEvent>,
+    // NOTE: prune_events_tx removed — prune events now flow through activity_tx.
+    // PruneEvent struct kept for prune_history storage and the REST API.
     /// Recent prune events (capped at 100) for the prune history API.
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
     /// Per-shard lock/pin flags — locked shards are never auto-pruned.
@@ -218,8 +291,6 @@ pub struct SharedState {
     pub channel_metrics: ChannelMetricsSet,
     /// Number of peers discovered via mDNS (LAN peers).
     pub lan_peer_count: std::sync::atomic::AtomicUsize,
-    /// Broadcast channel for LAN peer discovery events (WebSocket push).
-    pub lan_discovery_tx: broadcast::Sender<u32>,
     /// Broadcast channel fired whenever the peer_registry changes (connect/disconnect).
     /// WebSocket subscribers push a full `peer_list` message so the dashboard updates live.
     pub peer_list_changed_tx: broadcast::Sender<()>,
@@ -232,9 +303,8 @@ pub struct SharedState {
     /// Broadcast channel fired when models change (shard download, load, prune).
     /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
     pub models_changed_tx: broadcast::Sender<()>,
-    /// Broadcast channel for system notifications (CPU fallback, errors, etc.).
-    /// WebSocket subscribers push these as toast-worthy events to the dashboard.
-    pub system_notify_tx: broadcast::Sender<SystemNotification>,
+    // NOTE: system_notify_tx removed — system notifications now flow through activity_tx
+    // with toast_level set.
     /// Broadcast channel for rich activity events (verbose dashboard activity log).
     /// All subsystems emit events here; WebSocket pushes them as `activity_event` messages.
     pub activity_tx: broadcast::Sender<ActivityEvent>,
@@ -690,7 +760,7 @@ impl SharedState {
             hf_probe_cache: DashMap::new(),
             model_request_counts: DashMap::new(),
             resource_schedule: RwLock::new(config.resources.schedule.clone()),
-            prune_events_tx: broadcast::channel(64).0,
+            // prune_events_tx removed (unified into activity_tx)
             prune_history: RwLock::new(VecDeque::new()),
             locked_shards: {
                 let map = DashMap::new();
@@ -724,7 +794,7 @@ impl SharedState {
             )),
             channel_metrics: ChannelMetricsSet::new(),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
-            lan_discovery_tx: broadcast::channel(16).0,
+            // lan_discovery_tx removed (unified into activity_tx)
             peer_list_changed_tx: broadcast::channel(4).0,
             providers_config: RwLock::new({
                 // Hydrate from database (persisted via admin API), fall back to config.
@@ -751,7 +821,7 @@ impl SharedState {
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
             update_tx: broadcast::channel(4).0,
             models_changed_tx: broadcast::channel(16).0,
-            system_notify_tx: broadcast::channel(32).0,
+            // system_notify_tx removed (unified into activity_tx)
             activity_tx: broadcast::channel(256).0,
             activity_history: std::sync::Mutex::new(VecDeque::new()),
             provider_model_map: DashMap::new(),

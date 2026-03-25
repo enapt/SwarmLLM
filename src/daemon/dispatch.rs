@@ -582,6 +582,14 @@ pub(crate) async fn dispatch_network_messages(
                                         node_id: Some(format!("{}", announce.node_id)),
                                         detail_num: Some(*count as i64),
                                         detail_str: None,
+                                        toast_level: None,
+                                        toast_duration_ms: None,
+                                        shard_index: None,
+                                        freed_bytes: None,
+                                        holder_count_before: None,
+                                        holder_count_after: None,
+                                        remaining_local_shards: None,
+                                        timestamp: None,
                                     });
                                 }
                                 // Wake auto-manage so it re-evaluates rarity scores —
@@ -629,6 +637,14 @@ pub(crate) async fn dispatch_network_messages(
                                                 node_id: None,
                                                 detail_num: Some(manifest.shard_count as i64),
                                                 detail_str: Some(format!("{:?}", manifest.architecture)),
+                                                toast_level: None,
+                                                toast_duration_ms: None,
+                                                shard_index: None,
+                                                freed_bytes: None,
+                                                holder_count_before: None,
+                                                holder_count_after: None,
+                                                remaining_local_shards: None,
+                                                timestamp: None,
                                             });
                                         }
                                     }

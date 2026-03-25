@@ -257,6 +257,14 @@ impl AutoShardManager {
                         node_id: None,
                         detail_num: Some(shard_idx as i64),
                         detail_str: Some("huggingface".to_string()),
+                        toast_level: None,
+                        toast_duration_ms: None,
+                        shard_index: None,
+                        freed_bytes: None,
+                        holder_count_before: None,
+                        holder_count_after: None,
+                        remaining_local_shards: None,
+                        timestamp: None,
                     });
                 }
 
@@ -435,6 +443,14 @@ impl AutoShardManager {
                                     node_id: None,
                                     detail_num: Some(shard_idx as i64),
                                     detail_str: Some("huggingface".to_string()),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             }
 
@@ -529,6 +545,14 @@ impl AutoShardManager {
                                     node_id: None,
                                     detail_num: Some(shard_idx as i64),
                                     detail_str: None,
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             }
 
@@ -586,6 +610,14 @@ impl AutoShardManager {
                                     node_id: None,
                                     detail_num: None,
                                     detail_str: Some("p2p".to_string()),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             }
 
@@ -629,6 +661,14 @@ impl AutoShardManager {
                                     node_id: None,
                                     detail_num: Some(shard_idx as i64),
                                     detail_str: Some(e.clone()),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                             }
                             if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id)
@@ -687,6 +727,14 @@ impl AutoShardManager {
                         node_id: None,
                         detail_num: Some(candidate.shard_index as i64),
                         detail_str: None,
+                        toast_level: None,
+                        toast_duration_ms: None,
+                        shard_index: None,
+                        freed_bytes: None,
+                        holder_count_before: None,
+                        holder_count_after: None,
+                        remaining_local_shards: None,
+                        timestamp: None,
                     });
                 }
             } else {
@@ -816,6 +864,14 @@ impl AutoShardManager {
                                 node_id: Some(format!("{}", target)),
                                 detail_num: Some(candidate.shard_index as i64),
                                 detail_str: Some("p2p".to_string()),
+                                toast_level: None,
+                                toast_duration_ms: None,
+                                shard_index: None,
+                                freed_bytes: None,
+                                holder_count_before: None,
+                                holder_count_after: None,
+                                remaining_local_shards: None,
+                                timestamp: None,
                             });
                     }
                     let cmd = NetworkCommand::SendShardRequest {

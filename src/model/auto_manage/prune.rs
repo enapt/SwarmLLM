@@ -417,11 +417,8 @@ impl AutoShardManager {
                     .await;
             }
 
-            // Emit prune event
-            let _ = self.shared_state.prune_events_tx.send(event.clone());
+            // Emit unified activity event (replaces separate prune_events_tx)
             let _ = self.shared_state.models_changed_tx.send(());
-
-            // Emit activity event
             self.shared_state
                 .emit_activity(crate::daemon::state::ActivityEvent {
                     category: "auto_manage",
@@ -437,6 +434,14 @@ impl AutoShardManager {
                     node_id: None,
                     detail_num: Some(event.freed_bytes as i64),
                     detail_str: Some(event.reason.clone()),
+                    toast_level: Some("info"),
+                    toast_duration_ms: Some(6000),
+                    shard_index: Some(event.shard_index),
+                    freed_bytes: Some(event.freed_bytes),
+                    holder_count_before: Some(event.holder_count_before),
+                    holder_count_after: Some(event.holder_count_after),
+                    remaining_local_shards: Some(remaining_local),
+                    timestamp: Some(event.timestamp.to_rfc3339()),
                 });
 
             // Add to history

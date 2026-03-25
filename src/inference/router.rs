@@ -882,6 +882,14 @@ async fn finalize_request(
             node_id: None,
             detail_num: None,
             detail_str: Some(format!("{}", e)),
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
         });
     }
 
@@ -921,6 +929,14 @@ async fn finalize_request(
                 node_id: None,
                 detail_num: Some(total_tokens as i64),
                 detail_str: Some(result.finish_reason.clone()),
+                toast_level: None,
+                toast_duration_ms: None,
+                shard_index: None,
+                freed_bytes: None,
+                holder_count_before: None,
+                holder_count_after: None,
+                remaining_local_shards: None,
+                timestamp: None,
             });
         }
 

@@ -978,6 +978,14 @@ impl Daemon {
             node_id: Some(format!("{}", self.identity.node_id())),
             detail_num: Some(self.config.node.listen_port as i64),
             detail_str: None,
+            toast_level: None,
+            toast_duration_ms: None,
+            shard_index: None,
+            freed_bytes: None,
+            holder_count_before: None,
+            holder_count_after: None,
+            remaining_local_shards: None,
+            timestamp: None,
         });
 
         // Background shard verification: BLAKE3 hash check runs after API is up
@@ -1049,6 +1057,14 @@ impl Daemon {
                                     node_id: None,
                                     detail_num: Some(shard_info.index as i64),
                                     detail_str: Some(format!("{e}")),
+                                    toast_level: None,
+                                    toast_duration_ms: None,
+                                    shard_index: None,
+                                    freed_bytes: None,
+                                    holder_count_before: None,
+                                    holder_count_after: None,
+                                    remaining_local_shards: None,
+                                    timestamp: None,
                                 });
                                 quarantined += 1;
                             }
@@ -1092,6 +1108,14 @@ impl Daemon {
                     } else {
                         None
                     },
+                    toast_level: None,
+                    toast_duration_ms: None,
+                    shard_index: None,
+                    freed_bytes: None,
+                    holder_count_before: None,
+                    holder_count_after: None,
+                    remaining_local_shards: None,
+                    timestamp: None,
                 });
             });
         }
