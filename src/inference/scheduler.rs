@@ -225,7 +225,7 @@ impl PipelineScheduler {
         // Build set of pool member NodeIds for preferred routing.
         // Pool devices are trusted, free (no credit cost), and usually low latency.
         let pool_member_ids: std::collections::HashSet<NodeId> = {
-            if let Ok(ps) = self.shared_state.pool_state.try_read() {
+            if let Ok(ps) = self.shared_state.credits.pool_state.try_read() {
                 ps.as_ref()
                     .map(|s| s.members.iter().map(|m| m.node_id.clone()).collect())
                     .unwrap_or_default()

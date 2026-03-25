@@ -42,7 +42,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     let build_shard_detail = |m: &crate::types::ModelManifest,
                               state: &AppState|
      -> Vec<serde_json::Value> {
-        let acq = state.shared_state.acquisition_progress.get(&m.id);
+        let acq = state.shared_state.models.acquisition_progress.get(&m.id);
         m.shards
             .iter()
             .map(|s| {
@@ -98,6 +98,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
                 let locked = state
                     .shared_state
+                    .models
                     .locked_shards
                     .get(&shard_id)
                     .map(|v| *v)
@@ -145,7 +146,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 }
 
                 // Attach peer download state
-                if let Some(peer_dl) = state.shared_state.peer_shard_downloads.get(&shard_id) {
+                if let Some(peer_dl) = state
+                    .shared_state
+                    .models
+                    .peer_shard_downloads
+                    .get(&shard_id)
+                {
                     let peers: Vec<serde_json::Value> = peer_dl
                         .value()
                         .iter()
@@ -328,8 +334,16 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             let probed = {
                 let mid_check = crate::types::ModelId(model_id.clone());
                 has_header
-                    || state.shared_state.hf_sources.contains_key(&mid_check)
-                    || state.shared_state.hf_probe_cache.contains_key(&mid_check)
+                    || state
+                        .shared_state
+                        .models
+                        .hf_sources
+                        .contains_key(&mid_check)
+                    || state
+                        .shared_state
+                        .models
+                        .hf_probe_cache
+                        .contains_key(&mid_check)
             };
             let mmproj_info = {
                 let mid_mmproj = crate::types::ModelId(info.name.clone());
@@ -346,6 +360,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             };
             let trust_level = state
                 .shared_state
+                .models
                 .model_trust
                 .get(&crate::types::ModelId(model_id.clone()))
                 .map(|t| t.trust_level.to_string())
@@ -457,6 +472,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // Check acquisition progress — clean up completed entries
         let acq_state = state
             .shared_state
+            .models
             .acquisition_progress
             .get(&m.id)
             .and_then(|entry| {
@@ -471,6 +487,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let acq_progress = if acq_state == Some("downloading") {
             state
                 .shared_state
+                .models
                 .acquisition_progress
                 .get(&m.id)
                 .map(|entry| {
@@ -495,8 +512,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         let has_header = model_dir.join("gguf_header.bin").exists();
 
         let probed = has_header
-            || state.shared_state.hf_sources.contains_key(&m.id)
-            || state.shared_state.hf_probe_cache.contains_key(&m.id);
+            || state.shared_state.models.hf_sources.contains_key(&m.id)
+            || state.shared_state.models.hf_probe_cache.contains_key(&m.id);
         let mmproj_info_reg = {
             let holders = state.shared_state.model_registry.mmproj_holders(&m.id);
             let local_has = holders.contains(&local_node_id);
@@ -508,6 +525,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         };
         let trust_level = state
             .shared_state
+            .models
             .model_trust
             .get(&m.id)
             .map(|t| t.trust_level.to_string())
@@ -549,6 +567,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         seen_ids.insert(model_name.clone());
         let trust_level = state
             .shared_state
+            .models
             .model_trust
             .get(&crate::types::ModelId(model_name.clone()))
             .map(|t| t.trust_level.to_string())
@@ -621,7 +640,7 @@ pub async fn model_acquisition_status(
     let mid = crate::types::ModelId(model_id.clone());
 
     // Fast path: read from shared state (no channel round-trip)
-    if let Some(status) = state.shared_state.acquisition_progress.get(&mid) {
+    if let Some(status) = state.shared_state.models.acquisition_progress.get(&mid) {
         return Ok(Json(
             serde_json::to_value(status.value()).unwrap_or_default(),
         ));
@@ -654,7 +673,11 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
         let mut any_downloading = false;
 
         // Get per-shard download progress for this model (if any)
-        let acq_progress = state.shared_state.acquisition_progress.get(&manifest.id);
+        let acq_progress = state
+            .shared_state
+            .models
+            .acquisition_progress
+            .get(&manifest.id);
 
         for shard in &manifest.shards {
             let shard_id = crate::types::ShardId {
@@ -690,19 +713,23 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
             });
 
             // Also check peer download states (from gossip)
-            let peer_downloading =
-                state
-                    .shared_state
-                    .peer_shard_downloads
-                    .get(&shard_id)
-                    .map(|entry| {
-                        let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
+            let peer_downloading = state
+                .shared_state
+                .models
+                .peer_shard_downloads
+                .get(&shard_id)
+                .map(|entry| {
+                    let peers: Vec<serde_json::Value> = entry.value().iter().map(|(nid, pct)| {
                         serde_json::json!({ "node_id": format!("{}", nid), "progress_pct": pct })
                     }).collect();
-                        peers
-                    });
+                    peers
+                });
 
-            let locked = state.shared_state.locked_shards.contains_key(&shard_id);
+            let locked = state
+                .shared_state
+                .models
+                .locked_shards
+                .contains_key(&shard_id);
             let mut shard_json = serde_json::json!({
                 "index": shard.index,
                 "size_bytes": shard.size_bytes,
@@ -875,13 +902,13 @@ pub async fn delete_model(
     }
 
     // Remove from acquisition_progress
-    shared.acquisition_progress.remove(&mid);
+    shared.models.acquisition_progress.remove(&mid);
 
     // Remove from gguf_meta
     shared.gguf_meta.remove(&mid);
 
     // Remove from hf_sources
-    shared.hf_sources.remove(&mid);
+    shared.models.hf_sources.remove(&mid);
 
     // Remove split models for this model
     shared.split_models.retain(|key, _| key.0 != mid);
@@ -904,6 +931,7 @@ pub async fn delete_model(
 
     // Notify dashboard
     let _ = shared
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -970,6 +998,7 @@ pub async fn unload_model(
 
     // Notify dashboard
     let _ = shared
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -1089,11 +1118,12 @@ pub async fn unload_shard(
     }
 
     // Clear stale model_loaded history so updated layer range emits fresh
-    if let Ok(mut history) = shared.activity_history.lock() {
+    if let Ok(mut history) = shared.events.activity_history.lock() {
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
     }
 
     let _ = shared
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -1225,11 +1255,12 @@ pub async fn load_shard(
     // Clear split models so they reload with new window
     shared.split_models.retain(|key, _| key.0 != mid);
     // Clear stale model_loaded history so the new layer range emits a fresh event
-    if let Ok(mut history) = shared.activity_history.lock() {
+    if let Ok(mut history) = shared.events.activity_history.lock() {
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
     }
 
     let _ = shared
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -1369,7 +1400,7 @@ pub async fn delete_shard(
 
     // Clear stale model_loaded history entries so the reload emits a fresh event
     // (the layer range may have changed after shard deletion)
-    if let Ok(mut history) = shared.activity_history.lock() {
+    if let Ok(mut history) = shared.events.activity_history.lock() {
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
     }
 
@@ -1387,6 +1418,7 @@ pub async fn delete_shard(
             )
             .await;
             let _ = reload_shared
+                .events
                 .dashboard_tx
                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
         });
@@ -1394,6 +1426,7 @@ pub async fn delete_shard(
 
     // Notify dashboard so shard grid and model state update immediately
     let _ = shared
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -1552,7 +1585,7 @@ pub async fn download_shard(
                     state: crate::model::acquisition::ShardState::Downloading,
                 },
             );
-            shared.acquisition_progress.insert(
+            shared.models.acquisition_progress.insert(
                 mid.clone(),
                 crate::model::acquisition::AcquisitionStatus {
                     model_id: mid.clone(),
@@ -1630,7 +1663,7 @@ pub async fn download_shard(
     }
 
     // Fallback: HuggingFace (if source exists)
-    if let Some(hf) = shared.hf_sources.get(&mid) {
+    if let Some(hf) = shared.models.hf_sources.get(&mid) {
         return Ok(Json(serde_json::json!({
             "status": "use_hf",
             "source": "huggingface",
@@ -1654,10 +1687,16 @@ pub async fn get_model_auto_manage(
     let mid = crate::types::ModelId(model_id.clone());
     let default_cap = state
         .shared_state
+        .models
         .auto_manage_default_model_cap
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    match state.shared_state.model_auto_manage_policies.get(&mid) {
+    match state
+        .shared_state
+        .models
+        .model_auto_manage_policies
+        .get(&mid)
+    {
         Some(policy) => Json(serde_json::json!({
             "model_id": model_id,
             "enabled": policy.enabled,
@@ -1697,6 +1736,7 @@ pub async fn set_model_auto_manage(
     // Update in-memory
     state
         .shared_state
+        .models
         .model_auto_manage_policies
         .insert(mid.clone(), policy.clone());
 
@@ -1707,7 +1747,7 @@ pub async fn set_model_auto_manage(
         .put_json("model_auto_manage_policies", &model_id, &policy);
 
     // Wake auto-manage to re-evaluate
-    state.shared_state.auto_manage_notify.notify_one();
+    state.shared_state.models.auto_manage_notify.notify_one();
 
     tracing::info!(
         model = %model_id,
@@ -2034,11 +2074,11 @@ pub async fn model_metadata(
 pub async fn download_queue(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut downloads: Vec<serde_json::Value> = Vec::new();
 
-    for entry in state.shared_state.acquisition_progress.iter() {
+    for entry in state.shared_state.models.acquisition_progress.iter() {
         let status = entry.value();
         let model_id = &status.model_id;
 
-        let source = if state.shared_state.hf_sources.contains_key(model_id) {
+        let source = if state.shared_state.models.hf_sources.contains_key(model_id) {
             "huggingface"
         } else {
             "network"
@@ -2134,7 +2174,7 @@ pub async fn download_queue(State(state): State<AppState>) -> Json<serde_json::V
 
 /// GET /api/admin/prune-history — Recent prune events.
 pub async fn prune_history(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let history = state.shared_state.prune_history.read().await;
+    let history = state.shared_state.models.prune_history.read().await;
     let events: Vec<serde_json::Value> = history
         .iter()
         .rev()
@@ -2180,6 +2220,7 @@ pub async fn lock_shard(
     if body.locked {
         state
             .shared_state
+            .models
             .locked_shards
             .insert(shard_id.clone(), true);
         // Persist to database
@@ -2190,7 +2231,7 @@ pub async fn lock_shard(
                 .insert_raw("locked_shards", &key_str, b"1");
         }
     } else {
-        state.shared_state.locked_shards.remove(&shard_id);
+        state.shared_state.models.locked_shards.remove(&shard_id);
         if let Ok(key_str) = serde_json::to_string(&shard_id) {
             let _ = state.shared_state.db.remove("locked_shards", &key_str);
         }

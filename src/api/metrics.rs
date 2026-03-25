@@ -26,7 +26,10 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     );
 
     // swarmllm_inference_requests_total (counter)
-    let requests = shared.inference_requests_total.load(Ordering::Relaxed);
+    let requests = shared
+        .metrics
+        .inference_requests_total
+        .load(Ordering::Relaxed);
     write_counter(
         &mut buf,
         "swarmllm_inference_requests_total",
@@ -36,7 +39,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 
     // swarmllm_credits_balance (gauge)
     let balance = {
-        let cb = shared.credit_balance.read().await;
+        let cb = shared.credits.credit_balance.read().await;
         cb.balance
     };
     write_gauge(
@@ -140,7 +143,7 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     const BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
     let name = "swarmllm_inference_latency_seconds";
 
-    let samples_guard = match shared.inference_latency_samples.read() {
+    let samples_guard = match shared.metrics.inference_latency_samples.read() {
         Ok(g) => g,
         Err(_) => {
             tracing::warn!("inference_latency_samples lock poisoned — skipping histogram");
@@ -167,12 +170,12 @@ fn write_channel_metrics(buf: &mut String, shared: &crate::daemon::SharedState) 
     use std::sync::atomic::Ordering::Relaxed;
 
     let channels: &[(&str, &crate::daemon::ChannelCounters)] = &[
-        ("network_cmd", &shared.channel_metrics.network_cmd),
-        ("network_out", &shared.channel_metrics.network_out),
-        ("router_cmd", &shared.channel_metrics.router_cmd),
-        ("rebalance", &shared.channel_metrics.rebalance),
-        ("acquisition", &shared.channel_metrics.acquisition),
-        ("pool_cmd", &shared.channel_metrics.pool_cmd),
+        ("network_cmd", &shared.metrics.channel_metrics.network_cmd),
+        ("network_out", &shared.metrics.channel_metrics.network_out),
+        ("router_cmd", &shared.metrics.channel_metrics.router_cmd),
+        ("rebalance", &shared.metrics.channel_metrics.rebalance),
+        ("acquisition", &shared.metrics.channel_metrics.acquisition),
+        ("pool_cmd", &shared.metrics.channel_metrics.pool_cmd),
     ];
 
     let _ = writeln!(

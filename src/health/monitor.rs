@@ -104,9 +104,9 @@ impl HealthMonitor {
                     self.cleanup_stale_channels();
                     self.cleanup_stale_peer_id_map();
                     // Cleanup expired anti-gaming rate limit entries
-                    self.shared_state.anti_gaming.lock().await.cleanup();
+                    self.shared_state.credits.anti_gaming.lock().await.cleanup();
                     // Decay trust scores toward default (0.5) on each health ping cycle
-                    self.shared_state.trust_manager.decay_all(&self.shared_state.peer_registry);
+                    self.shared_state.credits.trust_manager.decay_all(&self.shared_state.peer_registry);
                     // Clean up stale AllReduce entries (receiver dropped/timed out)
                     self.shared_state.allreduce_registry.cleanup_stale();
                 }
@@ -173,7 +173,7 @@ impl HealthMonitor {
 
         // Use real uptime so message content changes each broadcast (avoids GossipSub dedup)
         let uptime_seconds = {
-            let stats = self.shared_state.node_stats.read().await;
+            let stats = self.shared_state.metrics.node_stats.read().await;
             (chrono::Utc::now() - stats.uptime_start)
                 .num_seconds()
                 .max(0) as u64
@@ -281,7 +281,7 @@ impl HealthMonitor {
             }
 
             // Also broadcast HfSourceGossip so late-joining peers discover the HF source
-            if let Some(hf_source) = self.shared_state.hf_sources.get(&manifest.id) {
+            if let Some(hf_source) = self.shared_state.models.hf_sources.get(&manifest.id) {
                 let gossip = crate::types::HfSourceGossip {
                     model_id: manifest.id.clone(),
                     repo_id: hf_source.repo_id.clone(),
@@ -467,9 +467,17 @@ impl HealthMonitor {
                 .try_send(RebalanceEvent::PeerLeft(peer_id))
                 .is_err()
             {
-                self.shared_state.channel_metrics.rebalance.record_dropped();
+                self.shared_state
+                    .metrics
+                    .channel_metrics
+                    .rebalance
+                    .record_dropped();
             } else {
-                self.shared_state.channel_metrics.rebalance.record_sent();
+                self.shared_state
+                    .metrics
+                    .channel_metrics
+                    .rebalance
+                    .record_sent();
             }
         }
     }
@@ -591,6 +599,7 @@ impl HealthMonitor {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
         let to_remove: Vec<_> = self
             .shared_state
+            .models
             .acquisition_progress
             .iter()
             .filter(|entry| {
@@ -611,7 +620,7 @@ impl HealthMonitor {
                 "Cleaning up stale acquisition progress entries"
             );
             for key in to_remove {
-                self.shared_state.acquisition_progress.remove(&key);
+                self.shared_state.models.acquisition_progress.remove(&key);
             }
         }
     }

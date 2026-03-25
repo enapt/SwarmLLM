@@ -211,11 +211,16 @@ impl ShardRebalancer {
                         .is_err()
                     {
                         self.shared_state
+                            .metrics
                             .channel_metrics
                             .acquisition
                             .record_dropped();
                     } else {
-                        self.shared_state.channel_metrics.acquisition.record_sent();
+                        self.shared_state
+                            .metrics
+                            .channel_metrics
+                            .acquisition
+                            .record_sent();
                     }
                     tracing::info!(
                         model = %shard_id.model_id,
@@ -297,11 +302,16 @@ impl ShardRebalancer {
                     .is_err()
                 {
                     self.shared_state
+                        .metrics
                         .channel_metrics
                         .acquisition
                         .record_dropped();
                 } else {
-                    self.shared_state.channel_metrics.acquisition.record_sent();
+                    self.shared_state
+                        .metrics
+                        .channel_metrics
+                        .acquisition
+                        .record_sent();
                 }
                 tracing::info!(
                     model = %shard_id.model_id,

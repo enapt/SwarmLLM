@@ -277,7 +277,7 @@ impl InferenceRouter {
         // Calculate priority tier from credit balance and network percentile.
         // Per spec: "Credit errors: degrade priority tier, never block"
         let balance = {
-            if let Ok(bal) = self.shared_state.credit_balance.try_read() {
+            if let Ok(bal) = self.shared_state.credits.credit_balance.try_read() {
                 bal.balance
             } else {
                 0
@@ -289,7 +289,7 @@ impl InferenceRouter {
         let network_percentile = {
             let mut count = 0u32;
             let mut below = 0u32;
-            for entry in self.shared_state.peer_credit_balances.iter() {
+            for entry in self.shared_state.credits.peer_credit_balances.iter() {
                 count += 1;
                 if *entry.value() < balance {
                     below += 1;
@@ -340,6 +340,7 @@ impl InferenceRouter {
             .is_some()
         {
             self.shared_state
+                .models
                 .model_request_counts
                 .entry(adjusted_request.model_id.clone())
                 .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
@@ -720,14 +721,19 @@ impl InferenceRouter {
             // Create escrow for large requests (estimated cost > threshold)
             let estimated_cost = crate::credit::ledger::RATE_INFERENCE_CONSUME
                 * request.sampling_params.max_tokens as i64;
-            let escrow_id = if shared_state.escrow_manager.needs_escrow(estimated_cost) {
+            let escrow_id = if shared_state
+                .credits
+                .escrow_manager
+                .needs_escrow(estimated_cost)
+            {
                 match shared_state
+                    .credits
                     .escrow_manager
                     .create_escrow(
                         request.id,
                         estimated_cost,
                         &request.requester,
-                        &shared_state.credit_balance,
+                        &shared_state.credits.credit_balance,
                     )
                     .await
                 {
@@ -776,7 +782,8 @@ impl InferenceRouter {
                         completion_tokens = result.completion_tokens,
                         "DIAG: inference completed"
                     );
-                    if let Ok(mut samples) = shared_state.inference_latency_samples.write() {
+                    if let Ok(mut samples) = shared_state.metrics.inference_latency_samples.write()
+                    {
                         if samples.len() >= 1000 {
                             samples.pop_front();
                         }
@@ -802,6 +809,7 @@ impl InferenceRouter {
                     Ok(_) => {
                         // Release escrow — credits stay deducted (already charged)
                         if let Err(e) = shared_state
+                            .credits
                             .escrow_manager
                             .release_escrow(eid, shared_state.identity.node_id())
                             .await
@@ -812,8 +820,9 @@ impl InferenceRouter {
                     Err(_) => {
                         // Refund escrow — return credits on failure
                         if let Err(e) = shared_state
+                            .credits
                             .escrow_manager
-                            .refund_escrow(eid, &shared_state.credit_balance)
+                            .refund_escrow(eid, &shared_state.credits.credit_balance)
                             .await
                         {
                             tracing::warn!(escrow_id = %eid, error = %e, "Failed to refund escrow");
@@ -897,11 +906,12 @@ async fn finalize_request(
     let is_local_api_request = request.requester == crate::types::NodeId([0u8; 32]);
 
     if let Ok(ref result) = output {
-        if let Ok(mut stats) = shared_state.node_stats.try_write() {
+        if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
             stats.requests_served += 1;
         }
         // Update Prometheus metrics
         shared_state
+            .metrics
             .inference_requests_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -948,7 +958,7 @@ async fn finalize_request(
         // - Pool members (slaves): charge goes to the MASTER's balance via credit forward.
         //   The slave's dashboard is fully usable; usage is billed to the pool owner.
         let is_pool_member = {
-            let ps = shared_state.pool_state.read().await;
+            let ps = shared_state.credits.pool_state.read().await;
             ps.as_ref()
                 .map(|s| s.pool_id != *shared_state.identity.node_id())
                 .unwrap_or(false)
@@ -960,10 +970,10 @@ async fn finalize_request(
             if is_pool_member {
                 // Slave device: forward the spend to the master's balance.
                 // Use the same credit forward mechanism as earning, but negative.
-                if let Some(ref tx) = *shared_state.pool_tx.read().await {
+                if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
                     let my_id = shared_state.identity.node_id();
                     let pool_id = {
-                        let ps = shared_state.pool_state.read().await;
+                        let ps = shared_state.credits.pool_state.read().await;
                         ps.as_ref().map(|s| s.pool_id.clone())
                     };
                     if let Some(pid) = pool_id {
@@ -987,7 +997,7 @@ async fn finalize_request(
             } else {
                 // Normal node or pool owner: charge locally
                 if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                    &shared_state.credit_balance,
+                    &shared_state.credits.credit_balance,
                     &shared_state.db,
                     -spent,
                     false,
@@ -1312,6 +1322,7 @@ async fn execute_request(
     // after threshold, enabling auto-manage to propagate this model.
     {
         let mut trust = shared_state
+            .models
             .model_trust
             .entry(model_id.clone())
             .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
@@ -1439,6 +1450,7 @@ async fn execute_request(
                 // If another task is already loading, it returns immediately.
                 // We then wait on the notify for up to 60s.
                 let maybe_notify = shared_state
+                    .models
                     .loading_models
                     .get(model_id)
                     .map(|r| r.value().clone());
@@ -1573,7 +1585,7 @@ async fn execute_request(
             // Update trust for all remote peers that participated in the pipeline
             for seg in &assignment_ref.segments {
                 if seg.node_id != local_node_id {
-                    shared_state.trust_manager.update_trust(
+                    shared_state.credits.trust_manager.update_trust(
                         &shared_state.peer_registry,
                         &seg.node_id,
                         crate::credit::trust::TrustEvent::InferenceSuccess,
@@ -1602,7 +1614,7 @@ async fn execute_request(
             // Apply credit penalty for distributed inference failure
             let penalty = shared_state.config.pool.credit_rates.penalty_serve_failure;
             if let Err(pe) = crate::credit::ledger::apply_credit_direct(
-                &shared_state.credit_balance,
+                &shared_state.credits.credit_balance,
                 &shared_state.db,
                 -penalty,
                 false,
@@ -1655,7 +1667,7 @@ async fn spot_check_distributed_result(
 
     // Ask anti-gaming whether this request should be spot-checked
     let should_check = {
-        let ag = shared_state.anti_gaming.lock().await;
+        let ag = shared_state.credits.anti_gaming.lock().await;
         let rate = ag.effective_spot_check_rate(&remote_peers[0]);
         rand::random::<f64>() < rate
     };
@@ -1724,7 +1736,7 @@ async fn spot_check_distributed_result(
 /// Report a spot-check failure for a peer: reduce trust and log the penalty.
 async fn report_spot_check_failure(shared_state: &Arc<SharedState>, peer: &NodeId) {
     // Update trust score
-    shared_state.trust_manager.update_trust(
+    shared_state.credits.trust_manager.update_trust(
         &shared_state.peer_registry,
         peer,
         crate::credit::trust::TrustEvent::SpotCheckFail,
@@ -1732,7 +1744,7 @@ async fn report_spot_check_failure(shared_state: &Arc<SharedState>, peer: &NodeI
 
     // Report to anti-gaming
     let penalty = {
-        let mut ag = shared_state.anti_gaming.lock().await;
+        let mut ag = shared_state.credits.anti_gaming.lock().await;
         ag.report_spot_check_failure(peer)
     };
 

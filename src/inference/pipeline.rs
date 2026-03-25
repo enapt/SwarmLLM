@@ -896,7 +896,7 @@ impl PipelineExecutor {
             if has_local_segment {
                 let total_earned = crate::credit::ledger::RATE_INFERENCE_SERVE * total_tokens;
                 if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                    &self.shared_state.credit_balance,
+                    &self.shared_state.credits.credit_balance,
                     &self.shared_state.db,
                     total_earned,
                     true,
@@ -1026,7 +1026,7 @@ impl PipelineExecutor {
                 }
             } else {
                 // No header on disk — try fetching from HuggingFace on-demand
-                if let Some(hf_source) = self.shared_state.hf_sources.get(model_id) {
+                if let Some(hf_source) = self.shared_state.models.hf_sources.get(model_id) {
                     let model_dir = self
                         .shared_state
                         .config
@@ -1671,7 +1671,7 @@ impl PipelineExecutor {
             .await?;
 
         // Track stats
-        if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
             stats.forwards_served += 1;
         }
 

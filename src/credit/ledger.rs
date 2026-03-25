@@ -121,9 +121,9 @@ impl CreditLedger {
     fn credit_rates(&self) -> crate::config::CreditRateConfig {
         if let Some(ref ss) = self.shared_state {
             // Check for a per-pool override first
-            if let Ok(pool_state) = ss.pool_state.try_read() {
+            if let Ok(pool_state) = ss.credits.pool_state.try_read() {
                 if let Some(ref ps) = *pool_state {
-                    if let Some(rates) = ss.pool_credit_rates.get(&ps.pool_id) {
+                    if let Some(rates) = ss.credits.pool_credit_rates.get(&ps.pool_id) {
                         return rates.value().clone();
                     }
                 }
@@ -422,7 +422,7 @@ impl CreditLedger {
                     // Flush pending credit earn accumulator from forward participation.
                     // This prevents credit loss from try_write() contention in the hot path.
                     if let Some(ref ss) = self.shared_state {
-                        let pending = ss.pending_credit_earn.swap(0, std::sync::atomic::Ordering::AcqRel);
+                        let pending = ss.credits.pending_credit_earn.swap(0, std::sync::atomic::Ordering::AcqRel);
                         if pending != 0 {
                             if let Err(e) = apply_credit_direct(
                                 &self.balance,
@@ -432,7 +432,7 @@ impl CreditLedger {
                             ).await {
                                 tracing::warn!(error = %e, pending, "Failed to flush pending credit earn");
                                 // Put it back so it's not lost
-                                ss.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Release);
+                                ss.credits.pending_credit_earn.fetch_add(pending, std::sync::atomic::Ordering::Release);
                             } else {
                                 tracing::debug!(pending, "Flushed pending forward participation credits");
                             }
@@ -532,7 +532,7 @@ impl CreditLedger {
                 _ = escrow_cleanup_interval.tick() => {
                     // Clean up expired escrows (refund credits for timed-out requests)
                     if let Some(ref ss) = self.shared_state {
-                        let cleaned = ss.escrow_manager.cleanup_expired(&self.balance).await;
+                        let cleaned = ss.credits.escrow_manager.cleanup_expired(&self.balance).await;
                         if cleaned > 0 {
                             tracing::info!(
                                 cleaned,

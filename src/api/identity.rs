@@ -151,7 +151,7 @@ pub async fn leaderboard(
     // Add self (always included)
     let self_id = state.shared_state.identity.node_id();
     let (self_balance, self_tier) = {
-        let self_credit = state.shared_state.credit_balance.read().await;
+        let self_credit = state.shared_state.credits.credit_balance.read().await;
         let balance = self_credit.balance;
         let tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
         (balance, tier)
@@ -178,6 +178,7 @@ pub async fn leaderboard(
         // Use actual gossiped balance if available, otherwise estimate from trust
         let balance = state
             .shared_state
+            .credits
             .peer_credit_balances
             .get(&peer.node_id)
             .map(|v| *v)

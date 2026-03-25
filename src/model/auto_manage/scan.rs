@@ -250,6 +250,7 @@ pub async fn check_and_load_model(
             }
             // Check no active download for this shard
             let is_downloading = shared
+                .models
                 .acquisition_progress
                 .get(model_id)
                 .map(|entry| {
@@ -314,7 +315,7 @@ pub async fn check_and_load_model(
     // If another task is already loading this model, skip silently.
     let _loading_guard = {
         use dashmap::mapref::entry::Entry;
-        match shared.loading_models.entry(model_id.clone()) {
+        match shared.models.loading_models.entry(model_id.clone()) {
             Entry::Vacant(e) => {
                 e.insert(Arc::new(tokio::sync::Notify::new()));
                 Some(model_id.clone()) // We hold the guard
@@ -333,7 +334,7 @@ pub async fn check_and_load_model(
     impl<'a> Drop for LoadGuard<'a> {
         fn drop(&mut self) {
             if let Some(ref mid) = self.model_id {
-                if let Some((_, notify)) = self.shared.loading_models.remove(mid) {
+                if let Some((_, notify)) = self.shared.models.loading_models.remove(mid) {
                     notify.notify_waiters();
                 }
             }
@@ -387,6 +388,7 @@ pub async fn check_and_load_model(
                     );
                     // Only emit once per model to avoid spamming on every scan cycle
                     let already_notified = shared
+                        .events
                         .activity_history
                         .lock()
                         .map(|h| {
@@ -522,6 +524,7 @@ pub async fn check_and_load_model(
             manifest.name, mem_type, shard_label, layer_start, layer_end
         );
         let already_emitted = shared
+            .events
             .activity_history
             .lock()
             .map(|h| {

@@ -238,12 +238,12 @@ pub async fn try_proxy_openai(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
 
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
     let provider = match resolve_provider(model, &config) {
         Some(p) if !p.is_anthropic => p,
         _ => {
             // Fallback: check provider_model_map (populated by list_provider_models)
-            if let Some(entry) = state.shared_state.provider_model_map.get(model) {
+            if let Some(entry) = state.shared_state.metrics.provider_model_map.get(model) {
                 let provider_name = entry.value().clone();
                 match resolve_by_name(&provider_name, &config) {
                     Some(p) if !p.is_anthropic => {
@@ -543,7 +543,7 @@ pub async fn proxy_to_anthropic(
 
 /// GET /v1/providers — List configured providers (public, no keys exposed).
 pub async fn list_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
 
     let mut providers = vec![
         serde_json::json!({

@@ -622,7 +622,7 @@ impl Daemon {
                         }
                         let model_id_str = entry.file_name().to_string_lossy().to_string();
                         let mid = crate::types::ModelId(model_id_str.clone());
-                        if shared_state.hf_sources.contains_key(&mid) {
+                        if shared_state.models.hf_sources.contains_key(&mid) {
                             continue;
                         }
                         let hf_path = entry.path().join("hf_source.json");
@@ -635,7 +635,10 @@ impl Daemon {
                                         file = %source.filename,
                                         "Loaded HF source from disk"
                                     );
-                                    shared_state.hf_sources.insert(mid.clone(), source.clone());
+                                    shared_state
+                                        .models
+                                        .hf_sources
+                                        .insert(mid.clone(), source.clone());
                                     let _ = self.db.put_json("hf_sources", &model_id_str, &source);
                                 }
                             }
@@ -676,7 +679,7 @@ impl Daemon {
                         // Download from HF if source is known
                         let model_id_str = entry.file_name().to_string_lossy().to_string();
                         let mid = crate::types::ModelId(model_id_str.clone());
-                        if let Some(hf_src) = shared_state.hf_sources.get(&mid) {
+                        if let Some(hf_src) = shared_state.models.hf_sources.get(&mid) {
                             tracing::info!(
                                 model = %model_id_str,
                                 repo = %hf_src.repo_id,
@@ -864,7 +867,7 @@ impl Daemon {
         // Spawn CreditLedger — shares the same Arc<RwLock<CreditBalance>> as SharedState
         let mut credit_ledger = CreditLedger::new(
             shared_state.identity.node_id().clone(),
-            shared_state.credit_balance.clone(),
+            shared_state.credits.credit_balance.clone(),
             self.db.clone(),
             network_tx.clone(),
             shutdown_rx.clone(),
@@ -896,7 +899,7 @@ impl Daemon {
 
         let (pool_cmd_tx, pool_cmd_rx) = mpsc::channel::<crate::pool::types::PoolCommand>(64);
         {
-            *shared_state.pool_tx.write().await = Some(pool_cmd_tx);
+            *shared_state.credits.pool_tx.write().await = Some(pool_cmd_tx);
         }
         let pool_manager = crate::pool::manager::PoolManager::new(
             shared_state.clone(),
@@ -926,8 +929,8 @@ impl Daemon {
         // Spawn UpdateChecker (11th subsystem task — optional, runs only if not disabled)
         {
             let update_config = self.config.updates.clone();
-            let update_state = shared_state.update_state.clone();
-            let dash_tx = shared_state.dashboard_tx.clone();
+            let update_state = shared_state.events.update_state.clone();
+            let dash_tx = shared_state.events.dashboard_tx.clone();
             let update_shutdown = shutdown_rx.clone();
             let checker = crate::update::UpdateChecker::new(
                 update_config,
@@ -1278,11 +1281,13 @@ impl Daemon {
                 // Sort by request count descending so popular models get VRAM priority on restart
                 manifests.sort_by(|a, b| {
                     let count_a = sm
+                        .models
                         .model_request_counts
                         .get(&a.id)
                         .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))
                         .unwrap_or(0);
                     let count_b = sm
+                        .models
                         .model_request_counts
                         .get(&b.id)
                         .map(|c| c.value().load(std::sync::atomic::Ordering::Relaxed))

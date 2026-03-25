@@ -73,7 +73,7 @@ impl AutoShardManager {
         network_tx: mpsc::Sender<NetworkCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
-        let notify = shared_state.auto_manage_notify.clone();
+        let notify = shared_state.models.auto_manage_notify.clone();
         let max_concurrent = shared_state
             .config
             .auto_manage
@@ -147,7 +147,7 @@ impl AutoShardManager {
                     }
 
                     // Re-check enabled -- admin API can toggle at runtime
-                    if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
+                    if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         self.evaluate().await;
                     }
                 }
@@ -165,7 +165,7 @@ impl AutoShardManager {
                         );
                         continue;
                     }
-                    if self.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
+                    if self.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Acquire) {
                         tracing::info!("AutoShardManager: triggered by new HF source or manifest");
                         last_notify_eval = std::time::Instant::now();
                         self.evaluate().await;
@@ -203,6 +203,7 @@ impl AutoShardManager {
         // shard holder, remove its in-flight download entry. This handles the
         // case where the Complete gossip message was lost or delayed.
         self.shared_state
+            .models
             .peer_shard_downloads
             .retain(|shard_id, downloaders| {
                 downloaders.retain(|(node_id, _pct)| {
@@ -222,7 +223,7 @@ impl AutoShardManager {
         // that peers already hold shards.
         let peers = self.shared_state.peer_registry.len();
         if peers == 0 {
-            let stats = self.shared_state.node_stats.read().await;
+            let stats = self.shared_state.metrics.node_stats.read().await;
             let uptime_secs = (chrono::Utc::now() - stats.uptime_start)
                 .num_seconds()
                 .max(0) as u64;
@@ -284,7 +285,7 @@ impl AutoShardManager {
     pub(super) fn decay_request_counts(&self) {
         let our_region = self.our_region().unwrap_or_else(|| "??".to_string());
 
-        for entry in self.shared_state.model_request_counts.iter() {
+        for entry in self.shared_state.models.model_request_counts.iter() {
             let model_id = entry.key().clone();
             let fresh = entry.value().swap(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -329,6 +330,7 @@ impl AutoShardManager {
 
             let mut trust = self
                 .shared_state
+                .models
                 .model_trust
                 .entry(manifest.id.clone())
                 .or_insert_with(crate::types::ModelTrustInfo::new_discovered);
@@ -382,7 +384,7 @@ impl AutoShardManager {
                 let mid = ModelId(model_id_str.clone());
 
                 // Skip if already known
-                if self.shared_state.hf_sources.contains_key(&mid) {
+                if self.shared_state.models.hf_sources.contains_key(&mid) {
                     continue;
                 }
 
@@ -396,6 +398,7 @@ impl AutoShardManager {
                                 "Discovered HF source from hf_source.json"
                             );
                             self.shared_state
+                                .models
                                 .hf_sources
                                 .insert(mid.clone(), source.clone());
                             // Persist to DB

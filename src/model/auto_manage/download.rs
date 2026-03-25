@@ -59,6 +59,7 @@ impl AutoShardManager {
             // Check if this shard is currently being downloaded (by API handler or another cycle)
             let is_downloading = self
                 .shared_state
+                .models
                 .acquisition_progress
                 .get(&candidate.model_id)
                 .map(|entry| {
@@ -154,7 +155,7 @@ impl AutoShardManager {
 
         // Download from HuggingFace only if no peers hold the shard
         if !has_peer_holders {
-            if let Some(hf_source) = self.shared_state.hf_sources.get(&candidate.model_id) {
+            if let Some(hf_source) = self.shared_state.models.hf_sources.get(&candidate.model_id) {
                 // Create progress entry with per-shard tracking for the specific shard
                 let mut shard_progress = std::collections::HashMap::new();
                 shard_progress.insert(
@@ -169,7 +170,8 @@ impl AutoShardManager {
                 // Merge with existing progress entry rather than overwriting.
                 // Multiple shards of the same model may be downloading concurrently
                 // and each needs its own shard_progress entry tracked.
-                if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(&mid) {
+                if let Some(mut entry) = self.shared_state.models.acquisition_progress.get_mut(&mid)
+                {
                     entry.state = crate::model::acquisition::AcquisitionState::Downloading;
                     // Set total_shards from the manifest, not by incrementing
                     // (incrementing causes inflated counts when merging progress entries)
@@ -218,6 +220,7 @@ impl AutoShardManager {
                         trigger: "auto_manage".to_string(),
                     };
                     self.shared_state
+                        .models
                         .acquisition_progress
                         .insert(mid.clone(), status);
                 }
@@ -294,7 +297,7 @@ impl AutoShardManager {
                             };
 
                             if let Some(mut entry) =
-                                prog_shared.acquisition_progress.get_mut(&prog_mid)
+                                prog_shared.models.acquisition_progress.get_mut(&prog_mid)
                             {
                                 entry.downloaded_bytes = prog.downloaded_bytes;
                                 entry.total_bytes = prog.total_bytes;
@@ -344,7 +347,8 @@ impl AutoShardManager {
                                 error = %e,
                                 "AutoShardManager: GGUF probe failed"
                             );
-                            if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id)
+                            if let Some(mut entry) =
+                                shared.models.acquisition_progress.get_mut(&model_id)
                             {
                                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                                     reason: format!("GGUF probe failed: {}", e),
@@ -515,7 +519,8 @@ impl AutoShardManager {
                                 .record_shard_holder(sid.clone(), node_id.clone());
 
                             // Update progress
-                            if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id)
+                            if let Some(mut entry) =
+                                shared.models.acquisition_progress.get_mut(&model_id)
                             {
                                 entry.state = crate::model::acquisition::AcquisitionState::Complete;
                                 entry.downloaded_shards = 1;
@@ -590,6 +595,7 @@ impl AutoShardManager {
 
                             // Notify dashboard that models have changed
                             let _ = shared
+                                .events
                                 .dashboard_tx
                                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -626,7 +632,7 @@ impl AutoShardManager {
                             // Self-wake so we immediately re-evaluate and download
                             // more shards (libp2p gossipsub doesn't deliver our own
                             // broadcasts back to us, so we must notify ourselves).
-                            shared.auto_manage_notify.notify_one();
+                            shared.models.auto_manage_notify.notify_one();
 
                             // Clean up acquisition_progress after a delay so the
                             // frontend sees "complete" before we remove it.
@@ -634,7 +640,10 @@ impl AutoShardManager {
                             let cleanup_mid = model_id.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                                cleanup_shared
+                                    .models
+                                    .acquisition_progress
+                                    .remove(&cleanup_mid);
                             });
                         }
                         Err(e) => {
@@ -673,7 +682,8 @@ impl AutoShardManager {
                                     timestamp: None,
                                 });
                             }
-                            if let Some(mut entry) = shared.acquisition_progress.get_mut(&model_id)
+                            if let Some(mut entry) =
+                                shared.models.acquisition_progress.get_mut(&model_id)
                             {
                                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                                     reason: e,
@@ -685,7 +695,10 @@ impl AutoShardManager {
                             let cleanup_mid2 = model_id.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                                cleanup_shared2.acquisition_progress.remove(&cleanup_mid2);
+                                cleanup_shared2
+                                    .models
+                                    .acquisition_progress
+                                    .remove(&cleanup_mid2);
                             });
                         }
                     }
@@ -773,6 +786,7 @@ impl AutoShardManager {
                     let shard_bytes = candidate.shard_size_bytes;
                     if let Some(mut entry) = self
                         .shared_state
+                        .models
                         .acquisition_progress
                         .get_mut(&candidate.model_id)
                     {
@@ -804,7 +818,7 @@ impl AutoShardManager {
                                 state: crate::model::acquisition::ShardState::Downloading,
                             },
                         );
-                        self.shared_state.acquisition_progress.insert(
+                        self.shared_state.models.acquisition_progress.insert(
                             candidate.model_id.clone(),
                             crate::model::acquisition::AcquisitionStatus {
                                 model_id: candidate.model_id.clone(),
@@ -924,6 +938,7 @@ impl AutoShardManager {
         // Look up mmproj_filename from HfSource
         let mmproj_filename = self
             .shared_state
+            .models
             .hf_sources
             .get(&candidate.model_id)
             .and_then(|s| s.mmproj_filename.clone());
@@ -938,6 +953,7 @@ impl AutoShardManager {
 
         let repo_id = self
             .shared_state
+            .models
             .hf_sources
             .get(&candidate.model_id)
             .map(|s| s.repo_id.clone());
@@ -991,6 +1007,7 @@ impl AutoShardManager {
 
                     // Notify dashboard
                     let _ = shared
+                        .events
                         .dashboard_tx
                         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
                 }
@@ -1030,6 +1047,7 @@ impl AutoShardManager {
         check_and_load_model(&self.shared_state, model_id, vram_budget).await;
         let _ = self
             .shared_state
+            .events
             .dashboard_tx
             .send(crate::daemon::state::DashboardSignal::ModelsChanged);
     }

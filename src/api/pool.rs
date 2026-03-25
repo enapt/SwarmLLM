@@ -10,7 +10,7 @@ use crate::types::NodeId;
 
 /// GET /api/pool/state — Get current pool state.
 pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let pool_state = state.shared_state.pool_state.read().await;
+    let pool_state = state.shared_state.credits.pool_state.read().await;
     match pool_state.as_ref() {
         Some(ps) => Json(serde_json::json!({
             "in_pool": true,
@@ -400,7 +400,7 @@ pub async fn pool_join(
 // ---- Helpers ----
 
 async fn send_pool_command(state: &AppState, cmd: PoolCommand) -> Result<(), ApiError> {
-    let tx_lock = state.shared_state.pool_tx.read().await;
+    let tx_lock = state.shared_state.credits.pool_tx.read().await;
     let tx = tx_lock.as_ref().ok_or_else(|| {
         ApiError(crate::error::SwarmError::Internal(
             "Pool manager not running".into(),
@@ -491,6 +491,7 @@ pub async fn pool_rates_get(
 
     let rates = state
         .shared_state
+        .credits
         .pool_credit_rates
         .get(&pool_id)
         .map(|r| r.value().clone())
@@ -521,6 +522,7 @@ pub async fn pool_rates_set(
     // Merge: use provided values or fall back to current/defaults
     let current = state
         .shared_state
+        .credits
         .pool_credit_rates
         .get(&pool_id)
         .map(|r| r.value().clone())
@@ -587,6 +589,7 @@ pub async fn pool_rates_set(
 
     state
         .shared_state
+        .credits
         .pool_credit_rates
         .insert(pool_id, new_rates.clone());
 

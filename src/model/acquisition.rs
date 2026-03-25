@@ -351,6 +351,7 @@ impl AcquisitionManager {
                     .log
                     .push("All shards already present and verified".into());
                 self.shared_state
+                    .models
                     .acquisition_progress
                     .insert(model_id.clone(), job.status.clone());
             }
@@ -492,6 +493,7 @@ impl AcquisitionManager {
                     }
                 }
                 self.shared_state
+                    .models
                     .acquisition_progress
                     .insert(model_id.clone(), job.status.clone());
             }
@@ -532,7 +534,7 @@ impl AcquisitionManager {
         }
 
         // Grab references we need before borrowing job mutably
-        let progress_map = &self.shared_state.acquisition_progress;
+        let progress_map = &self.shared_state.models.acquisition_progress;
         let node_id = self.shared_state.identity.node_id().clone();
 
         let Some(job) = self.jobs.get_mut(&model_id) else {
@@ -712,6 +714,7 @@ impl AcquisitionManager {
     /// Publish acquisition progress to SharedState for WebSocket/API consumption.
     fn publish_progress(&self, model_id: &ModelId, status: &AcquisitionStatus) {
         self.shared_state
+            .models
             .acquisition_progress
             .insert(model_id.clone(), status.clone());
     }
@@ -727,7 +730,12 @@ impl AcquisitionManager {
             tracing::error!(model = %model_id, error = %e, "Failed to persist manifest to DB");
         }
 
-        if let Some(mut entry) = self.shared_state.acquisition_progress.get_mut(model_id) {
+        if let Some(mut entry) = self
+            .shared_state
+            .models
+            .acquisition_progress
+            .get_mut(model_id)
+        {
             entry
                 .log
                 .push("Loading model from shards for inference...".into());

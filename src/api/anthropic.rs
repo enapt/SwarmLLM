@@ -581,7 +581,7 @@ pub async fn messages(
 
     // Claude models → Anthropic cloud API (full pass-through, preserves tools/thinking)
     if lower_model.starts_with("claude") {
-        let config = state.shared_state.providers_config.read().await;
+        let config = state.shared_state.metrics.providers_config.read().await;
         if let Some(ref entry) = config.anthropic {
             let api_key = entry.api_key.clone();
             drop(config);
@@ -614,7 +614,7 @@ pub async fn messages(
 
     // Non-Claude models → translate Anthropic format to OpenAI and proxy through cloud providers
     {
-        let config = state.shared_state.providers_config.read().await;
+        let config = state.shared_state.metrics.providers_config.read().await;
         if let Some(provider) = providers::resolve_provider(&req.model, &config) {
             let provider_name = provider.name.clone();
             let provider_url = provider.base_url.clone();

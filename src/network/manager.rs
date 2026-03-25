@@ -627,12 +627,17 @@ impl NetworkManager {
                             };
                             if let Err(e) = self.outbound_tx.try_send(authed) {
                                 self.shared_state
+                                    .metrics
                                     .channel_metrics
                                     .network_out
                                     .record_dropped();
                                 tracing::warn!(error = %e, "Dispatcher backpressured, dropping gossipsub message");
                             } else {
-                                self.shared_state.channel_metrics.network_out.record_sent();
+                                self.shared_state
+                                    .metrics
+                                    .channel_metrics
+                                    .network_out
+                                    .record_sent();
                             }
                         }
                     }
@@ -850,7 +855,7 @@ impl NetworkManager {
             )) => {
                 tracing::info!(?old, ?new, "AutoNAT status changed");
                 {
-                    if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+                    if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
                         stats.nat_status = Some(format!("{new:?}"));
                     }
                 }
@@ -1045,6 +1050,7 @@ impl NetworkManager {
                     .insert(node_id.clone(), peer_info);
                 let _ = self
                     .shared_state
+                    .events
                     .dashboard_tx
                     .send(crate::daemon::state::DashboardSignal::PeersChanged);
 
@@ -1174,7 +1180,9 @@ impl NetworkManager {
                         }
                         // Use try_lock() to avoid blocking the event loop.
                         // If contended, skip — next Identify event will catch it.
-                        if let Ok(mut anti_gaming) = self.shared_state.anti_gaming.try_lock() {
+                        if let Ok(mut anti_gaming) =
+                            self.shared_state.credits.anti_gaming.try_lock()
+                        {
                             anti_gaming.register_subnet(&node_id, ip_bytes);
                         }
                         break; // One IP per peer is enough
@@ -1440,6 +1448,7 @@ impl NetworkManager {
                     let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
                     if let Some(ref nid) = node_id_for_cleanup {
                         self.shared_state
+                            .models
                             .peer_shard_downloads
                             .retain(|_shard_id, peers| {
                                 peers.retain(|(n, _)| n != nid);
@@ -1487,6 +1496,7 @@ impl NetworkManager {
                             self.shared_state.peer_registry.remove(&node_id);
                             let _ = self
                                 .shared_state
+                                .events
                                 .dashboard_tx
                                 .send(crate::daemon::state::DashboardSignal::PeersChanged);
 
@@ -1647,12 +1657,17 @@ impl NetworkManager {
                         tracing::debug!(%peer, "Handling protocol message request");
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
                             self.shared_state
+                                .metrics
                                 .channel_metrics
                                 .network_out
                                 .record_dropped();
                             tracing::warn!(error = %e, "Dispatcher backpressured, dropping request message");
                         } else {
-                            self.shared_state.channel_metrics.network_out.record_sent();
+                            self.shared_state
+                                .metrics
+                                .channel_metrics
+                                .network_out
+                                .record_sent();
                         }
                     }
                 }
@@ -1888,12 +1903,17 @@ impl NetworkManager {
                 }
                 if let Err(e) = self.dispatch_authenticated(Some(&peer), *msg) {
                     self.shared_state
+                        .metrics
                         .channel_metrics
                         .network_out
                         .record_dropped();
                     tracing::warn!(%peer, error = %e, "Dispatcher backpressured, dropping response message");
                 } else {
-                    self.shared_state.channel_metrics.network_out.record_sent();
+                    self.shared_state
+                        .metrics
+                        .channel_metrics
+                        .network_out
+                        .record_sent();
                 }
             }
             SwarmResponse::ShardData(data) => {
@@ -2035,7 +2055,9 @@ impl NetworkManager {
 
                         // Retries exhausted or no more peers — fall back to HuggingFace
                         self.shard_p2p_retries.remove(&shard_id);
-                        if let Some(hf_src) = self.shared_state.hf_sources.get(&shard_id.model_id) {
+                        if let Some(hf_src) =
+                            self.shared_state.models.hf_sources.get(&shard_id.model_id)
+                        {
                             let mname = self
                                 .shared_state
                                 .model_registry
@@ -2066,7 +2088,7 @@ impl NetworkManager {
                                     timestamp: None,
                                 });
                             // Wake auto-manage to pick up HF download
-                            self.shared_state.auto_manage_notify.notify_one();
+                            self.shared_state.models.auto_manage_notify.notify_one();
                             drop(hf_src);
                         } else {
                             let mname = self
@@ -2102,6 +2124,7 @@ impl NetworkManager {
                         // Clean up acquisition progress
                         if let Some(mut entry) = self
                             .shared_state
+                            .models
                             .acquisition_progress
                             .get_mut(&shard_id.model_id)
                         {
@@ -2113,7 +2136,10 @@ impl NetworkManager {
                         let cleanup_mid = shard_id.model_id.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                            cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                            cleanup_shared
+                                .models
+                                .acquisition_progress
+                                .remove(&cleanup_mid);
                         });
                         return;
                     }
@@ -2164,6 +2190,7 @@ impl NetworkManager {
                     // Update acquisition_progress so the frontend download bar moves
                     if let Some(mut entry) = self
                         .shared_state
+                        .models
                         .acquisition_progress
                         .get_mut(&shard_id.model_id)
                     {
@@ -2245,6 +2272,7 @@ impl NetworkManager {
                         // Mark acquisition as complete so frontend clears the download bar
                         if let Some(mut entry) = self
                             .shared_state
+                            .models
                             .acquisition_progress
                             .get_mut(&shard_id.model_id)
                         {
@@ -2262,7 +2290,10 @@ impl NetworkManager {
                             let cleanup_mid = shard_id.model_id.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                                cleanup_shared
+                                    .models
+                                    .acquisition_progress
+                                    .remove(&cleanup_mid);
                             });
                         }
 
@@ -2301,11 +2332,12 @@ impl NetworkManager {
                                 )
                                 .await;
                                 let _ = load_shared
+                                    .events
                                     .dashboard_tx
                                     .send(crate::daemon::state::DashboardSignal::ModelsChanged);
                             });
                         }
-                        self.shared_state.auto_manage_notify.notify_one();
+                        self.shared_state.models.auto_manage_notify.notify_one();
 
                         tracing::info!(
                             model = %shard_id.model_id,
@@ -2892,13 +2924,18 @@ impl NetworkManager {
                         let msg = SwarmMessage::LayerForward(forward);
                         if let Err(e) = self.dispatch_authenticated(Some(&peer), msg) {
                             self.shared_state
+                                .metrics
                                 .channel_metrics
                                 .network_out
                                 .record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor forward");
                             return None;
                         } else {
-                            self.shared_state.channel_metrics.network_out.record_sent();
+                            self.shared_state
+                                .metrics
+                                .channel_metrics
+                                .network_out
+                                .record_sent();
                         }
                         Some(request_id)
                     }
@@ -2923,12 +2960,17 @@ impl NetworkManager {
                             .dispatch_authenticated(Some(&peer), SwarmMessage::LayerResult(result))
                         {
                             self.shared_state
+                                .metrics
                                 .channel_metrics
                                 .network_out
                                 .record_dropped();
                             tracing::warn!(error = %e, "Outbound channel full, dropping tensor result");
                         } else {
-                            self.shared_state.channel_metrics.network_out.record_sent();
+                            self.shared_state
+                                .metrics
+                                .channel_metrics
+                                .network_out
+                                .record_sent();
                         }
                     }
                     Err(e) => {
@@ -2970,13 +3012,18 @@ impl NetworkManager {
                                         SwarmMessage::LayerForward(forward),
                                     ) {
                                         self.shared_state
+                                            .metrics
                                             .channel_metrics
                                             .network_out
                                             .record_dropped();
                                         tracing::warn!(error = %e, "Outbound channel full, dropping decrypted tensor");
                                         return None;
                                     } else {
-                                        self.shared_state.channel_metrics.network_out.record_sent();
+                                        self.shared_state
+                                            .metrics
+                                            .channel_metrics
+                                            .network_out
+                                            .record_sent();
                                     }
                                     return Some(request_id);
                                 }
@@ -3145,7 +3192,7 @@ impl NetworkManager {
     /// the next connection event or discovery tick will correct it.
     fn update_peer_count(&self) {
         let count = self.swarm.connected_peers().count() as u32;
-        if let Ok(mut stats) = self.shared_state.node_stats.try_write() {
+        if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
             stats.peers_connected = count;
         }
     }

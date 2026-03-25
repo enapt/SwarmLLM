@@ -114,7 +114,7 @@ fn track_forward_participation(
     _layer_end: usize,
     _max_layers: usize,
 ) {
-    if let Ok(mut stats) = shared_state.node_stats.try_write() {
+    if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
         stats.forwards_served += 1;
     }
     // Credits are earned per-token (not per-layer) to stay balanced with the
@@ -125,6 +125,7 @@ fn track_forward_participation(
                                                               // Use atomic accumulator to prevent credit loss on lock contention.
                                                               // The CreditLedger periodic persist (every 60s) will flush this to DB.
     shared_state
+        .credits
         .pending_credit_earn
         .fetch_add(earned, std::sync::atomic::Ordering::Relaxed);
 }
@@ -414,7 +415,7 @@ pub(crate) async fn dispatch_network_messages(
                                 crate::credit::ledger::process_balance_gossip(
                                     &credit_peer_balances,
                                     &gossip,
-                                    Some(&shared_state.peer_credit_balances),
+                                    Some(&shared_state.credits.peer_credit_balances),
                                 ).await;
                             }
                             SwarmMessage::ModelVote(_) => {
@@ -483,7 +484,7 @@ pub(crate) async fn dispatch_network_messages(
                                 }
                                 // Anti-gaming validation for network transactions
                                 {
-                                    let mut ag = shared_state.anti_gaming.lock().await;
+                                    let mut ag = shared_state.credits.anti_gaming.lock().await;
                                     match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
                                         Ok(_decision) => {}
                                         Err(violation) => {
@@ -501,14 +502,14 @@ pub(crate) async fn dispatch_network_messages(
                                 let local_id = shared_state.identity.node_id().clone();
                                 if tx.to == local_id {
                                     if let Err(e) = crate::credit::ledger::apply_credit_direct(
-                                        &shared_state.credit_balance,
+                                        &shared_state.credits.credit_balance,
                                         &shared_state.db,
                                         tx.amount,
                                         true,
                                     ).await {
                                         tracing::warn!(error = %e, "Failed to apply credit transaction");
                                     }
-                                    let bal = shared_state.credit_balance.read().await;
+                                    let bal = shared_state.credits.credit_balance.read().await;
                                     tracing::info!(
                                         amount = tx.amount,
                                         balance = bal.balance,
@@ -594,7 +595,7 @@ pub(crate) async fn dispatch_network_messages(
                                 }
                                 // Wake auto-manage so it re-evaluates rarity scores —
                                 // new shard holders change which shards are most needed.
-                                shared_state.auto_manage_notify.notify_one();
+                                shared_state.models.auto_manage_notify.notify_one();
                             }
                             // Process model manifests from peers — register in model_registry
                             SwarmMessage::ModelManifest(manifest) => {
@@ -624,7 +625,7 @@ pub(crate) async fn dispatch_network_messages(
                                         shared_state.model_registry.register_manifest(manifest.clone());
                                         // Wake auto-manage when a genuinely new model appears
                                         if is_new {
-                                            shared_state.auto_manage_notify.notify_one();
+                                            shared_state.models.auto_manage_notify.notify_one();
                                             shared_state.emit_activity(crate::daemon::state::ActivityEvent {
                                                 category: "model",
                                                 kind: "model_discovered",
@@ -777,7 +778,7 @@ pub(crate) async fn dispatch_network_messages(
                                     );
                                     continue;
                                 }
-                                if let Some(ref tx) = *shared_state.pool_tx.read().await {
+                                if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
                                     let cmd = match pool_msg {
                                         crate::types::PoolMessage::Invitation(inv) => {
                                             Some(crate::pool::types::PoolCommand::InboundInvitation {
@@ -892,7 +893,7 @@ pub(crate) async fn dispatch_network_messages(
                                     continue;
                                 }
                                 let mid = gossip.model_id.clone();
-                                if !shared_state.hf_sources.contains_key(&mid) {
+                                if !shared_state.models.hf_sources.contains_key(&mid) {
                                     tracing::info!(
                                         model = %mid,
                                         repo = %gossip.repo_id,
@@ -905,7 +906,7 @@ pub(crate) async fn dispatch_network_messages(
                                         filename: gossip.filename.clone(),
                                         mmproj_filename: gossip.mmproj_filename.clone(),
                                     };
-                                    shared_state.hf_sources.insert(mid.clone(), source.clone());
+                                    shared_state.models.hf_sources.insert(mid.clone(), source.clone());
                                     // Persist to DB
                                     let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
                                     // Also write hf_source.json to disk so discover_hf_sources finds it on restart
@@ -919,7 +920,7 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                     }
                                     // Wake the AutoShardManager so it evaluates promptly
-                                    shared_state.auto_manage_notify.notify_one();
+                                    shared_state.models.auto_manage_notify.notify_one();
                                 }
                             }
                             SwarmMessage::ShardDownloadProgress(progress) => {
@@ -942,7 +943,7 @@ pub(crate) async fn dispatch_network_messages(
                                 if progress.node_id != *local_nid {
                                     if progress.state == crate::types::DownloadState::Complete || progress.progress_pct >= 100 {
                                         // Download finished — remove from download tracking
-                                        if let Some(mut entry) = shared_state.peer_shard_downloads.get_mut(&progress.shard_id) {
+                                        if let Some(mut entry) = shared_state.models.peer_shard_downloads.get_mut(&progress.shard_id) {
                                             entry.retain(|(nid, _)| *nid != progress.node_id);
                                         }
                                         // Register the peer as a shard holder now
@@ -951,10 +952,10 @@ pub(crate) async fn dispatch_network_messages(
                                         shared_state.model_registry
                                             .record_shard_holder(progress.shard_id.clone(), progress.node_id.clone());
                                         // Wake auto-manage — peer completed a download, rarity changed
-                                        shared_state.auto_manage_notify.notify_one();
+                                        shared_state.models.auto_manage_notify.notify_one();
                                     } else {
                                         // Update or insert download progress
-                                        let mut entry = shared_state.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
+                                        let mut entry = shared_state.models.peer_shard_downloads.entry(progress.shard_id.clone()).or_default();
                                         if let Some(pos) = entry.iter().position(|(nid, _)| *nid == progress.node_id) {
                                             entry[pos].1 = progress.progress_pct;
                                         } else {

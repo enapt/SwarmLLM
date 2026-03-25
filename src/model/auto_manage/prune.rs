@@ -53,6 +53,7 @@ impl AutoShardManager {
             // Check per-model prune policy
             if let Some(policy) = self
                 .shared_state
+                .models
                 .model_auto_manage_policies
                 .get(&manifest.id)
             {
@@ -92,7 +93,12 @@ impl AutoShardManager {
                 }
 
                 // Skip locked/pinned shards
-                if self.shared_state.locked_shards.contains_key(&shard_id) {
+                if self
+                    .shared_state
+                    .models
+                    .locked_shards
+                    .contains_key(&shard_id)
+                {
                     continue;
                 }
 
@@ -112,6 +118,7 @@ impl AutoShardManager {
                 // Skip shards for models the user explicitly pinned/trusted
                 if self
                     .shared_state
+                    .models
                     .model_trust
                     .get(&manifest.id)
                     .map(|t| t.pinned_by_user)
@@ -420,6 +427,7 @@ impl AutoShardManager {
             // Emit unified activity event (replaces separate prune_events_tx)
             let _ = self
                 .shared_state
+                .events
                 .dashboard_tx
                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
             self.shared_state
@@ -449,7 +457,7 @@ impl AutoShardManager {
 
             // Add to history
             {
-                let mut history = self.shared_state.prune_history.write().await;
+                let mut history = self.shared_state.models.prune_history.write().await;
                 if history.len() >= 100 {
                     history.pop_front();
                 }
@@ -537,7 +545,7 @@ impl AutoShardManager {
 
     /// Compute schedule-based pressure bonus during reduced hours.
     async fn schedule_pressure_bonus(&self) -> f64 {
-        let schedule = self.shared_state.resource_schedule.read().await;
+        let schedule = self.shared_state.models.resource_schedule.read().await;
         if !schedule.enabled {
             return 0.0;
         }
@@ -661,7 +669,7 @@ impl AutoShardManager {
         local_node_id: &NodeId,
     ) -> bool {
         // Check HF source
-        if self.shared_state.hf_sources.contains_key(model_id) {
+        if self.shared_state.models.hf_sources.contains_key(model_id) {
             return true;
         }
 
@@ -743,7 +751,7 @@ impl AutoShardManager {
     /// Get last prune time for a model from prune history.
     fn last_prune_time(&self, model_id: &ModelId) -> Option<chrono::DateTime<chrono::Utc>> {
         // Check prune history (we need a sync read, so try_read)
-        if let Ok(history) = self.shared_state.prune_history.try_read() {
+        if let Ok(history) = self.shared_state.models.prune_history.try_read() {
             history.iter().rev().find_map(|e| {
                 if e.model_id == *model_id {
                     Some(e.timestamp)

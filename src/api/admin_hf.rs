@@ -336,11 +336,15 @@ pub async fn hf_download(
         source: "huggingface".to_string(),
         trigger: "user".to_string(),
     };
-    shared.acquisition_progress.insert(mid.clone(), status);
+    shared
+        .models
+        .acquisition_progress
+        .insert(mid.clone(), status);
 
     // Register cancellation flag for this download
     let hf_cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     shared
+        .models
         .download_cancel_flags
         .insert(mid.clone(), hf_cancel_flag.clone());
 
@@ -359,7 +363,10 @@ pub async fn hf_download(
             let mut last_bytes = 0u64;
             let mut last_time = std::time::Instant::now();
             while let Some(prog) = prx.recv().await {
-                if let Some(mut entry) = progress_shared.acquisition_progress.get_mut(&progress_mid)
+                if let Some(mut entry) = progress_shared
+                    .models
+                    .acquisition_progress
+                    .get_mut(&progress_mid)
                 {
                     entry.downloaded_bytes = prog.downloaded_bytes;
                     entry.total_bytes = prog.total_bytes;
@@ -385,7 +392,7 @@ pub async fn hf_download(
             ) => Some(result),
             _ = shutdown_rx.wait_for(|v| *v) => {
                 tracing::info!(model = %download_mid, "Download cancelled by shutdown");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+                if let Some(mut entry) = download_shared.models.acquisition_progress.get_mut(&download_mid) {
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: "Cancelled by daemon shutdown".into(),
                     };
@@ -395,13 +402,16 @@ pub async fn hf_download(
             }
         };
         let Some(download_result) = download_result else {
-            shared.download_cancel_flags.remove(&download_mid);
+            shared.models.download_cancel_flags.remove(&download_mid);
             return;
         };
         match download_result {
             Ok(path) => {
                 tracing::info!(path = %path.display(), "HuggingFace download complete");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                if let Some(mut entry) = download_shared
+                    .models
+                    .acquisition_progress
+                    .get_mut(&download_mid)
                 {
                     entry.state = crate::model::acquisition::AcquisitionState::Complete;
                     entry.downloaded_shards = 1;
@@ -442,16 +452,20 @@ pub async fn hf_download(
                         download_shared
                             .model_loaded
                             .store(true, std::sync::atomic::Ordering::Release);
-                        if let Some(mut entry) =
-                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        if let Some(mut entry) = download_shared
+                            .models
+                            .acquisition_progress
+                            .get_mut(&download_mid)
                         {
                             entry.log.push(format!("Model loaded: {}", model_name));
                         }
                         tracing::info!(model = %model_name, "HF model loaded for inference");
                     }
                     Err(e) => {
-                        if let Some(mut entry) =
-                            download_shared.acquisition_progress.get_mut(&download_mid)
+                        if let Some(mut entry) = download_shared
+                            .models
+                            .acquisition_progress
+                            .get_mut(&download_mid)
                         {
                             entry.log.push(format!("Model load failed: {}", e));
                         }
@@ -461,7 +475,10 @@ pub async fn hf_download(
             }
             Err(e) => {
                 tracing::error!(error = %e, "HuggingFace download failed");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                if let Some(mut entry) = download_shared
+                    .models
+                    .acquisition_progress
+                    .get_mut(&download_mid)
                 {
                     entry.state =
                         crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
@@ -482,7 +499,10 @@ pub async fn hf_download(
         }
 
         // Clean up cancel flag
-        download_shared.download_cancel_flags.remove(&download_mid);
+        download_shared
+            .models
+            .download_cancel_flags
+            .remove(&download_mid);
 
         // Clean up acquisition_progress after a delay so the frontend sees
         // the final state and triggers a re-render before we remove it.
@@ -490,7 +510,10 @@ pub async fn hf_download(
         let cleanup_mid = download_mid.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+            cleanup_shared
+                .models
+                .acquisition_progress
+                .remove(&cleanup_mid);
         });
     });
 
@@ -601,18 +624,23 @@ pub async fn hf_probe(
 
             // Cap probe cache at 1000 entries — evict oldest by probed_at
             const MAX_PROBE_CACHE: usize = 1_000;
-            if state.shared_state.hf_probe_cache.len() >= MAX_PROBE_CACHE {
+            if state.shared_state.models.hf_probe_cache.len() >= MAX_PROBE_CACHE {
                 if let Some(oldest) = state
                     .shared_state
+                    .models
                     .hf_probe_cache
                     .iter()
                     .min_by_key(|entry| entry.value().probed_at)
                     .map(|entry| entry.key().clone())
                 {
-                    state.shared_state.hf_probe_cache.remove(&oldest);
+                    state.shared_state.models.hf_probe_cache.remove(&oldest);
                 }
             }
-            state.shared_state.hf_probe_cache.insert(mid, probe_info);
+            state
+                .shared_state
+                .models
+                .hf_probe_cache
+                .insert(mid, probe_info);
 
             let arch_str = &info.tensor_meta.architecture;
             let model_arch = crate::inference::split::ModelArch::from_gguf_arch(arch_str);
@@ -746,6 +774,7 @@ pub async fn hf_download_shards(
     {
         let mut trust = state
             .shared_state
+            .models
             .model_trust
             .entry(mid.clone())
             .or_insert_with(crate::types::ModelTrustInfo::new_pinned);
@@ -826,7 +855,10 @@ pub async fn hf_download_shards(
         trigger: "user".to_string(),
     };
     let shared = state.shared_state.clone();
-    shared.acquisition_progress.insert(mid.clone(), status);
+    shared
+        .models
+        .acquisition_progress
+        .insert(mid.clone(), status);
 
     // Clone values needed both in the spawn and the response
     let response_model_id = model_id_str.clone();
@@ -835,6 +867,7 @@ pub async fn hf_download_shards(
     // Register cancellation flag for this download
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     shared
+        .models
         .download_cancel_flags
         .insert(mid.clone(), cancel_flag.clone());
 
@@ -874,7 +907,11 @@ pub async fn hf_download_shards(
             );
 
             // Update acquisition progress with the single seed shard
-            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            if let Some(mut entry) = download_shared
+                .models
+                .acquisition_progress
+                .get_mut(&download_mid)
+            {
                 entry.total_shards = 1;
                 entry.log.push(format!(
                     "Seeding shard {seed_shard}/{total_shards} — auto-manage will acquire more as peers join"
@@ -894,7 +931,11 @@ pub async fn hf_download_shards(
             shard_indices
         };
 
-        if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+        if let Some(mut entry) = download_shared
+            .models
+            .acquisition_progress
+            .get_mut(&download_mid)
+        {
             // Set total_bytes to the sum of requested shards only (not full model size)
             let requested_bytes: u64 = shard_indices
                 .iter()
@@ -928,7 +969,11 @@ pub async fn hf_download_shards(
         .await
         {
             tracing::error!(error = %e, "GGUF header download failed");
-            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            if let Some(mut entry) = download_shared
+                .models
+                .acquisition_progress
+                .get_mut(&download_mid)
+            {
                 entry.state =
                     crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
                 entry.log.push(format!("Header download failed: {}", e));
@@ -975,7 +1020,11 @@ pub async fn hf_download_shards(
 
         if let Err(e) = &manifest_result {
             tracing::error!(error = %e, "Manifest generation failed (early broadcast skipped)");
-            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            if let Some(mut entry) = download_shared
+                .models
+                .acquisition_progress
+                .get_mut(&download_mid)
+            {
                 entry.log.push(format!("Manifest generation failed: {e}"));
             }
             // Continue with downloads anyway — manifest can be regenerated later
@@ -987,7 +1036,7 @@ pub async fn hf_download_shards(
             filename: filename.clone(),
             mmproj_filename: None,
         };
-        download_shared.hf_sources.insert(
+        download_shared.models.hf_sources.insert(
             crate::types::ModelId(model_id_str.clone()),
             hf_source.clone(),
         );
@@ -1065,7 +1114,10 @@ pub async fn hf_download_shards(
             let mut last_bytes = 0u64;
             let mut last_time = std::time::Instant::now();
             while let Some(prog) = prx.recv().await {
-                if let Some(mut entry) = progress_shared.acquisition_progress.get_mut(&progress_mid)
+                if let Some(mut entry) = progress_shared
+                    .models
+                    .acquisition_progress
+                    .get_mut(&progress_mid)
                 {
                     entry.downloaded_bytes = prog.downloaded_bytes;
                     entry.total_bytes = prog.total_bytes;
@@ -1101,7 +1153,10 @@ pub async fn hf_download_shards(
                     "Cancelled by user"
                 };
                 tracing::info!(model = %model_id_str, reason, "Download cancelled");
-                if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid)
+                if let Some(mut entry) = download_shared
+                    .models
+                    .acquisition_progress
+                    .get_mut(&download_mid)
                 {
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: reason.to_string(),
@@ -1109,7 +1164,10 @@ pub async fn hf_download_shards(
                     entry.log.push(reason.to_string());
                 }
                 // Clean up cancel flag
-                download_shared.download_cancel_flags.remove(&download_mid);
+                download_shared
+                    .models
+                    .download_cancel_flags
+                    .remove(&download_mid);
                 return;
             }
 
@@ -1146,6 +1204,7 @@ pub async fn hf_download_shards(
                     });
                     // Update per-shard progress directly
                     if let Some(mut entry) = shard_progress_shared
+                        .models
                         .acquisition_progress
                         .get_mut(&shard_progress_mid)
                     {
@@ -1196,8 +1255,10 @@ pub async fn hf_download_shards(
                     progress_task.abort();
                     cumulative_downloaded += layout.size_bytes;
 
-                    if let Some(mut entry) =
-                        download_shared.acquisition_progress.get_mut(&download_mid)
+                    if let Some(mut entry) = download_shared
+                        .models
+                        .acquisition_progress
+                        .get_mut(&download_mid)
                     {
                         entry.downloaded_shards += 1;
                         entry.log.push(format!("Shard {} downloaded", shard_idx));
@@ -1235,8 +1296,10 @@ pub async fn hf_download_shards(
                 Err(e) => {
                     progress_task.abort();
                     tracing::error!(error = %e, shard_idx, "Shard download failed");
-                    if let Some(mut entry) =
-                        download_shared.acquisition_progress.get_mut(&download_mid)
+                    if let Some(mut entry) = download_shared
+                        .models
+                        .acquisition_progress
+                        .get_mut(&download_mid)
                     {
                         entry.failed_shards += 1;
                         entry.log.push(format!("Shard {} failed: {}", shard_idx, e));
@@ -1262,10 +1325,17 @@ pub async fn hf_download_shards(
         drop(ptx);
 
         // Clean up cancel flag
-        download_shared.download_cancel_flags.remove(&download_mid);
+        download_shared
+            .models
+            .download_cancel_flags
+            .remove(&download_mid);
 
         if failed {
-            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            if let Some(mut entry) = download_shared
+                .models
+                .acquisition_progress
+                .get_mut(&download_mid)
+            {
                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                     reason: "One or more shard downloads failed".to_string(),
                 };
@@ -1290,7 +1360,11 @@ pub async fn hf_download_shards(
                 precomputed_layouts: Some(&info.layouts),
             });
 
-            if let Some(mut entry) = download_shared.acquisition_progress.get_mut(&download_mid) {
+            if let Some(mut entry) = download_shared
+                .models
+                .acquisition_progress
+                .get_mut(&download_mid)
+            {
                 entry.state = crate::model::acquisition::AcquisitionState::Complete;
                 entry.verified_shards = shard_indices.len() as u32;
                 entry
@@ -1309,6 +1383,7 @@ pub async fn hf_download_shards(
 
             // Notify dashboard that models have changed
             let _ = download_shared
+                .events
                 .dashboard_tx
                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -1333,7 +1408,7 @@ pub async fn hf_download_shards(
             });
 
             // Wake auto-manage again to re-evaluate (maybe download more shards)
-            download_shared.auto_manage_notify.notify_one();
+            download_shared.models.auto_manage_notify.notify_one();
 
             // Clean up acquisition_progress after a delay so the frontend sees
             // the "complete" state and triggers a re-render before we remove it.
@@ -1341,7 +1416,10 @@ pub async fn hf_download_shards(
             let cleanup_mid = download_mid.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                cleanup_shared.acquisition_progress.remove(&cleanup_mid);
+                cleanup_shared
+                    .models
+                    .acquisition_progress
+                    .remove(&cleanup_mid);
             });
         }
     });
@@ -1490,6 +1568,7 @@ pub async fn cancel_download(
 
     // Check if there's an active download for this model
     let has_active = shared
+        .models
         .acquisition_progress
         .get(&mid)
         .map(|entry| {
@@ -1509,12 +1588,12 @@ pub async fn cancel_download(
     }
 
     // Set the cancel flag (the download loop checks this)
-    if let Some(flag) = shared.download_cancel_flags.get(&mid) {
+    if let Some(flag) = shared.models.download_cancel_flags.get(&mid) {
         flag.store(true, std::sync::atomic::Ordering::Release);
     }
 
     // Mark the acquisition as failed/cancelled
-    if let Some(mut entry) = shared.acquisition_progress.get_mut(&mid) {
+    if let Some(mut entry) = shared.models.acquisition_progress.get_mut(&mid) {
         entry.state = crate::model::acquisition::AcquisitionState::Failed {
             reason: "Cancelled by user".to_string(),
         };
@@ -1553,7 +1632,7 @@ pub async fn hf_source(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mid = crate::types::ModelId(model_id.clone());
 
-    if let Some(src) = state.shared_state.hf_sources.get(&mid) {
+    if let Some(src) = state.shared_state.models.hf_sources.get(&mid) {
         return Ok(Json(serde_json::json!({
             "model_id": model_id,
             "repo_id": src.repo_id,
@@ -1561,7 +1640,7 @@ pub async fn hf_source(
         })));
     }
 
-    if let Some(probe) = state.shared_state.hf_probe_cache.get(&mid) {
+    if let Some(probe) = state.shared_state.models.hf_probe_cache.get(&mid) {
         return Ok(Json(serde_json::json!({
             "model_id": model_id,
             "repo_id": probe.repo_id,
@@ -1616,7 +1695,11 @@ pub async fn hf_source(
                     filename: hit.filename.clone(),
                     mmproj_filename: None,
                 };
-                state.shared_state.hf_sources.insert(mid.clone(), source);
+                state
+                    .shared_state
+                    .models
+                    .hf_sources
+                    .insert(mid.clone(), source);
                 let _ = state.db.put_json(
                     "hf_sources",
                     &model_id,

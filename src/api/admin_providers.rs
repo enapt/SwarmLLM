@@ -9,7 +9,7 @@ use crate::error::ApiError;
 
 /// GET /api/admin/providers — List configured provider status (no keys exposed).
 pub async fn get_providers(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
 
     let entries: &[(&str, &Option<crate::config::ProviderEntry>)] = &[
         ("anthropic", &config.anthropic),
@@ -114,7 +114,7 @@ pub async fn update_providers(
         }
     }
 
-    let mut config = state.shared_state.providers_config.write().await;
+    let mut config = state.shared_state.metrics.providers_config.write().await;
 
     fn update_entry(entry: &mut Option<crate::config::ProviderEntry>, key: Option<String>) {
         if let Some(k) = key {
@@ -174,13 +174,19 @@ pub async fn update_providers(
 
     // Invalidate provider models cache so next fetch picks up new keys
     {
-        let mut cache = state.shared_state.provider_models_cache.write().await;
+        let mut cache = state
+            .shared_state
+            .metrics
+            .provider_models_cache
+            .write()
+            .await;
         cache.0.clear();
     }
 
     // Notify WebSocket clients so model list and mode indicator refresh immediately
     let _ = state
         .shared_state
+        .events
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
@@ -211,7 +217,12 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
 
     // Check cache — return immediately if fresh
     {
-        let cache = state.shared_state.provider_models_cache.read().await;
+        let cache = state
+            .shared_state
+            .metrics
+            .provider_models_cache
+            .read()
+            .await;
         let (ref cached_models, ref ts) = *cache;
         if !cached_models.is_empty() {
             if ts.elapsed() < CACHE_TTL {
@@ -223,7 +234,12 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
             tokio::spawn(async move {
                 let models = fetch_provider_models_inner(&bg_state).await;
                 if !models.is_empty() {
-                    let mut cache = bg_state.shared_state.provider_models_cache.write().await;
+                    let mut cache = bg_state
+                        .shared_state
+                        .metrics
+                        .provider_models_cache
+                        .write()
+                        .await;
                     *cache = (models, std::time::Instant::now());
                 }
             });
@@ -234,7 +250,12 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
     // Empty cache (first call) — block and fetch
     let models = fetch_provider_models_inner(&state).await;
     {
-        let mut cache = state.shared_state.provider_models_cache.write().await;
+        let mut cache = state
+            .shared_state
+            .metrics
+            .provider_models_cache
+            .write()
+            .await;
         *cache = (models.clone(), std::time::Instant::now());
     }
     Json(serde_json::json!({ "models": models }))
@@ -242,7 +263,7 @@ pub async fn list_provider_models(State(state): State<AppState>) -> Json<serde_j
 
 /// Inner function that actually fetches models from all configured providers.
 async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value> {
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
     let mut models = Vec::new();
 
     // Collect (provider_name, base_url, api_key, needs_prefix) for all configured providers
@@ -397,6 +418,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
             if let Some(id) = m.get("id").and_then(|v| v.as_str()) {
                 state
                     .shared_state
+                    .metrics
                     .provider_model_map
                     .insert(id.to_string(), provider.to_string());
             }
@@ -414,7 +436,7 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
 /// Sends a tiny chat completion request (max_tokens=1) to one model per provider
 /// to measure latency and confirm availability. Returns per-provider status.
 pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
 
     // Build (provider_name, base_url, api_key, test_model) tuples
     let mut probes: Vec<(&str, String, String, String)> = Vec::new();
@@ -599,7 +621,7 @@ pub async fn provider_model_status(
     State(state): State<AppState>,
     Json(body): Json<ModelStatusRequest>,
 ) -> Json<serde_json::Value> {
-    let config = state.shared_state.providers_config.read().await;
+    let config = state.shared_state.metrics.providers_config.read().await;
     let models: Vec<String> = body.models.into_iter().take(20).collect();
 
     // Resolve provider for each model
@@ -609,7 +631,12 @@ pub async fn provider_model_status(
             if !p.is_anthropic {
                 probes.push((model_id.clone(), p.base_url.clone(), p.api_key.clone()));
             }
-        } else if let Some(entry) = state.shared_state.provider_model_map.get(model_id.as_str()) {
+        } else if let Some(entry) = state
+            .shared_state
+            .metrics
+            .provider_model_map
+            .get(model_id.as_str())
+        {
             let pname = entry.value().clone();
             if let Some(p) = crate::api::providers::resolve_by_name(&pname, &config) {
                 if !p.is_anthropic {
@@ -696,7 +723,7 @@ pub async fn provider_model_status(
 
 /// GET /api/admin/version — Current and latest version info.
 pub async fn version_info(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let update_state = state.shared_state.update_state.read().await;
+    let update_state = state.shared_state.events.update_state.read().await;
     let current_version = env!("CARGO_PKG_VERSION");
 
     let (latest_version, update_available, changelog) =
@@ -732,8 +759,8 @@ pub async fn check_update(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let config = state.shared_state.config.updates.clone();
-    let update_state = state.shared_state.update_state.clone();
-    let dash_tx = state.shared_state.dashboard_tx.clone();
+    let update_state = state.shared_state.events.update_state.clone();
+    let dash_tx = state.shared_state.events.dashboard_tx.clone();
 
     let checker = crate::update::UpdateChecker::new(
         config,
@@ -755,7 +782,7 @@ pub async fn check_update(
             us.last_checked = Some(chrono::Utc::now().to_rfc3339());
             us.last_error = None;
             // Notify WebSocket
-            let _ = state.shared_state.dashboard_tx.send(
+            let _ = state.shared_state.events.dashboard_tx.send(
                 crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
             );
             Ok(Json(serde_json::json!({
@@ -785,7 +812,7 @@ pub async fn check_update(
 pub async fn apply_update(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let update_state = state.shared_state.update_state.read().await;
+    let update_state = state.shared_state.events.update_state.read().await;
     let info = match &update_state.update_available {
         Some(info) if info.downloaded => info.clone(),
         Some(_) => {
@@ -806,7 +833,7 @@ pub async fn apply_update(
     let checker = crate::update::UpdateChecker::new(
         config,
         "enapt/SwarmLLM".to_string(),
-        state.shared_state.update_state.clone(),
+        state.shared_state.events.update_state.clone(),
         tx,
     );
 

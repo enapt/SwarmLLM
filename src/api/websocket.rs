@@ -50,6 +50,7 @@ struct WsCountGuard(Arc<SharedState>);
 impl Drop for WsCountGuard {
     fn drop(&mut self) {
         self.0
+            .metrics
             .ws_connection_count
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -61,10 +62,12 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
     // leaks when the HTTP upgrade itself fails.
     const MAX_WS_CONNECTIONS: usize = 100;
     let current = shared_state
+        .metrics
         .ws_connection_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if current >= MAX_WS_CONNECTIONS {
         shared_state
+            .metrics
             .ws_connection_count
             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         tracing::warn!(
@@ -85,8 +88,8 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 
     // Spawn a task to push stats every 2 seconds + ping every 30 seconds + activity events
     let push_state = shared_state.clone();
-    let mut dashboard_rx = shared_state.dashboard_tx.subscribe();
-    let mut activity_rx = shared_state.activity_tx.subscribe();
+    let mut dashboard_rx = shared_state.events.dashboard_tx.subscribe();
+    let mut activity_rx = shared_state.events.activity_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
         // Send the current peer list immediately on connect so the dashboard
         // populates without waiting for the first peer_list_changed event.
@@ -100,6 +103,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
         // Replay activity history so new clients see startup events
         {
             let events: Vec<_> = push_state
+                .events
                 .activity_history
                 .lock()
                 .map(|h| h.iter().cloned().collect())
@@ -277,12 +281,13 @@ async fn build_stats_message(
     state: &SharedState,
     prev_shard_snapshot: &mut HashMap<String, Vec<ShardSnapshot>>,
 ) -> String {
-    let stats = state.node_stats.read().await;
-    let credit = state.credit_balance.read().await;
+    let stats = state.metrics.node_stats.read().await;
+    let credit = state.credits.credit_balance.read().await;
     let local_node_id = state.identity.node_id().clone();
 
     // Collect active acquisition progress with per-shard detail
     let acquisitions: Vec<serde_json::Value> = state
+        .models
         .acquisition_progress
         .iter()
         .map(|entry| {
@@ -318,7 +323,7 @@ async fn build_stats_message(
                 .get_manifest(&status.model_id)
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| status.model_id.0.clone());
-            let source = if state.hf_sources.contains_key(&status.model_id) {
+            let source = if state.models.hf_sources.contains_key(&status.model_id) {
                 "huggingface"
             } else {
                 "network"
@@ -448,7 +453,7 @@ async fn build_stats_message(
     // Peer shard download progress (from gossip)
     {
         let mut peer_dl: Vec<serde_json::Value> = Vec::new();
-        for entry in state.peer_shard_downloads.iter() {
+        for entry in state.models.peer_shard_downloads.iter() {
             let shard_id = entry.key();
             for (nid, pct) in entry.value().iter() {
                 peer_dl.push(serde_json::json!({

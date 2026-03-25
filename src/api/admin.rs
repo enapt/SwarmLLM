@@ -14,8 +14,8 @@ use crate::error::ApiError;
 /// GET /api/admin/stats — Full dashboard stats snapshot.
 pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let node_id = hex::encode(state.shared_state.identity.node_id().0);
-    let stats = state.shared_state.node_stats.read().await;
-    let credit = state.shared_state.credit_balance.read().await;
+    let stats = state.shared_state.metrics.node_stats.read().await;
+    let credit = state.shared_state.credits.credit_balance.read().await;
 
     let uptime_seconds = (chrono::Utc::now() - stats.uptime_start)
         .num_seconds()
@@ -43,7 +43,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
 
     // Inference performance metrics from latency samples
     let inference_perf = {
-        let samples = state.shared_state.inference_latency_samples.read();
+        let samples = state.shared_state.metrics.inference_latency_samples.read();
         match samples {
             Ok(s) if !s.is_empty() => {
                 let count = s.len();
@@ -58,7 +58,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
                 let p95_ms = sorted[((count as f64 * 0.95) as usize).min(count - 1)] * 1000.0;
                 let p99_ms = sorted[((count as f64 * 0.99) as usize).min(count - 1)] * 1000.0;
                 serde_json::json!({
-                    "total_requests": state.shared_state.inference_requests_total
+                    "total_requests": state.shared_state.metrics.inference_requests_total
                         .load(std::sync::atomic::Ordering::Relaxed),
                     "avg_latency_ms": (avg_ms * 10.0).round() / 10.0,
                     "min_latency_ms": (min_ms * 10.0).round() / 10.0,
@@ -70,7 +70,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
                 })
             }
             _ => serde_json::json!({
-                "total_requests": state.shared_state.inference_requests_total
+                "total_requests": state.shared_state.metrics.inference_requests_total
                     .load(std::sync::atomic::Ordering::Relaxed),
                 "avg_latency_ms": null,
                 "samples": 0,
@@ -114,7 +114,7 @@ pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value
         "max_disk_mb": config.resources.max_disk_mb,
         "listen_port": config.node.listen_port,
         "session_timeout_seconds": config.inference.session_timeout_seconds,
-        "auto_manage_shards": state.shared_state.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
+        "auto_manage_shards": state.shared_state.models.auto_manage_enabled.load(std::sync::atomic::Ordering::Relaxed),
         "auto_manage_max_storage_mb": config.auto_manage.max_storage_mb,
         "shard_size_mb": config.model.shard_size_mb,
         "max_batch_size": config.inference.max_batch_size,
@@ -155,11 +155,12 @@ pub async fn update_config(
         // Update the runtime atomic so AutoShardManager picks it up immediately
         state
             .shared_state
+            .models
             .auto_manage_enabled
             .store(auto_manage, std::sync::atomic::Ordering::Release);
         if auto_manage {
             // Wake the AutoShardManager so it evaluates promptly
-            state.shared_state.auto_manage_notify.notify_one();
+            state.shared_state.models.auto_manage_notify.notify_one();
         }
         state.shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
@@ -300,7 +301,7 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::V
 
 /// GET /api/admin/credits — Credit details.
 pub async fn credit_info(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let credit = state.shared_state.credit_balance.read().await;
+    let credit = state.shared_state.credits.credit_balance.read().await;
     let tier = crate::credit::priority::PriorityCalculator::tier_name(credit.balance);
 
     Json(serde_json::json!({
@@ -596,6 +597,7 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
                 let model_id = crate::types::ModelId(model_id_str.clone());
                 let request_count = state
                     .shared_state
+                    .models
                     .model_request_counts
                     .get(&model_id)
                     .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
@@ -769,7 +771,7 @@ pub struct JoinNetworkRequest {
 
 /// GET /api/admin/schedule — Get current resource schedule.
 pub async fn get_schedule(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let schedule = state.shared_state.resource_schedule.read().await;
+    let schedule = state.shared_state.models.resource_schedule.read().await;
     Json(serde_json::json!({
         "enabled": schedule.enabled,
         "reduced_hours_start": schedule.reduced_hours_start,
@@ -793,7 +795,7 @@ pub async fn update_schedule(
     State(state): State<AppState>,
     Json(body): Json<ScheduleUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut schedule = state.shared_state.resource_schedule.write().await;
+    let mut schedule = state.shared_state.models.resource_schedule.write().await;
 
     if let Some(enabled) = body.enabled {
         schedule.enabled = enabled;

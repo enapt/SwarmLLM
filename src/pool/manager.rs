@@ -68,8 +68,11 @@ impl PoolManager {
                 "Restored pool state from database"
             );
             let pool_id = state.pool_id.clone();
-            *self.shared_state.pool_state.write().await = Some(state.clone());
-            self.shared_state.pool_registry.insert(pool_id, state);
+            *self.shared_state.credits.pool_state.write().await = Some(state.clone());
+            self.shared_state
+                .credits
+                .pool_registry
+                .insert(pool_id, state);
         }
 
         // Restore pending invitations
@@ -205,7 +208,7 @@ impl PoolManager {
                 self.handle_inbound_join_request(code_hash, requester).await;
             }
             PoolCommand::GetState { reply } => {
-                let state = self.shared_state.pool_state.read().await.clone();
+                let state = self.shared_state.credits.pool_state.read().await.clone();
                 let _ = reply.send(state);
             }
             PoolCommand::GetInvitations { reply } => {
@@ -214,7 +217,7 @@ impl PoolManager {
                 let _ = reply.send(invitations);
             }
             PoolCommand::GetMembership { reply } => {
-                let state = self.shared_state.pool_state.read().await;
+                let state = self.shared_state.credits.pool_state.read().await;
                 let my_id = self.shared_state.identity.node_id();
                 let membership = state
                     .as_ref()
@@ -242,7 +245,7 @@ impl PoolManager {
         }
 
         // Check we're not already in a pool
-        if self.shared_state.pool_state.read().await.is_some() {
+        if self.shared_state.credits.pool_state.read().await.is_some() {
             return Err(SwarmError::Internal("Already in a pool".into()));
         }
 
@@ -287,8 +290,11 @@ impl PoolManager {
 
         // Persist and update shared state
         self.persist_pool_state(&state)?;
-        *self.shared_state.pool_state.write().await = Some(state.clone());
-        self.shared_state.pool_registry.insert(my_id, state.clone());
+        *self.shared_state.credits.pool_state.write().await = Some(state.clone());
+        self.shared_state
+            .credits
+            .pool_registry
+            .insert(my_id, state.clone());
 
         tracing::info!(
             pool_id = %state.pool_id,
@@ -313,7 +319,7 @@ impl PoolManager {
     ) -> Result<PoolInvitation, SwarmError> {
         // Extract pool_id from state, validating constraints, then release the lock.
         let pool_id = {
-            let guard = self.shared_state.pool_state.read().await;
+            let guard = self.shared_state.credits.pool_state.read().await;
             let state = guard
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -376,7 +382,7 @@ impl PoolManager {
         invitation: PoolInvitation,
     ) -> Result<(), SwarmError> {
         // Check we're not already in a pool
-        if self.shared_state.pool_state.read().await.is_some() {
+        if self.shared_state.credits.pool_state.read().await.is_some() {
             return Err(SwarmError::Internal("Already in a pool".into()));
         }
 
@@ -431,7 +437,7 @@ impl PoolManager {
         };
 
         self.persist_pool_state(&state)?;
-        *self.shared_state.pool_state.write().await = Some(state.clone());
+        *self.shared_state.credits.pool_state.write().await = Some(state.clone());
 
         // Broadcast acceptance to the network
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::Acceptance(acceptance));
@@ -479,7 +485,7 @@ impl PoolManager {
         }
 
         let (removal, state_clone) = {
-            let mut guard = self.shared_state.pool_state.write().await;
+            let mut guard = self.shared_state.credits.pool_state.write().await;
             let ps = guard
                 .as_mut()
                 .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -530,7 +536,7 @@ impl PoolManager {
 
     async fn handle_leave_pool(&mut self) -> Result<(), SwarmError> {
         let pool_id = {
-            let guard = self.shared_state.pool_state.read().await;
+            let guard = self.shared_state.credits.pool_state.read().await;
             let ps = guard
                 .as_ref()
                 .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -546,8 +552,8 @@ impl PoolManager {
         // If DB write fails, we return error with in-memory state still intact (correct for retry).
         // If process crashes after DB clear but before memory clear, restart sees no DB record (correct).
         self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL)?;
-        *self.shared_state.pool_state.write().await = None;
-        self.shared_state.pool_registry.remove(&pool_id);
+        *self.shared_state.credits.pool_state.write().await = None;
+        self.shared_state.credits.pool_registry.remove(&pool_id);
 
         // Broadcast signed member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
@@ -631,7 +637,7 @@ impl PoolManager {
 
         // Verify sender is an actual pool member BEFORE co-signing
         {
-            let state = self.shared_state.pool_state.read().await;
+            let state = self.shared_state.credits.pool_state.read().await;
             if let Some(ref ps) = *state {
                 let is_member = ps.members.iter().any(|m| m.node_id == forward.from_node_id);
                 if !is_member {
@@ -663,7 +669,7 @@ impl PoolManager {
 
         // SEC-C2: Apply credit to the pool owner's balance
         if let Err(e) = crate::credit::ledger::apply_credit_direct(
-            &self.shared_state.credit_balance,
+            &self.shared_state.credits.credit_balance,
             &self.shared_state.db,
             forward.amount,
             true,
@@ -674,7 +680,7 @@ impl PoolManager {
         }
 
         // Update the member's contribution in pool state
-        let mut state = self.shared_state.pool_state.write().await;
+        let mut state = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *state {
             if let Some(member) = ps
                 .members
@@ -799,6 +805,7 @@ impl PoolManager {
 
         // Store in registry for network-wide visibility
         self.shared_state
+            .credits
             .pool_registry
             .insert(state.pool_id.clone(), state);
     }
@@ -953,7 +960,7 @@ impl PoolManager {
 
         // Check pool capacity BEFORE consuming the invitation to avoid locking out invitees
         {
-            let state = self.shared_state.pool_state.read().await;
+            let state = self.shared_state.credits.pool_state.read().await;
             if let Some(ref ps) = *state {
                 let max_size = self.shared_state.config.pool.max_pool_size;
                 if ps.members.len() >= max_size as usize {
@@ -972,7 +979,7 @@ impl PoolManager {
             .db
             .remove(TREE_POOL_INVITATIONS, &acceptance.invitation_id.to_string());
 
-        let mut state = self.shared_state.pool_state.write().await;
+        let mut state = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *state {
             // Check not already a member
             if ps
@@ -1058,9 +1065,12 @@ impl PoolManager {
                 .db
                 .put_json(TREE_POOL_REMOVAL_REPLAYS, &removal_key, &true);
 
-            *self.shared_state.pool_state.write().await = None;
+            *self.shared_state.credits.pool_state.write().await = None;
             let _ = self.shared_state.db.remove(TREE_POOL_STATE, KEY_MY_POOL);
-            self.shared_state.pool_registry.remove(&removal.pool_id);
+            self.shared_state
+                .credits
+                .pool_registry
+                .remove(&removal.pool_id);
             tracing::info!(pool_id = %removal.pool_id, "Removed from pool by owner");
         }
     }
@@ -1106,7 +1116,7 @@ impl PoolManager {
             return;
         }
 
-        let mut state = self.shared_state.pool_state.write().await;
+        let mut state = self.shared_state.credits.pool_state.write().await;
         if let Some(ref mut ps) = *state {
             let before = ps.members.len();
             ps.members.retain(|m| m.node_id != node_id);
@@ -1120,7 +1130,7 @@ impl PoolManager {
     }
 
     async fn gossip_pool_state(&self) {
-        let state = self.shared_state.pool_state.read().await;
+        let state = self.shared_state.credits.pool_state.read().await;
         if let Some(ref ps) = *state {
             let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::StateGossip(ps.clone()));
             let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
@@ -1128,7 +1138,7 @@ impl PoolManager {
     }
 
     async fn build_leaderboard(&self) -> Vec<LeaderboardEntry> {
-        let state = self.shared_state.pool_state.read().await;
+        let state = self.shared_state.credits.pool_state.read().await;
         let mut entries = Vec::new();
 
         if let Some(ref ps) = *state {
@@ -1167,7 +1177,7 @@ impl PoolManager {
             ));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.pool_state.write().await;
+        let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
             .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -1184,7 +1194,7 @@ impl PoolManager {
             return Err(SwarmError::Internal("Split must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.pool_state.write().await;
+        let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
             .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -1209,7 +1219,7 @@ impl PoolManager {
             return Err(SwarmError::Internal("Level must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.pool_state.write().await;
+        let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
             .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -1236,7 +1246,7 @@ impl PoolManager {
 
     /// Generate a short invite code (owner only). One-time use, expires after TTL.
     async fn handle_generate_invite_code(&mut self) -> Result<String, SwarmError> {
-        let pool_state = self.shared_state.pool_state.read().await;
+        let pool_state = self.shared_state.credits.pool_state.read().await;
         let ps = pool_state
             .as_ref()
             .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
@@ -1289,7 +1299,7 @@ impl PoolManager {
     /// Broadcasts a JoinRequest over gossip so the owner can auto-invite.
     async fn handle_join_with_code(&mut self, code: String) -> Result<(), SwarmError> {
         // Must not already be in a pool
-        if self.shared_state.pool_state.read().await.is_some() {
+        if self.shared_state.credits.pool_state.read().await.is_some() {
             return Err(SwarmError::Internal("Already in a pool".into()));
         }
 
@@ -1337,7 +1347,7 @@ impl PoolManager {
     async fn handle_inbound_join_request(&mut self, code_hash: [u8; 32], requester: NodeId) {
         // Only process if we're a pool owner
         let is_owner = {
-            let ps = self.shared_state.pool_state.read().await;
+            let ps = self.shared_state.credits.pool_state.read().await;
             ps.as_ref()
                 .map(|s| s.pool_id == *self.shared_state.identity.node_id())
                 .unwrap_or(false)

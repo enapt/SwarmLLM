@@ -76,6 +76,7 @@ impl AutoShardManager {
         let configured_range = self.shared_state.config.inference.shard_range;
         let default_cap = self
             .shared_state
+            .models
             .auto_manage_default_model_cap
             .load(std::sync::atomic::Ordering::Relaxed);
         let min_replicas = self.shared_state.config.auto_manage.min_replicas as usize;
@@ -105,6 +106,7 @@ impl AutoShardManager {
             // -- Policy gate: skip models excluded from auto-manage --
             if let Some(policy) = self
                 .shared_state
+                .models
                 .model_auto_manage_policies
                 .get(&manifest.id)
             {
@@ -122,7 +124,7 @@ impl AutoShardManager {
             // allow gap-filling regardless of trust level. Only new-model adoption
             // (zero local shards) requires explicit trust / user pinning.
             {
-                let trust = self.shared_state.model_trust.get(&manifest.id);
+                let trust = self.shared_state.models.model_trust.get(&manifest.id);
                 let trust_level = trust
                     .as_ref()
                     .map(|t| &t.trust_level)
@@ -166,6 +168,7 @@ impl AutoShardManager {
 
             let effective_cap = self
                 .shared_state
+                .models
                 .model_auto_manage_policies
                 .get(&manifest.id)
                 .and_then(|p| {
@@ -274,6 +277,7 @@ impl AutoShardManager {
                 // near-holders so we don't duplicate their work.
                 let peer_dl_count = self
                     .shared_state
+                    .models
                     .peer_shard_downloads
                     .get(&shard_id)
                     .map(|v| v.len())
@@ -355,7 +359,12 @@ impl AutoShardManager {
 
                 // Skip shards already being downloaded on THIS node (explicit or
                 // auto-manage). Prevents racing with an in-flight download.
-                if let Some(acq) = self.shared_state.acquisition_progress.get(&manifest.id) {
+                if let Some(acq) = self
+                    .shared_state
+                    .models
+                    .acquisition_progress
+                    .get(&manifest.id)
+                {
                     if let Some(sp) = acq.shard_progress.get(&shard.index) {
                         if matches!(
                             sp.state,
@@ -578,7 +587,7 @@ impl AutoShardManager {
         // downloading shard 0 would block acquisition of shard 1.
         let downloading_shards: std::collections::HashSet<(String, u32)> = {
             let mut set = std::collections::HashSet::new();
-            for entry in self.shared_state.acquisition_progress.iter() {
+            for entry in self.shared_state.models.acquisition_progress.iter() {
                 if !matches!(
                     entry.value().state,
                     crate::model::acquisition::AcquisitionState::Downloading
@@ -683,6 +692,7 @@ impl AutoShardManager {
             // Also check raw counter as fallback (covers first window before decay kicks in)
             let raw = self
                 .shared_state
+                .models
                 .model_request_counts
                 .get(model_id)
                 .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))

@@ -723,7 +723,7 @@ pub async fn chat_completions(
     let created = chrono::Utc::now().timestamp();
 
     // Track requests made by this node
-    if let Ok(mut stats) = state.shared_state.node_stats.try_write() {
+    if let Ok(mut stats) = state.shared_state.metrics.node_stats.try_write() {
         stats.requests_made += 1;
     }
 
@@ -1159,7 +1159,7 @@ pub async fn chat_completions(
                             .data_dir
                             .join("models")
                             .join(&safe_id);
-                        if let Some(hf_src) = state.shared_state.hf_sources.get(&mid) {
+                        if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
                             let shard_size = state.shared_state.config.model.shard_size_bytes();
                             if let Ok(info) = crate::model::huggingface::probe_gguf_file(
                                 &hf_src.repo_id,

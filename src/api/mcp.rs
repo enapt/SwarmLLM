@@ -623,7 +623,7 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
     }
 
     // Cloud provider models
-    for entry in state.shared_state.provider_model_map.iter() {
+    for entry in state.shared_state.metrics.provider_model_map.iter() {
         let model_id = entry.key().clone();
         if !seen.contains(&model_id) {
             seen.insert(model_id.clone());
@@ -1273,7 +1273,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     if tier == "smart" {
         // Prefer known-capable cloud models
         let smart_prefixes = ["claude", "gpt-4", "o1", "o3", "gemini-2"];
-        for entry in state.shared_state.provider_model_map.iter() {
+        for entry in state.shared_state.metrics.provider_model_map.iter() {
             let model_id = entry.key().clone();
             let is_smart = smart_prefixes
                 .iter()
@@ -1464,6 +1464,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     // Cloud providers
     let mut cloud_models: Vec<String> = state
         .shared_state
+        .metrics
         .provider_model_map
         .iter()
         .map(|e| e.key().clone())
@@ -1471,7 +1472,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     cloud_models.sort();
 
     // Node stats
-    let stats = state.shared_state.node_stats.read().await;
+    let stats = state.shared_state.metrics.node_stats.read().await;
     let node_stats = json!({
         "requests_served": stats.requests_served,
         "requests_made": stats.requests_made,
@@ -1483,7 +1484,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
     drop(stats);
 
     // Credit balance
-    let credit_balance = state.shared_state.credit_balance.read().await;
+    let credit_balance = state.shared_state.credits.credit_balance.read().await;
     let credits = json!({
         "balance": credit_balance.balance,
         "lifetime_earned": credit_balance.lifetime_earned,
@@ -1583,6 +1584,7 @@ async fn resource_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse
     // Cloud provider models
     let mut cloud: Vec<String> = state
         .shared_state
+        .metrics
         .provider_model_map
         .iter()
         .map(|e| e.key().clone())

@@ -22,7 +22,7 @@ pub async fn forward_credits_to_owner(
 
     // Extract pool info while holding the read lock, then release it.
     let (pool_id, owner_id, forward_amount) = {
-        let guard = shared_state.pool_state.read().await;
+        let guard = shared_state.credits.pool_state.read().await;
         let ps = match guard.as_ref() {
             Some(ps) => ps,
             None => return Ok(false), // Not in a pool
@@ -63,7 +63,7 @@ pub async fn forward_credits_to_owner(
         crypto::create_credit_forward(&shared_state.identity, &pool_id, my_id, &owner_id, amount);
 
     // Send to pool manager for processing + broadcasting
-    if let Some(ref tx) = *shared_state.pool_tx.read().await {
+    if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
         if tx
             .send(PoolCommand::ProcessCreditForward { forward })
             .await
