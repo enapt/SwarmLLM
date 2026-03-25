@@ -903,7 +903,9 @@ pub async fn delete_model(
     }
 
     // Notify dashboard
-    let _ = shared.models_changed_tx.send(());
+    let _ = shared
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     tracing::info!(model = %model_id, files = files_removed, "Model deleted");
 
@@ -967,7 +969,9 @@ pub async fn unload_model(
     shared.gguf_meta.remove(&mid);
 
     // Notify dashboard
-    let _ = shared.models_changed_tx.send(());
+    let _ = shared
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     // Emit activity event
     shared.emit_activity(crate::daemon::state::ActivityEvent {
@@ -1089,7 +1093,9 @@ pub async fn unload_shard(
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
     }
 
-    let _ = shared.models_changed_tx.send(());
+    let _ = shared
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let mname = shared
@@ -1223,7 +1229,9 @@ pub async fn load_shard(
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
     }
 
-    let _ = shared.models_changed_tx.send(());
+    let _ = shared
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let mname = shared
@@ -1378,12 +1386,16 @@ pub async fn delete_shard(
                 vram_budget,
             )
             .await;
-            let _ = reload_shared.models_changed_tx.send(());
+            let _ = reload_shared
+                .dashboard_tx
+                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
         });
     }
 
     // Notify dashboard so shard grid and model state update immediately
-    let _ = shared.models_changed_tx.send(());
+    let _ = shared
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
         let mname = shared

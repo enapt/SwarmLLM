@@ -927,13 +927,13 @@ impl Daemon {
         {
             let update_config = self.config.updates.clone();
             let update_state = shared_state.update_state.clone();
-            let update_tx = shared_state.update_tx.clone();
+            let dash_tx = shared_state.dashboard_tx.clone();
             let update_shutdown = shutdown_rx.clone();
             let checker = crate::update::UpdateChecker::new(
                 update_config,
                 "enapt/SwarmLLM".to_string(),
                 update_state,
-                update_tx,
+                dash_tx,
             );
             subsystems.spawn(async move {
                 checker.run(update_shutdown).await;

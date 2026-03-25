@@ -128,6 +128,19 @@ impl ActivityEvent {
     }
 }
 
+/// Signal enum for dashboard-targeted WS pushes.
+/// Consolidates peer_list_changed, models_changed, and update_available
+/// into a single broadcast channel to reduce channel proliferation.
+#[derive(Clone, Debug)]
+pub enum DashboardSignal {
+    /// Peer registry changed — push full peer list to dashboard.
+    PeersChanged,
+    /// Model state changed (shard download, load, prune) — frontend should re-fetch models.
+    ModelsChanged,
+    /// Software update available — push banner to dashboard.
+    UpdateAvailable(crate::update::UpdateInfo),
+}
+
 /// Thread-safe shared state accessible by all daemon tasks.
 /// Cached info about a locally loaded model (lock-free reads).
 #[derive(Clone, Debug)]
@@ -291,18 +304,12 @@ pub struct SharedState {
     pub channel_metrics: ChannelMetricsSet,
     /// Number of peers discovered via mDNS (LAN peers).
     pub lan_peer_count: std::sync::atomic::AtomicUsize,
-    /// Broadcast channel fired whenever the peer_registry changes (connect/disconnect).
-    /// WebSocket subscribers push a full `peer_list` message so the dashboard updates live.
-    pub peer_list_changed_tx: broadcast::Sender<()>,
+    /// Unified broadcast channel for dashboard-targeted signals (peer changes, model changes, updates).
+    pub dashboard_tx: broadcast::Sender<DashboardSignal>,
     /// Runtime-mutable cloud provider configuration (API keys for Anthropic, OpenAI, etc.).
     pub providers_config: RwLock<crate::config::ProvidersConfig>,
     /// Update checker shared state (version info, last checked, etc.).
     pub update_state: Arc<RwLock<crate::update::UpdateState>>,
-    /// Broadcast channel for update availability notifications (WebSocket push).
-    pub update_tx: broadcast::Sender<crate::update::UpdateInfo>,
-    /// Broadcast channel fired when models change (shard download, load, prune).
-    /// WebSocket subscribers push a `models_changed` event so the dashboard auto-refreshes.
-    pub models_changed_tx: broadcast::Sender<()>,
     // NOTE: system_notify_tx removed — system notifications now flow through activity_tx
     // with toast_level set.
     /// Broadcast channel for rich activity events (verbose dashboard activity log).
@@ -795,7 +802,7 @@ impl SharedState {
             channel_metrics: ChannelMetricsSet::new(),
             lan_peer_count: std::sync::atomic::AtomicUsize::new(0),
             // lan_discovery_tx removed (unified into activity_tx)
-            peer_list_changed_tx: broadcast::channel(4).0,
+            dashboard_tx: broadcast::channel(32).0,
             providers_config: RwLock::new({
                 // Hydrate from database (persisted via admin API), fall back to config.
                 // Database values may be encrypted — decrypt using the node's signing key.
@@ -819,8 +826,7 @@ impl SharedState {
                 pc
             }),
             update_state: Arc::new(RwLock::new(crate::update::UpdateState::default())),
-            update_tx: broadcast::channel(4).0,
-            models_changed_tx: broadcast::channel(16).0,
+            // update_tx and models_changed_tx replaced by dashboard_tx
             // system_notify_tx removed (unified into activity_tx)
             activity_tx: broadcast::channel(256).0,
             activity_history: std::sync::Mutex::new(VecDeque::new()),

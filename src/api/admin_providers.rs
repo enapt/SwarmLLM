@@ -179,7 +179,10 @@ pub async fn update_providers(
     }
 
     // Notify WebSocket clients so model list and mode indicator refresh immediately
-    let _ = state.shared_state.models_changed_tx.send(());
+    let _ = state
+        .shared_state
+        .dashboard_tx
+        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -730,13 +733,13 @@ pub async fn check_update(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let config = state.shared_state.config.updates.clone();
     let update_state = state.shared_state.update_state.clone();
-    let update_tx = state.shared_state.update_tx.clone();
+    let dash_tx = state.shared_state.dashboard_tx.clone();
 
     let checker = crate::update::UpdateChecker::new(
         config,
         "enapt/SwarmLLM".to_string(),
         update_state.clone(),
-        update_tx,
+        dash_tx,
     );
 
     match checker.check_for_update().await {
@@ -752,7 +755,9 @@ pub async fn check_update(
             us.last_checked = Some(chrono::Utc::now().to_rfc3339());
             us.last_error = None;
             // Notify WebSocket
-            let _ = state.shared_state.update_tx.send(info.clone());
+            let _ = state.shared_state.dashboard_tx.send(
+                crate::daemon::state::DashboardSignal::UpdateAvailable(info.clone()),
+            );
             Ok(Json(serde_json::json!({
                 "status": "update_available",
                 "info": info,

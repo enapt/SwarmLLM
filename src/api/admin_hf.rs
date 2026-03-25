@@ -1308,7 +1308,9 @@ pub async fn hf_download_shards(
             .await;
 
             // Notify dashboard that models have changed
-            let _ = download_shared.models_changed_tx.send(());
+            let _ = download_shared
+                .dashboard_tx
+                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
             // Emit activity event for HF download completion
             download_shared.emit_activity(crate::daemon::state::ActivityEvent {

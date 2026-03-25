@@ -355,8 +355,9 @@ async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
 
     let config = swarmllm::config::UpdateConfig::default();
     let state = Arc::new(RwLock::new(UpdateState::default()));
-    let (update_tx, _) = tokio::sync::broadcast::channel(4);
-    let checker = UpdateChecker::new(config, "enapt/SwarmLLM".to_string(), state, update_tx);
+    let (dashboard_tx, _) =
+        tokio::sync::broadcast::channel::<swarmllm::daemon::state::DashboardSignal>(16);
+    let checker = UpdateChecker::new(config, "enapt/SwarmLLM".to_string(), state, dashboard_tx);
 
     match checker.check_for_update().await {
         Ok(Some(info)) => {

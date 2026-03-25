@@ -418,7 +418,10 @@ impl AutoShardManager {
             }
 
             // Emit unified activity event (replaces separate prune_events_tx)
-            let _ = self.shared_state.models_changed_tx.send(());
+            let _ = self
+                .shared_state
+                .dashboard_tx
+                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
             self.shared_state
                 .emit_activity(crate::daemon::state::ActivityEvent {
                     category: "auto_manage",

@@ -85,9 +85,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 
     // Spawn a task to push stats every 2 seconds + ping every 30 seconds + activity events
     let push_state = shared_state.clone();
-    let mut update_rx = shared_state.update_tx.subscribe();
-    let mut models_changed_rx = shared_state.models_changed_tx.subscribe();
-    let mut peer_list_rx = shared_state.peer_list_changed_tx.subscribe();
+    let mut dashboard_rx = shared_state.dashboard_tx.subscribe();
     let mut activity_rx = shared_state.activity_tx.subscribe();
     let mut push_task = tokio::spawn(async move {
         // Send the current peer list immediately on connect so the dashboard
@@ -150,35 +148,29 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                         break;
                     }
                 }
-                _ = models_changed_rx.recv() => {
-                    let msg = serde_json::json!({
-                        "type": "models_changed",
-                    });
-                    let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                    if sender.send(Message::Text(msg_str)).await.is_err() {
-                        break;
-                    }
-                }
-                _ = peer_list_rx.recv() => {
-                    let peers = build_peer_list_message(&push_state);
-                    let msg_str = serde_json::to_string(&peers).unwrap_or_default();
-                    if sender.send(Message::Text(msg_str)).await.is_err() {
-                        break;
-                    }
-                }
-                update_info = update_rx.recv() => {
-                    if let Ok(info) = update_info {
-                        let msg = serde_json::json!({
-                            "type": "update_available",
-                            "data": {
-                                "current_version": info.current_version,
-                                "latest_version": info.latest_version,
-                                "changelog": info.changelog,
-                                "published_at": info.published_at,
-                                "downloaded": info.downloaded,
+                signal = dashboard_rx.recv() => {
+                    if let Ok(sig) = signal {
+                        let msg_str = match sig {
+                            crate::daemon::state::DashboardSignal::ModelsChanged => {
+                                serde_json::to_string(&serde_json::json!({"type": "models_changed"})).unwrap_or_default()
                             }
-                        });
-                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                            crate::daemon::state::DashboardSignal::PeersChanged => {
+                                let peers = build_peer_list_message(&push_state);
+                                serde_json::to_string(&peers).unwrap_or_default()
+                            }
+                            crate::daemon::state::DashboardSignal::UpdateAvailable(info) => {
+                                serde_json::to_string(&serde_json::json!({
+                                    "type": "update_available",
+                                    "data": {
+                                        "current_version": info.current_version,
+                                        "latest_version": info.latest_version,
+                                        "changelog": info.changelog,
+                                        "published_at": info.published_at,
+                                        "downloaded": info.downloaded,
+                                    }
+                                })).unwrap_or_default()
+                            }
+                        };
                         if sender.send(Message::Text(msg_str)).await.is_err() {
                             break;
                         }

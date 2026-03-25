@@ -589,7 +589,9 @@ impl AutoShardManager {
                             check_and_load_model(&shared, &model_id, vram_budget).await;
 
                             // Notify dashboard that models have changed
-                            let _ = shared.models_changed_tx.send(());
+                            let _ = shared
+                                .dashboard_tx
+                                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
                             // Emit activity event for shard download complete
                             {
@@ -988,7 +990,9 @@ impl AutoShardManager {
                         net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![sid]));
 
                     // Notify dashboard
-                    let _ = shared.models_changed_tx.send(());
+                    let _ = shared
+                        .dashboard_tx
+                        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1024,6 +1028,9 @@ impl AutoShardManager {
     pub(super) async fn check_model_complete(&self, model_id: &ModelId) {
         let vram_budget = compute_vram_budget(&self.shared_state);
         check_and_load_model(&self.shared_state, model_id, vram_budget).await;
-        let _ = self.shared_state.models_changed_tx.send(());
+        let _ = self
+            .shared_state
+            .dashboard_tx
+            .send(crate::daemon::state::DashboardSignal::ModelsChanged);
     }
 }

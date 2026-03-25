@@ -39,8 +39,8 @@ pub struct UpdateChecker {
     binary_path: PathBuf,
     /// Shared update state.
     state: Arc<RwLock<UpdateState>>,
-    /// Broadcast sender for update notifications (WebSocket will subscribe).
-    update_tx: tokio::sync::broadcast::Sender<UpdateInfo>,
+    /// Dashboard signal sender for update notifications.
+    dashboard_tx: tokio::sync::broadcast::Sender<crate::daemon::state::DashboardSignal>,
 }
 
 /// GitHub release API response (subset of fields we need).
@@ -63,7 +63,7 @@ impl UpdateChecker {
         config: UpdateConfig,
         repo: String,
         state: Arc<RwLock<UpdateState>>,
-        update_tx: tokio::sync::broadcast::Sender<UpdateInfo>,
+        dashboard_tx: tokio::sync::broadcast::Sender<crate::daemon::state::DashboardSignal>,
     ) -> Self {
         let binary_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("swarmllm"));
         Self {
@@ -71,7 +71,7 @@ impl UpdateChecker {
             repo,
             binary_path,
             state,
-            update_tx,
+            dashboard_tx,
         }
     }
 
@@ -380,7 +380,9 @@ impl UpdateChecker {
                         state.last_checked = Some(chrono::Utc::now().to_rfc3339());
                         state.last_error = None;
                     }
-                    let _ = self.update_tx.send(info);
+                    let _ = self
+                        .dashboard_tx
+                        .send(crate::daemon::state::DashboardSignal::UpdateAvailable(info));
                 }
                 Ok(None) => {
                     tracing::debug!("No update available");

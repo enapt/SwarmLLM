@@ -1043,7 +1043,10 @@ impl NetworkManager {
                 self.shared_state
                     .peer_registry
                     .insert(node_id.clone(), peer_info);
-                let _ = self.shared_state.peer_list_changed_tx.send(());
+                let _ = self
+                    .shared_state
+                    .dashboard_tx
+                    .send(crate::daemon::state::DashboardSignal::PeersChanged);
 
                 // Emit activity event for peer connection
                 {
@@ -1482,7 +1485,10 @@ impl NetworkManager {
                             // dispatch from resolving NodeId for a peer that's being removed
                             self.peer_to_node.remove(&peer_id);
                             self.shared_state.peer_registry.remove(&node_id);
-                            let _ = self.shared_state.peer_list_changed_tx.send(());
+                            let _ = self
+                                .shared_state
+                                .dashboard_tx
+                                .send(crate::daemon::state::DashboardSignal::PeersChanged);
 
                             self.shared_state
                                 .emit_activity(crate::daemon::state::ActivityEvent {
@@ -2294,7 +2300,9 @@ impl NetworkManager {
                                     vram_budget,
                                 )
                                 .await;
-                                let _ = load_shared.models_changed_tx.send(());
+                                let _ = load_shared
+                                    .dashboard_tx
+                                    .send(crate::daemon::state::DashboardSignal::ModelsChanged);
                             });
                         }
                         self.shared_state.auto_manage_notify.notify_one();
