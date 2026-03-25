@@ -255,6 +255,7 @@ pub struct SharedState {
     >,
     pub pending_tp_partials: DashMap<(uuid::Uuid, u32), TpAllReduceCollector>,
     pub allreduce_registry: Arc<crate::inference::allreduce::AllReduceRegistry>,
+    pub ring_chunk_registry: Arc<crate::inference::allreduce::RingChunkRegistry>,
     pub vision_modules: DashMap<crate::types::ModelId, Arc<crate::inference::vision::VisionModule>>,
     pub encrypted_pipeline_models: DashMap<crate::types::ModelId, bool>,
     pub local_embedders:
@@ -751,6 +752,7 @@ impl SharedState {
             pending_vision_results: DashMap::new(),
             pending_tp_partials: DashMap::new(),
             allreduce_registry: Arc::new(crate::inference::allreduce::AllReduceRegistry::new()),
+            ring_chunk_registry: Arc::new(crate::inference::allreduce::RingChunkRegistry::new()),
             shard_bytes_served: AtomicU64::new(0),
             relay_seconds_served: AtomicU64::new(0),
             active_relay_circuits: DashMap::new(),

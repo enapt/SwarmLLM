@@ -1199,17 +1199,21 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         }
+                                        let delivered = shared_state.ring_chunk_registry.deliver(
+                                            chunk.request_id,
+                                            chunk.layer_idx,
+                                            chunk.step,
+                                            chunk.chunk_data.clone(),
+                                        );
                                         tracing::debug!(
                                             request_id = %chunk.request_id,
                                             layer_idx = chunk.layer_idx,
                                             step = chunk.step,
                                             chunk_idx = chunk.chunk_idx,
                                             is_allgather = chunk.is_allgather,
+                                            delivered,
                                             "Ring AllReduce chunk received"
                                         );
-                                        // Ring chunk delivery will be handled by the ring execution loop
-                                        // in allreduce.rs when ring_allreduce_network() is implemented.
-                                        // For now, log and drop — star topology handles all TP groups.
                                     }
                                     // Regional shard summary gossip (Phase 18)
                                     SwarmMessage::RegionShardSummary(summary) => {

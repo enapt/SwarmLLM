@@ -332,11 +332,214 @@ impl AllReduceRegistry {
     }
 }
 
-/// Send this node's partial tensor to the coordinator (rank 0) and wait for the reduced result.
+// ─── Ring chunk delivery registry ─────────────────────────────────────────────
+
+/// Key for a pending ring chunk: (request_id, layer_idx, step).
+type RingChunkKey = (Uuid, u32, u32);
+
+/// Registry for receiving ring AllReduce chunks from neighbors.
+pub struct RingChunkRegistry {
+    pending: dashmap::DashMap<RingChunkKey, oneshot::Sender<Vec<u8>>>,
+}
+
+impl Default for RingChunkRegistry {
+    fn default() -> Self {
+        Self {
+            pending: dashmap::DashMap::new(),
+        }
+    }
+}
+
+impl RingChunkRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register to receive a chunk for a specific (request, layer, step).
+    pub fn register(
+        &self,
+        request_id: Uuid,
+        layer_idx: u32,
+        step: u32,
+    ) -> oneshot::Receiver<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.insert((request_id, layer_idx, step), tx);
+        rx
+    }
+
+    /// Deliver a received chunk. Returns false if no one was waiting.
+    pub fn deliver(&self, request_id: Uuid, layer_idx: u32, step: u32, data: Vec<u8>) -> bool {
+        if let Some((_, tx)) = self.pending.remove(&(request_id, layer_idx, step)) {
+            tx.send(data).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+// ─── Ring AllReduce network execution ─────────────────────────────────────────
+
+/// Execute ring AllReduce over the network for a single layer.
 ///
-/// Currently uses the **star topology**. When `choose_allreduce_strategy()` returns `Ring`,
-/// a future network implementation would use chunk-level ring messaging instead.
-/// The ring algorithm itself is implemented and tested in `ring_allreduce_sum_local()`.
+/// Each node holds one partial tensor. The ring algorithm runs 2*(N-1) steps:
+/// - Scatter-reduce (N-1 steps): accumulate partial sums chunk-by-chunk around ring
+/// - Allgather (N-1 steps): propagate fully-reduced chunks around ring
+///
+/// After completion, all nodes have the fully-reduced tensor.
+#[allow(clippy::too_many_arguments)]
+pub async fn ring_allreduce_network(
+    shared_state: &Arc<SharedState>,
+    network_tx: &mpsc::Sender<NetworkCommand>,
+    ring_registry: &RingChunkRegistry,
+    allreduce_registry: &AllReduceRegistry,
+    request_id: Uuid,
+    layer_idx: u32,
+    tp_group: &TensorParallelGroup,
+    local_rank: usize,
+    partial_data_compressed: Vec<u8>,
+    shape: Vec<u32>,
+) -> Result<TpAllReduceResponse, SwarmError> {
+    let n = tp_group.tp_size();
+    let schedule = compute_ring_schedule(local_rank, n);
+
+    // Decompress our partial tensor to f32
+    let partial_bytes = zstd::decode_all(std::io::Cursor::new(&partial_data_compressed))
+        .map_err(|e| SwarmError::Internal(format!("Decompress ring partial: {e}")))?;
+    let num_elements = partial_bytes.len() / 4;
+    let mut local_data: Vec<f32> = vec![0.0; num_elements];
+    for (i, chunk) in partial_bytes.chunks_exact(4).enumerate() {
+        local_data[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+
+    // Split into N chunks
+    let chunk_size = num_elements.div_ceil(n);
+    let mut chunks: Vec<Vec<f32>> = (0..n)
+        .map(|c| {
+            let start = c * chunk_size;
+            let end = (start + chunk_size).min(num_elements);
+            if start < num_elements {
+                local_data[start..end].to_vec()
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+
+    // Right neighbor to send to
+    let right_rank = (local_rank + 1) % n;
+    let right_node = &tp_group.nodes[right_rank];
+    let right_peer_bytes = shared_state
+        .peer_id_map
+        .get(right_node)
+        .map(|r| r.clone())
+        .ok_or_else(|| {
+            SwarmError::Internal(format!("No PeerId for ring right neighbor {right_node}"))
+        })?;
+
+    // Execute each step of the ring
+    for ring_step in &schedule {
+        let step_num = ring_step.step
+            + if ring_step.phase == RingPhase::Allgather {
+                n - 1
+            } else {
+                0
+            };
+
+        // Register to receive from left neighbor for this step
+        let rx = ring_registry.register(request_id, layer_idx, step_num as u32);
+
+        // Send our chunk to the right neighbor
+        let send_data: Vec<u8> = chunks[ring_step.send_chunk_idx]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        let compressed_chunk = zstd::encode_all(std::io::Cursor::new(&send_data), 1)
+            .map_err(|e| SwarmError::Internal(format!("Compress ring chunk: {e}")))?;
+
+        let chunk_msg = crate::types::TpRingChunk {
+            request_id,
+            layer_idx,
+            step: step_num as u32,
+            chunk_idx: ring_step.send_chunk_idx as u32,
+            is_allgather: ring_step.phase == RingPhase::Allgather,
+            chunk_data: compressed_chunk,
+            num_chunks: n as u32,
+            sender_peer_bytes: None,
+        };
+        network_tx
+            .send(NetworkCommand::SendRingChunk {
+                target_peer_bytes: right_peer_bytes.clone(),
+                chunk: chunk_msg,
+            })
+            .await
+            .map_err(|e| SwarmError::Internal(format!("Send ring chunk: {e}")))?;
+
+        // Wait for chunk from left neighbor
+        let received_data = tokio::time::timeout(ALLREDUCE_TIMEOUT, rx)
+            .await
+            .map_err(|_| {
+                SwarmError::Internal(format!(
+                    "Ring AllReduce timeout at step {step_num} for layer {layer_idx}"
+                ))
+            })?
+            .map_err(|_| SwarmError::Internal("Ring chunk channel dropped".into()))?;
+
+        // Decompress received chunk
+        let recv_bytes = zstd::decode_all(std::io::Cursor::new(&received_data))
+            .map_err(|e| SwarmError::Internal(format!("Decompress ring recv: {e}")))?;
+        let recv_floats: Vec<f32> = recv_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // Apply the received chunk
+        let recv_idx = ring_step.recv_chunk_idx;
+        match ring_step.phase {
+            RingPhase::ScatterReduce => {
+                // Accumulate: add received to our chunk
+                for (j, val) in recv_floats.iter().enumerate() {
+                    if j < chunks[recv_idx].len() {
+                        chunks[recv_idx][j] += val;
+                    }
+                }
+            }
+            RingPhase::Allgather => {
+                // Replace: overwrite our chunk with the fully-reduced one
+                chunks[recv_idx] = recv_floats;
+            }
+        }
+    }
+
+    // Reassemble the fully-reduced tensor
+    let mut result: Vec<f32> = Vec::with_capacity(num_elements);
+    for chunk in &chunks {
+        result.extend_from_slice(chunk);
+    }
+    result.truncate(num_elements);
+
+    // Compress and package as TpAllReduceResponse
+    let result_bytes: Vec<u8> = result.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let reduced_compressed = zstd::encode_all(std::io::Cursor::new(&result_bytes), 1)
+        .map_err(|e| SwarmError::Internal(format!("Compress ring result: {e}")))?;
+
+    let resp = TpAllReduceResponse {
+        request_id,
+        layer_idx,
+        reduced_data: reduced_compressed,
+        shape,
+    };
+
+    // Deliver to ourselves (the pipeline is waiting on the registry)
+    allreduce_registry.deliver(resp.clone());
+
+    Ok(resp)
+}
+
+/// Send this node's partial tensor and wait for the reduced result.
+///
+/// Automatically selects **star** or **ring** topology based on group size and tensor size.
+/// - Star (default, tp_size < 4): all ranks → coordinator → broadcast
+/// - Ring (tp_size ≥ 4, tensor ≥ 1024 elements): scatter-reduce + allgather via TpRingChunk
 #[allow(clippy::too_many_arguments)]
 pub async fn allreduce_sum(
     shared_state: &Arc<SharedState>,
@@ -350,12 +553,30 @@ pub async fn allreduce_sum(
     shape: Vec<u32>,
 ) -> Result<TpAllReduceResponse, SwarmError> {
     let tp_size = tp_group.tp_size() as u32;
+
+    // Estimate tensor elements for strategy selection (compressed size / ~2 for FP16)
+    let est_elements = partial_data_compressed.len() / 2;
+    let strategy = choose_allreduce_strategy(tp_size, est_elements);
+
+    if strategy == AllReduceStrategy::Ring {
+        return ring_allreduce_network(
+            shared_state,
+            network_tx,
+            &shared_state.ring_chunk_registry,
+            allreduce_registry,
+            request_id,
+            layer_idx,
+            tp_group,
+            local_rank,
+            partial_data_compressed,
+            shape,
+        )
+        .await;
+    }
+
+    // Star topology (default for small groups)
     let coordinator = &tp_group.nodes[0];
     let is_coordinator = local_rank == 0;
-
-    // Uses star topology over the network. Ring allreduce is available locally
-    // via ring_allreduce_sum_local() and will be wired for network use when
-    // the chunk-messaging protocol is implemented.
 
     // Register to receive the reduced result
     let rx = allreduce_registry.register(request_id, layer_idx);
