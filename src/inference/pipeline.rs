@@ -10,8 +10,9 @@ use crate::inference::chat_template;
 use crate::inference::router::{
     InferenceOutput, StreamingTokenEvent, StreamingTokenTx, TokenLogProbEntry,
 };
+use crate::inference::split;
 use crate::types::{
-    InferenceError, InferenceRequest, LayerForward, LayerResult, NetworkCommand,
+    InferenceError, InferenceRequest, LayerForward, LayerResult, ModelId, NetworkCommand,
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
 };
 
@@ -146,6 +147,86 @@ impl PipelineExecutor {
             assignment,
             collected_logprobs: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Ensure the split model metadata entry exists in SharedState.
+    ///
+    /// Lightweight — reads GGUF header only, no GPU loading.
+    /// Creates the entry if missing, handles VRAM budget eviction.
+    fn ensure_split_model_entry(
+        &self,
+        model_id: &ModelId,
+        layer_start: usize,
+        layer_end: usize,
+    ) -> Result<(ModelId, usize, usize), SwarmError> {
+        let split_key = (model_id.clone(), layer_start, layer_end);
+        if self.shared_state.split_models.contains_key(&split_key) {
+            return Ok(split_key);
+        }
+
+        let shard_store =
+            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+        let model_dir = shard_store.models_dir().join(&model_id.0);
+        let manifest = self
+            .shared_state
+            .model_registry
+            .get_manifest(model_id)
+            .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
+        let total_layers = manifest.num_layers as usize;
+
+        let local_node_id = self.shared_state.identity.node_id().clone();
+        let local_shards: Vec<u32> = manifest
+            .shards
+            .iter()
+            .filter(|s| {
+                let sid = crate::types::ShardId {
+                    model_id: model_id.clone(),
+                    index: s.index,
+                };
+                self.shared_state
+                    .model_registry
+                    .shard_holders(&sid)
+                    .contains(&local_node_id)
+            })
+            .map(|s| s.index)
+            .collect();
+        let has_first = local_shards.contains(&0);
+        let has_last = local_shards.contains(&manifest.shard_count.saturating_sub(1));
+        let is_first = layer_start == 0 && has_first;
+        let is_last = layer_end >= total_layers && has_last;
+
+        let header_path = model_dir.join("gguf_header.bin");
+        let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
+            &model_dir,
+            layer_start,
+            layer_end,
+            total_layers,
+        );
+        let new_entry = split::SplitModelEntry::from_header(
+            &header_path,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            vram_estimate,
+        );
+
+        let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
+            .or(self.shared_state.config.inference.max_split_model_memory_mb);
+        if let Some(budget_mb) = vram_budget {
+            split::evict_split_models_lru(
+                &self.shared_state.split_models,
+                &self.shared_state.active_pipelines,
+                budget_mb,
+                new_entry.estimated_vram_mb,
+            );
+        }
+        self.shared_state
+            .split_models
+            .entry(split_key.clone())
+            .or_insert(new_entry);
+
+        Ok(split_key)
     }
 
     /// T14: Pre-compute vision embeddings before the text pipeline.
@@ -1569,75 +1650,7 @@ impl PipelineExecutor {
             segment.layer_range.1 as usize,
         );
 
-        // Ensure the split model metadata entry exists (lightweight — no GPU loading)
-        let split_key = (model_id.clone(), layer_start, layer_end);
-        if !self.shared_state.split_models.contains_key(&split_key) {
-            let shard_store =
-                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-            let model_dir = shard_store.models_dir().join(&model_id.0);
-
-            let manifest = self
-                .shared_state
-                .model_registry
-                .get_manifest(model_id)
-                .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
-            let total_layers = manifest.num_layers as usize;
-
-            // Determine is_first/is_last with shard-awareness
-            let local_node_id = self.shared_state.identity.node_id().clone();
-            let local_shards: Vec<u32> = manifest
-                .shards
-                .iter()
-                .filter(|s| {
-                    let sid = crate::types::ShardId {
-                        model_id: model_id.clone(),
-                        index: s.index,
-                    };
-                    self.shared_state
-                        .model_registry
-                        .shard_holders(&sid)
-                        .contains(&local_node_id)
-                })
-                .map(|s| s.index)
-                .collect();
-            let has_shard_0 = local_shards.contains(&0);
-            let last_shard_idx = manifest.shard_count.saturating_sub(1);
-            let has_last_shard = local_shards.contains(&last_shard_idx);
-            let is_first = layer_start == 0 && has_shard_0;
-            let is_last = layer_end >= total_layers && has_last_shard;
-
-            // Read metadata from GGUF header (no model loading)
-            let header_path = model_dir.join("gguf_header.bin");
-            let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
-                &model_dir,
-                layer_start,
-                layer_end,
-                total_layers,
-            );
-            let new_entry = crate::inference::split::SplitModelEntry::from_header(
-                &header_path,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last,
-                vram_estimate,
-            );
-
-            let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
-                .or(self.shared_state.config.inference.max_split_model_memory_mb);
-            if let Some(budget_mb) = vram_budget {
-                crate::inference::split::evict_split_models_lru(
-                    &self.shared_state.split_models,
-                    &self.shared_state.active_pipelines,
-                    budget_mb,
-                    new_entry.estimated_vram_mb,
-                );
-            }
-            self.shared_state
-                .split_models
-                .entry(split_key.clone())
-                .or_insert(new_entry);
-        }
+        let split_key = self.ensure_split_model_entry(model_id, layer_start, layer_end)?;
 
         // Touch the metadata entry and extract cached EOS tokens
         let _cached_eos_tokens = {
@@ -1937,72 +1950,7 @@ impl PipelineExecutor {
             "Starting tensor-parallel segment execution"
         );
 
-        // Ensure split model metadata entry exists (lightweight — no GPU loading)
-        let split_key = (model_id.clone(), layer_start, layer_end);
-        if !self.shared_state.split_models.contains_key(&split_key) {
-            let shard_store =
-                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-            let model_dir = shard_store.models_dir().join(&model_id.0);
-            let manifest = self
-                .shared_state
-                .model_registry
-                .get_manifest(model_id)
-                .ok_or_else(|| SwarmError::Internal("No manifest for model".into()))?;
-            let total_layers = manifest.num_layers as usize;
-
-            let local_shards: Vec<u32> = manifest
-                .shards
-                .iter()
-                .filter(|s| {
-                    let sid = crate::types::ShardId {
-                        model_id: model_id.clone(),
-                        index: s.index,
-                    };
-                    self.shared_state
-                        .model_registry
-                        .shard_holders(&sid)
-                        .contains(&local_node_id)
-                })
-                .map(|s| s.index)
-                .collect();
-            let has_first_shard = local_shards.contains(&0);
-            let last_idx = manifest.shard_count.saturating_sub(1);
-            let has_last_shard = local_shards.contains(&last_idx);
-            let is_first = layer_start == 0 && has_first_shard;
-            let is_last_segment = layer_end >= total_layers && has_last_shard;
-
-            // Read metadata from GGUF header (no model loading)
-            let header_path = model_dir.join("gguf_header.bin");
-            let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
-                &model_dir,
-                layer_start,
-                layer_end,
-                total_layers,
-            );
-            let new_entry = split::SplitModelEntry::from_header(
-                &header_path,
-                layer_start,
-                layer_end,
-                is_first,
-                is_last_segment,
-                vram_estimate,
-            );
-
-            let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
-                .or(self.shared_state.config.inference.max_split_model_memory_mb);
-            if let Some(budget_mb) = vram_budget {
-                split::evict_split_models_lru(
-                    &self.shared_state.split_models,
-                    &self.shared_state.active_pipelines,
-                    budget_mb,
-                    new_entry.estimated_vram_mb,
-                );
-            }
-            self.shared_state
-                .split_models
-                .entry(split_key.clone())
-                .or_insert(new_entry);
-        }
+        let split_key = self.ensure_split_model_entry(model_id, layer_start, layer_end)?;
 
         // Touch the metadata entry
         if let Some(entry) = self.shared_state.split_models.get(&split_key) {
