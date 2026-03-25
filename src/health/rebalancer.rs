@@ -86,28 +86,18 @@ impl ShardRebalancer {
                     peer = %departed_peer,
                     "Peer departed, queuing for batch rebalance"
                 );
-                self.shared_state
-                    .emit_activity(crate::daemon::state::ActivityEvent {
-                        category: "network",
-                        kind: "rebalance_peer_left",
-                        message: format!(
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "network",
+                        "rebalance_peer_left",
+                        format!(
                             "Rebalancing: peer {} departed",
                             &format!("{}", departed_peer)[..8]
                         ),
-                        model_id: None,
-                        model_name: None,
-                        node_id: Some(format!("{}", departed_peer)),
-                        detail_num: None,
-                        detail_str: Some("peer_left".to_string()),
-                        toast_level: None,
-                        toast_duration_ms: None,
-                        shard_index: None,
-                        freed_bytes: None,
-                        holder_count_before: None,
-                        holder_count_after: None,
-                        remaining_local_shards: None,
-                        timestamp: None,
-                    });
+                    )
+                    .with_node(format!("{}", departed_peer))
+                    .with_detail_str("peer_left".to_string()),
+                );
                 self.pending_peer_left.push(departed_peer);
                 self.process_pending_departures().await;
             }
@@ -116,51 +106,28 @@ impl ShardRebalancer {
                     peer = %new_peer,
                     "New peer joined, re-announcing shards"
                 );
-                self.shared_state
-                    .emit_activity(crate::daemon::state::ActivityEvent {
-                        category: "network",
-                        kind: "rebalance_peer_joined",
-                        message: format!(
+                self.shared_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "network",
+                        "rebalance_peer_joined",
+                        format!(
                             "Re-announcing shards: new peer {} joined",
                             &format!("{}", new_peer)[..8]
                         ),
-                        model_id: None,
-                        model_name: None,
-                        node_id: Some(format!("{}", new_peer)),
-                        detail_num: None,
-                        detail_str: Some("peer_joined".to_string()),
-                        toast_level: None,
-                        toast_duration_ms: None,
-                        shard_index: None,
-                        freed_bytes: None,
-                        holder_count_before: None,
-                        holder_count_after: None,
-                        remaining_local_shards: None,
-                        timestamp: None,
-                    });
+                    )
+                    .with_node(format!("{}", new_peer))
+                    .with_detail_str("peer_joined".to_string()),
+                );
                 self.handle_peer_joined().await;
             }
             RebalanceEvent::ManualTrigger => {
                 tracing::info!("Manual rebalance triggered");
                 self.shared_state
-                    .emit_activity(crate::daemon::state::ActivityEvent {
-                        category: "network",
-                        kind: "rebalance_manual",
-                        message: "Manual shard rebalance triggered".to_string(),
-                        model_id: None,
-                        model_name: None,
-                        node_id: None,
-                        detail_num: None,
-                        detail_str: None,
-                        toast_level: None,
-                        toast_duration_ms: None,
-                        shard_index: None,
-                        freed_bytes: None,
-                        holder_count_before: None,
-                        holder_count_after: None,
-                        remaining_local_shards: None,
-                        timestamp: None,
-                    });
+                    .emit_activity(crate::daemon::state::ActivityEvent::new(
+                        "network",
+                        "rebalance_manual",
+                        "Manual shard rebalance triggered".to_string(),
+                    ));
                 self.check_all_shards().await;
             }
         }

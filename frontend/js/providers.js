@@ -48,7 +48,6 @@ var PROVIDER_NAMES = {
 };
 
 // Ordered list of all supported cloud provider keys.
-var PROVIDER_KEYS = Object.keys(PROVIDER_NAMES);
 
 // Prebuilt <img> HTML strings for each provider (16px, avoids repeated DOM creation).
 var _providerIconCache = {};

@@ -878,28 +878,16 @@ async fn finalize_request(
             "Inference request failed"
         );
         // Emit failure activity
-        let mname = shared_state
-            .model_registry
-            .get_manifest(&request.model_id)
-            .map(|m| m.name.clone());
-        shared_state.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "inference",
-            kind: "inference_failed",
-            message: format!("Inference failed: {}", e),
-            model_id: Some(request.model_id.0.clone()),
-            model_name: mname,
-            node_id: None,
-            detail_num: None,
-            detail_str: Some(format!("{}", e)),
-            toast_level: Some("warning"),
-            toast_duration_ms: Some(5000),
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "inference",
+                "inference_failed",
+                format!("Inference failed: {}", e),
+            )
+            .with_model(request.model_id.0.clone())
+            .with_detail_str(format!("{}", e))
+            .with_toast("warning", 5000),
+        );
     }
 
     // Local API requests use NodeId([0; 32]) as requester sentinel
@@ -923,31 +911,23 @@ async fn finalize_request(
                 .map(|m| m.name.clone());
             let display = mname.as_deref().unwrap_or(&request.model_id.0);
             let total_tokens = result.prompt_tokens + result.completion_tokens;
-            shared_state.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "inference",
-                kind: "inference_completed",
-                message: format!(
-                    "Completed on {} — {} prompt + {} generated = {} total tokens ({})",
-                    display,
-                    result.prompt_tokens,
-                    result.completion_tokens,
-                    total_tokens,
-                    result.finish_reason,
-                ),
-                model_id: Some(request.model_id.0.clone()),
-                model_name: mname,
-                node_id: None,
-                detail_num: Some(total_tokens as i64),
-                detail_str: Some(result.finish_reason.clone()),
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "inference",
+                    "inference_completed",
+                    format!(
+                        "Completed on {} — {} prompt + {} generated = {} total tokens ({})",
+                        display,
+                        result.prompt_tokens,
+                        result.completion_tokens,
+                        total_tokens,
+                        result.finish_reason,
+                    ),
+                )
+                .with_model(request.model_id.0.clone())
+                .with_detail_num(total_tokens as i64)
+                .with_detail_str(result.finish_reason.clone()),
+            );
         }
 
         // Credit operations:

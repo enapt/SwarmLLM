@@ -1388,24 +1388,16 @@ pub async fn hf_download_shards(
                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
             // Emit activity event for HF download completion
-            download_shared.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "download",
-                kind: "hf_download_complete",
-                message: format!("HuggingFace download complete: {}", model_id_str),
-                model_id: Some(model_id_str.clone()),
-                model_name: None,
-                node_id: None,
-                detail_num: None,
-                detail_str: Some("huggingface".to_string()),
-                toast_level: Some("success"),
-                toast_duration_ms: Some(8000),
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            download_shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "hf_download_complete",
+                    format!("HuggingFace download complete: {}", model_id_str),
+                )
+                .with_model(model_id_str.clone())
+                .with_detail_str("huggingface".to_string())
+                .with_toast("success", 8000),
+            );
 
             // Wake auto-manage again to re-evaluate (maybe download more shards)
             download_shared.models.auto_manage_notify.notify_one();

@@ -756,31 +756,24 @@ impl NetworkManager {
                             .model_registry
                             .get_manifest(&shard_id.model_id)
                             .map(|m| m.name.clone());
-                        self.shared_state
-                            .emit_activity(crate::daemon::state::ActivityEvent {
-                                category: "download",
-                                kind: "shard_transfer_failed",
-                                message: format!(
+                        self.shared_state.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "download",
+                                "shard_transfer_failed",
+                                format!(
                                     "P2P transfer failed: shard {} of {} — {} ({}B received)",
                                     shard_id.index + 1,
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     error,
                                     progress
                                 ),
-                                model_id: Some(shard_id.model_id.0.clone()),
-                                model_name: mname,
-                                node_id: Some(format!("{}", peer)),
-                                detail_num: Some(shard_id.index as i64),
-                                detail_str: Some(format!("{}", error)),
-                                toast_level: Some("warning"),
-                                toast_duration_ms: Some(6000),
-                                shard_index: None,
-                                freed_bytes: None,
-                                holder_count_before: None,
-                                holder_count_after: None,
-                                remaining_local_shards: None,
-                                timestamp: None,
-                            });
+                            )
+                            .with_model(shard_id.model_id.0.clone())
+                            .with_node(format!("{}", peer))
+                            .with_detail_num(shard_id.index as i64)
+                            .with_detail_str(format!("{}", error))
+                            .with_toast("warning", 6000),
+                        );
                     }
                     // Clean up stale download progress entry to prevent resource leak
                     self.shard_download_progress.remove(&shard_id);
@@ -1069,11 +1062,11 @@ impl NetworkManager {
                             .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
                     });
                     let detail = if is_lan { "LAN" } else { "WAN" };
-                    self.shared_state
-                        .emit_activity(crate::daemon::state::ActivityEvent {
-                            category: "network",
-                            kind: "peer_connected",
-                            message: format!(
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "network",
+                            "peer_connected",
+                            format!(
                                 "Peer connected: {}{}",
                                 label,
                                 gpu_name
@@ -1081,20 +1074,10 @@ impl NetworkManager {
                                     .map(|g| format!(" ({})", g))
                                     .unwrap_or_default()
                             ),
-                            model_id: None,
-                            model_name: None,
-                            node_id: Some(node_id_str),
-                            detail_num: None,
-                            detail_str: Some(detail.to_string()),
-                            toast_level: None,
-                            toast_duration_ms: None,
-                            shard_index: None,
-                            freed_bytes: None,
-                            holder_count_before: None,
-                            holder_count_after: None,
-                            remaining_local_shards: None,
-                            timestamp: None,
-                        });
+                        )
+                        .with_node(node_id_str)
+                        .with_detail_str(detail.to_string()),
+                    );
                 }
 
                 // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
@@ -1500,25 +1483,14 @@ impl NetworkManager {
                                 .dashboard_tx
                                 .send(crate::daemon::state::DashboardSignal::PeersChanged);
 
-                            self.shared_state
-                                .emit_activity(crate::daemon::state::ActivityEvent {
-                                    category: "network",
-                                    kind: "peer_disconnected",
-                                    message: format!("Peer disconnected: {}", label),
-                                    model_id: None,
-                                    model_name: None,
-                                    node_id: Some(format!("{}", node_id)),
-                                    detail_num: None,
-                                    detail_str: None,
-                                    toast_level: None,
-                                    toast_duration_ms: None,
-                                    shard_index: None,
-                                    freed_bytes: None,
-                                    holder_count_before: None,
-                                    holder_count_after: None,
-                                    remaining_local_shards: None,
-                                    timestamp: None,
-                                });
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "network",
+                                    "peer_disconnected",
+                                    format!("Peer disconnected: {}", label),
+                                )
+                                .with_node(format!("{}", node_id)),
+                            );
                             tracing::debug!(%peer_id, "Removed disconnected peer from registry");
                         } else {
                             tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
@@ -2019,28 +1991,19 @@ impl NetworkManager {
                                         .get_manifest(&shard_id.model_id)
                                         .map(|m| m.name.clone());
                                     self.shared_state.emit_activity(
-                                        crate::daemon::state::ActivityEvent {
-                                            category: "download",
-                                            kind: "shard_download_p2p",
-                                            message: format!(
+                                        crate::daemon::state::ActivityEvent::new(
+                                            "download",
+                                            "shard_download_p2p",
+                                            format!(
                                                 "Retrying shard {} of {} from another peer",
                                                 shard_id.index + 1,
                                                 mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                             ),
-                                            model_id: Some(shard_id.model_id.0.clone()),
-                                            model_name: mname,
-                                            node_id: Some(format!("{}", next_target)),
-                                            detail_num: Some(shard_id.index as i64),
-                                            detail_str: Some("retry".to_string()),
-                                            toast_level: None,
-                                            toast_duration_ms: None,
-                                            shard_index: None,
-                                            freed_bytes: None,
-                                            holder_count_before: None,
-                                            holder_count_after: None,
-                                            remaining_local_shards: None,
-                                            timestamp: None,
-                                        },
+                                        )
+                                        .with_model(shard_id.model_id.0.clone())
+                                        .with_node(format!("{}", next_target))
+                                        .with_detail_num(shard_id.index as i64)
+                                        .with_detail_str("retry".to_string()),
                                     );
                                     let retry_req = crate::types::ShardRequest {
                                         shard_id: shard_id.clone(),
@@ -2063,30 +2026,21 @@ impl NetworkManager {
                                 .model_registry
                                 .get_manifest(&shard_id.model_id)
                                 .map(|m| m.name.clone());
-                            self.shared_state
-                                .emit_activity(crate::daemon::state::ActivityEvent {
-                                    category: "download",
-                                    kind: "shard_download_started",
-                                    message: format!(
-                                    "P2P failed after {} retries — falling back to HuggingFace for shard {} of {}",
-                                    retry_num,
-                                    shard_id.index + 1,
-                                    mname.as_deref().unwrap_or(&shard_id.model_id.0),
-                                ),
-                                    model_id: Some(shard_id.model_id.0.clone()),
-                                    model_name: mname,
-                                    node_id: None,
-                                    detail_num: Some(shard_id.index as i64),
-                                    detail_str: Some("hf_fallback".to_string()),
-                                    toast_level: None,
-                                    toast_duration_ms: None,
-                                    shard_index: None,
-                                    freed_bytes: None,
-                                    holder_count_before: None,
-                                    holder_count_after: None,
-                                    remaining_local_shards: None,
-                                    timestamp: None,
-                                });
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "download",
+                                    "shard_download_started",
+                                    format!(
+"P2P failed after {} retries — falling back to HuggingFace for shard {} of {}",
+retry_num,
+shard_id.index + 1,
+mname.as_deref().unwrap_or(&shard_id.model_id.0),
+),
+                                )
+                                .with_model(shard_id.model_id.0.clone())
+                                .with_detail_num(shard_id.index as i64)
+                                .with_detail_str("hf_fallback".to_string()),
+                            );
                             // Wake auto-manage to pick up HF download
                             self.shared_state.models.auto_manage_notify.notify_one();
                             drop(hf_src);
@@ -2096,29 +2050,21 @@ impl NetworkManager {
                                 .model_registry
                                 .get_manifest(&shard_id.model_id)
                                 .map(|m| m.name.clone());
-                            self.shared_state
-                                .emit_activity(crate::daemon::state::ActivityEvent {
-                                    category: "download",
-                                    kind: "shard_transfer_failed",
-                                    message: format!(
+                            self.shared_state.emit_activity(
+                                crate::daemon::state::ActivityEvent::new(
+                                    "download",
+                                    "shard_transfer_failed",
+                                    format!(
                                         "No peers or HF source for shard {} of {}",
                                         shard_id.index + 1,
                                         mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     ),
-                                    model_id: Some(shard_id.model_id.0.clone()),
-                                    model_name: mname,
-                                    node_id: None,
-                                    detail_num: Some(shard_id.index as i64),
-                                    detail_str: Some("no_source".to_string()),
-                                    toast_level: Some("warning"),
-                                    toast_duration_ms: Some(6000),
-                                    shard_index: None,
-                                    freed_bytes: None,
-                                    holder_count_before: None,
-                                    holder_count_after: None,
-                                    remaining_local_shards: None,
-                                    timestamp: None,
-                                });
+                                )
+                                .with_model(shard_id.model_id.0.clone())
+                                .with_detail_num(shard_id.index as i64)
+                                .with_detail_str("no_source".to_string())
+                                .with_toast("warning", 6000),
+                            );
                         }
 
                         // Clean up acquisition progress
@@ -2364,30 +2310,21 @@ impl NetworkManager {
                                     .map(|nid| format!("{}", nid).chars().take(8).collect())
                             })
                             .unwrap_or_else(|| format!("{}", peer).chars().take(12).collect());
-                        self.shared_state
-                            .emit_activity(crate::daemon::state::ActivityEvent {
-                                category: "download",
-                                kind: "shard_p2p_complete",
-                                message: format!(
+                        self.shared_state.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "download",
+                                "shard_p2p_complete",
+                                format!(
                                     "Shard {} of {} downloaded from peer {}",
                                     shard_id.index + 1,
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     peer_label
                                 ),
-                                model_id: Some(shard_id.model_id.0.clone()),
-                                model_name: mname,
-                                node_id: Some(format!("{}", peer)),
-                                detail_num: Some(shard_id.index as i64),
-                                detail_str: None,
-                                toast_level: None,
-                                toast_duration_ms: None,
-                                shard_index: None,
-                                freed_bytes: None,
-                                holder_count_before: None,
-                                holder_count_after: None,
-                                remaining_local_shards: None,
-                                timestamp: None,
-                            });
+                            )
+                            .with_model(shard_id.model_id.0.clone())
+                            .with_node(format!("{}", peer))
+                            .with_detail_num(shard_id.index as i64),
+                        );
                     }
                 } else {
                     tracing::warn!(

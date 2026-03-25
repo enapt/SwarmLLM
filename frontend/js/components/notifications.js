@@ -186,14 +186,14 @@
     }
   }
 
-  function _renderActivityLog() {
-    var log = document.getElementById('activity-log');
+  function _renderEventLog(entries, logId, countId, emptyText) {
+    var log = document.getElementById(logId);
     if (!log) return;
-    var countEl = document.getElementById('activity-count');
-    if (countEl) countEl.textContent = _activityEntries.length + ' events';
+    var countEl = document.getElementById(countId);
+    if (countEl) countEl.textContent = entries.length + ' events';
 
     var html = '';
-    var show = _activityEntries.slice(0, MAX_DISPLAY);
+    var show = entries.slice(0, MAX_DISPLAY);
     for (var i = 0; i < show.length; i++) {
       var e = show[i];
       var catClass = ACTIVITY_CATEGORY_CLASS[e.category] || '';
@@ -207,40 +207,15 @@
         '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
         timeHtml + '</div>';
     }
-    if (_activityEntries.length > MAX_DISPLAY) {
+    if (entries.length > MAX_DISPLAY) {
       html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
-        (_activityEntries.length - MAX_DISPLAY) + ' older events</div>';
+        (entries.length - MAX_DISPLAY) + ' older events</div>';
     }
-    log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>';
+    log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">' + emptyText + '</div>';
   }
 
-  function _renderNetworkLog() {
-    var log = document.getElementById('network-log');
-    if (!log) return;
-    var countEl = document.getElementById('network-log-count');
-    if (countEl) countEl.textContent = _networkEntries.length + ' events';
-
-    var html = '';
-    var show = _networkEntries.slice(0, MAX_DISPLAY);
-    for (var i = 0; i < show.length; i++) {
-      var e = show[i];
-      var catClass = ACTIVITY_CATEGORY_CLASS[e.category] || '';
-      var d = new Date(e.ts);
-      var clock = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
-      var ago = U.timeAgo(e.ts);
-      var timeHtml = i === 0
-        ? '<span class="activity-time" title="' + clock + '">' + ago + '</span>'
-        : '<span class="activity-time">' + clock + ' <span class="activity-ago">' + ago + '</span></span>';
-      html += '<div class="activity-entry ' + catClass + '"><span class="activity-icon">' + e.icon + '</span>' +
-        '<span class="activity-text">' + U.escapeHtml(e.text) + '</span>' +
-        timeHtml + '</div>';
-    }
-    if (_networkEntries.length > MAX_DISPLAY) {
-      html += '<div class="activity-overflow text-muted" style="font-size:0.7rem;padding:4px 0;text-align:center">' +
-        (_networkEntries.length - MAX_DISPLAY) + ' older events</div>';
-    }
-    log.innerHTML = html || '<div class="text-muted" style="font-size:0.82rem;padding:8px 0">No network events yet.</div>';
-  }
+  function _renderActivityLog() { _renderEventLog(_activityEntries, 'activity-log', 'activity-count', I18n.t('activity.none')); }
+  function _renderNetworkLog() { _renderEventLog(_networkEntries, 'network-log', 'network-log-count', I18n.t('activity.none_network')); }
 
   // --- Toast System ---
   function showToast(text, type, duration) {
@@ -369,7 +344,7 @@
     S.ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');
 
     S.ws.onopen = function() {
-      S.wsHealthy = true;
+      
       setDashboardCover(false);
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(1.0);
       S.pollTimers.forEach(function(t) { clearInterval(t); });
@@ -424,7 +399,7 @@
     };
 
     S.ws.onclose = function() {
-      S.wsHealthy = false;
+      
       if (typeof NeuralBg !== 'undefined') NeuralBg.setHealth(0.3);
       if (S.wsWasConnected) {
         showWsBanner('disconnected', I18n.t('errors.connection_lost'));

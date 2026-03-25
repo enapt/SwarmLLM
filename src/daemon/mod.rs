@@ -972,24 +972,15 @@ impl Daemon {
             "SwarmLLM daemon running"
         );
 
-        shared_state.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "system",
-            kind: "daemon_started",
-            message: format!("SwarmLLM started on port {}", self.config.node.listen_port),
-            model_id: None,
-            model_name: None,
-            node_id: Some(format!("{}", self.identity.node_id())),
-            detail_num: Some(self.config.node.listen_port as i64),
-            detail_str: None,
-            toast_level: None,
-            toast_duration_ms: None,
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "system",
+                "daemon_started",
+                format!("SwarmLLM started on port {}", self.config.node.listen_port),
+            )
+            .with_node(format!("{}", self.identity.node_id()))
+            .with_detail_num(self.config.node.listen_port as i64),
+        );
 
         // Background shard verification: BLAKE3 hash check runs after API is up
         // so the dashboard is responsive immediately. Bad shards are quarantined.
@@ -1047,28 +1038,22 @@ impl Daemon {
                                 verify_state
                                     .model_registry
                                     .remove_shard_holder(&sid, verify_state.identity.node_id());
-                                verify_state.emit_activity(crate::daemon::state::ActivityEvent {
-                                    category: "model",
-                                    kind: "shard_verify_failed",
-                                    message: format!(
-                                        "Shard {} of {} failed verification — quarantined",
-                                        shard_info.index + 1,
-                                        manifest.name
-                                    ),
-                                    model_id: Some(manifest.id.0.clone()),
-                                    model_name: Some(manifest.name.clone()),
-                                    node_id: None,
-                                    detail_num: Some(shard_info.index as i64),
-                                    detail_str: Some(format!("{e}")),
-                                    toast_level: Some("warning"),
-                                    toast_duration_ms: Some(5000),
-                                    shard_index: None,
-                                    freed_bytes: None,
-                                    holder_count_before: None,
-                                    holder_count_after: None,
-                                    remaining_local_shards: None,
-                                    timestamp: None,
-                                });
+                                verify_state.emit_activity(
+                                    crate::daemon::state::ActivityEvent::new(
+                                        "model",
+                                        "shard_verify_failed",
+                                        format!(
+                                            "Shard {} of {} failed verification — quarantined",
+                                            shard_info.index + 1,
+                                            manifest.name
+                                        ),
+                                    )
+                                    .with_model(manifest.id.0.clone())
+                                    .with_model_name(manifest.name.clone())
+                                    .with_detail_num(shard_info.index as i64)
+                                    .with_detail_str(format!("{e}"))
+                                    .with_toast("warning", 5000),
+                                );
                                 quarantined += 1;
                             }
                             Err(_) => {
@@ -1090,36 +1075,22 @@ impl Daemon {
                         "Background shard verification complete — all shards OK"
                     );
                 }
-                verify_state.emit_activity(crate::daemon::state::ActivityEvent {
-                    category: "system",
-                    kind: "shard_verified",
-                    message: format!(
-                        "Verified {} shards{}",
-                        verified,
-                        if quarantined > 0 {
-                            format!(" ({quarantined} quarantined)")
-                        } else {
-                            String::new()
-                        }
-                    ),
-                    model_id: None,
-                    model_name: None,
-                    node_id: None,
-                    detail_num: Some(verified as i64),
-                    detail_str: if quarantined > 0 {
-                        Some(format!("{quarantined} quarantined"))
-                    } else {
-                        None
-                    },
-                    toast_level: None,
-                    toast_duration_ms: None,
-                    shard_index: None,
-                    freed_bytes: None,
-                    holder_count_before: None,
-                    holder_count_after: None,
-                    remaining_local_shards: None,
-                    timestamp: None,
-                });
+                verify_state.emit_activity(
+                    crate::daemon::state::ActivityEvent::new(
+                        "system",
+                        "shard_verified",
+                        format!(
+                            "Verified {} shards{}",
+                            verified,
+                            if quarantined > 0 {
+                                format!(" ({quarantined} quarantined)")
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    )
+                    .with_detail_num(verified as i64),
+                );
             });
         }
 

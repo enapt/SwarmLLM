@@ -18,29 +18,17 @@
         var container = document.getElementById('compare-model-list');
         if (!container) return;
 
-        var localModels = [];
-        var cloudModels = [];
-        try {
-          var resp = await App.authFetch('/api/admin/models');
-          if (resp.ok) {
-            var d = await resp.json();
-            localModels = Array.isArray(d) ? d : (d.models || d.data || []);
-          }
-        } catch(e) {}
-        try {
-          var resp2 = await App.authFetch('/api/admin/provider-models');
-          if (resp2.ok) {
-            var d2 = await resp2.json();
-            cloudModels = Array.isArray(d2) ? d2 : (d2.models || d2.data || []);
-          }
-        } catch(e) {}
+        // Use the shared data store cache (deduped fetching)
+        var result = await App.data.loadModels();
+        var localModels = result.models || [];
+        var cloudModels = result.cloudModels || [];
 
         App.compare.models = [];
-        (localModels || []).forEach(function(m) {
-          App.compare.models.push({ id: m.id || m.model_id || m.name, type: 'local' });
+        localModels.forEach(function(m) {
+          App.compare.models.push({ id: m.id, type: 'local' });
         });
-        (cloudModels || []).forEach(function(m) {
-          var mid = m.id || m.model_id || m.name;
+        cloudModels.forEach(function(m) {
+          var mid = m.id;
           if (!App.compare.models.some(function(x) { return x.id === mid; })) {
             var ctx = m.context_length || m.context_window || m.max_model_len || 0;
             App.compare.models.push({ id: mid, type: 'cloud', context: ctx });

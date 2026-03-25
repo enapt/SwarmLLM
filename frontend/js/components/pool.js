@@ -123,7 +123,6 @@
         // Update slave banner on dashboard
         this.updateSlaveBanner(data);
       } catch (e) {
-        console.error('Pool load error:', e);
       }
     },
 

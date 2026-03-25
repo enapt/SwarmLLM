@@ -9,7 +9,6 @@ window.App = {
   // --- Shared mutable state ---
   state: {
     ws: null,
-    wsHealthy: false,
     wsWasConnected: false,
     wsBannerTimer: null,
     pollTimers: [],

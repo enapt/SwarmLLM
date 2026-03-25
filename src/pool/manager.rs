@@ -455,25 +455,15 @@ impl PoolManager {
             "Accepted pool invitation"
         );
 
-        self.shared_state
-            .emit_activity(crate::daemon::state::ActivityEvent {
-                category: "pool",
-                kind: "pool_device_joined",
-                message: "Joined device pool".to_string(),
-                model_id: None,
-                model_name: None,
-                node_id: Some(format!("{}", invitation.pool_id)),
-                detail_num: None,
-                detail_str: None,
-                toast_level: Some("success"),
-                toast_duration_ms: Some(5000),
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "pool",
+                "pool_device_joined",
+                "Joined device pool".to_string(),
+            )
+            .with_node(format!("{}", invitation.pool_id))
+            .with_toast("success", 5000),
+        );
 
         Ok(())
     }
@@ -574,25 +564,14 @@ impl PoolManager {
 
         tracing::info!("Left device pool");
 
-        self.shared_state
-            .emit_activity(crate::daemon::state::ActivityEvent {
-                category: "pool",
-                kind: "pool_device_left",
-                message: "Left device pool".to_string(),
-                model_id: None,
-                model_name: None,
-                node_id: None,
-                detail_num: None,
-                detail_str: None,
-                toast_level: Some("info"),
-                toast_duration_ms: Some(5000),
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+        self.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "pool",
+                "pool_device_left",
+                "Left device pool".to_string(),
+            )
+            .with_toast("info", 5000),
+        );
 
         Ok(())
     }

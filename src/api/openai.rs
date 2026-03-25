@@ -767,12 +767,11 @@ pub async fn chat_completions(
                 }
             })
             .unwrap_or_default();
-        state
-            .shared_state
-            .emit_activity(crate::daemon::state::ActivityEvent {
-                category: "inference",
-                kind: "inference_request",
-                message: format!(
+        state.shared_state.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "inference",
+                "inference_request",
+                format!(
                     "Inference request on {} — {} message{}, max {} tokens{}",
                     display,
                     msg_count,
@@ -784,24 +783,10 @@ pub async fn chat_completions(
                         String::new()
                     }
                 ),
-                model_id: Some(req.model.clone()),
-                model_name: mname,
-                node_id: None,
-                detail_num: Some(max_tok as i64),
-                detail_str: if !prompt_preview.is_empty() {
-                    Some(prompt_preview)
-                } else {
-                    None
-                },
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            )
+            .with_model(req.model.clone())
+            .with_detail_num(max_tok as i64),
+        );
     }
 
     // Resolve "auto" model alias to the first available model.

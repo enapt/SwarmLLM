@@ -406,23 +406,6 @@
     return false;
   }
 
-  // --- Loading state helpers ---
-  function showLoading(el) {
-    if (!el) return;
-    el.setAttribute('data-prev-html', el.innerHTML);
-    el.innerHTML = '<div class="loading-spinner" style="display:flex;align-items:center;justify-content:center;padding:1rem;gap:0.5rem;color:var(--text-muted)">' +
-      '<span class="spinner"></span> Loading\u2026</div>';
-  }
-
-  function hideLoading(el) {
-    if (!el) return;
-    var prev = el.getAttribute('data-prev-html');
-    if (prev !== null) {
-      el.innerHTML = prev;
-      el.removeAttribute('data-prev-html');
-    }
-  }
-
   // Export utilities
   App.utils = {
     escapeHtml: escapeHtml,
@@ -447,7 +430,5 @@
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
     handleApiError: handleApiError,
-    showLoading: showLoading,
-    hideLoading: hideLoading,
   };
 })();

@@ -189,24 +189,10 @@ impl ModelProcessPool {
             Some(shards) => format!("Spawning worker for {} ({})", model_id.0, shards),
             None => format!("Spawning worker for {}", model_id.0),
         };
-        self.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "model",
-            kind: "worker_spawned",
-            message: msg,
-            model_id: Some(model_id.0.clone()),
-            model_name: None,
-            node_id: None,
-            detail_num: None,
-            detail_str: None,
-            toast_level: None,
-            toast_duration_ms: None,
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        self.emit_activity(
+            crate::daemon::state::ActivityEvent::new("model", "worker_spawned", msg)
+                .with_model(model_id.0.clone()),
+        );
 
         Ok(WorkerHandle {
             child,
@@ -399,27 +385,17 @@ impl ModelProcessPool {
             // Drop handle → kills child process → OS frees all CUDA memory
             drop(handle);
             tracing::info!(model_id = %model_id, "Model worker killed, GPU memory freed");
-            self.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "model",
-                kind: "worker_unloaded",
-                message: format!(
-                    "Unloaded {} from memory (worker killed, GPU memory freed)",
-                    model_id.0
-                ),
-                model_id: Some(model_id.0.clone()),
-                model_name: None,
-                node_id: None,
-                detail_num: None,
-                detail_str: None,
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            self.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "model",
+                    "worker_unloaded",
+                    format!(
+                        "Unloaded {} from memory (worker killed, GPU memory freed)",
+                        model_id.0
+                    ),
+                )
+                .with_model(model_id.0.clone()),
+            );
         }
     }
 

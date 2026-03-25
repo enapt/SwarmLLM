@@ -4028,16 +4028,6 @@ impl SplitModel {
         self.tokenizer.as_ref()
     }
 
-    /// Return the number of transformer layers in this segment.
-    pub fn num_layers(&self) -> usize {
-        self.layers.len()
-    }
-
-    /// Return the maximum sequence length supported by this model.
-    pub fn max_seq_len(&self) -> usize {
-        self.max_seq_len
-    }
-
     /// Return the device this model is loaded on.
     pub fn device(&self) -> &Device {
         &self.device

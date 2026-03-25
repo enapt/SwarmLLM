@@ -103,7 +103,6 @@
           App.networkMap.paths[alpha2] = d;
         }
       } catch (e) {
-        console.warn('[SwarmLLM] Failed to load map data:', e.message);
       }
 
       var svg = '<svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg" class="world-svg">';

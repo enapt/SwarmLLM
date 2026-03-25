@@ -116,29 +116,20 @@ pub async fn rescan_local_shards(
                 .model_registry
                 .get_manifest(&model_id)
                 .map(|m| m.name.clone());
-            shared.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "model",
-                kind: "shard_scan_found",
-                message: format!(
-                    "Found {} new shard{} of {} on disk",
-                    new_shards,
-                    if new_shards != 1 { "s" } else { "" },
-                    mname.as_deref().unwrap_or(&model_id_str)
-                ),
-                model_id: Some(model_id.0.clone()),
-                model_name: mname,
-                node_id: None,
-                detail_num: Some(new_shards as i64),
-                detail_str: None,
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "model",
+                    "shard_scan_found",
+                    format!(
+                        "Found {} new shard{} of {} on disk",
+                        new_shards,
+                        if new_shards != 1 { "s" } else { "" },
+                        mname.as_deref().unwrap_or(&model_id_str)
+                    ),
+                )
+                .with_model(model_id.0.clone())
+                .with_detail_num(new_shards as i64),
+            );
         }
     }
 
@@ -399,27 +390,20 @@ pub async fn check_and_load_model(
                         })
                         .unwrap_or(false);
                     if !already_notified {
-                        shared.emit_activity(crate::daemon::state::ActivityEvent {
-                            category: "model",
-                            kind: "model_load_skipped",
-                            message: format!(
-                                "Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
-                                manifest.name, budget - total_after
-                            ),
-                            model_id: Some(model_id.0.clone()),
-                            model_name: Some(manifest.name.clone()),
-                            node_id: None,
-                            detail_num: Some(estimated as i64),
-                            detail_str: Some("vram_budget".to_string()),
-                            toast_level: None,
-                            toast_duration_ms: None,
-                            shard_index: None,
-                            freed_bytes: None,
-                            holder_count_before: None,
-                            holder_count_after: None,
-                            remaining_local_shards: None,
-                            timestamp: None,
-                        });
+                        shared.emit_activity(
+                            crate::daemon::state::ActivityEvent::new(
+                                "model",
+                                "model_load_skipped",
+                                format!(
+"Not loading {} — {estimated}MB needed but only {}MB free of {budget}MB budget",
+manifest.name, budget - total_after
+),
+                            )
+                            .with_model(model_id.0.clone())
+                            .with_model_name(manifest.name.clone())
+                            .with_detail_num(estimated as i64)
+                            .with_detail_str("vram_budget".to_string()),
+                        );
                     }
                     continue;
                 }
@@ -537,24 +521,12 @@ pub async fn check_and_load_model(
             })
             .unwrap_or(false);
         if !already_emitted {
-            shared.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "model",
-                kind: "model_loaded",
-                message: load_msg,
-                model_id: Some(model_id.0.clone()),
-                model_name: Some(manifest.name.clone()),
-                node_id: None,
-                detail_num: Some((layer_end - layer_start) as i64),
-                detail_str: Some(format!("[{}..{})", layer_start, layer_end)),
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new("model", "model_loaded", load_msg)
+                    .with_model(model_id.0.clone())
+                    .with_model_name(manifest.name.clone())
+                    .with_detail_num((layer_end - layer_start) as i64),
+            );
         }
     }
 }

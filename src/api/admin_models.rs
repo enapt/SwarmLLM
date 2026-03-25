@@ -1003,33 +1003,25 @@ pub async fn unload_model(
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     // Emit activity event
-    shared.emit_activity(crate::daemon::state::ActivityEvent {
-        category: "model",
-        kind: "model_unloaded",
-        message: format!(
-            "Unloaded {} — ~{}MB {} freed",
-            model_display_name,
-            estimated_mb,
-            if shared.gpu_info.is_some() {
-                "VRAM"
-            } else {
-                "RAM"
-            }
-        ),
-        model_id: Some(model_id.clone()),
-        model_name: Some(model_display_name.clone()),
-        node_id: None,
-        detail_num: Some(estimated_mb as i64),
-        detail_str: None,
-        toast_level: None,
-        toast_duration_ms: None,
-        shard_index: None,
-        freed_bytes: None,
-        holder_count_before: None,
-        holder_count_after: None,
-        remaining_local_shards: None,
-        timestamp: None,
-    });
+    shared.emit_activity(
+        crate::daemon::state::ActivityEvent::new(
+            "model",
+            "model_unloaded",
+            format!(
+                "Unloaded {} — ~{}MB {} freed",
+                model_display_name,
+                estimated_mb,
+                if shared.gpu_info.is_some() {
+                    "VRAM"
+                } else {
+                    "RAM"
+                }
+            ),
+        )
+        .with_model(model_id.clone())
+        .with_model_name(model_display_name.clone())
+        .with_detail_num(estimated_mb as i64),
+    );
 
     tracing::info!(model = %model_id, segments = segments_removed, "Model unloaded from memory");
 
@@ -1139,34 +1131,25 @@ pub async fn unload_shard(
             let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
             format!("shards {} remain", nums.join(", "))
         };
-        shared.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "model",
-            kind: "shard_unloaded_memory",
-            message: format!(
-                "Unloaded shard {} of {} from {} — {}",
-                shard_index + 1,
-                display,
-                if shared.gpu_info.is_some() {
-                    "VRAM"
-                } else {
-                    "RAM"
-                },
-                remaining
-            ),
-            model_id: Some(model_id.clone()),
-            model_name: mname,
-            node_id: None,
-            detail_num: Some(shard_index as i64),
-            detail_str: None,
-            toast_level: None,
-            toast_duration_ms: None,
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "model",
+                "shard_unloaded_memory",
+                format!(
+                    "Unloaded shard {} of {} from {} — {}",
+                    shard_index + 1,
+                    display,
+                    if shared.gpu_info.is_some() {
+                        "VRAM"
+                    } else {
+                        "RAM"
+                    },
+                    remaining
+                ),
+            )
+            .with_model(model_id.clone())
+            .with_detail_num(shard_index as i64),
+        );
     }
 
     tracing::info!(
@@ -1276,33 +1259,24 @@ pub async fn load_shard(
             let nums: Vec<_> = new_window.iter().map(|i| (i + 1).to_string()).collect();
             format!("shards {}", nums.join(", "))
         };
-        shared.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "model",
-            kind: "shard_loaded_memory",
-            message: format!(
-                "Loaded {} — {} now in {}",
-                display,
-                window_label,
-                if shared.gpu_info.is_some() {
-                    "VRAM"
-                } else {
-                    "RAM"
-                }
-            ),
-            model_id: Some(model_id.clone()),
-            model_name: mname,
-            node_id: None,
-            detail_num: Some(shard_index as i64),
-            detail_str: None,
-            toast_level: None,
-            toast_duration_ms: None,
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "model",
+                "shard_loaded_memory",
+                format!(
+                    "Loaded {} — {} now in {}",
+                    display,
+                    window_label,
+                    if shared.gpu_info.is_some() {
+                        "VRAM"
+                    } else {
+                        "RAM"
+                    }
+                ),
+            )
+            .with_model(model_id.clone())
+            .with_detail_num(shard_index as i64),
+        );
     }
 
     tracing::info!(
@@ -1463,29 +1437,21 @@ pub async fn delete_shard(
             let nums: Vec<_> = remaining_local.iter().map(|i| i.to_string()).collect();
             format!("shards {} remain on disk", nums.join(", "))
         };
-        shared.emit_activity(crate::daemon::state::ActivityEvent {
-            category: "model",
-            kind: "shard_deleted",
-            message: format!(
-                "Deleted shard {} of {} — inference unloaded, {}",
-                shard_index + 1,
-                display,
-                status
-            ),
-            model_id: Some(model_id.clone()),
-            model_name: mname,
-            node_id: None,
-            detail_num: Some(shard_index as i64),
-            detail_str: None,
-            toast_level: Some("info"),
-            toast_duration_ms: Some(4000),
-            shard_index: None,
-            freed_bytes: None,
-            holder_count_before: None,
-            holder_count_after: None,
-            remaining_local_shards: None,
-            timestamp: None,
-        });
+        shared.emit_activity(
+            crate::daemon::state::ActivityEvent::new(
+                "model",
+                "shard_deleted",
+                format!(
+                    "Deleted shard {} of {} — inference unloaded, {}",
+                    shard_index + 1,
+                    display,
+                    status
+                ),
+            )
+            .with_model(model_id.clone())
+            .with_detail_num(shard_index as i64)
+            .with_toast("info", 4000),
+        );
     }
 
     tracing::info!(model = %model_id, shard = shard_index, "Shard removed");
@@ -1628,29 +1594,22 @@ pub async fn download_shard(
                 .get(&target)
                 .map(|r| r.nickname.clone())
                 .unwrap_or_else(|| format!("{}", target).chars().take(8).collect());
-            shared.emit_activity(crate::daemon::state::ActivityEvent {
-                category: "download",
-                kind: "shard_download_p2p",
-                message: format!(
-                    "Downloading shard {} of {} from peer {}",
-                    shard_index + 1,
-                    mname.as_deref().unwrap_or(&model_id),
-                    peer_label
-                ),
-                model_id: Some(model_id.clone()),
-                model_name: mname,
-                node_id: Some(format!("{}", target)),
-                detail_num: Some(shard_index as i64),
-                detail_str: Some("p2p".to_string()),
-                toast_level: None,
-                toast_duration_ms: None,
-                shard_index: None,
-                freed_bytes: None,
-                holder_count_before: None,
-                holder_count_after: None,
-                remaining_local_shards: None,
-                timestamp: None,
-            });
+            shared.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "download",
+                    "shard_download_p2p",
+                    format!(
+                        "Downloading shard {} of {} from peer {}",
+                        shard_index + 1,
+                        mname.as_deref().unwrap_or(&model_id),
+                        peer_label
+                    ),
+                )
+                .with_model(model_id.clone())
+                .with_node(format!("{}", target))
+                .with_detail_num(shard_index as i64)
+                .with_detail_str("p2p".to_string()),
+            );
 
             return Ok(Json(serde_json::json!({
                 "status": "downloading",
