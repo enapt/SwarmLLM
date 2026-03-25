@@ -1311,23 +1311,20 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 
 Items identified during audits but deferred for future implementation:
 
-| Item | Status | Notes |
-|------|--------|-------|
-| Paged attention pool wiring | `paged_kv_pool`/`paged_kv_store` in SharedState always None | Feature-gated behind `paged-attn`, needs per-model init (n_kv_heads/head_dim from GGUF, not available at startup). Hot path (model_worker.rs) uses KvCacheStore, not paged blocks. |
-| Ring AllReduce network wiring | Local impl complete, not wired to network transport | Needs new TpRingChunk message types, per-step pending state, dispatch handler, and ring execution loop. Star topology works well for 2-3 node LAN setups. |
-| Starcoder2 / Glm4 layer loading | Arch detection exists, no split/model.rs loading code | Removed from `supported_list()` — re-add when layer loading is implemented |
-| Qwen 3.5 batched inference | Single-request forward wired, batched returns error | Per-request SSM state splitting needed for batch_size > 1 |
-| LoRA inference wiring | API registers adapters, request carries adapter_id | adapter_registry never queried during inference — model_worker subprocess doesn't load adapters |
-| Speculative decoding in subprocess | Works via llama-cpp executor only | Unreachable for shard-loaded models (Phase 17 subprocess path). IPC protocol lacks speculative support. |
-
-| Torrent-style parallel P2P download | Single-source P2P per shard | chunk_offset/chunk_size support exists but multi-source coordination not built |
-| Download resume | HF downloads restart from scratch on interrupt | Needs HTTP Range header from last byte on resume |
-| TP forward pass — FFN norm position | FFN norm currently applied to pre-attention tensor | Correct placement is post-attention; fixing requires a 2-IPC round-trip protocol redesign to pass the post-attention intermediate tensor separately |
-| `delta_net_scan` alpha/beta integration | Qwen 3.5 SSM scan uses hardcoded 0.95 decay stub | `ssm_alpha.weight` and `ssm_beta.weight` tensors present in GGUF but not yet read; dynamic per-step alpha/beta computation deferred |
-| PEX aggregate rate limiter | Individual connection rate limit only | A per-node aggregate PEX request budget is bounded implicitly by `max_established_per_peer=1` and `max_connections=500`; an explicit aggregate limiter is a future hardening item |
-| `connection_addrs` cap | No explicit cap on addresses per peer | Upper bound is `max_established_per_peer=1` × connections; an explicit per-peer address cap would further reduce memory usage at scale |
+No active deferred items — all resolved.
 
 Resolved items (removed from deferred):
+- **PEX aggregate rate limiter**: COMPLETE — sliding window (50 req/60s) on inbound PEX requests + per-peer address cap (8 addrs) + connection_addrs cap (1024)
+- **DeltaNet alpha/beta integration**: COMPLETE — proper Gated DeltaNet formula: `g_t = exp(-softplus(α + dt))`, prediction error `v - g·S@k`, per-dim beta gating from GGUF tensors
+- **Download resume**: COMPLETE — HF shard downloads resume from partial .tmp files, skipping completed coalesced ranges
+- **Qwen 3.5 batched inference**: COMPLETE — per-request SSM state splitting for batch > 1, same pattern as Dense attention batching
+- **Starcoder2 / Glm4 layer loading**: COMPLETE — optional FFN gate (Starcoder2 2-layer MLP), Gelu activation, both added to supported_list()
+- **TP FFN norm position**: COMPLETE — 2-phase IPC protocol (AttnOnly → AllReduce → FfnOnly → AllReduce) ensures FFN norm applied to full post-attention tensor
+- **LoRA inference wiring**: COMPLETE — adapter_id in LayerForward/IpcForward, model_worker loads from adapter_config.json + safetensors, forward_with_lora() called
+- **Paged attention pool wiring**: COMPLETE — PagedKvPool initialized in model_worker after model load (paged-attn feature), n_kv_head()/head_dim() accessors on SplitModel
+- **Speculative decoding in subprocess**: COMPLETE — IPC protocol: SpeculativeDraft/SpeculativeVerify messages + DraftResult/VerifyResult with logit distributions
+- **Ring AllReduce network wiring**: COMPLETE — TpRingChunk message type + SendRingChunk NetworkCommand + dispatcher handler. Star topology still default; ring activates at tp_size ≥ 4
+- **Torrent-style parallel P2P download**: COMPLETE — ParallelChunkTracker: 8 MB chunks, max 4 concurrent, round-robin peer assignment, fail/reassign support
 - **DHT-based shard holder resolution (S5)**: COMPLETE — Kademlia provider records + bounded cache (max 50/shard LRU). Two-tier resolution: sync cache for hot path, async DHT for cold lookups. Scales to 50K+ nodes.
 - **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split/model.rs forward loop
 - **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
