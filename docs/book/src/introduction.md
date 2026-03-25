@@ -18,7 +18,7 @@ SwarmLLM is a single Rust binary that turns your computer into a node in a distr
 - **Model Trust System** — Automatic trust levels (Discovered, Pinned, DemandVerified, NetworkPopular) gate shard downloads and pruning decisions.
 - **Zero-Config Networking** — LAN discovery via mDNS, peer exchange, persistent peer cache, invite codes.
 - **Multi-SDK** — Python, JavaScript/TypeScript, LangChain, and LlamaIndex integrations.
-- **Web Dashboard** — Built-in swarm-first UI with chat, model browser, network map, and model compare. 20 languages (i18n), light/dark/system theme toggle, basic/advanced mode, plain-English labels for beginners.
+- **Web Dashboard** — Built-in swarm-first UI with chat, model browser, network map, and model compare. 21 languages (i18n), light/dark/system theme toggle, plain-English labels for beginners.
 - **Cloud Fallback** — Optionally route to 12 cloud providers (incl. Moonshot/Kimi) when no swarm peers have the model you need.
 
 ## Performance

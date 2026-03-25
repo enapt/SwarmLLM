@@ -5,6 +5,24 @@ use crate::error::SwarmError;
 use crate::model::manifest::ModelManifestExt;
 use crate::types::{ModelId, ShardInfo};
 
+/// Compute BLAKE3 hash of a file using streaming 64KB reads.
+///
+/// Used for shard integrity verification, manifest hash computation,
+/// and download verification.
+pub fn hash_file_blake3(path: &Path) -> Result<[u8; 32], SwarmError> {
+    let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).map_err(SwarmError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
 /// Sanitize a path component to prevent path traversal attacks.
 /// Blocks null bytes, control characters, and directory separators (`/`, `\`).
 /// Consecutive dots (`..`) are collapsed to prevent traversal.
@@ -98,38 +116,17 @@ impl ShardStore {
                 "Shard has zero hash — computing actual hash for verification"
             );
             // Still verify the file is readable (don't skip entirely)
-            let mut file = std::fs::File::open(&path).map_err(SwarmError::Io)?;
-            let mut hasher = blake3::Hasher::new();
-            let mut buf = [0u8; 64 * 1024];
-            loop {
-                let n = file.read(&mut buf).map_err(SwarmError::Io)?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
+            let actual_hash = hash_file_blake3(&path)?;
             tracing::info!(
                 model = %model_id,
                 shard = info.index,
-                hash = %hex::encode(hasher.finalize().as_bytes()),
+                hash = %hex::encode(actual_hash),
                 "Computed actual hash for zero-hash shard"
             );
             return Ok(());
         }
 
-        let mut file = std::fs::File::open(&path).map_err(SwarmError::Io)?;
-        let mut hasher = blake3::Hasher::new();
-        let mut buf = [0u8; 64 * 1024]; // 64KB buffer
-
-        loop {
-            let n = file.read(&mut buf).map_err(SwarmError::Io)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-
-        let actual = *hasher.finalize().as_bytes();
+        let actual = hash_file_blake3(&path)?;
 
         if actual == info.hash {
             tracing::debug!(

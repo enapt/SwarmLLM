@@ -217,7 +217,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Auto-Shard Management** — VRAM-aware automatic shard acquisition from HuggingFace (with resume, retry, and Range headers) and peers with popularity/rarity scoring. Smart pruning auto-removes over-replicated shards based on demand, resource pressure, and region diversity
 
 ### Operations
-- **Built-in Web UI** — Swarm-first dashboard with chat interface (image upload for VLM), model browser, shard visualization, first-run setup wizard, network map, leaderboard, model compare page, mobile-responsive layout. 20 languages (i18n), light/dark/system theme, basic/advanced mode toggle
+- **Built-in Web UI** — Swarm-first dashboard with chat interface (image upload for VLM), model browser, shard visualization, first-run setup wizard, network map, leaderboard, model compare page, mobile-responsive layout. 21 languages (i18n), light/dark/system theme
 - **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash for all 10 subsystems, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, readiness probe `/health/ready`, structured tracing with request ID correlation, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API (`/api/admin/config/reload`)
@@ -559,7 +559,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | Database | redb v3 (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 | Monitoring | Prometheus + Grafana (dashboards included) |
-| Frontend | Vanilla HTML/CSS/JS, 20 languages, light/dark/system theme, ~8.5K lines |
+| Frontend | Vanilla HTML/CSS/JS, 21 languages, light/dark/system theme, ~8.5K lines |
 | SDK | Python, JS/TS, LangChain, LlamaIndex |
 
 ## How SwarmLLM Compares
@@ -581,7 +581,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | **API Compatibility** | **OpenAI + Anthropic + MCP** (full Claude Code) | PyTorch/Transformers | OpenAI + Claude + Ollama | Subnet-defined |
 | **Web UI** | Full dashboard, chat, model browser, setup wizard | Basic chatbot | Basic chat UI | No built-in UI |
 | **SDKs** | Python + JS/TS + LangChain + LlamaIndex | Python native | — | Python |
-| **i18n** | **20 languages**, light/dark theme | English | English | English |
+| **i18n** | **21 languages**, light/dark theme | English | English | English |
 | **Auto-Update** | Built-in self-update | No | No | No |
 | **Maintained** | **Active** (2026) | Last release Sep 2023 | **Active** (2025) | **Active** (2025) |
 

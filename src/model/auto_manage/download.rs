@@ -453,17 +453,7 @@ display
                             // block_in_place: streaming hash with 64KB buffer (avoids loading full shard into memory)
                             let shard_path = dest.join(format!("shard_{:03}.bin", shard_idx));
                             let hash_result: Option<[u8; 32]> = tokio::task::block_in_place(|| {
-                                let mut file = std::fs::File::open(&shard_path).ok()?;
-                                let mut hasher = blake3::Hasher::new();
-                                let mut buf = [0u8; 65536];
-                                loop {
-                                    let n = std::io::Read::read(&mut file, &mut buf).ok()?;
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    hasher.update(&buf[..n]);
-                                }
-                                Some(*hasher.finalize().as_bytes())
+                                crate::model::shard::hash_file_blake3(&shard_path).ok()
                             });
                             if let Some(hash) = hash_result {
                                 if let Some(mut manifest) =

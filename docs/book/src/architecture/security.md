@@ -47,7 +47,7 @@ All inbound network messages carry transport-authenticated sender identity:
 
 Kademlia DHT records are Ed25519-signed to prevent poisoning:
 - Format: `[32B pubkey][64B signature][payload]`
-- `announce_capability()` and `announce_shards()` sign records with node identity
+- `start_providing_shards()` signs records with node identity
 - **Active verification**: `verify_dht_value()` is called on all `GetRecordOk` results in NetworkManager — records with invalid or missing signatures are logged and discarded
 - Records expire after 1 hour with automatic re-publication
 
