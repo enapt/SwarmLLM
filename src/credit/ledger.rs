@@ -702,10 +702,11 @@ pub async fn process_balance_gossip(
                 balances.extend(map.iter().map(|e| *e.value()));
             } else {
                 // Fallback: raw push (used in tests without SharedState)
+                const MAX_BALANCE_VEC_PEERS: usize = 1000;
                 let mut balances = peer_balances.write().await;
                 balances.push(gossip.balance_bucket);
-                if balances.len() > 1000 {
-                    let excess = balances.len() - 1000;
+                if balances.len() > MAX_BALANCE_VEC_PEERS {
+                    let excess = balances.len() - MAX_BALANCE_VEC_PEERS;
                     balances.drain(..excess);
                 }
             }

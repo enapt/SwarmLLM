@@ -19,7 +19,12 @@ use crate::types::NetworkFinishReason;
 /// Run the model worker subprocess.
 /// Called from main.rs when the binary is invoked with `model-worker` subcommand.
 /// `shard_window`: if Some, only load these shard indices (VRAM-saving mode).
-pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf, shard_window: Option<Vec<u32>>) {
+pub async fn run_worker(
+    socket_path: PathBuf,
+    data_dir: PathBuf,
+    shard_window: Option<Vec<u32>>,
+    kv_cache_ttl_secs: u64,
+) {
     // Connect to the daemon's Unix socket
     let stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
@@ -41,7 +46,9 @@ pub async fn run_worker(socket_path: PathBuf, data_dir: PathBuf, shard_window: O
 
     // Per-model state: (layer_start, layer_end) → SplitModel
     let mut models: HashMap<(usize, usize), SplitModel> = HashMap::new();
-    let kv_store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(600)));
+    let kv_store = Arc::new(KvCacheStore::new(std::time::Duration::from_secs(
+        kv_cache_ttl_secs,
+    )));
 
     if let Some(ref w) = shard_window {
         tracing::info!(window = ?w, "model-worker: shard window active — only loading specified shards");

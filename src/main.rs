@@ -108,6 +108,9 @@ enum Commands {
         /// Comma-separated shard indices to load (e.g. "0,1,7"). If omitted, loads all on-disk shards.
         #[arg(long)]
         shard_window: Option<String>,
+        /// KV-cache session TTL in seconds (default 600)
+        #[arg(long, default_value = "600")]
+        kv_cache_ttl: u64,
     },
     /// Device pool management (combine credits across your devices)
     Pool {
@@ -229,13 +232,15 @@ async fn main() -> anyhow::Result<()> {
             socket,
             data_dir,
             shard_window,
+            kv_cache_ttl,
         } => {
             let window: Option<Vec<u32>> = shard_window.map(|s| {
                 s.split(',')
                     .filter_map(|x| x.trim().parse::<u32>().ok())
                     .collect()
             });
-            swarmllm::inference::model_worker::run_worker(socket, data_dir, window).await;
+            swarmllm::inference::model_worker::run_worker(socket, data_dir, window, kv_cache_ttl)
+                .await;
             Ok(())
         }
         Commands::Pool { action } => {

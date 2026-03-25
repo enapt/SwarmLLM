@@ -54,6 +54,8 @@ pub struct ModelProcessPool {
     /// Activity event sender for dashboard notifications.
     activity_tx:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::daemon::state::ActivityEvent>>,
+    /// KV-cache session TTL passed to worker subprocesses (from config).
+    kv_cache_ttl_secs: std::sync::atomic::AtomicU64,
 }
 
 impl ModelProcessPool {
@@ -64,7 +66,14 @@ impl ModelProcessPool {
             data_dir,
             active_shard_windows: DashMap::new(),
             activity_tx: std::sync::OnceLock::new(),
+            kv_cache_ttl_secs: std::sync::atomic::AtomicU64::new(600),
         }
+    }
+
+    /// Set the KV-cache TTL for worker subprocesses (called once after config load).
+    pub fn set_kv_cache_ttl(&self, ttl_secs: u64) {
+        self.kv_cache_ttl_secs
+            .store(ttl_secs, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Set the activity event sender (called once after SharedState is created).
@@ -135,6 +144,13 @@ impl ModelProcessPool {
             data_dir_str.to_string(),
         ];
 
+        // Pass KV-cache TTL from config
+        let ttl = self
+            .kv_cache_ttl_secs
+            .load(std::sync::atomic::Ordering::Relaxed);
+        args.push("--kv-cache-ttl".to_string());
+        args.push(ttl.to_string());
+
         // If a shard window is set for this model, pass it to the worker
         if let Some(window) = self.active_shard_windows.get(model_id) {
             let window_str = window
@@ -174,7 +190,7 @@ impl ModelProcessPool {
             }
         }
 
-        tracing::info!("Model worker subprocess started");
+        tracing::info!(model_id = %model_id.0, "DIAG: model worker subprocess started");
 
         // Build a descriptive message including shard window if available
         let shard_info = self.active_shard_windows.get(model_id).map(|w| {

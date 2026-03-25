@@ -763,10 +763,13 @@ impl SharedState {
             shutdown_tx,
         });
 
-        // Wire activity_tx into the process pool for spawn/unload notifications
+        // Wire activity_tx and KV-cache TTL into the process pool
         state
             .model_process_pool
             .set_activity_tx(state.events.activity_tx.clone());
+        state
+            .model_process_pool
+            .set_kv_cache_ttl(state.config.inference.kv_cache_ttl_secs.unwrap_or(600));
 
         (state, shutdown_rx, dht_query_rx)
     }
