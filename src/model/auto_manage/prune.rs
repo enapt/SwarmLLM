@@ -461,8 +461,8 @@ impl AutoShardManager {
                     category: "auto_manage",
                     kind: "shard_pruned",
                     message: format!(
-                        "Pruned shard {} of {} — {} holders remain",
-                        event.shard_index + 1,
+                        "Pruned {} of {} — {} holders remain",
+                        ShardId::display_index(event.shard_index),
                         event.model_name,
                         event.holder_count_after
                     ),

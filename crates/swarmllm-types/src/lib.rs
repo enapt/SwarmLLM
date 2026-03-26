@@ -368,6 +368,15 @@ impl ShardId {
         self.index == MMPROJ_SHARD_INDEX
     }
 
+    /// Human-friendly display label for a shard index (1-based, or "mmproj").
+    pub fn display_index(index: u32) -> String {
+        if index == MMPROJ_SHARD_INDEX {
+            "mmproj".to_string()
+        } else {
+            format!("shard {}", index + 1)
+        }
+    }
+
     /// Create a ShardId for the mmproj of a given model.
     pub fn mmproj_for(model_id: ModelId) -> Self {
         Self {

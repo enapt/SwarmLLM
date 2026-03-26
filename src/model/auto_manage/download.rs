@@ -671,7 +671,7 @@ e
                     self.shared_state.emit_activity(crate::daemon::state::ActivityEvent::new(
                         "download",
                         "shard_no_source",
-                        format!("Cannot download shard {} of {} — no HuggingFace source and no peers hold it", candidate.shard_index + 1, mname.as_deref().unwrap_or(&candidate.model_id.0)),
+                        format!("Cannot download {} of {} — no HuggingFace source and no peers hold it", crate::types::ShardId::display_index(candidate.shard_index), mname.as_deref().unwrap_or(&candidate.model_id.0)),
                     )
                     .with_model(candidate.model_id.0.clone())
                     .with_detail_num(candidate.shard_index as i64)
@@ -730,7 +730,7 @@ e
                             });
                         entry.log.push(format!(
                             "P2P: downloading shard {} from peer",
-                            candidate.shard_index + 1
+                            crate::types::ShardId::display_index(candidate.shard_index)
                         ));
                     } else {
                         let mut shard_progress = std::collections::HashMap::new();
@@ -759,7 +759,7 @@ e
                                 started_at: Some(chrono::Utc::now()),
                                 log: vec![format!(
                                     "P2P: downloading shard {} from peer",
-                                    candidate.shard_index + 1
+                                    crate::types::ShardId::display_index(candidate.shard_index)
                                 )],
                                 source: "peers".to_string(),
                                 trigger: "auto_manage".to_string(),
@@ -796,7 +796,7 @@ e
                                 "shard_download_p2p",
                                 format!(
                                     "Requesting shard {} of {} from peer {}",
-                                    candidate.shard_index + 1,
+                                    crate::types::ShardId::display_index(candidate.shard_index),
                                     mname.as_deref().unwrap_or(&candidate.model_id.0),
                                     peer_label
                                 ),
