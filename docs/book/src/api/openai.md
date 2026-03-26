@@ -29,10 +29,10 @@ curl http://localhost:8800/v1/chat/completions \
 | `model` | string | yes | — | Model name (or `"auto"` for first available) |
 | `messages` | array | yes | — | Chat messages (`role` + `content`). Roles: `system`, `user`, `assistant`, `tool` |
 | `stream` | boolean | no | `false` | Enable SSE streaming |
-| `max_tokens` | integer | no | `2048` | Max tokens to generate |
+| `max_tokens` | integer | no | `2048` | Max tokens to generate (clamped to 1–32768) |
 | `temperature` | float | no | `0.7` | Sampling temperature (0.0-2.0) |
 | `top_p` | float | no | `1.0` | Nucleus sampling threshold |
-| `stop` | string or array | no | — | Stop sequence(s) |
+| `stop` | string or array | no | — | Stop sequence(s), 1–256 chars each, max 16 |
 | `frequency_penalty` | float | no | `0.0` | Frequency penalty (-2.0 to 2.0) |
 | `presence_penalty` | float | no | `0.0` | Presence penalty (-2.0 to 2.0) |
 | `tools` | array | no | — | Tool/function definitions for function calling |

@@ -437,6 +437,21 @@ For a 7B model (hidden_dim=3584):
 7. Identify standby nodes per segment
 8. Send PipelineAssignment → all nodes ACK → begin forwarding
 
+### Inference Correctness
+
+**Stop sequence handling**: User-provided stop sequences (`stop` in OpenAI, `stop_sequences` in Anthropic) are enforced in all three inference execution paths:
+1. `pipeline.rs` `execute_distributed` — accumulated text scanned after each token decode
+2. `model_worker.rs` `handle_generate` — accumulated text checked after each token in the subprocess decode loop
+3. `executor.rs` `generate_stream_llama` — accumulated text checked after each token in the llama.cpp loop
+
+Empty stop sequences are rejected at the API validation layer (must be 1–256 chars).
+
+**EOS token handling**: The distributed pipeline checks for EOS tokens in `result.token_ids` explicitly (not just via `result.finish_reason`), preventing runaway generation if the worker subprocess returns EOS as a token ID without setting the finish reason.
+
+**Top-k sampling**: Uses `select_nth_unstable_by(k - 1, desc_cmp)` to partition the k largest logits into `[..k]`. The k-1 pivot ensures exactly k elements are retained (not k-1).
+
+**RoPE position tracking**: Prompt token count estimated as `max(chars / 4, 1)` when no tokenizer is available on the coordinating node. The minimum of 1 prevents zero-position RoPE for short prompts.
+
 ### KV-Cache Management
 
 - Per-request KV-cache isolation via `DashMap<String, KvCacheEntry>` (key: `"model_key\0request_id"`)
@@ -505,6 +520,8 @@ ModelProcessPool.forward()   ──socket──▶   runs forward passes / decod
 - `forward()` — routes a `LayerForward` to the subprocess, awaits `LayerResult`
 - `generate()` — sends a full generate request, streams `WorkerMsg::Token` back
 - `unload_model()` — kills the subprocess → OS/CUDA reclaims all GPU memory
+- **Crash recovery**: if a worker subprocess crashes (OOM, CUDA fault, panic), the IO error from `send_daemon`/`recv_worker` evicts the dead `WorkerHandle` from the pool. The next inference request for that model automatically respawns a fresh worker via `get_or_spawn()`.
+- **Socket cleanup**: a RAII guard (`SocketCleanup`) ensures the Unix socket file in `/tmp/` is removed if `spawn_worker` fails at any step after binding. On success, the guard is defused via `mem::forget` and `WorkerHandle::drop` handles cleanup.
 
 **`SplitModelEntry`** is now **metadata-only** (no `Arc<Mutex<SplitModel>>` in the main process):
 - Caches `eos_tokens`, `vocab`, `chat_template`, `bos_token`, `eos_token_str` from the GGUF header
@@ -587,6 +604,10 @@ On `CircuitReqAccepted`, records start time. On `CircuitClosed`, computes durati
 credits (default -50) and broadcasts `InferenceError` to all pipeline participants.
 
 Credit earn/spend rates are configurable per pool via the pool configuration API.
+
+**Pool credit forwarding**: When a pool member earns credits, `earn_inference` attempts to forward them to the pool owner before crediting locally. If forwarding succeeds, the member retains nothing (return 0). If forwarding fails or the node is not in a pool, credits are applied locally. This prevents credit inflation when pool members accumulate credits that should belong to the owner.
+
+**Pipeline completion credit earn**: Uses the configurable rate from `config.pool.credit_rates.inference_serve` (not the compile-time constant), with `saturating_mul` for overflow safety. Remote peers earn per-forward-step via `track_forward_participation`; local segments earn via `apply_credit_direct` at pipeline completion — these are separate code paths with no double-counting.
 
 ## Device Pools (Multi-Device Credit Linking)
 
@@ -782,6 +803,7 @@ over-replicated shards to free VRAM and disk on smaller nodes.
 ```
 
 **Safety Checks** — pruning is blocked if:
+- Shard is actively being downloaded by this node (prevents download/prune race)
 - Shard is locked/pinned by user
 - Shard is in configured `--shards` range
 - `holder_count <= adjusted_target_replicas`
@@ -1174,7 +1196,6 @@ When a requested model isn't available locally or on the swarm, requests can opt
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
   - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`)
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
-  - `frontend/js/components/ui.js` — tab switching, sidebar, modals, mode indicator
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle
   - `frontend/js/components/dashboard.js` — stats, hardware, model cards, peers, shard grid live updates
@@ -1193,7 +1214,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - Cross-component calls: `App.componentName.method()`. Shared state: `App.state.*`. Utilities: `App.utils.*`.
 
 ### Frontend Features
-- **i18n**: 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. "Continue in English" UX for non-English users who prefer English.
+- **i18n**: 565 translation keys across 21 languages (en, es, fr, de, pt, it, nl, ru, zh, ja, ko, ar, tr, pl, sv, th, hi, vi, id, uk, cs). Auto-detects browser language. `I18n.t()` + `data-i18n` DOM attributes. Interpolation via `{variable}` placeholders. Fallback chain: current language → English → raw key. "Continue in English" UX for non-English users who prefer English.
 - **Theme**: Light / Dark / System toggle. `[data-theme="light"]` CSS overrides. Persisted in localStorage.
 - **Neural network background**: Animated canvas particle network behind dashboard tiles (`frontend/js/neural-bg.js`). ~60 nodes with connecting edges, gentle drift, mouse repulsion/glow. State-reactive coloring: blue (idle) → cyan (active inference) → red-orange (unhealthy/disconnected). Peer count boosts vibrancy, active requests trigger node firing pulses. Pauses when tab hidden; reduced opacity in light theme.
 

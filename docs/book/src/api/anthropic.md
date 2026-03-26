@@ -26,12 +26,12 @@ ANTHROPIC_BASE_URL=http://localhost:8800 claude --model qwen2.5-coder-7b
 |---|---|---|---|
 | `model` | string | yes | Model name (local GGUF, network model, or cloud model like `gpt-4o`) |
 | `messages` | array | yes | Chat messages with `role` + `content` |
-| `max_tokens` | integer | yes | Maximum tokens to generate |
+| `max_tokens` | integer | yes | Maximum tokens to generate (clamped to 1–32768) |
 | `system` | string or array | no | System prompt (supports `cache_control` blocks) |
 | `stream` | boolean | no | Enable SSE streaming |
 | `temperature` | float | no | Sampling temperature |
 | `top_p` | float | no | Nucleus sampling |
-| `stop_sequences` | array | no | Stop sequences |
+| `stop_sequences` | array | no | Stop sequences, 1–256 chars each, max 16 |
 | `tools` | array | no | Tool definitions for function calling |
 | `tool_choice` | object | no | Tool selection strategy |
 | `metadata` | object | no | Request metadata |
