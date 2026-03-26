@@ -445,41 +445,10 @@ fn detect_hardware(shared_state: &crate::daemon::SharedState) -> serde_json::Val
 }
 
 /// Fallback GPU detection via nvidia-smi when llama.cpp gpu_info is unavailable.
-pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total",
-            "--format=csv,noheader,nounits",
-        ])
-        .output();
+pub(crate) use crate::model::auto_manage::vram::detect_gpu_nvidia_smi;
 
-    match output {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let line = text.trim();
-            if let Some((name, vram_str)) = line.split_once(',') {
-                let name = name.trim().to_string();
-                let vram_mb = vram_str.trim().parse::<u64>().ok();
-                (Some(name), vram_mb)
-            } else {
-                (None, None)
-            }
-        }
-        _ => (None, None),
-    }
-}
-
-/// Query current GPU VRAM usage via nvidia-smi (memory.used in MB).
 fn query_gpu_vram_used() -> Option<u64> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.trim().parse::<u64>().ok()
+    crate::model::auto_manage::vram::query_gpu_vram_used()
 }
 
 /// GET /api/admin/network-map — Aggregated region data for the world heatmap.

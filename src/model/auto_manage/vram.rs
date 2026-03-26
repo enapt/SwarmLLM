@@ -209,22 +209,39 @@ pub fn local_vram_mb(shared: &SharedState) -> u64 {
 
 /// Fallback GPU VRAM detection via nvidia-smi.
 fn detect_vram_nvidia_smi() -> Option<u64> {
+    detect_gpu_nvidia_smi().1
+}
+
+/// Detect GPU name and total VRAM via nvidia-smi.
+pub(crate) fn detect_gpu_nvidia_smi() -> (Option<String>, Option<u64>) {
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+        .args([
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let line = text.trim();
+            if let Some((name, vram_str)) = line.split_once(',') {
+                let name = name.trim().to_string();
+                let vram_mb = vram_str.trim().parse::<u64>().ok();
+                (Some(name), vram_mb)
+            } else {
+                (None, None)
+            }
+        }
+        _ => (None, None),
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.trim().parse::<u64>().ok()
 }
 
 /// Query live GPU VRAM usage in MB via nvidia-smi.
 ///
 /// Called on each auto-manage tick (~5 min) for accurate VRAM pressure.
 /// Returns None if nvidia-smi is unavailable or fails.
-pub(super) fn query_gpu_vram_used() -> Option<u64> {
+pub(crate) fn query_gpu_vram_used() -> Option<u64> {
     let output = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         .output()

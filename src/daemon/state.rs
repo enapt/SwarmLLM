@@ -167,6 +167,16 @@ pub struct EventBus {
     pub update_state: Arc<RwLock<crate::update::UpdateState>>,
 }
 
+impl EventBus {
+    /// Remove stale `model_loaded` history entries for a model (e.g., after load/unload/delete).
+    pub fn clear_model_load_history(&self, model_id: &str) {
+        if let Ok(mut history) = self.activity_history.lock() {
+            history
+                .retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(model_id)));
+        }
+    }
+}
+
 /// Credit & pool: balances, pool membership, escrow, trust, anti-gaming.
 pub struct CreditPool {
     pub credit_balance: Arc<RwLock<CreditBalance>>,
@@ -794,6 +804,15 @@ impl SharedState {
     /// Apply hot-reloaded operational params and notify subscribers.
     pub fn apply_config_reload(&self, params: crate::config::OperationalParams) {
         let _ = self.config_watch_tx.send(params);
+    }
+
+    /// Returns "VRAM" if a GPU is available, "RAM" otherwise.
+    pub fn memory_type_label(&self) -> &'static str {
+        if self.gpu_info.is_some() {
+            "VRAM"
+        } else {
+            "RAM"
+        }
     }
 
     /// Emit a rich activity event to the dashboard.

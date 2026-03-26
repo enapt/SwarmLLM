@@ -905,11 +905,7 @@ async fn finalize_request(
 
         // Emit inference completion activity
         {
-            let mname = shared_state
-                .model_registry
-                .get_manifest(&request.model_id)
-                .map(|m| m.name.clone());
-            let display = mname.as_deref().unwrap_or(&request.model_id.0);
+            let display = shared_state.model_registry.display_name(&request.model_id);
             let total_tokens = result.prompt_tokens + result.completion_tokens;
             shared_state.emit_activity(
                 crate::daemon::state::ActivityEvent::new(

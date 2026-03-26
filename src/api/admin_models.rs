@@ -954,11 +954,7 @@ pub async fn unload_model(
     let shared = &state.shared_state;
 
     // Get model name and estimated size before removing
-    let model_display_name = shared
-        .model_registry
-        .get_manifest(&mid)
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| model_id.clone());
+    let model_display_name = shared.model_registry.display_name(&mid);
     let estimated_mb = shared
         .model_registry
         .get_manifest(&mid)
@@ -1009,11 +1005,7 @@ pub async fn unload_model(
                 "Unloaded {} — ~{}MB {} freed",
                 model_display_name,
                 estimated_mb,
-                if shared.gpu_info.is_some() {
-                    "VRAM"
-                } else {
-                    "RAM"
-                }
+                shared.memory_type_label()
             ),
         )
         .with_model(model_id.clone())
@@ -1108,9 +1100,7 @@ pub async fn unload_shard(
     }
 
     // Clear stale model_loaded history so updated layer range emits fresh
-    if let Ok(mut history) = shared.events.activity_history.lock() {
-        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
-    }
+    shared.events.clear_model_load_history(&model_id);
 
     let _ = shared
         .events
@@ -1118,11 +1108,7 @@ pub async fn unload_shard(
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
-        let mname = shared
-            .model_registry
-            .get_manifest(&mid)
-            .map(|m| m.name.clone());
-        let display = mname.as_deref().unwrap_or(&model_id);
+        let display = shared.model_registry.display_name(&mid);
         let remaining = if new_window.is_empty() {
             "model fully unloaded".to_string()
         } else {
@@ -1246,11 +1232,7 @@ pub async fn load_shard(
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
-        let mname = shared
-            .model_registry
-            .get_manifest(&mid)
-            .map(|m| m.name.clone());
-        let display = mname.as_deref().unwrap_or(&model_id);
+        let display = shared.model_registry.display_name(&mid);
         let window_label = if new_window.len() == 1 {
             format!("shard {}", new_window[0] + 1)
         } else {
@@ -1400,11 +1382,7 @@ pub async fn delete_shard(
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
     {
-        let mname = shared
-            .model_registry
-            .get_manifest(&mid)
-            .map(|m| m.name.clone());
-        let display = mname.as_deref().unwrap_or(&model_id);
+        let display = shared.model_registry.display_name(&mid);
         // Check what shards remain loaded
         let remaining_local: Vec<u32> = shared
             .model_registry
@@ -1580,10 +1558,7 @@ pub async fn download_shard(
                     .await;
             }
 
-            let mname = shared
-                .model_registry
-                .get_manifest(&mid)
-                .map(|m| m.name.clone());
+            let display = shared.model_registry.display_name(&mid);
             let peer_label = shared
                 .nickname_registry
                 .get(&target)
@@ -1596,7 +1571,7 @@ pub async fn download_shard(
                     format!(
                         "Downloading shard {} of {} from peer {}",
                         shard_index + 1,
-                        mname.as_deref().unwrap_or(&model_id),
+                        display,
                         peer_label
                     ),
                 )

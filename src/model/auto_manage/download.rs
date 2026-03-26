@@ -242,11 +242,7 @@ impl AutoShardManager {
 
                 // Emit HF-specific download start event
                 {
-                    let mname = shared
-                        .model_registry
-                        .get_manifest(&model_id)
-                        .map(|m| m.name.clone());
-                    let display = mname.as_deref().unwrap_or(&model_id.0);
+                    let display = shared.model_registry.display_name(&model_id);
                     shared.emit_activity(
                         crate::daemon::state::ActivityEvent::new(
                             "download",
@@ -421,11 +417,7 @@ impl AutoShardManager {
                             );
                             // Emit per-shard completion activity
                             {
-                                let mname = shared
-                                    .model_registry
-                                    .get_manifest(&model_id)
-                                    .map(|m| m.name.clone());
-                                let display = mname.as_deref().unwrap_or(&model_id.0);
+                                let display = shared.model_registry.display_name(&model_id);
                                 shared.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
                                         "download",
@@ -507,10 +499,7 @@ display
                             }
                             // Emit shard registered activity
                             {
-                                let mname = shared
-                                    .model_registry
-                                    .get_manifest(&model_id)
-                                    .map(|m| m.name.clone());
+                                let display = shared.model_registry.display_name(&model_id);
                                 shared.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
                                         "download",
@@ -518,7 +507,7 @@ display
                                         format!(
                                             "Shard {} of {} verified and registered",
                                             shard_idx + 1,
-                                            mname.as_deref().unwrap_or(&model_id.0)
+                                            display
                                         ),
                                     )
                                     .with_model(model_id.0.clone())
@@ -566,11 +555,7 @@ display
 
                             // Emit activity event for shard download complete
                             {
-                                let mname = shared
-                                    .model_registry
-                                    .get_manifest(&model_id)
-                                    .map(|m| m.name.clone());
-                                let display = mname.as_deref().unwrap_or(&model_id.0);
+                                let display = shared.model_registry.display_name(&model_id);
                                 shared.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
                                         "download",

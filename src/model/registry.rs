@@ -165,6 +165,14 @@ impl ModelRegistry {
         self.manifests.get(model_id).map(|v| v.clone())
     }
 
+    /// Human-friendly display name for a model (falls back to raw model ID).
+    pub fn display_name(&self, model_id: &ModelId) -> String {
+        self.manifests
+            .get(model_id)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| model_id.0.clone())
+    }
+
     /// Get all known model manifests.
     pub fn models(&self) -> Vec<ModelManifest> {
         self.manifests.iter().map(|v| v.value().clone()).collect()
