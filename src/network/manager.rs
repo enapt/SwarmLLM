@@ -925,260 +925,8 @@ impl NetworkManager {
                     connection_id,
                 },
             )) => {
-                tracing::debug!(
-                    %peer_id,
-                    protocol_version = %info.protocol_version,
-                    listen_addrs = ?info.listen_addrs,
-                    "Identified peer"
-                );
-                // Add ONLY the connected address to Kademlia — not all listen_addrs.
-                // Adding all addresses causes Kademlia to route DHT queries through
-                // addresses we haven't connected on, triggering redundant dials that
-                // create multiple connections per peer. request_response round-robins
-                // across connections, and degraded connections silently drop messages.
-                if let Some(connected_addr) = self.connection_addrs.get(&connection_id) {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, connected_addr.clone());
-                    tracing::debug!(
-                        %peer_id,
-                        addr = %connected_addr,
-                        "Added connected address to Kademlia (skipped {} other listen_addrs)",
-                        info.listen_addrs.len().saturating_sub(1)
-                    );
-                } else if let Some(addr) = info.listen_addrs.first() {
-                    // Fallback: connection_id not tracked (shouldn't happen)
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, addr.clone());
-                    tracing::warn!(
-                        %peer_id,
-                        "No tracked connection address for Identify, used first listen_addr"
-                    );
-                }
-                // Verify announced key matches the authenticated PeerId from Noise handshake
-                // to prevent NodeId spoofing via forged Identify messages.
-                let announced_peer_id = info.public_key.to_peer_id();
-                if announced_peer_id != peer_id {
-                    tracing::warn!(
-                        %peer_id,
-                        announced = %announced_peer_id,
-                        "Peer announced mismatched public key in Identify — ignoring"
-                    );
-                    return;
-                }
-
-                // Derive NodeId from the peer's Ed25519 public key (32 bytes)
-                // per spec: NodeId(verifying_key.to_bytes())
-                let node_id = if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
-                    crate::types::NodeId(ed_key.to_bytes())
-                } else {
-                    // Fallback for non-Ed25519 keys: hash the peer_id
-                    let hash = blake3::hash(&peer_id.to_bytes());
-                    crate::types::NodeId(*hash.as_bytes())
-                };
-
-                // Establish encryption session from the peer's Ed25519 public key
-                if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
-                    if let Some(x25519_pub) =
-                        crate::crypto::session::ed25519_pubkey_to_x25519(&ed_key.to_bytes())
-                    {
-                        tracing::info!(
-                            %peer_id,
-                            node_id = %node_id,
-                            session_type = "static",
-                            "DIAG: key exchange initiated"
-                        );
-                        self.shared_state
-                            .session_manager
-                            .establish_session(&node_id, x25519_pub);
-                        tracing::info!(
-                            %peer_id,
-                            node_id = %node_id,
-                            session_type = "static",
-                            session_count = self.shared_state.session_manager.session_count(),
-                            "DIAG: encryption session established"
-                        );
-                    }
-                }
-
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                // Preserve first_seen from existing entry or use current time
-                let first_seen = self
-                    .shared_state
-                    .peer_registry
-                    .get(&node_id)
-                    .map(|p| p.first_seen)
-                    .unwrap_or(now_ts);
-                // Preserve trust, capability, and verified count from existing entry
-                let existing = self.shared_state.peer_registry.get(&node_id);
-                let trust_score = existing.as_ref().map(|p| p.trust_score).unwrap_or(0.5);
-                let capability = existing.as_ref().and_then(|p| p.capability.clone());
-                let vtc = existing
-                    .as_ref()
-                    .map(|p| p.verified_transaction_count)
-                    .unwrap_or(0);
-                let is_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
-                drop(existing);
-                let peer_info = PeerInfo {
-                    node_id: node_id.clone(),
-                    addresses: info
-                        .listen_addrs
-                        .iter()
-                        .take(8)
-                        .map(|a| a.to_string())
-                        .collect(),
-                    capability,
-                    last_seen: chrono::Utc::now(),
-                    latency_ms: None,
-                    trust_score,
-                    peer_id_bytes: Some(peer_id.to_bytes()),
-                    active_request_count: 0,
-                    first_seen,
-                    verified_transaction_count: vtc,
-                    is_lan_peer: is_lan,
-                };
-                // Insert peer_registry BEFORE peer_to_node to prevent TOCTOU race
-                // where dispatch can resolve NodeId from peer_to_node but peer_registry
-                // check fails because insert hasn't happened yet.
-                self.shared_state
-                    .peer_registry
-                    .insert(node_id.clone(), peer_info);
-                let _ = self
-                    .shared_state
-                    .events
-                    .dashboard_tx
-                    .send(crate::daemon::state::DashboardSignal::PeersChanged);
-
-                // Emit activity event for peer connection
-                {
-                    let nick = self
-                        .shared_state
-                        .nickname_registry
-                        .get(&node_id)
-                        .map(|r| r.nickname.clone());
-                    let node_id_str = format!("{}", node_id);
-                    let label = nick.as_deref().unwrap_or(&node_id_str[..16]);
-                    let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
-                        p.capability
-                            .as_ref()
-                            .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
-                    });
-                    let detail = if is_lan { "LAN" } else { "WAN" };
-                    self.shared_state.emit_activity(
-                        crate::daemon::state::ActivityEvent::new(
-                            "network",
-                            "peer_connected",
-                            format!(
-                                "Peer connected: {}{}",
-                                label,
-                                gpu_name
-                                    .as_ref()
-                                    .map(|g| format!(" ({})", g))
-                                    .unwrap_or_default()
-                            ),
-                        )
-                        .with_node(node_id_str)
-                        .with_detail_str(detail.to_string()),
-                    );
-                }
-
-                // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
-                // Evict highest-latency non-LAN non-pipeline peer when over limit.
-                const MAX_PEER_REGISTRY: usize = 200;
-                if self.shared_state.peer_registry.len() > MAX_PEER_REGISTRY {
-                    // Find the worst peer to evict: highest latency, not LAN, not in active pipeline
-                    let active_pipeline_nodes: std::collections::HashSet<_> = {
-                        let segments: Vec<_> = self
-                            .shared_state
-                            .active_pipelines
-                            .iter()
-                            .flat_map(|e| {
-                                e.value()
-                                    .segments
-                                    .iter()
-                                    .map(|s| s.node_id.clone())
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect();
-                        segments.into_iter().collect()
-                    };
-                    let evict_candidate = self
-                        .shared_state
-                        .peer_registry
-                        .iter()
-                        .filter(|e| {
-                            !e.is_lan_peer
-                                && !active_pipeline_nodes.contains(e.key())
-                                && *e.key() != node_id
-                        })
-                        // Prefer evicting peers with known high latency over unmeasured peers.
-                        // Unmeasured peers (None) get 0 so they survive until measured.
-                        .max_by_key(|e| e.latency_ms.unwrap_or(0))
-                        .map(|e| e.key().clone());
-                    if let Some(evict_id) = evict_candidate {
-                        self.shared_state.peer_registry.remove(&evict_id);
-                        // Also remove from peer_to_node and disconnect
-                        let evict_peer = self
-                            .peer_to_node
-                            .iter()
-                            .find(|e| *e.value() == evict_id)
-                            .map(|e| *e.key());
-                        if let Some(pid) = evict_peer {
-                            self.peer_to_node.remove(&pid);
-                            let _ = self.swarm.disconnect_peer_id(pid);
-                        }
-                        tracing::debug!(
-                            evicted = %evict_id,
-                            registry_size = self.shared_state.peer_registry.len(),
-                            "Evicted distant peer to stay under registry cap"
-                        );
-                    }
-                }
-
-                // NET-C4: Populate reverse PeerId → NodeId lookup (capped)
-                const MAX_PEER_TO_NODE: usize = 10_000;
-                if self.peer_to_node.len() < MAX_PEER_TO_NODE
-                    || self.peer_to_node.contains_key(&peer_id)
-                {
-                    self.peer_to_node.insert(peer_id, node_id.clone());
-                }
-                // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
-                if self.shared_state.peer_id_map.len() < 10_000
-                    || self.shared_state.peer_id_map.contains_key(&node_id)
-                {
-                    self.shared_state
-                        .peer_id_map
-                        .insert(node_id.clone(), peer_id.to_bytes());
-                }
-
-                // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
-                for addr in &info.listen_addrs {
-                    if let Some(ip_bytes) = extract_ipv4_bytes(addr) {
-                        // Skip private (RFC 1918) and loopback addresses
-                        if ip_bytes[0] == 127
-                            || ip_bytes[0] == 0
-                            || ip_bytes[0] == 10
-                            || (ip_bytes[0] == 172 && (16..=31).contains(&ip_bytes[1]))
-                            || (ip_bytes[0] == 192 && ip_bytes[1] == 168)
-                        {
-                            continue;
-                        }
-                        // Use try_lock() to avoid blocking the event loop.
-                        // If contended, skip — next Identify event will catch it.
-                        if let Ok(mut anti_gaming) =
-                            self.shared_state.credits.anti_gaming.try_lock()
-                        {
-                            anti_gaming.register_subnet(&node_id, ip_bytes);
-                        }
-                        break; // One IP per peer is enough
-                    }
-                }
+                self.handle_identify_received(peer_id, info, connection_id)
+                    .await;
             }
 
             // ── Kademlia ──
@@ -1336,59 +1084,12 @@ impl NetworkManager {
                 endpoint,
                 ..
             } => {
-                let remote_addr = endpoint.get_remote_address();
-                let is_loopback = remote_addr.iter().any(|proto| {
-                    matches!(proto, libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback())
-                        || matches!(proto, libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback())
-                });
-                tracing::info!(
-                    %peer_id, %connection_id, count = num_established,
-                    remote_addr = %remote_addr,
-                    is_loopback,
-                    is_dialer = endpoint.is_dialer(),
-                    total_established = self.swarm.network_info().connection_counters().num_established(),
-                    total_peers = self.swarm.connected_peers().count(),
-                    pending_tensor_forwards = self.pending_tensor_outbound.len(),
-                    "DIAG: connection established"
+                self.handle_connection_established(
+                    peer_id,
+                    connection_id,
+                    num_established,
+                    &endpoint,
                 );
-                // Track which address each connection uses — the Identify handler
-                // uses this to add only the connected address to Kademlia.
-                // SEC: Cap connection_addrs to prevent unbounded memory growth.
-                const MAX_CONNECTION_ADDRS: usize = 1024;
-                if self.connection_addrs.len() >= MAX_CONNECTION_ADDRS {
-                    // Evict oldest half — stale ConnectionIds from missed close events.
-                    let mut ids: Vec<_> = self.connection_addrs.keys().cloned().collect();
-                    ids.sort();
-                    for id in ids.iter().take(MAX_CONNECTION_ADDRS / 2) {
-                        self.connection_addrs.remove(id);
-                    }
-                }
-                self.connection_addrs
-                    .insert(connection_id, remote_addr.clone());
-                self.update_peer_count();
-
-                // Layer 5: Peer Exchange — send PEX request on first connection only
-                if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
-                    // SEC: Cap ping_sent_times to prevent unbounded growth from connection storms.
-                    // Prune stale entries before inserting.
-                    const MAX_PING_ENTRIES: usize = 2048;
-                    if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
-                        let cutoff =
-                            std::time::Instant::now() - std::time::Duration::from_secs(120);
-                        self.ping_sent_times
-                            .retain(|_, (_, sent_at)| *sent_at > cutoff);
-                    }
-                    let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
-                    let outbound_id = self
-                        .swarm
-                        .behaviour_mut()
-                        .request_response
-                        .send_request(&peer_id, req);
-                    // Track send time for RTT measurement
-                    self.ping_sent_times
-                        .insert(outbound_id, (peer_id, std::time::Instant::now()));
-                    tracing::debug!(%peer_id, "Sent PEX request");
-                }
             }
 
             SwarmEvent::ConnectionClosed {
@@ -1398,147 +1099,7 @@ impl NetworkManager {
                 num_established,
                 ..
             } => {
-                let closed_addr = self.connection_addrs.remove(&connection_id);
-                // Check if any in-flight tensor forwards are affected
-                let affected_tensors: Vec<_> = self
-                    .pending_tensor_outbound
-                    .values()
-                    .map(|(u, _, _, _, _)| u.to_string())
-                    .collect();
-                tracing::warn!(
-                    %peer_id, %connection_id, ?cause, remaining = num_established,
-                    pending_tensor_forwards = self.pending_tensor_outbound.len(),
-                    affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
-                    total_peers = self.swarm.connected_peers().count(),
-                    "DIAG: connection closed"
-                );
-
-                // Skip cleanup if other connections to this peer remain
-                if num_established > 0 {
-                    tracing::debug!(%peer_id, remaining = num_established, "Other connections remain, skipping cleanup");
-                } else if self.swarm.is_connected(&peer_id) {
-                    // Swarm still considers peer connected (race: another
-                    // connection was just established) — skip cleanup.
-                    tracing::debug!(%peer_id, "Peer still connected per swarm, skipping cleanup");
-                    self.update_peer_count();
-                } else {
-                    self.update_peer_count();
-
-                    // NET-I1: Drain pending shard requests and download progress for this peer
-                    let drained_ids: Vec<OutboundRequestId> = self
-                        .pending_shard_requests
-                        .iter()
-                        .filter(|(_, (pid, _))| *pid == peer_id)
-                        .map(|(rid, _)| *rid)
-                        .collect();
-                    for rid in &drained_ids {
-                        if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
-                            self.shard_download_progress.remove(&shard_id);
-                            tracing::debug!(
-                                %peer_id,
-                                model = %shard_id.model_id,
-                                index = shard_id.index,
-                                "Cleaned up pending shard request for disconnected peer"
-                            );
-                        }
-                    }
-
-                    // NET-I3: Clean up peer_shard_downloads for disconnected peer.
-                    // Entries for peers that disconnect mid-download would otherwise
-                    // be orphaned permanently, accumulating stale data.
-                    let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
-                    if let Some(ref nid) = node_id_for_cleanup {
-                        self.shared_state
-                            .models
-                            .peer_shard_downloads
-                            .retain(|_shard_id, peers| {
-                                peers.retain(|(n, _)| n != nid);
-                                !peers.is_empty()
-                            });
-                    }
-
-                    // NET-I2: Remove peer from registry, but skip if in active pipelines.
-                    // Clone the NodeId and drop the DashMap Ref BEFORE calling remove(),
-                    // otherwise get() holds a read lock and remove() needs a write lock
-                    // on the same shard → synchronous deadlock that freezes the event loop.
-                    let node_id_opt = node_id_for_cleanup;
-                    if let Some(node_id) = node_id_opt {
-                        let in_active_pipeline =
-                            self.shared_state.active_pipelines.iter().any(|entry| {
-                                entry
-                                    .value()
-                                    .segments
-                                    .iter()
-                                    .any(|seg| seg.node_id == node_id)
-                            });
-                        // Clear encryption session on full disconnect to
-                        // prevent epoch desync after reconnection.
-                        // Only remove if no new connection has been established
-                        // (prevents race where reconnect arrives before close is processed).
-                        if !self.swarm.is_connected(&peer_id) {
-                            self.shared_state.session_manager.remove_session(&node_id);
-                        }
-
-                        if !in_active_pipeline {
-                            // Capture info before removing
-                            let nick = self
-                                .shared_state
-                                .nickname_registry
-                                .get(&node_id)
-                                .map(|r| r.nickname.clone());
-                            let label = nick
-                                .as_deref()
-                                .unwrap_or(&format!("{}", node_id)[..16])
-                                .to_string();
-
-                            // Remove peer_to_node BEFORE peer_registry to prevent
-                            // dispatch from resolving NodeId for a peer that's being removed
-                            self.peer_to_node.remove(&peer_id);
-                            self.shared_state.peer_registry.remove(&node_id);
-                            let _ = self
-                                .shared_state
-                                .events
-                                .dashboard_tx
-                                .send(crate::daemon::state::DashboardSignal::PeersChanged);
-
-                            self.shared_state.emit_activity(
-                                crate::daemon::state::ActivityEvent::new(
-                                    "network",
-                                    "peer_disconnected",
-                                    format!("Peer disconnected: {}", label),
-                                )
-                                .with_node(format!("{}", node_id)),
-                            );
-                            tracing::debug!(%peer_id, "Removed disconnected peer from registry");
-                        } else {
-                            tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
-                        }
-                    } else {
-                        // Peer was never registered (connection died before Identify).
-                        // This typically happens during mDNS simultaneous-dial race.
-                        // Schedule a re-dial with random jitter to break symmetry.
-                        if let Some(addr) = closed_addr {
-                            // Only re-dial if not already in the queue
-                            let already_queued = self
-                                .pending_redial
-                                .iter()
-                                .any(|(pid, _, _)| *pid == peer_id);
-                            if !already_queued && self.pending_redial.len() < 50 {
-                                use std::hash::{Hash, Hasher};
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                peer_id.hash(&mut hasher);
-                                let jitter_ms = 2000 + (hasher.finish() % 3000); // 2-5s
-                                let scheduled = std::time::Instant::now()
-                                    + std::time::Duration::from_millis(jitter_ms);
-                                tracing::info!(
-                                    %peer_id, %addr, jitter_ms,
-                                    "Scheduling re-dial after connection race"
-                                );
-                                self.pending_redial.push((peer_id, addr, scheduled));
-                            }
-                        }
-                    }
-                } // end else (num_established == 0)
+                self.handle_connection_closed(peer_id, connection_id, cause, num_established);
             }
 
             SwarmEvent::NewListenAddr { address, .. } => {
@@ -1574,6 +1135,476 @@ impl NetworkManager {
         }
     }
 
+    /// Handle Identify protocol — peer identified, establish encryption, register in peer_registry.
+    async fn handle_identify_received(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        info: libp2p::identify::Info,
+        connection_id: libp2p::swarm::ConnectionId,
+    ) {
+        tracing::debug!(
+            %peer_id,
+            protocol_version = %info.protocol_version,
+            listen_addrs = ?info.listen_addrs,
+            "Identified peer"
+        );
+        // Add ONLY the connected address to Kademlia — not all listen_addrs.
+        // Adding all addresses causes Kademlia to route DHT queries through
+        // addresses we haven't connected on, triggering redundant dials that
+        // create multiple connections per peer. request_response round-robins
+        // across connections, and degraded connections silently drop messages.
+        if let Some(connected_addr) = self.connection_addrs.get(&connection_id) {
+            self.swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, connected_addr.clone());
+            tracing::debug!(
+                %peer_id,
+                addr = %connected_addr,
+                "Added connected address to Kademlia (skipped {} other listen_addrs)",
+                info.listen_addrs.len().saturating_sub(1)
+            );
+        } else if let Some(addr) = info.listen_addrs.first() {
+            // Fallback: connection_id not tracked (shouldn't happen)
+            self.swarm
+                .behaviour_mut()
+                .kademlia
+                .add_address(&peer_id, addr.clone());
+            tracing::warn!(
+                %peer_id,
+                "No tracked connection address for Identify, used first listen_addr"
+            );
+        }
+        // Verify announced key matches the authenticated PeerId from Noise handshake
+        // to prevent NodeId spoofing via forged Identify messages.
+        let announced_peer_id = info.public_key.to_peer_id();
+        if announced_peer_id != peer_id {
+            tracing::warn!(
+                %peer_id,
+                announced = %announced_peer_id,
+                "Peer announced mismatched public key in Identify — ignoring"
+            );
+            return;
+        }
+
+        // Derive NodeId from the peer's Ed25519 public key (32 bytes)
+        // per spec: NodeId(verifying_key.to_bytes())
+        let node_id = if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
+            crate::types::NodeId(ed_key.to_bytes())
+        } else {
+            // Fallback for non-Ed25519 keys: hash the peer_id
+            let hash = blake3::hash(&peer_id.to_bytes());
+            crate::types::NodeId(*hash.as_bytes())
+        };
+
+        // Establish encryption session from the peer's Ed25519 public key
+        if let Ok(ed_key) = info.public_key.clone().try_into_ed25519() {
+            if let Some(x25519_pub) =
+                crate::crypto::session::ed25519_pubkey_to_x25519(&ed_key.to_bytes())
+            {
+                tracing::info!(
+                    %peer_id,
+                    node_id = %node_id,
+                    session_type = "static",
+                    "DIAG: key exchange initiated"
+                );
+                self.shared_state
+                    .session_manager
+                    .establish_session(&node_id, x25519_pub);
+                tracing::info!(
+                    %peer_id,
+                    node_id = %node_id,
+                    session_type = "static",
+                    session_count = self.shared_state.session_manager.session_count(),
+                    "DIAG: encryption session established"
+                );
+            }
+        }
+
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Preserve first_seen from existing entry or use current time
+        let first_seen = self
+            .shared_state
+            .peer_registry
+            .get(&node_id)
+            .map(|p| p.first_seen)
+            .unwrap_or(now_ts);
+        // Preserve trust, capability, and verified count from existing entry
+        let existing = self.shared_state.peer_registry.get(&node_id);
+        let trust_score = existing.as_ref().map(|p| p.trust_score).unwrap_or(0.5);
+        let capability = existing.as_ref().and_then(|p| p.capability.clone());
+        let vtc = existing
+            .as_ref()
+            .map(|p| p.verified_transaction_count)
+            .unwrap_or(0);
+        let is_lan = existing.as_ref().map(|p| p.is_lan_peer).unwrap_or(false);
+        drop(existing);
+        let peer_info = PeerInfo {
+            node_id: node_id.clone(),
+            addresses: info
+                .listen_addrs
+                .iter()
+                .take(8)
+                .map(|a| a.to_string())
+                .collect(),
+            capability,
+            last_seen: chrono::Utc::now(),
+            latency_ms: None,
+            trust_score,
+            peer_id_bytes: Some(peer_id.to_bytes()),
+            active_request_count: 0,
+            first_seen,
+            verified_transaction_count: vtc,
+            is_lan_peer: is_lan,
+        };
+        // Insert peer_registry BEFORE peer_to_node to prevent TOCTOU race
+        // where dispatch can resolve NodeId from peer_to_node but peer_registry
+        // check fails because insert hasn't happened yet.
+        self.shared_state
+            .peer_registry
+            .insert(node_id.clone(), peer_info);
+        let _ = self
+            .shared_state
+            .events
+            .dashboard_tx
+            .send(crate::daemon::state::DashboardSignal::PeersChanged);
+
+        // Emit activity event for peer connection
+        {
+            let nick = self
+                .shared_state
+                .nickname_registry
+                .get(&node_id)
+                .map(|r| r.nickname.clone());
+            let node_id_str = format!("{}", node_id);
+            let label = nick.as_deref().unwrap_or(&node_id_str[..16]);
+            let gpu_name = self.shared_state.peer_registry.get(&node_id).and_then(|p| {
+                p.capability
+                    .as_ref()
+                    .and_then(|c| c.gpu.as_ref().map(|g| g.name.clone()))
+            });
+            let detail = if is_lan { "LAN" } else { "WAN" };
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "network",
+                    "peer_connected",
+                    format!(
+                        "Peer connected: {}{}",
+                        label,
+                        gpu_name
+                            .as_ref()
+                            .map(|g| format!(" ({})", g))
+                            .unwrap_or_default()
+                    ),
+                )
+                .with_node(node_id_str)
+                .with_detail_str(detail.to_string()),
+            );
+        }
+
+        // S3: Cap peer_registry to prevent unbounded growth at 10K+ nodes.
+        // Evict highest-latency non-LAN non-pipeline peer when over limit.
+        const MAX_PEER_REGISTRY: usize = 200;
+        if self.shared_state.peer_registry.len() > MAX_PEER_REGISTRY {
+            // Find the worst peer to evict: highest latency, not LAN, not in active pipeline
+            let active_pipeline_nodes: std::collections::HashSet<_> = {
+                let segments: Vec<_> = self
+                    .shared_state
+                    .active_pipelines
+                    .iter()
+                    .flat_map(|e| {
+                        e.value()
+                            .segments
+                            .iter()
+                            .map(|s| s.node_id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                segments.into_iter().collect()
+            };
+            let evict_candidate = self
+                .shared_state
+                .peer_registry
+                .iter()
+                .filter(|e| {
+                    !e.is_lan_peer
+                        && !active_pipeline_nodes.contains(e.key())
+                        && *e.key() != node_id
+                })
+                // Prefer evicting peers with known high latency over unmeasured peers.
+                // Unmeasured peers (None) get 0 so they survive until measured.
+                .max_by_key(|e| e.latency_ms.unwrap_or(0))
+                .map(|e| e.key().clone());
+            if let Some(evict_id) = evict_candidate {
+                self.shared_state.peer_registry.remove(&evict_id);
+                // Also remove from peer_to_node and disconnect
+                let evict_peer = self
+                    .peer_to_node
+                    .iter()
+                    .find(|e| *e.value() == evict_id)
+                    .map(|e| *e.key());
+                if let Some(pid) = evict_peer {
+                    self.peer_to_node.remove(&pid);
+                    let _ = self.swarm.disconnect_peer_id(pid);
+                }
+                tracing::debug!(
+                    evicted = %evict_id,
+                    registry_size = self.shared_state.peer_registry.len(),
+                    "Evicted distant peer to stay under registry cap"
+                );
+            }
+        }
+
+        // NET-C4: Populate reverse PeerId → NodeId lookup (capped)
+        const MAX_PEER_TO_NODE: usize = 10_000;
+        if self.peer_to_node.len() < MAX_PEER_TO_NODE || self.peer_to_node.contains_key(&peer_id) {
+            self.peer_to_node.insert(peer_id, node_id.clone());
+        }
+        // Persistent NodeId → PeerId mapping (survives disconnects, capped at 10k)
+        if self.shared_state.peer_id_map.len() < 10_000
+            || self.shared_state.peer_id_map.contains_key(&node_id)
+        {
+            self.shared_state
+                .peer_id_map
+                .insert(node_id.clone(), peer_id.to_bytes());
+        }
+
+        // Layer 6: Track subnet for anti-gaming — extract IPv4 from listen addrs
+        for addr in &info.listen_addrs {
+            if let Some(ip_bytes) = extract_ipv4_bytes(addr) {
+                // Skip private (RFC 1918) and loopback addresses
+                if ip_bytes[0] == 127
+                    || ip_bytes[0] == 0
+                    || ip_bytes[0] == 10
+                    || (ip_bytes[0] == 172 && (16..=31).contains(&ip_bytes[1]))
+                    || (ip_bytes[0] == 192 && ip_bytes[1] == 168)
+                {
+                    continue;
+                }
+                // Use try_lock() to avoid blocking the event loop.
+                // If contended, skip — next Identify event will catch it.
+                if let Ok(mut anti_gaming) = self.shared_state.credits.anti_gaming.try_lock() {
+                    anti_gaming.register_subnet(&node_id, ip_bytes);
+                }
+                break; // One IP per peer is enough
+            }
+        }
+    }
+
+    /// Handle new peer connection — track address, send PEX request.
+    fn handle_connection_established(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        num_established: std::num::NonZeroU32,
+        endpoint: &libp2p::core::ConnectedPoint,
+    ) {
+        let remote_addr = endpoint.get_remote_address();
+        let is_loopback = remote_addr.iter().any(|proto| {
+            matches!(proto, libp2p::multiaddr::Protocol::Ip4(ip) if ip.is_loopback())
+                || matches!(proto, libp2p::multiaddr::Protocol::Ip6(ip) if ip.is_loopback())
+        });
+        tracing::info!(
+            %peer_id, %connection_id, count = num_established,
+            remote_addr = %remote_addr,
+            is_loopback,
+            is_dialer = endpoint.is_dialer(),
+            total_established = self.swarm.network_info().connection_counters().num_established(),
+            total_peers = self.swarm.connected_peers().count(),
+            pending_tensor_forwards = self.pending_tensor_outbound.len(),
+            "DIAG: connection established"
+        );
+        // Track which address each connection uses — the Identify handler
+        // uses this to add only the connected address to Kademlia.
+        // SEC: Cap connection_addrs to prevent unbounded memory growth.
+        const MAX_CONNECTION_ADDRS: usize = 1024;
+        if self.connection_addrs.len() >= MAX_CONNECTION_ADDRS {
+            // Evict oldest half — stale ConnectionIds from missed close events.
+            let mut ids: Vec<_> = self.connection_addrs.keys().cloned().collect();
+            ids.sort();
+            for id in ids.iter().take(MAX_CONNECTION_ADDRS / 2) {
+                self.connection_addrs.remove(id);
+            }
+        }
+        self.connection_addrs
+            .insert(connection_id, remote_addr.clone());
+        self.update_peer_count();
+
+        // Layer 5: Peer Exchange — send PEX request on first connection only
+        if num_established.get() == 1 && self.shared_state.config.network.peer_exchange {
+            // SEC: Cap ping_sent_times to prevent unbounded growth from connection storms.
+            // Prune stale entries before inserting.
+            const MAX_PING_ENTRIES: usize = 2048;
+            if self.ping_sent_times.len() >= MAX_PING_ENTRIES {
+                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(120);
+                self.ping_sent_times
+                    .retain(|_, (_, sent_at)| *sent_at > cutoff);
+            }
+            let req = SwarmRequest::Message(Box::new(SwarmMessage::PeerExchangeRequest));
+            let outbound_id = self
+                .swarm
+                .behaviour_mut()
+                .request_response
+                .send_request(&peer_id, req);
+            // Track send time for RTT measurement
+            self.ping_sent_times
+                .insert(outbound_id, (peer_id, std::time::Instant::now()));
+            tracing::debug!(%peer_id, "Sent PEX request");
+        }
+    }
+
+    /// Handle peer disconnection — cleanup registry, sessions, downloads.
+    fn handle_connection_closed(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        connection_id: libp2p::swarm::ConnectionId,
+        cause: Option<libp2p::swarm::ConnectionError>,
+        num_established: u32,
+    ) {
+        let closed_addr = self.connection_addrs.remove(&connection_id);
+        // Check if any in-flight tensor forwards are affected
+        let affected_tensors: Vec<_> = self
+            .pending_tensor_outbound
+            .values()
+            .map(|(u, _, _, _, _)| u.to_string())
+            .collect();
+        tracing::warn!(
+            %peer_id, %connection_id, ?cause, remaining = num_established,
+            pending_tensor_forwards = self.pending_tensor_outbound.len(),
+            affected_request_ids = ?affected_tensors.iter().take(5).collect::<Vec<_>>(),
+            total_peers = self.swarm.connected_peers().count(),
+            "DIAG: connection closed"
+        );
+
+        // Skip cleanup if other connections to this peer remain
+        if num_established > 0 {
+            tracing::debug!(%peer_id, remaining = num_established, "Other connections remain, skipping cleanup");
+        } else if self.swarm.is_connected(&peer_id) {
+            // Swarm still considers peer connected (race: another
+            // connection was just established) — skip cleanup.
+            tracing::debug!(%peer_id, "Peer still connected per swarm, skipping cleanup");
+            self.update_peer_count();
+        } else {
+            self.update_peer_count();
+
+            // NET-I1: Drain pending shard requests and download progress for this peer
+            let drained_ids: Vec<OutboundRequestId> = self
+                .pending_shard_requests
+                .iter()
+                .filter(|(_, (pid, _))| *pid == peer_id)
+                .map(|(rid, _)| *rid)
+                .collect();
+            for rid in &drained_ids {
+                if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
+                    self.shard_download_progress.remove(&shard_id);
+                    tracing::debug!(
+                        %peer_id,
+                        model = %shard_id.model_id,
+                        index = shard_id.index,
+                        "Cleaned up pending shard request for disconnected peer"
+                    );
+                }
+            }
+
+            // NET-I3: Clean up peer_shard_downloads for disconnected peer.
+            // Entries for peers that disconnect mid-download would otherwise
+            // be orphaned permanently, accumulating stale data.
+            let node_id_for_cleanup = self.peer_to_node.get(&peer_id).map(|r| r.clone());
+            if let Some(ref nid) = node_id_for_cleanup {
+                self.shared_state
+                    .models
+                    .peer_shard_downloads
+                    .retain(|_shard_id, peers| {
+                        peers.retain(|(n, _)| n != nid);
+                        !peers.is_empty()
+                    });
+            }
+
+            // NET-I2: Remove peer from registry, but skip if in active pipelines.
+            // Clone the NodeId and drop the DashMap Ref BEFORE calling remove(),
+            // otherwise get() holds a read lock and remove() needs a write lock
+            // on the same shard → synchronous deadlock that freezes the event loop.
+            let node_id_opt = node_id_for_cleanup;
+            if let Some(node_id) = node_id_opt {
+                let in_active_pipeline = self.shared_state.active_pipelines.iter().any(|entry| {
+                    entry
+                        .value()
+                        .segments
+                        .iter()
+                        .any(|seg| seg.node_id == node_id)
+                });
+                // Clear encryption session on full disconnect to
+                // prevent epoch desync after reconnection.
+                // Only remove if no new connection has been established
+                // (prevents race where reconnect arrives before close is processed).
+                if !self.swarm.is_connected(&peer_id) {
+                    self.shared_state.session_manager.remove_session(&node_id);
+                }
+
+                if !in_active_pipeline {
+                    // Capture info before removing
+                    let nick = self
+                        .shared_state
+                        .nickname_registry
+                        .get(&node_id)
+                        .map(|r| r.nickname.clone());
+                    let label = nick
+                        .as_deref()
+                        .unwrap_or(&format!("{}", node_id)[..16])
+                        .to_string();
+
+                    // Remove peer_to_node BEFORE peer_registry to prevent
+                    // dispatch from resolving NodeId for a peer that's being removed
+                    self.peer_to_node.remove(&peer_id);
+                    self.shared_state.peer_registry.remove(&node_id);
+                    let _ = self
+                        .shared_state
+                        .events
+                        .dashboard_tx
+                        .send(crate::daemon::state::DashboardSignal::PeersChanged);
+
+                    self.shared_state.emit_activity(
+                        crate::daemon::state::ActivityEvent::new(
+                            "network",
+                            "peer_disconnected",
+                            format!("Peer disconnected: {}", label),
+                        )
+                        .with_node(format!("{}", node_id)),
+                    );
+                    tracing::debug!(%peer_id, "Removed disconnected peer from registry");
+                } else {
+                    tracing::debug!(%peer_id, "Keeping peer in registry (active pipeline)");
+                }
+            } else {
+                // Peer was never registered (connection died before Identify).
+                // This typically happens during mDNS simultaneous-dial race.
+                // Schedule a re-dial with random jitter to break symmetry.
+                if let Some(addr) = closed_addr {
+                    // Only re-dial if not already in the queue
+                    let already_queued = self
+                        .pending_redial
+                        .iter()
+                        .any(|(pid, _, _)| *pid == peer_id);
+                    if !already_queued && self.pending_redial.len() < 50 {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        peer_id.hash(&mut hasher);
+                        let jitter_ms = 2000 + (hasher.finish() % 3000); // 2-5s
+                        let scheduled =
+                            std::time::Instant::now() + std::time::Duration::from_millis(jitter_ms);
+                        tracing::info!(
+                            %peer_id, %addr, jitter_ms,
+                            "Scheduling re-dial after connection race"
+                        );
+                        self.pending_redial.push((peer_id, addr, scheduled));
+                    }
+                }
+            }
+        } // end else (num_established == 0)
+    }
     async fn handle_request(
         &mut self,
         peer: libp2p::PeerId,
