@@ -58,7 +58,7 @@
 
       try {
         var resp = await App.authFetch('/api/identity/leaderboard?limit=50');
-        if (!resp.ok) { tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Failed to load</td></tr>'; return; }
+        if (!resp.ok) { tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_failed')) + '</td></tr>'; return; }
         var data = await resp.json();
         var entries = data.leaderboard || [];
 
@@ -91,11 +91,11 @@
           var tierEl = row.querySelector('.lb-tier');
           var tierClass = (e.tier || 'silver').toLowerCase().replace(/[^a-z]/g, '');
           tierEl.className = 'tier-badge ' + tierClass;
-          tierEl.textContent = e.tier || 'Silver';
+          tierEl.textContent = e.tier || I18n.t('leaderboard.tier_default');
           tbody.appendChild(row);
         }
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">Error: ' + U.escapeHtml(e.message) + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center">' + U.escapeHtml(I18n.t('leaderboard.load_error', { error: e.message })) + '</td></tr>';
       }
     }
   };

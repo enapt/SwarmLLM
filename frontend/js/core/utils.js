@@ -253,7 +253,7 @@
       modelData = (App.data.cache.models || []).find(function(m) { return m.id === S.currentModel; });
     }
 
-    var title = modelName ? 'Chat with ' + escapeHtml(modelName) : 'Chat with AI';
+    var title = modelName ? I18n.t('chat.title_with_model', { model: escapeHtml(modelName) }) : I18n.t('chat.empty_title');
     var _emIconKey = S.currentModel ? ((item && item.group && _ICON_MAP[item.group]) ? item.group : modelIconKey(S.currentModel)) : null;
     var _emIconUrl = _emIconKey ? providerIconUrl(_emIconKey) : null;
     var icon = _emIconUrl
@@ -265,16 +265,16 @@
       var isFullLocal = modelData.hosted_shards === modelData.shard_count;
       if (isFullLocal) {
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--green)">' +
-          '&#128274; Running locally \u2014 all shards on this device, prompts never leave</div>';
+          '&#128274; ' + escapeHtml(I18n.t('chat.enc_local_hint')) + '</div>';
       } else {
         encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--cyan,#22d3ee)">' +
-          '&#128274; Full E2E encryption \u2014 your device handles input &amp; output, peers only process encrypted hidden states' +
-          '<br><span style="font-size:0.75rem;color:var(--text-muted)">~2\u20135s extra latency per request.</span></div>';
+          '&#128274; ' + escapeHtml(I18n.t('chat.enc_e2e_hint')) +
+          '<br><span style="font-size:0.75rem;color:var(--text-muted)">' + escapeHtml(I18n.t('chat.enc_e2e_latency')) + '</span></div>';
       }
     } else if (modelData && modelData.shard_count > 1 && modelData.hosted_shards < modelData.shard_count) {
       encHint = '<div class="chat-empty-hint" style="margin:6px 0;font-size:0.8rem;color:var(--text-muted)">' +
-        '&#127760; Distributed inference \u2014 shards split across peers' +
-        '<br><span style="font-size:0.75rem">Use the \u201cEnable prompt privacy\u201d button in the bar above to encrypt your prompts end-to-end.</span></div>';
+        '&#127760; ' + escapeHtml(I18n.t('chat.enc_distributed_hint')) +
+        '<br><span style="font-size:0.75rem">' + escapeHtml(I18n.t('chat.enc_enable_hint')) + '</span></div>';
     }
 
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
@@ -282,8 +282,8 @@
       encHint +
       '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.type_to_send') + '</div>' +
       '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
-        (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
-        '<kbd>Shift+Enter</kbd> for new line</div>';
+        (modelName ? '' : escapeHtml(I18n.t('chat.pick_model_hint')) + ' \u2022 ') +
+        '<kbd>' + escapeHtml(I18n.t('chat.shift_enter')) + '</kbd></div>';
     return div;
   }
 
@@ -374,7 +374,7 @@
     if (active.total_bytes > 0) pct = Math.min(100, Math.round((active.downloaded_bytes || 0) / active.total_bytes * 100));
     var speed = active.speed_bytes_per_sec || 0;
     var name = formatModelDisplayName(active.model_name || active.model_id || '');
-    var text = 'Downloading ' + name + '... ' + pct + '%';
+    var text = I18n.t('chat.downloading_progress', { name: name, pct: pct });
     if (speed > 0) text += ' (' + formatSpeed(speed) + ')';
 
     if (!existing) {
@@ -393,7 +393,7 @@
   // Returns true if response was ok, false if error was shown.
   async function handleApiError(resp, fallbackMsg) {
     if (resp && resp.ok) return true;
-    var msg = fallbackMsg || 'Request failed';
+    var msg = fallbackMsg || I18n.t('common.request_failed');
     try {
       var body = await resp.json();
       if (body && body.error) {
@@ -410,7 +410,7 @@
   // Parses the JSON body and returns the error message string, or fallback.
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
   async function getApiErrorMessage(resp, fallback) {
-    var msg = fallback || 'Request failed';
+    var msg = fallback || I18n.t('common.request_failed');
     try {
       var body = await resp.json();
       if (body && body.error) {

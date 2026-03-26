@@ -35,7 +35,7 @@
       nameEl.title = dl.model_id;
 
       var sourceEl = item.querySelector('.dl-queue-source');
-      sourceEl.textContent = dl.source === 'huggingface' ? 'HF' : 'Network';
+      sourceEl.textContent = dl.source === 'huggingface' ? I18n.t('dl.source_hf') : I18n.t('dl.source_network');
       sourceEl.classList.add(dl.source === 'huggingface' ? 'hf' : 'net');
 
       var stateName = typeof dl.state === 'string' ? dl.state : 'unknown';
@@ -65,14 +65,14 @@
         (dl.total_bytes > 0 ? Math.min(100, Math.round((dl.downloaded_bytes / dl.total_bytes) * 100)) : 0);
       item.querySelector('.dl-queue-bar-fill').style.width = pct + '%';
 
-      var shardInfo = (dl.downloaded_shards || 0) + '/' + (dl.total_shards || 0) + ' shards';
-      if (dl.verified_shards > 0) shardInfo += ' (' + dl.verified_shards + ' verified)';
+      var shardInfo = I18n.t('dl.shards_progress', { downloaded: dl.downloaded_shards || 0, total: dl.total_shards || 0 });
+      if (dl.verified_shards > 0) shardInfo += ' ' + I18n.t('dl.shards_verified', { count: dl.verified_shards });
       item.querySelector('.dqs-left').textContent = shardInfo + ' \u00b7 ' + pct + '%';
 
       var speed = dl.speed_bytes_per_sec || 0;
       var statsRight = U.formatBytes(dl.downloaded_bytes || 0) + ' / ' + U.formatBytes(dl.total_bytes || 0);
       if (speed > 0) statsRight += ' \u00b7 ' + U.formatSpeed(speed);
-      if (dl.eta_secs) statsRight += ' \u00b7 ETA ' + U.formatEta(dl.eta_secs);
+      if (dl.eta_secs) statsRight += I18n.t('dashboard.eta', { eta: U.formatEta(dl.eta_secs) });
       item.querySelector('.dqs-right').textContent = statsRight;
 
       if (dl.log && dl.log.length > 0) {
@@ -172,7 +172,7 @@
 
         var leftEl = existing.querySelector('.dqs-left');
         if (leftEl) {
-          var shardInfo = (acq.downloaded_shards || 0) + '/' + (acq.total_shards || 0) + ' shards';
+          var shardInfo = I18n.t('dl.shards_progress', { downloaded: acq.downloaded_shards || 0, total: acq.total_shards || 0 });
           leftEl.textContent = shardInfo + ' \u00b7 ' + pct + '%';
         }
 
@@ -180,8 +180,8 @@
         if (rightEl) {
           var right = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes);
           if (speed > 0) right += ' \u00b7 ' + U.formatSpeed(speed);
-          if (acq.eta_secs) right += ' \u00b7 ETA ' + U.formatEta(acq.eta_secs);
-          else if (speed > 0 && totalBytes > dlBytes) right += ' \u00b7 ETA ' + U.formatEta((totalBytes - dlBytes) / speed);
+          if (acq.eta_secs) right += I18n.t('dashboard.eta', { eta: U.formatEta(acq.eta_secs) });
+          else if (speed > 0 && totalBytes > dlBytes) right += I18n.t('dashboard.eta', { eta: U.formatEta((totalBytes - dlBytes) / speed) });
           rightEl.textContent = right;
         }
 

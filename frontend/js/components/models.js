@@ -164,7 +164,7 @@
         });
         var data = await resp.json();
         if (!resp.ok) {
-          var errMsg = (data.error && data.error.message) || 'Download failed';
+          var errMsg = (data.error && data.error.message) || I18n.t('models.download_failed', { error: '' });
           App.ui.showBanner('error', errMsg);
           return;
         }

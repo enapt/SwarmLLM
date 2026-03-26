@@ -135,7 +135,7 @@
         var data = await resp.json();
         document.getElementById('settings-storage-used').textContent = U.formatBytes(data.disk_usage_bytes || 0);
         var maxMb = data.auto_manage_max_storage_mb || 0;
-        document.getElementById('settings-storage-max').textContent = maxMb > 0 ? U.formatMB(maxMb) : '50% of disk limit';
+        document.getElementById('settings-storage-max').textContent = maxMb > 0 ? U.formatMB(maxMb) : I18n.t('settings.disk_50pct');
 
         var networkVram = data.pool_vram_mb || 0;
         var localVram = data.local_vram_mb || 0;
@@ -158,17 +158,17 @@
             if (m.local_shards > 0) {
               var div = storageTmpl.content.cloneNode(true).firstElementChild;
               div.querySelector('.storage-model-name').textContent = m.name || m.id;
-              var metaText = m.local_shards + '/' + m.shard_count + ' shards \u00b7 ' + U.formatBytes(m.local_bytes);
+              var metaText = I18n.t('settings.storage_shards', { local: m.local_shards, total: m.shard_count }) + ' \u00b7 ' + U.formatBytes(m.local_bytes);
               var metaEl = div.querySelector('.storage-model-meta');
               metaEl.textContent = metaText;
               var vramNeeded = m.estimated_vram_mb || 0;
               if (vramNeeded > 0) {
                 var vramSpan = document.createElement('span');
-                vramSpan.textContent = ' ' + U.formatMB(vramNeeded) + ' VRAM';
+                vramSpan.textContent = ' ' + I18n.t('settings.vram_label', { size: U.formatMB(vramNeeded) });
                 var fits = networkVram > 0 && vramNeeded <= networkVram;
                 var tooLarge = networkVram > 0 && vramNeeded > networkVram;
                 if (fits) vramSpan.style.color = 'var(--green)';
-                else if (tooLarge) { vramSpan.style.color = 'var(--red)'; vramSpan.title = 'Exceeds network VRAM (' + U.formatMB(networkVram) + ')'; }
+                else if (tooLarge) { vramSpan.style.color = 'var(--red)'; vramSpan.title = I18n.t('settings.exceeds_vram', { size: U.formatMB(networkVram) }); }
                 else vramSpan.className = 'text-muted';
                 metaEl.appendChild(vramSpan);
               }

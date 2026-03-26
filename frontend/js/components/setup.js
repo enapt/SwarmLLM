@@ -92,11 +92,11 @@
           App.setup._joinedPeer = true;
           document.getElementById('setup-invite-code').value = '';
         } else {
-          status.textContent = result.error ? result.error.message : 'Failed to connect';
+          status.textContent = result.error ? result.error.message : I18n.t('setup.failed_connect');
           status.style.color = 'var(--red)';
         }
       } catch (e) {
-        status.textContent = 'Connection error: ' + (e.message || 'network error');
+        status.textContent = I18n.t('setup.connection_error', { error: e.message || 'network error' });
         status.style.color = 'var(--red)';
       }
     },
@@ -150,7 +150,7 @@
       var levels = ['minimal', 'moderate', 'maximum'];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
       document.getElementById('summary-contribution').textContent = U.capitalize(levels[val]);
-      var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : 'CPU only';
+      var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('setup.cpu_only');
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;
       document.getElementById('summary-auto-manage').textContent = autoManage ? I18n.t('setup.summary_enabled') : I18n.t('setup.summary_disabled');
