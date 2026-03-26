@@ -933,7 +933,7 @@ pub async fn chat_completions(
         // route immediately without cold-start waiting. Cloud models are never local.
         {
             let body = serde_json::to_value(&req).map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
+                ApiError(crate::error::SwarmError::Validation(format!(
                     "serialize request: {e}"
                 )))
             })?;
@@ -1041,7 +1041,7 @@ pub async fn chat_completions(
 
         // Cloud provider fallback: proxy to configured cloud provider if model matches
         let body = serde_json::to_value(&req).map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
+            ApiError(crate::error::SwarmError::Validation(format!(
                 "serialize request: {e}"
             )))
         })?;

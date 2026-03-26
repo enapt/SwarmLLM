@@ -274,11 +274,6 @@ pub struct SharedState {
         DashMap<crate::types::ModelId, Arc<crate::inference::local_embedder::LocalEmbedder>>,
     pub adapter_registry: Arc<crate::model::lora::AdapterRegistry>,
     pub model_process_pool: Arc<crate::inference::process_pool::ModelProcessPool>,
-    #[cfg(feature = "paged-attn")]
-    pub paged_kv_pool: Option<Arc<crate::inference::paged_kv::PagedKvPool>>,
-    #[cfg(feature = "paged-attn")]
-    pub paged_kv_store: Option<Arc<crate::inference::paged_kv::PagedKvStore>>,
-
     // Network & crypto
     pub session_manager: Arc<crate::crypto::SessionManager>,
     pub gossip_sealer: Arc<crate::crypto::GossipSealer>,
@@ -743,10 +738,6 @@ impl SharedState {
             is_ready: AtomicBool::new(false),
             config_watch_tx,
             detected_region: RwLock::new(None),
-            #[cfg(feature = "paged-attn")]
-            paged_kv_pool: None,
-            #[cfg(feature = "paged-attn")]
-            paged_kv_store: None,
             adapter_registry: Arc::new(crate::model::lora::AdapterRegistry::new(
                 &config.node.data_dir,
             )),

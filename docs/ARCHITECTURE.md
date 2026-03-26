@@ -33,8 +33,7 @@ Single Rust binary, three simultaneous functions:
 │  │  DashMap<Uuid, PipelineAssignment> — pipelines      │  │
 │  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
 │  │  RwLock<NodeStats>              — node statistics    │  │
-│  │  SharedExecutor                 — llama.cpp model    │  │
-│  │  DashMap<Blake3Hash, VoteTally> — model votes       │  │
+│  │  SharedExecutor                 — candle model exec  │  │
 │  │  DashMap<NodeId, NicknameRecord>— nickname registry │  │
 │  │  DashMap<PoolId, PoolState>     — pool registry     │  │
 │  │  DashMap<String, AcqProgress>   — download progress │  │
@@ -464,14 +463,6 @@ Empty stop sequences are rejected at the API validation layer (must be 1–256 c
 - Causal masks cached with LRU eviction (max 16 entries) to prevent GPU memory leak
 - Abandoned cache entries cleaned up after 10 minutes
 - Sessions persisted across node restarts via redb
-
-### Prefix Caching
-
-Cross-request prefix caching (`src/inference/prefix_cache.rs`) shares KV entries for common system prompts:
-- Trie-based prefix matching identifies shared token prefixes across requests
-- Matching entries skip redundant prefill computation (50-80% reduction for shared system prompts)
-- Configurable max entries via `prefix_cache_max_entries` (default 256)
-- LRU eviction when cache is full
 
 ### Chunked Prefill
 
@@ -1341,7 +1332,7 @@ Resolved items (removed from deferred):
 - **Starcoder2 / Glm4 layer loading**: COMPLETE — optional FFN gate (Starcoder2 2-layer MLP), Gelu activation, both added to supported_list()
 - **TP FFN norm position**: COMPLETE — 2-phase IPC protocol (AttnOnly → AllReduce → FfnOnly → AllReduce) ensures FFN norm applied to full post-attention tensor
 - **LoRA inference wiring**: COMPLETE — adapter_id in LayerForward/IpcForward, model_worker loads from adapter_config.json + safetensors, forward_with_lora() called
-- **Paged attention pool wiring**: COMPLETE — PagedKvPool initialized in model_worker after model load (paged-attn feature), n_kv_head()/head_dim() accessors on SplitModel
+- **Paged attention pool wiring**: REMOVED — PagedKvPool/PagedKvStore module and SharedState fields deleted (never wired to any production path). Feature gated behind `paged-attn` which was never enabled
 - **Speculative decoding in subprocess**: COMPLETE — IPC protocol: SpeculativeDraft/SpeculativeVerify messages + DraftResult/VerifyResult with logit distributions
 - **Ring AllReduce network wiring**: COMPLETE — TpRingChunk message type + SendRingChunk NetworkCommand + dispatcher handler. Star topology still default; ring activates at tp_size ≥ 4
 - **Torrent-style parallel P2P download**: COMPLETE — ParallelChunkTracker: 8 MB chunks, max 4 concurrent, round-robin peer assignment, fail/reassign support
@@ -1355,6 +1346,9 @@ Resolved items (removed from deferred):
 - **DiskPressure rebalance**: Enum variant removed (never emitted)
 - **SpmTokenizer::vocab**: Field already removed in prior cleanup
 - **Legacy single-GGUF**: `model_path` config still valid for Phase 1 llama-cpp executor
+- **prefix_cache module**: Removed — never wired to any production inference path
+- **quantization module**: Removed — utility functions only called by their own tests, no production consumers
+- **paged_kv module + SharedState fields**: Removed — `paged-attn` feature never enabled, fields always `None`
 
 ## Scalability (Phase 19)
 

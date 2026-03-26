@@ -75,7 +75,7 @@ pub fn verify_transaction(
     if let Ok(Some(_)) = db
         .get_json::<CreditTransaction>(crate::credit::ledger::TREE_TRANSACTIONS, &tx.id.to_string())
     {
-        return Err(SwarmError::Internal(format!(
+        return Err(SwarmError::CreditError(format!(
             "Duplicate transaction: {}",
             tx.id
         )));

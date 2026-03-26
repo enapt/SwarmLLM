@@ -1866,8 +1866,15 @@ pub async fn model_metadata(
         ))));
     }
 
-    let header_bytes =
-        std::fs::read(&header_path).map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
+    let hp = header_path.clone();
+    let header_bytes = tokio::task::spawn_blocking(move || std::fs::read(&hp))
+        .await
+        .map_err(|e| {
+            ApiError(crate::error::SwarmError::Internal(format!(
+                "spawn_blocking join: {e}"
+            )))
+        })?
+        .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
     let mut cursor = std::io::Cursor::new(&header_bytes);
     let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).map_err(|e| {
         ApiError(crate::error::SwarmError::Internal(format!(

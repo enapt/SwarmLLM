@@ -66,8 +66,8 @@ var I18n = (function() {
     document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
       el.title = t(el.getAttribute('data-i18n-title'));
     });
-    document.querySelectorAll('[data-i18n-aria]').forEach(function(el) {
-      el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria')));
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(function(el) {
+      el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria-label')));
     });
     document.documentElement.lang = currentLang;
     if (strings._dir) document.documentElement.dir = strings._dir;

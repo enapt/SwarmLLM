@@ -595,7 +595,7 @@ pub async fn messages(
                 thinking: &req.thinking,
             })
             .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
+                ApiError(crate::error::SwarmError::Validation(format!(
                     "Failed to serialize request: {e}"
                 )))
             })?;

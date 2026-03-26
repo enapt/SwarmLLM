@@ -4,6 +4,5 @@ pub mod distribution;
 pub mod huggingface;
 pub mod lora;
 pub mod manifest;
-pub mod quantization;
 pub mod registry;
 pub mod shard;

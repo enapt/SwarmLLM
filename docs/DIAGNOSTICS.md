@@ -385,19 +385,6 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: select_vision_node` | `local`, `first_segment`, `any_holder` |
 | WARN  | `DIAG: vision encode timeout` | `node`, `timeout_secs` |
 
-### Paged KV-Cache (paged_kv.rs)
-
-| Level | What | Fields |
-|-------|------|--------|
-| DEBUG | `DIAG: paged_kv allocate` | `blocks_needed`, `free_blocks` |
-| WARN  | `DIAG: paged_kv allocate OOM` | `blocks_needed`, `free_blocks` |
-
-### Prefix Cache (prefix_cache.rs)
-
-| Level | What | Fields |
-|-------|------|--------|
-| DEBUG | `DIAG: prefix_cache lookup` | `cache_entries`, `hit` (true/false) |
-
 ### Chat Template (chat_template.rs)
 
 | Level | What | Fields |
@@ -635,8 +622,6 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/inference/executor.rs` | Model load timing with backend type, generate_stream params |
 | `src/inference/speculative.rs` | Batch acceptance rate tracking |
 | `src/inference/vision.rs` | Image encoding timing |
-| `src/inference/paged_kv.rs` | Block allocation success/failure |
-| `src/inference/prefix_cache.rs` | Cache hit/miss with entry counts |
 | `src/inference/chat_template.rs` | Template matching and fallback detection |
 | `src/model/shard.rs` | Shard verification failures, load_all_local summary |
 | `src/model/registry.rs` | Manifest registration with schema version, DB load counts |
@@ -675,7 +660,7 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 - `mod.rs` re-exports (11): no logic, just `pub mod` declarations
 - Type definitions (3): `types.rs`, `pool/types.rs`, `error.rs` — struct/enum definitions only
 - Static assets (2): `ui/assets.rs`, `ui/mod.rs` — embedded file serving
-- Pure functions (2): `quantization.rs` (math), `network/transport.rs` (keypair conversion)
+- Pure functions (1): `network/transport.rs` (keypair conversion)
 - `lib.rs` (1): module declarations only
 - `inference/json_grammar.rs` (1): pure state machine with no I/O
 
@@ -684,7 +669,7 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 | Subsystem | Files | DIAG Lines | Key Log Points |
 |-----------|-------|------------|----------------|
 | Network (manager, behaviour, protocol, discovery, relay, peer_cache) | 6 | ~50 | Connection lifecycle, codec read/write, encryption, swarm events |
-| Inference (router, pipeline, scheduler, executor, split, sampling, speculative, vision, kv_cache, prefix_cache, chat_template) | 11 | ~40 | Request dispatch, pipeline assembly, forward pass, token sampling |
+| Inference (router, pipeline, scheduler, executor, split, sampling, speculative, vision, kv_cache, chat_template) | 10 | ~38 | Request dispatch, pipeline assembly, forward pass, token sampling |
 | API (server, openai, admin, websocket, middleware, providers, anthropic, identity, internal, metrics, pool) | 12 | ~55 | Server startup, SSE streaming, auth, Anthropic proxy, pool ops, metrics scrape |
 | Model (shard, manifest, huggingface, acquisition, auto_manage, registry, distribution, governance, lora) | 9 | ~25 | Shard verification, HF search/download, model loading, pruning |
 | Credit (ledger, transaction, priority, anti_gaming, trust, escrow) | 6 | ~15 | Transaction verification, tier calculation, trust updates, escrow |

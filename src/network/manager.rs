@@ -1521,6 +1521,10 @@ impl NetworkManager {
                         peers.retain(|(n, _)| n != nid);
                         !peers.is_empty()
                     });
+
+                // NET-I4: Clean up stale peer_credit_balances entry.
+                // Prevents unbounded growth and stale entries skewing priority tier percentiles.
+                self.shared_state.credits.peer_credit_balances.remove(nid);
             }
 
             // NET-I2: Remove peer from registry, but skip if in active pipelines.

@@ -614,7 +614,7 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
     let now = chrono::Utc::now();
     let age_secs = (now - gossip.timestamp).num_seconds().abs();
     if age_secs > BALANCE_REPORT_MAX_AGE_SECS {
-        return Err(SwarmError::Internal(format!(
+        return Err(SwarmError::CreditError(format!(
             "Stale balance report from {}: {}s old (max {}s)",
             gossip.node_id, age_secs, BALANCE_REPORT_MAX_AGE_SECS,
         )));
