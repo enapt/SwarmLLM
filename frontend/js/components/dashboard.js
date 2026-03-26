@@ -155,7 +155,7 @@
           if (gpuBadge) {
             if (hw.gpu_inference) {
               var backendLabel = hw.inference_backend || 'GPU';
-              gpuBadge.textContent = backendLabel + ' mode';
+              gpuBadge.textContent = I18n.t('hw.gpu_mode_label', { backend: backendLabel });
               gpuBadge.className = 'node-mode-badge node-mode-gpu';
               gpuBadge.title = I18n.t('hw.gpu_mode_tip');
             } else {
@@ -181,8 +181,8 @@
               }
               var displayUsed = activeVramMb > 0 ? activeVramMb : vramUsed;
               if (activeVramMb > 0 && vramUsed > activeVramMb + 200) {
-                vramEl.textContent = U.formatMB(activeVramMb) + ' active / ' + U.formatMB(vramTotal);
-                vramEl.title = U.formatMB(vramUsed) + ' reserved by CUDA (freed models are cached — normal GPU behavior)';
+                vramEl.textContent = I18n.t('hw.vram_active', { active: U.formatMB(activeVramMb), total: U.formatMB(vramTotal) });
+                vramEl.title = I18n.t('hw.vram_reserved_tip', { used: U.formatMB(vramUsed) });
               } else {
                 vramEl.textContent = U.formatMB(displayUsed) + ' / ' + U.formatMB(vramTotal);
                 vramEl.title = '';
@@ -210,7 +210,7 @@
           document.getElementById('node-vram').textContent = '\u2014';
           document.getElementById('vram-bar').style.width = '0%';
         }
-        document.getElementById('node-cpu').textContent = hw.cpu_name ? hw.cpu_name + ' (' + hw.cpu_cores + ' cores)' : 'Unknown';
+        document.getElementById('node-cpu').textContent = hw.cpu_name ? hw.cpu_name + ' ' + I18n.t('hw.cores', { cores: hw.cpu_cores }) : I18n.t('hw.unknown_cpu');
 
         if (hw.total_ram_mb) {
           document.getElementById('ram-total').textContent = '/ ' + U.formatMB(hw.total_ram_mb);
@@ -251,7 +251,7 @@
         var lanBadge = document.getElementById('lan-peer-badge');
         if (lanBadge) {
           if (data.lan_peers && data.lan_peers > 0) {
-            lanBadge.textContent = data.lan_peers + ' LAN';
+            lanBadge.textContent = data.lan_peers + ' ' + I18n.t('dashboard.lan_badge');
             lanBadge.style.display = 'inline-block';
           } else {
             lanBadge.style.display = 'none';
@@ -401,12 +401,12 @@
           '<img src="/static/icons/swarm.svg" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo">' +
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.swarm_models')) + '</span>' +
           '<span class="models-section-count">' + swarmMeta + '</span>' +
-          '<select class="swarm-model-sort" id="swarm-model-sort" title="Sort models">' +
-            '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>A\u2013Z</option>' +
-            '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>Z\u2013A</option>' +
-            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>Status</option>' +
-            '<option value="size"' + (swarmSort === 'size' ? ' selected' : '') + '>Size \u2193</option>' +
-            '<option value="shards"' + (swarmSort === 'shards' ? ' selected' : '') + '>Local shards \u2193</option>' +
+          '<select class="swarm-model-sort" id="swarm-model-sort" title="' + U.escapeHtml(I18n.t('dashboard.sort_title')) + '">' +
+            '<option value="az"' + (swarmSort === 'az' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
+            '<option value="za"' + (swarmSort === 'za' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_za')) + '</option>' +
+            '<option value="status"' + (swarmSort === 'status' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_status')) + '</option>' +
+            '<option value="size"' + (swarmSort === 'size' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_size')) + '</option>' +
+            '<option value="shards"' + (swarmSort === 'shards' ? ' selected' : '') + '>' + U.escapeHtml(I18n.t('dashboard.sort_local_shards')) + '</option>' +
           '</select>' +
           '</summary>';
         swarmBody = document.createElement('div');
@@ -463,11 +463,11 @@
         // Trust level badge
         var trustBadge = '';
         if (m.trust_level === 'network_popular') {
-          trustBadge = '<span class="badge-trust badge-trust-popular" title="Widely hosted across the network">Popular</span>';
+          trustBadge = '<span class="badge-trust badge-trust-popular" title="' + U.escapeHtml(I18n.t('dashboard.trust_popular')) + '">Popular</span>';
         } else if (m.trust_level === 'demand_verified') {
-          trustBadge = '<span class="badge-trust badge-trust-verified" title="Has received real inference requests">Verified</span>';
+          trustBadge = '<span class="badge-trust badge-trust-verified" title="' + U.escapeHtml(I18n.t('dashboard.trust_verified')) + '">Verified</span>';
         } else if (m.trust_level === 'pinned') {
-          trustBadge = '<span class="badge-trust badge-trust-pinned" title="Manually approved by you">Pinned</span>';
+          trustBadge = '<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">Pinned</span>';
         }
 
         // Encrypted pipeline badge
@@ -476,25 +476,25 @@
           var encReady = m.has_first_shard && m.has_last_shard;
           var encActive = m.encrypted_pipeline;
           var encClass = encActive ? 'badge-encrypted active' : (encReady ? 'badge-encrypted ready' : 'badge-encrypted faded');
-          var encTitle = encActive ? 'Encrypted pipeline active \u2014 click to disable' :
-            (encReady ? 'Encrypted pipeline available \u2014 click to enable' :
-              'Encrypted pipeline unavailable \u2014 need first + last shard');
+          var encTitle = encActive ? I18n.t('dashboard.enc_active') :
+            (encReady ? I18n.t('dashboard.enc_available') :
+              I18n.t('dashboard.enc_unavailable'));
           var missingParts = [];
-          if (!m.has_first_shard) missingParts.push('first (shard 0)');
-          if (!m.has_last_shard) missingParts.push('last (shard ' + (m.shard_count - 1) + ')');
-          if (missingParts.length > 0) encTitle += '. Missing: ' + missingParts.join(', ');
+          if (!m.has_first_shard) missingParts.push(I18n.t('dashboard.enc_missing_first'));
+          if (!m.has_last_shard) missingParts.push(I18n.t('dashboard.enc_missing_last', { n: m.shard_count - 1 }));
+          if (missingParts.length > 0) encTitle += '. ' + I18n.t('dashboard.enc_missing', { parts: missingParts.join(', ') });
           encBadge = '<span class="' + encClass + '" data-enc-toggle="' + U.escapeHtml(m.id) + '" data-enc-ready="' + (encReady ? '1' : '0') + '" title="' + U.escapeHtml(encTitle) + '">&#128274;</span>';
         }
 
         // Source label
         var sourceLabel = '';
         if (m.source === 'network' && hostedShards === 0) {
-          sourceLabel = '<span class="badge badge-remote" title="Available via network peers">Remote</span>';
+          sourceLabel = '<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">Remote</span>';
         }
 
         // Gear + info buttons
-        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="Auto-manage settings">&#9881;</button>';
-        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="GGUF Metadata">&#9432;</button>' : '';
+        var gearHtml = '<button class="model-gear-btn" data-am-gear="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.gear_title')) + '">&#9881;</button>';
+        var metaBtnHtml = m.has_header ? '<button class="model-meta-btn" data-meta-toggle="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.meta_title')) + '">&#9432;</button>' : '';
 
         // Shard grid
         var shardHtml = '';
@@ -548,7 +548,7 @@
               }
             }
 
-            var title = 'Part ' + (s.index + 1) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
+            var title = I18n.t('dashboard.shard_part', { n: s.index + 1 }) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
             if (cls === 'local vram') title += ' \u2014 ' + I18n.t(S._gpuInference ? 'shard.tooltip_active_vram' : 'shard.tooltip_active_ram');
             else if (cls === 'local') title += ' \u2014 ' + I18n.t('shard.tooltip_on_disk');
             else if (cls === 'peer') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_available', { count: s.holders });
@@ -596,7 +596,7 @@
 
           var legendParts = [];
           if (hasLocalNotVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-local"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_pc')) + '</span>');
-          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.status_active')) + ' (in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')</span>');
+          if (hasVram) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-vram"></span>' + U.escapeHtml(I18n.t('dashboard.active_in', { mem: S._gpuInference ? 'VRAM' : 'RAM' })) + '</span>');
           if (hasPeer) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-peer"></span>' + U.escapeHtml(I18n.t('dashboard.shard_on_peers')) + '</span>');
           if (hasDl) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-dl"></span>' + U.escapeHtml(I18n.t('dashboard.shard_downloading')) + '</span>');
           if (hasMissing) legendParts.push('<span class="sleg"><span class="sleg-swatch sleg-missing"></span>' + U.escapeHtml(I18n.t('dashboard.shard_missing')) + '</span>');
@@ -634,26 +634,22 @@
           shards.forEach(function(s) { if ((s.holders || 0) > maxH) maxH = s.holders || 0; });
 
           if (healthClass === 'health-full') {
-            barTooltipLines.push('Well replicated \u2014 every part is distributed across multiple nodes.');
-            barTooltipLines.push('The network can tolerate nodes going offline without disruption.');
+            barTooltipLines.push(I18n.t('dashboard.health_well_replicated'));
           } else if (healthClass === 'health-good') {
-            barTooltipLines.push('Available but lightly replicated.');
-            barTooltipLines.push('More nodes hosting this model improves speed and resilience.');
+            barTooltipLines.push(I18n.t('dashboard.health_lightly_replicated'));
           } else if (healthClass === 'health-partial') {
-            barTooltipLines.push('Some parts have only a single copy on the network.');
-            barTooltipLines.push('If that node goes offline, inference will fail.');
+            barTooltipLines.push(I18n.t('dashboard.health_single_copy'));
           } else {
-            barTooltipLines.push('Parts of this model are missing from the network.');
-            barTooltipLines.push('Inference cannot run until the missing parts are provided.');
+            barTooltipLines.push(I18n.t('dashboard.health_parts_missing'));
           }
 
           barTooltipLines.push('');
-          if (wellReplicated > 0) barTooltipLines.push('\u2705 ' + wellReplicated + '/' + totalShards + ' parts on ' + (maxH >= 3 ? maxH + '+' : '3+') + ' nodes');
-          if (adequate > 0) barTooltipLines.push('\u{1F7E1} ' + adequate + '/' + totalShards + ' parts on 2 nodes');
-          if (fragile > 0) barTooltipLines.push('\u{1F7E0} ' + fragile + '/' + totalShards + ' parts on 1 node only');
-          if (networkMissing > 0) barTooltipLines.push('\u{1F534} ' + networkMissing + '/' + totalShards + ' parts unavailable');
+          if (wellReplicated > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_3plus', { count: wellReplicated, total: totalShards, nodes: maxH >= 3 ? maxH + '+' : '3+' }));
+          if (adequate > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_2', { count: adequate, total: totalShards }));
+          if (fragile > 0) barTooltipLines.push(I18n.t('dashboard.health_nodes_1', { count: fragile, total: totalShards }));
+          if (networkMissing > 0) barTooltipLines.push(I18n.t('dashboard.health_unavailable', { count: networkMissing, total: totalShards }));
           barTooltipLines.push('');
-          barTooltipLines.push(totalShards + ' parts \u00b7 ' + avgHolders.toFixed(1) + '\u00d7 avg replication');
+          barTooltipLines.push(I18n.t('dashboard.health_summary', { parts: totalShards, avg: avgHolders.toFixed(1) }));
 
           var barTooltip = barTooltipLines.join('\n');
 
@@ -667,9 +663,9 @@
             else if (holders === 2) color = 'rgba(134,239,172,0.7)';
             else if (holders === 1) color = 'var(--orange)';
             else color = 'var(--red, #ef4444)';
-            barSegments += '<div class="health-seg" style="flex:1;background:' + color + '" title="Part ' + (i + 1) + ': ' + holders + ' node' + (holders !== 1 ? 's' : '') + '"></div>';
+            barSegments += '<div class="health-seg" style="flex:1;background:' + color + '" title="' + U.escapeHtml(I18n.t('dashboard.health_seg_title', { n: i + 1, holders: holders })) + '"></div>';
           });
-          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Swarm health: ' + healthLabel + '" title="' + U.escapeHtml(barTooltip) + '">' + barSegments + '</div>';
+          var barHtml = '<div class="shard-health-bar" role="progressbar" aria-valuenow="' + healthPct + '" aria-valuemin="0" aria-valuemax="100" aria-label="' + U.escapeHtml(I18n.t('dashboard.health_bar_label', { label: healthLabel })) + '" title="' + U.escapeHtml(barTooltip) + '">' + barSegments + '</div>';
 
           // Summary: scale-aware detail
           var healthDetail = '';
@@ -725,19 +721,19 @@
           var triggerText = dlTrigger === 'auto_manage' ? I18n.t('dashboard.auto_manage') : (dlTrigger === 'user' ? I18n.t('dashboard.manual') : '');
           var sourceText = dlSource === 'huggingface' ? I18n.t('dashboard.from_hf') : (dlSource === 'peers' ? I18n.t('dashboard.from_peers') : '');
           if (isCachingLocally) {
-            shardLabel = (triggerText || I18n.t('dashboard.auto_manage')) + ': saving to this device (' + localNow + '/' + shardCount + ')';
+            shardLabel = I18n.t('dashboard.caching_label', { trigger: triggerText || I18n.t('dashboard.auto_manage'), local: localNow, total: shardCount });
           } else {
             // Show which specific shard is downloading (from shard_details)
             var dlShardIdx = '';
             if (ap.shard_details) {
               var activeShard = ap.shard_details.find(function(sd) { return sd.state === 'downloading'; });
-              if (activeShard) dlShardIdx = ' part ' + (activeShard.index + 1);
+              if (activeShard) dlShardIdx = I18n.t('dashboard.downloading_part', { n: activeShard.index + 1 });
             }
-            shardLabel = (triggerText ? triggerText + ': ' : '') + 'Downloading' + dlShardIdx + (sourceText ? ' ' + sourceText : '') + ' (' + localNow + '/' + shardCount + ' local)';
+            shardLabel = (triggerText ? triggerText + ': ' : '') + I18n.t('dashboard.downloading_label') + dlShardIdx + (sourceText ? ' ' + sourceText : '') + I18n.t('dashboard.downloading_local', { local: localNow, total: shardCount });
           }
           var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
           if (speed > 0) rightText += ' &middot; ' + U.formatSpeed(speed);
-          if (etaStr) rightText += ' &middot; ETA ' + etaStr;
+          if (etaStr) rightText += I18n.t('dashboard.eta', { eta: etaStr });
           progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '" data-last-pct="' + pct + '">' +
             '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
             '<span class="text-muted">' + shardLabel + '</span>' +
@@ -760,7 +756,7 @@
               var bytes = s.download.downloaded_bytes || 0;
               var total = s.download.total_bytes || s.size_bytes || 0;
               perShardDlHtml += '<div class="per-shard-dl-row">' +
-                '<span class="per-shard-dl-label">Part ' + (s.index + 1) + '</span>' +
+                '<span class="per-shard-dl-label">' + U.escapeHtml(I18n.t('dashboard.shard_part', { n: s.index + 1 })) + '</span>' +
                 '<div class="per-shard-dl-bar"><div class="per-shard-dl-fill" style="width:' + pct2 + '%"></div></div>' +
                 '<span class="per-shard-dl-pct">' + U.formatBytes(bytes) + '/' + U.formatBytes(total) + ' (' + pct2 + '%)</span>' +
                 '</div>';
@@ -772,16 +768,16 @@
         // Footer meta info
         var footerMeta = [];
         footerMeta.push(U.formatBytes(m.total_size_bytes || 0));
-        if (shardCount > 0) footerMeta.push(shardCount + (shardCount === 1 ? ' shard' : ' shards'));
+        if (shardCount > 0) footerMeta.push(I18n.t(shardCount === 1 ? 'dashboard.shard_count_one' : 'dashboard.shard_count_other', { count: shardCount }));
         if (m.estimated_vram_mb) {
           if (S._gpuInference) {
-            footerMeta.push('~' + U.formatMB(m.estimated_vram_mb) + ' VRAM');
+            footerMeta.push(I18n.t('dashboard.vram_estimate', { vram: U.formatMB(m.estimated_vram_mb) }));
           } else {
             footerMeta.push('<span title="' + U.escapeHtml(I18n.t('hw.low_ram_tip')) + '" style="cursor:help">' + U.escapeHtml(I18n.t('hw.low_ram')) + '</span>');
           }
         }
-        if (m.peers_hosting > 0) footerMeta.push(m.peers_hosting + ' peer' + (m.peers_hosting !== 1 ? 's' : ''));
-        else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">Local only</span>');
+        if (m.peers_hosting > 0) footerMeta.push(I18n.t('dashboard.peer_count', { count: m.peers_hosting }));
+        else if (hostedShards > 0) footerMeta.push('<span style="color:var(--orange)">' + U.escapeHtml(I18n.t('dashboard.local_only')) + '</span>');
 
         // Missing files warning
         var fileIndicators = '';
@@ -792,18 +788,18 @@
             var missingFiles = [];
             if (!hasManifest) missingFiles.push('manifest');
             if (!hasHeader) missingFiles.push('header');
-            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem" title="Missing: ' + missingFiles.join(', ') + '">&#9888; Missing ' + missingFiles.join(' + ') + '</span>';
+            fileIndicators = '<span style="color:var(--orange);font-size:0.7rem" title="' + U.escapeHtml(I18n.t('dashboard.missing_files', { files: missingFiles.join(', ') })) + '">' + I18n.t('dashboard.missing_warning', { files: missingFiles.join(' + ') }) + '</span>';
           }
         }
 
         // Action buttons
         var actionHtml = '';
         if (m.status === 'loaded') {
-          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="Unload all parts from memory — frees RAM/VRAM but keeps files on disk">' + U.escapeHtml(I18n.t('dashboard.btn_unload_all')) + '</button>';
+          actionHtml = '<button class="btn btn-sm btn-outline" data-unload-model="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.unload_tip')) + '">' + U.escapeHtml(I18n.t('dashboard.btn_unload_all')) + '</button>';
         } else if (isReady) {
           actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
         } else if (isDownloading) {
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="Cancel download">&times; ' + U.escapeHtml(I18n.t('dashboard.btn_cancel')) + '</button>';
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.btn_cancel')) + '</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
           actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_download')) + '</button>';
         }
@@ -915,7 +911,7 @@
         function renderRowsInto(container, models) {
           container.innerHTML = models.length > 0
             ? models.map(renderCloudRow).join('')
-            : '<div class="cloud-model-empty">No models match</div>';
+            : '<div class="cloud-model-empty">' + U.escapeHtml(I18n.t('dashboard.cloud_no_match')) + '</div>';
         }
 
         var providerCount = Object.keys(byProvider).length;
@@ -950,22 +946,22 @@
             '<div class="cloud-card-header">' +
               '<span class="cloud-provider-name">' + (cardIconHtml ? cardIconHtml + ' ' : '') + U.escapeHtml(pLabel) + '</span>' +
               '<span>' +
-                '<span class="badge badge-cloud">' + pModels.length + ' model' + (pModels.length !== 1 ? 's' : '') + '</span>' +
-                '<span class="cloud-status-ok">\u25cf Connected</span>' +
+                '<span class="badge badge-cloud">' + I18n.t('dashboard.cloud_models_count', { count: pModels.length }) + '</span>' +
+                '<span class="cloud-status-ok">\u25cf ' + U.escapeHtml(I18n.t('dashboard.cloud_connected')) + '</span>' +
               '</span>' +
             '</div>' +
             '<div class="cloud-card-controls">' +
-              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="Search models\u2026" autocomplete="off">' +
+              '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="' + U.escapeHtml(I18n.t('dashboard.cloud_search')) + '" autocomplete="off">' +
               '<select class="cloud-model-sort" id="' + sortId + '">' +
-                '<option value="popular">Newest</option>' +
-                '<option value="az">A\u2013Z</option>' +
-                '<option value="ctx-desc">Context \u2193</option>' +
-                '<option value="ctx-asc">Context \u2191</option>' +
-                '<option value="avail">Ping \u2193</option>' +
+                '<option value="popular">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_newest')) + '</option>' +
+                '<option value="az">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_az')) + '</option>' +
+                '<option value="ctx-desc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_desc')) + '</option>' +
+                '<option value="ctx-asc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_asc')) + '</option>' +
+                '<option value="avail">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ping')) + '</option>' +
               '</select>' +
             '</div>' +
             '<div class="cloud-model-list" id="' + listId + '"></div>' +
-            '<div class="cloud-card-note">Requests routed to ' + U.escapeHtml(pLabel) + ' API \u2014 not shared on the swarm network</div>';
+            '<div class="cloud-card-note">' + U.escapeHtml(I18n.t('dashboard.cloud_note', { provider: pLabel })) + '</div>';
 
           cloudBody.appendChild(card);
 
@@ -1067,13 +1063,13 @@
                 cell.style.removeProperty('--dl-pct');
               }
 
-              var title = 'Shard ' + sd.index;
-              if (newClass === 'local') title += ' \u2014 Verified, stored locally';
-              else if (newClass === 'verifying') title += ' \u2014 Downloaded, verifying (BLAKE3)...';
-              else if (newClass === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
-              else if (newClass === 'queued') title += ' \u2014 Queued for download';
-              else if (sd.state === 'failed') title += ' \u2014 Failed';
-              else title += ' \u2014 Not available';
+              var title = I18n.t('dashboard.shard_part', { n: sd.index + 1 });
+              if (newClass === 'local') title += ' \u2014 ' + I18n.t('dashboard.shard_verified');
+              else if (newClass === 'verifying') title += ' \u2014 ' + I18n.t('dashboard.shard_verifying');
+              else if (newClass === 'downloading') title += ' \u2014 ' + I18n.t('dashboard.shard_dl_pct', { pct: dlPct });
+              else if (newClass === 'queued') title += ' \u2014 ' + I18n.t('dashboard.shard_queued');
+              else if (sd.state === 'failed') title += ' \u2014 ' + I18n.t('dashboard.shard_failed');
+              else title += ' \u2014 ' + I18n.t('dashboard.shard_unavailable');
               cell.setAttribute('title', title);
               cell.setAttribute('aria-label', title);
             }
@@ -1088,7 +1084,7 @@
             if (pct >= lastPct) {
               progressEl.setAttribute('data-last-pct', '' + pct);
               var speed = acq.speed_bytes_per_sec || 0;
-              var shardLabel = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || shardDetails.length)) : 'Downloading';
+              var shardLabel = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || shardDetails.length }) : I18n.t('dashboard.downloading_label');
               var etaStr = '';
               if (speed > 0 && acq.total_bytes > dlBytes) {
                 etaStr = U.formatEta((acq.total_bytes - dlBytes) / speed);
@@ -1097,7 +1093,7 @@
               if (textEl) {
                 var txt = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(acq.total_bytes) + ' (' + pct + '%)';
                 if (speed > 0) txt += ' \u00b7 ' + U.formatSpeed(speed);
-                if (etaStr) txt += ' \u00b7 ETA ' + etaStr;
+                if (etaStr) txt += I18n.t('dashboard.eta', { eta: etaStr });
                 textEl.textContent = txt;
               }
               var labelEl = progressEl.querySelector('.text-muted');
@@ -1122,7 +1118,7 @@
               var dlBytes2 = Math.min(acq.downloaded_bytes, acq.total_bytes);
               var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
               var speed2 = acq.speed_bytes_per_sec || 0;
-              var shardLabel2 = acq.downloaded_shards !== undefined ? ('Shard ' + acq.downloaded_shards + '/' + (acq.total_shards || '?')) : 'Downloading';
+              var shardLabel2 = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || '?' }) : I18n.t('dashboard.downloading_label');
               var progDiv = document.createElement('div');
               progDiv.className = 'dl-progress';
               progDiv.setAttribute('data-model-progress', safeId);
@@ -1145,12 +1141,12 @@
           var summaryEl = document.querySelector('[data-model-summary="' + safeId + '"]');
           if (summaryEl && shardDetails.length > 0) {
             var summParts = [];
-            if (localCount > 0) summParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + localCount + ' local</span>');
-            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '</span>');
-            if (dlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + dlCount + ' downloading</span>');
-            if (peerDlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + peerDlCount + ' peer DL</span>');
-            if (queuedCount > 0) summParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + queuedCount + ' queued</span>');
-            if (missingCount > 0) summParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + missingCount + ' missing</span>');
+            if (localCount > 0) summParts.push('<span class="shard-sum-item shard-sum-local"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_local', { count: localCount }) + '</span>');
+            if (peerCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_peers', { count: peerCount }) + '</span>');
+            if (dlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_downloading', { count: dlCount }) + '</span>');
+            if (peerDlCount > 0) summParts.push('<span class="shard-sum-item shard-sum-peer-dl"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_peer_dl', { count: peerDlCount }) + '</span>');
+            if (queuedCount > 0) summParts.push('<span class="shard-sum-item shard-sum-queued"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_queued', { count: queuedCount }) + '</span>');
+            if (missingCount > 0) summParts.push('<span class="shard-sum-item shard-sum-missing"><span class="shard-sum-dot"></span>' + I18n.t('dashboard.summary_missing', { count: missingCount }) + '</span>');
             summaryEl.innerHTML = summParts.join('');
           }
         });
@@ -1186,12 +1182,12 @@
                 setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
               }
               var vramCls = s.in_vram ? 'local vram' : 'local';
-              var vramLabel = s.in_vram ? 'Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')' : 'On disk (not loaded)';
+              var vramLabel = s.in_vram ? I18n.t('dashboard.shard_active_vram', { mem: S._gpuInference ? 'VRAM' : 'RAM' }) : I18n.t('dashboard.shard_on_disk_label');
               cell.className = 'shard-cell ' + vramCls + preserve;
               // Preserve inner elements (holder badge, endpoint tag)
               Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
               cell.insertBefore(document.createTextNode('' + (s.index + 1)), cell.firstChild);
-              cell.setAttribute('title', 'Part ' + (s.index + 1) + ' \u2014 ' + vramLabel);
+              cell.setAttribute('title', I18n.t('dashboard.shard_part', { n: s.index + 1 }) + ' \u2014 ' + vramLabel);
               // Only log the first time a shard becomes local (not on vram toggle)
               // Shard state logging handled by backend activity_event
             } else if (s.holders > 0 && current.indexOf('peer') < 0) {
@@ -1207,7 +1203,7 @@
                 hBadge.textContent = s.holders;
                 cell.appendChild(hBadge);
               }
-              cell.setAttribute('title', 'Shard ' + s.index + ' \u2014 Available from ' + s.holders + ' peer(s)');
+              cell.setAttribute('title', I18n.t('dashboard.shard_peer_available', { idx: s.index, holders: s.holders }));
               // Peer discovery logging handled by backend activity_event
             } else if (s.holders > 0) {
               // Update holder count on existing peer cells
@@ -1234,7 +1230,7 @@
           if (!wasPeerDl) {
             cell.classList.add('shard-transitioning');
             setTimeout(function() { cell.classList.remove('shard-transitioning'); }, 1500);
-            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', 'Peer ' + pd.node_id.substring(0, 8) + ' downloading shard ' + (pd.shard_index + 1), true);
+            App.dashboard._logModelEvent(pd.model_id, '\u{1F4E1}', I18n.t('dashboard.peer_downloading_log', { peer: pd.node_id.substring(0, 8), shard: pd.shard_index + 1 }), true);
           }
           var pdPreserve = '';
           if (cell.classList.contains('locked')) pdPreserve += ' locked';
@@ -1244,7 +1240,7 @@
           cell.style.setProperty('--dl-pct', pdPct + '%');
           Array.from(cell.childNodes).forEach(function(n) { if (n.nodeType === 3) n.textContent = ''; });
           cell.insertBefore(document.createTextNode(pdPct + '%'), cell.firstChild);
-          cell.setAttribute('title', 'Shard ' + pd.shard_index + ' \u2014 Peer ' + pd.node_id.substring(0, 8) + ' downloading (' + pdPct + '%)');
+          cell.setAttribute('title', I18n.t('dashboard.peer_downloading_title', { idx: pd.shard_index, peer: pd.node_id.substring(0, 8), pct: pdPct }));
         });
       }
     },
@@ -1261,7 +1257,7 @@
       var lanBadge = node.querySelector('.peer-lan-badge');
       if (p.is_lan_peer) {
         lanBadge.removeAttribute('hidden');
-        lanBadge.textContent = 'LAN';
+        lanBadge.textContent = I18n.t('dashboard.lan_badge');
       }
 
       var label = node.querySelector('.peer-label');

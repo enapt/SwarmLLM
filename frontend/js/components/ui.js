@@ -203,12 +203,12 @@
       var active = statsData ? (statsData.active_requests || 0) : 0;
 
       var parts = [];
-      if (peers > 0) parts.push('<span class="mode-stat"><strong>' + peers + '</strong> peer' + (peers !== 1 ? 's' : '') + '</span>');
-      if (hostedShards > 0) parts.push('<span class="mode-stat"><strong>' + hostedShards + '</strong> shard' + (hostedShards !== 1 ? 's' : '') + '</span>');
-      if (cloudCount > 0) parts.push('<span class="mode-stat"><strong>' + cloudCount + '</strong> provider' + (cloudCount !== 1 ? 's' : '') + '</span>');
-      if (active > 0) parts.push('<span class="mode-stat" style="color:var(--orange)"><strong>' + active + '</strong> active</span>');
-      if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> req</span>');
-      if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> served</span>');
+      if (peers > 0) parts.push('<span class="mode-stat"><strong>' + peers + '</strong> ' + I18n.t(peers !== 1 ? 'mode.stat_peers_other' : 'mode.stat_peers_one', { count: peers }).replace(/^\d+\s*/, '') + '</span>');
+      if (hostedShards > 0) parts.push('<span class="mode-stat"><strong>' + hostedShards + '</strong> ' + I18n.t(hostedShards !== 1 ? 'mode.stat_shards_other' : 'mode.stat_shards_one', { count: hostedShards }).replace(/^\d+\s*/, '') + '</span>');
+      if (cloudCount > 0) parts.push('<span class="mode-stat"><strong>' + cloudCount + '</strong> ' + I18n.t(cloudCount !== 1 ? 'mode.stat_providers_other' : 'mode.stat_providers_one', { count: cloudCount }).replace(/^\d+\s*/, '') + '</span>');
+      if (active > 0) parts.push('<span class="mode-stat" style="color:var(--orange)"><strong>' + active + '</strong> ' + I18n.t('mode.stat_active', { count: active }).replace(/^\d+\s*/, '') + '</span>');
+      if (requests > 0) parts.push('<span class="mode-stat"><strong>' + requests + '</strong> ' + I18n.t('mode.stat_requests', { count: requests }).replace(/^\d+\s*/, '') + '</span>');
+      if (served > 0) parts.push('<span class="mode-stat"><strong>' + served + '</strong> ' + I18n.t('mode.stat_served', { count: served }).replace(/^\d+\s*/, '') + '</span>');
 
       var detailHtml;
       if (parts.length > 0) {

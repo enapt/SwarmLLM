@@ -83,32 +83,32 @@
 
           // Stats meta (downloads, likes, VRAM fit)
           var statsHtml = '';
-          if (repo.downloads) statsHtml += '<span>' + repo.downloads.toLocaleString() + ' downloads</span>';
-          if (repo.likes) statsHtml += '<span>' + repo.likes.toLocaleString() + ' likes</span>';
+          if (repo.downloads) statsHtml += '<span>' + I18n.t('models.hf_downloads', { count: repo.downloads.toLocaleString() }) + '</span>';
+          if (repo.likes) statsHtml += '<span>' + I18n.t('models.hf_likes', { count: repo.likes.toLocaleString() }) + '</span>';
           var shardSizeStr = repo.est_shard_size ? U.formatBytes(repo.est_shard_size) : '';
           var boomerangSizeStr = repo.est_boomerang_size ? U.formatBytes(repo.est_boomerang_size) : '';
           if (repo.fits_boomerang) {
-            statsHtml += '<span><span style="color:var(--green)" title="First+last shard fit VRAM (~' + boomerangSizeStr + ')">&#9989; Run locally</span></span>';
+            statsHtml += '<span><span style="color:var(--green)" title="' + U.escapeHtml(I18n.t('models.hf_fit_boomerang', { size: boomerangSizeStr })) + '">&#9989; ' + U.escapeHtml(I18n.t('models.tip_run_local')) + '</span></span>';
           } else if (repo.fits_shard) {
-            statsHtml += '<span><span style="color:var(--cyan)" title="Individual shards fit VRAM (~' + shardSizeStr + '/shard)">&#128279; Can host shards</span></span>';
+            statsHtml += '<span><span style="color:var(--cyan)" title="' + U.escapeHtml(I18n.t('models.hf_fit_shard', { size: shardSizeStr })) + '">&#128279; ' + U.escapeHtml(I18n.t('models.tip_host_shards')) + '</span></span>';
           } else if (repo.fits_vram === false && variants.length > 0) {
-            statsHtml += '<span><span style="color:var(--orange)" title="Even individual shards may exceed your available VRAM">&#9888; Exceeds VRAM</span></span>';
+            statsHtml += '<span><span style="color:var(--orange)" title="' + U.escapeHtml(I18n.t('models.hf_exceeds_vram')) + '">&#9888; ' + U.escapeHtml(I18n.t('models.tip_exceeds_vram')) + '</span></span>';
           }
           // Composite score badge
           if (repo.composite_score != null) {
             var scoreColor = repo.composite_score >= 60 ? 'var(--green)' : repo.composite_score >= 30 ? 'var(--yellow)' : 'var(--text-muted)';
-            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="Fit score: quality=' + ((repo.score_breakdown||{}).quality||0) + '% fit=' + ((repo.score_breakdown||{}).fit||0) + '% demand=' + ((repo.score_breakdown||{}).demand||0) + '% size=' + ((repo.score_breakdown||{}).size||0) + '%">' + repo.composite_score + ' pts</span>';
+            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="' + U.escapeHtml(I18n.t('models.hf_score_breakdown', { quality: (repo.score_breakdown||{}).quality||0, fit: (repo.score_breakdown||{}).fit||0, demand: (repo.score_breakdown||{}).demand||0, size: (repo.score_breakdown||{}).size||0 })) + '">' + repo.composite_score + ' pts</span>';
           }
           card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
 
           // Network meta
           var replicas = repo.network_replicas || 0;
           var networkHtml = replicas > 0
-            ? '<span class="badge-swarm" title="' + replicas + ' node(s) already hosting this model on the swarm">On Swarm &mdash; ' + replicas + ' node' + (replicas !== 1 ? 's' : '') + '</span>'
-            : '<span class="badge-new" title="Not yet on the swarm">New to network</span>';
-          if (replicas === 0) networkHtml += '<span style="color:var(--green)" title="No replicas yet — high credit earning potential">&#128176; High demand</span>';
-          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)" title="Few replicas — good credit earning potential">&#128176; Medium demand</span>';
-          else networkHtml += '<span style="color:var(--text-muted)" title="Well replicated across the network">&#128176; Well replicated</span>';
+            ? '<span class="badge-swarm" title="' + replicas + ' node(s)">' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '</span>'
+            : '<span class="badge-new">' + U.escapeHtml(I18n.t('models.hf_new')) + '</span>';
+          if (replicas === 0) networkHtml += '<span style="color:var(--green)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_demand_high')) + '</span>';
+          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_demand_medium')) + '</span>';
+          else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_well_replicated')) + '</span>';
           card.querySelector('.hf-meta-network').innerHTML = networkHtml;
 
           // Variant selector
@@ -120,7 +120,7 @@
               var opt = document.createElement('option');
               opt.value = v.filename;
               var label = v.quant + (v.size_bytes ? ' \u2014 ' + U.formatBytes(v.size_bytes) : '');
-              if (v.quant === recommended) { label += ' (Recommended)'; opt.selected = true; }
+              if (v.quant === recommended) { label += I18n.t('models.hf_recommended'); opt.selected = true; }
               opt.textContent = label;
               selectEl.appendChild(opt);
             });
@@ -242,7 +242,7 @@
               var na = a.name.toLowerCase(), nb = b.name.toLowerCase();
               return na < nb ? -1 : na > nb ? 1 : 0;
             });
-            groups.push({ key: p, label: (PROVIDER_NAMES[p] || p) + ' (cloud)', items: items });
+            groups.push({ key: p, label: (PROVIDER_NAMES[p] || p) + I18n.t('models.cloud_suffix'), items: items });
             S._modelDropdownData = S._modelDropdownData.concat(items);
           });
         }
@@ -564,36 +564,36 @@
         if (results[0].ok) policy = await results[0].json();
         if (results[1].ok) encStatus = await results[1].json();
       } catch (e) {
-        App.ui.showBanner('error', 'Could not load model policy');
+        App.ui.showBanner('error', I18n.t('models.policy_load_failed'));
       }
 
       var encReadyClass = encStatus.ready ? 'text-success' : 'text-warning';
-      var encReadyText = encStatus.ready ? 'Ready (has first + last shard)' :
-        'Missing: ' + (!encStatus.has_first_shard ? 'first shard ' : '') + (!encStatus.has_last_shard ? 'last shard' : '');
+      var encReadyText = encStatus.ready ? I18n.t('models.enc_ready') :
+        (!encStatus.has_first_shard ? I18n.t('models.enc_missing_first') + ' ' : '') + (!encStatus.has_last_shard ? I18n.t('models.enc_missing_last') : '');
       var encDisabled = !encStatus.ready ? ' disabled' : '';
       var encOverheadNote = encStatus.shard_count <= 2
-        ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + encStatus.shard_count + '-shard model = fully local (no distributed offloading)</span>'
-        : '<span class="text-muted" style="font-size:0.65rem">Adds ~1 extra RTT/token. No remote node sees plaintext.</span>';
+        ? '<span class="text-warning" style="font-size:0.65rem">&#9888; ' + U.escapeHtml(I18n.t('models.enc_overhead_local', { count: encStatus.shard_count })) + '</span>'
+        : '<span class="text-muted" style="font-size:0.65rem">' + U.escapeHtml(I18n.t('models.enc_overhead')) + '</span>';
 
       var panel = document.createElement('div');
       panel.className = 'auto-manage-panel';
       panel.innerHTML =
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-enabled-' + U.safeId(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> Auto-manage enabled</label>' +
+          '<label><input type="checkbox" id="am-enabled-' + U.safeId(modelId) + '"' + (policy.enabled ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('models.auto_manage_enabled')) + '</label>' +
         '</div>' +
         '<div class="am-row">' +
-          '<label><input type="checkbox" id="am-prune-' + U.safeId(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> Auto-prune enabled</label>' +
+          '<label><input type="checkbox" id="am-prune-' + U.safeId(modelId) + '"' + (policy.prune_enabled !== false ? ' checked' : '') + '> ' + U.escapeHtml(I18n.t('models.auto_prune_enabled')) + '</label>' +
         '</div>' +
         '<div class="am-row">' +
-          '<label>Max shards:</label>' +
+          '<label>' + U.escapeHtml(I18n.t('models.max_shards')) + '</label>' +
           '<input type="number" id="am-max-' + U.safeId(modelId) + '" value="' + (policy.max_shards || 0) + '" min="0" step="1">' +
-          '<span class="text-muted" style="font-size:0.7rem">0 = unlimited</span>' +
+          '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(I18n.t('models.unlimited')) + '</span>' +
         '</div>' +
         '<hr style="margin:0.3rem 0;border-color:var(--border)">' +
         '<div class="am-row" style="flex-direction:column;gap:0.2rem">' +
           '<label><input type="checkbox" id="am-encrypted-' + U.safeId(modelId) + '"' +
             (encStatus.encrypted_pipeline ? ' checked' : '') + encDisabled +
-            '> &#128274; Encrypted pipeline</label>' +
+            '> &#128274; ' + U.escapeHtml(I18n.t('models.encrypted_pipeline')) + '</label>' +
           '<span class="' + encReadyClass + '" style="font-size:0.65rem">' + encReadyText + '</span>' +
           encOverheadNote +
         '</div>' +
@@ -631,7 +631,7 @@
           });
           if (!encResp.ok) {
             var encData = await encResp.json().catch(function() { return {}; });
-            encErr = encData.error ? encData.error.message : 'Encrypted pipeline save failed';
+            encErr = encData.error ? encData.error.message : I18n.t('models.enc_pipeline_save_failed');
           }
         }
 
@@ -644,12 +644,12 @@
           var errMsg = encErr || '';
           if (!amResp.ok) {
             var errData = await amResp.json().catch(function() { return {}; });
-            errMsg = errData.error ? errData.error.message : 'Save failed';
+            errMsg = errData.error ? errData.error.message : I18n.t('models.save_failed');
           }
           App.ui.showBanner('error', errMsg);
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Save failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.save_error', { error: e.message }));
       }
     },
 
@@ -660,7 +660,7 @@
       panel.classList.remove('hidden');
       if (panel.innerHTML) return;
 
-      panel.innerHTML = '<div class="meta-loading"><span class="spinner" style="width:14px;height:14px;border-width:1.5px"></span> Loading metadata...</div>';
+      panel.innerHTML = '<div class="meta-loading"><span class="spinner" style="width:14px;height:14px;border-width:1.5px"></span> ' + U.escapeHtml(I18n.t('models.loading_metadata')) + '</div>';
       try {
         var data = S.metadataCache[modelId];
         if (!data) {
@@ -671,7 +671,7 @@
         }
         renderMetadataPanel(panel, data);
       } catch (e) {
-        panel.innerHTML = '<div class="meta-error">Failed to load GGUF metadata</div>';
+        panel.innerHTML = '<div class="meta-error">' + U.escapeHtml(I18n.t('models.metadata_failed')) + '</div>';
       }
     },
 
@@ -679,9 +679,9 @@
       if (!confirm(I18n.t('models.confirm_shutdown'))) return;
       try {
         await App.authFetch('/api/admin/shutdown', { method: 'POST' });
-        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">SwarmLLM has been shut down.</div>';
+        document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--text-muted);font-size:1.2rem">' + U.escapeHtml(I18n.t('models.shutdown_message')) + '</div>';
       } catch (e) {
-        App.ui.showBanner('error', 'Shutdown failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.shutdown_error', { error: e.message }));
       }
     },
 
@@ -727,30 +727,30 @@
   }
 
   function renderMetadataPanel(panel, data) {
-    var html = '<div class="meta-header">GGUF Metadata</div>';
+    var html = '<div class="meta-header">' + U.escapeHtml(I18n.t('models.metadata_header')) + '</div>';
     var g = data.general || {};
     var m = data.model || {};
     var summaryParts = [];
     if (g.architecture) {
       var archTag = '<span class="meta-tag">' + U.escapeHtml(g.architecture) + '</span>';
       if (g.architecture_supported === false) {
-        archTag += '<span class="meta-tag" style="background:var(--error-bg,#5c2020);color:var(--error-fg,#ff6b6b)">unsupported</span>';
+        archTag += '<span class="meta-tag" style="background:var(--error-bg,#5c2020);color:var(--error-fg,#ff6b6b)">' + U.escapeHtml(I18n.t('models.meta_unsupported')) + '</span>';
       }
       summaryParts.push(archTag);
     }
     if (g.quantization) summaryParts.push('<span class="meta-tag">' + U.escapeHtml(g.quantization) + '</span>');
     if (m.context_length) summaryParts.push('<span class="meta-tag">ctx ' + m.context_length.toLocaleString() + '</span>');
-    if (m.block_count) summaryParts.push('<span class="meta-tag">' + m.block_count + ' layers</span>');
-    if (m.vocab_size) summaryParts.push('<span class="meta-tag">vocab ' + m.vocab_size.toLocaleString() + '</span>');
+    if (m.block_count) summaryParts.push('<span class="meta-tag">' + I18n.t('models.meta_layers', { count: m.block_count }) + '</span>');
+    if (m.vocab_size) summaryParts.push('<span class="meta-tag">' + I18n.t('models.meta_vocab', { count: m.vocab_size.toLocaleString() }) + '</span>');
     if (summaryParts.length > 0) html += '<div class="meta-summary">' + summaryParts.join('') + '</div>';
 
-    html += '<table class="meta-table"><thead><tr><th colspan="2">Model Parameters</th></tr></thead><tbody>';
+    html += '<table class="meta-table"><thead><tr><th colspan="2">' + U.escapeHtml(I18n.t('models.meta_model_params')) + '</th></tr></thead><tbody>';
     var modelFields = [
-      ['Context Length', m.context_length], ['Layers (block_count)', m.block_count],
-      ['Embedding Dimension', m.embedding_length], ['Attention Heads', m.head_count],
-      ['KV Heads (GQA)', m.head_count_kv], ['RoPE Dimension', m.rope_dimension_count],
-      ['RoPE Freq Base', m.rope_freq_base], ['RMS Norm Epsilon', m.layer_norm_rms_epsilon],
-      ['Vocab Size', m.vocab_size],
+      [I18n.t('models.meta_context_length'), m.context_length], [I18n.t('models.meta_layers_label'), m.block_count],
+      [I18n.t('models.meta_embedding_dim'), m.embedding_length], [I18n.t('models.meta_attention_heads'), m.head_count],
+      [I18n.t('models.meta_kv_heads'), m.head_count_kv], [I18n.t('models.meta_rope_dim'), m.rope_dimension_count],
+      [I18n.t('models.meta_rope_freq'), m.rope_freq_base], [I18n.t('models.meta_rms_epsilon'), m.layer_norm_rms_epsilon],
+      [I18n.t('models.meta_vocab_size'), m.vocab_size],
     ];
     modelFields.forEach(function(f) {
       if (f[1] != null) {
@@ -762,9 +762,9 @@
 
     var t = data.tokenizer || {};
     if (t.model || t.eos_token_id != null || t.bos_token_id != null) {
-      html += '<table class="meta-table"><thead><tr><th colspan="2">Tokenizer</th></tr></thead><tbody>';
-      [['Tokenizer Model', t.model], ['Pre-tokenizer', t.pre], ['BOS Token ID', t.bos_token_id],
-       ['EOS Token ID', t.eos_token_id], ['Padding Token ID', t.padding_token_id]
+      html += '<table class="meta-table"><thead><tr><th colspan="2">' + U.escapeHtml(I18n.t('models.meta_tokenizer')) + '</th></tr></thead><tbody>';
+      [[I18n.t('models.meta_tokenizer_model'), t.model], [I18n.t('models.meta_pre_tokenizer'), t.pre], [I18n.t('models.meta_bos_id'), t.bos_token_id],
+       [I18n.t('models.meta_eos_id'), t.eos_token_id], [I18n.t('models.meta_padding_id'), t.padding_token_id]
       ].forEach(function(f) {
         if (f[1] != null) html += '<tr><td class="meta-key">' + U.escapeHtml(f[0]) + '</td><td class="meta-val">' + U.escapeHtml(String(f[1])) + '</td></tr>';
       });
@@ -772,11 +772,11 @@
     }
 
     var tens = data.tensors || {};
-    if (tens.count) html += '<div class="meta-tensor-info">' + tens.count + ' tensors, data offset: ' + U.formatBytes(tens.data_offset || 0) + '</div>';
+    if (tens.count) html += '<div class="meta-tensor-info">' + I18n.t('models.meta_tensor_info', { count: tens.count, offset: U.formatBytes(tens.data_offset || 0) }) + '</div>';
 
     var raw = data.raw || [];
     if (raw.length > 0) {
-      html += '<details class="meta-raw-details"><summary>All metadata keys (' + raw.length + ')</summary>';
+      html += '<details class="meta-raw-details"><summary>' + U.escapeHtml(I18n.t('models.meta_all_keys', { count: raw.length })) + '</summary>';
       html += '<table class="meta-table meta-raw-table"><tbody>';
       raw.forEach(function(r) { html += '<tr><td class="meta-key">' + U.escapeHtml(r.key) + '</td><td class="meta-val">' + U.escapeHtml(r.value) + '</td></tr>'; });
       html += '</tbody></table></details>';
