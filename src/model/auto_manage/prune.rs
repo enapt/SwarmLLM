@@ -20,8 +20,14 @@ impl AutoShardManager {
         let shard_store =
             crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
 
+        // Pre-fetch VRAM usage off the Tokio thread (nvidia-smi is blocking I/O)
+        let live_vram_used = tokio::task::spawn_blocking(query_gpu_vram_used)
+            .await
+            .ok()
+            .flatten();
+
         // Compute resource pressure
-        let resource_pressure = self.compute_resource_pressure();
+        let resource_pressure = self.compute_resource_pressure(live_vram_used);
         let pressure_urgent = resource_pressure > 0.95;
         tracing::info!(
             resource_pressure = format!("{:.2}", resource_pressure),
@@ -492,7 +498,7 @@ impl AutoShardManager {
     }
 
     /// Compute resource pressure (0.0-1.0) based on VRAM and disk usage.
-    fn compute_resource_pressure(&self) -> f64 {
+    fn compute_resource_pressure(&self, live_vram_used: Option<u64>) -> f64 {
         let config = &self.shared_state.config;
         let local_node_id = self.shared_state.identity.node_id().clone();
 
@@ -524,7 +530,7 @@ impl AutoShardManager {
         // VRAM pressure -- prefer live nvidia-smi data over internal model tracking
         let vram_pressure = if let Some(ref gpu) = self.shared_state.gpu_info {
             if gpu.vram_total_mb > 0 {
-                let used_mb = query_gpu_vram_used().unwrap_or_else(|| {
+                let used_mb = live_vram_used.unwrap_or_else(|| {
                     // Fallback: sum estimated VRAM of loaded models
                     self.shared_state
                         .split_models
