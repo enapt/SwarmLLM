@@ -377,6 +377,16 @@ impl ShardId {
         }
     }
 
+    /// Safe 1-based index for display, returning "mmproj" for MMPROJ_SHARD_INDEX.
+    /// Use this instead of `index + 1` to avoid u32 overflow on mmproj shards.
+    pub fn display_index_short(index: u32) -> String {
+        if index == MMPROJ_SHARD_INDEX {
+            "mmproj".to_string()
+        } else {
+            format!("{}", index + 1)
+        }
+    }
+
     /// Create a ShardId for the mmproj of a given model.
     pub fn mmproj_for(model_id: ModelId) -> Self {
         Self {

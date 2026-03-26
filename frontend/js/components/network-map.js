@@ -296,7 +296,7 @@
         }
       }
       var current = sel.value;
-      sel.innerHTML = '<option value="">All models</option>';
+      sel.innerHTML = '<option value="">' + (typeof I18n !== 'undefined' ? I18n.t('dashboard.all_models') : 'All models') + '</option>';
       var sorted = Object.keys(models).sort();
       for (var k = 0; k < sorted.length; k++) {
         var opt = document.createElement('option');

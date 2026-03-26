@@ -1398,6 +1398,7 @@ pub async fn delete_shard(
                             .shard_holders(&sid)
                             .contains(&shared.identity.node_id().clone())
                     })
+                    .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
                     .map(|s| s.index + 1)
                     .collect()
             })

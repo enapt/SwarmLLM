@@ -1048,7 +1048,9 @@ impl Daemon {
                                         "shard_verify_failed",
                                         format!(
                                             "Shard {} of {} failed verification — quarantined",
-                                            shard_info.index + 1,
+                                            crate::types::ShardId::display_index_short(
+                                                shard_info.index
+                                            ),
                                             manifest.name
                                         ),
                                     )

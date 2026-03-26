@@ -487,7 +487,8 @@ manifest.name, budget - total_after
                 // Shard overlaps with this segment's layer range
                 sl < layer_end && se > layer_start && local_shard_indices.contains(&s.index)
             })
-            .map(|s| s.index + 1) // 1-indexed for display
+            .filter(|s| s.index != crate::types::MMPROJ_SHARD_INDEX)
+            .map(|s| s.index + 1)
             .collect();
         let shard_label = if covering_shards.len() == manifest.shard_count as usize {
             "all shards".to_string()

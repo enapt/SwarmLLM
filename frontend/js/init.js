@@ -67,13 +67,13 @@
         var resp = await App.authFetch('/api/admin/providers', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
         var data = await resp.json();
         if (data[provider]) {
-          status.innerHTML = '<span style="color:var(--green)">\u2713 Connected!</span>';
+          status.innerHTML = '<span style="color:var(--green)">\u2713 ' + U.escapeHtml(I18n.t('connection.connected')) + '</span>';
           App.setup._savedProvider = provider;
         } else {
           status.innerHTML = '<span style="color:var(--red)">' + U.escapeHtml(I18n.t('init.key_saved_no_response')) + '</span>';
           App.setup._savedProvider = provider;
         }
-      } catch (e) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
+      } catch (e) { status.textContent = I18n.t('leaderboard.load_error', { error: e.message }); status.style.color = 'var(--red)'; }
     });
     // Wizard step indicators
     document.querySelectorAll('.wizard-step[data-step]').forEach(function(stepBtn) {

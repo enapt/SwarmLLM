@@ -765,7 +765,7 @@ impl NetworkManager {
                                 "shard_transfer_failed",
                                 format!(
                                     "P2P transfer failed: shard {} of {} — {} ({}B received)",
-                                    shard_id.index + 1,
+                                    crate::types::ShardId::display_index_short(shard_id.index),
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     error,
                                     progress
@@ -2061,7 +2061,9 @@ impl NetworkManager {
                                             "shard_download_p2p",
                                             format!(
                                                 "Retrying shard {} of {} from another peer",
-                                                shard_id.index + 1,
+                                                crate::types::ShardId::display_index_short(
+                                                    shard_id.index
+                                                ),
                                                 mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                             ),
                                         )
@@ -2098,7 +2100,7 @@ impl NetworkManager {
                                     format!(
 "P2P failed after {} retries — falling back to HuggingFace for shard {} of {}",
 retry_num,
-shard_id.index + 1,
+crate::types::ShardId::display_index_short(shard_id.index),
 mname.as_deref().unwrap_or(&shard_id.model_id.0),
 ),
                                 )
@@ -2121,7 +2123,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     "shard_transfer_failed",
                                     format!(
                                         "No peers or HF source for shard {} of {}",
-                                        shard_id.index + 1,
+                                        crate::types::ShardId::display_index_short(shard_id.index),
                                         mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     ),
                                 )
@@ -2187,7 +2189,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 "shard_write_failed",
                                 format!(
                                     "Failed to write shard {} of {} to disk: {}",
-                                    shard_id.index + 1,
+                                    crate::types::ShardId::display_index_short(shard_id.index),
                                     shard_id.model_id,
                                     e
                                 ),
@@ -2269,7 +2271,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     "shard_finalize_failed",
                                     format!(
                                         "Failed to finalize shard {} of {}: {}",
-                                        shard_id.index + 1,
+                                        crate::types::ShardId::display_index_short(shard_id.index),
                                         shard_id.model_id,
                                         e
                                     ),
@@ -2381,7 +2383,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 "shard_p2p_complete",
                                 format!(
                                     "Shard {} of {} downloaded from peer {}",
-                                    shard_id.index + 1,
+                                    crate::types::ShardId::display_index_short(shard_id.index),
                                     mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                     peer_label
                                 ),
