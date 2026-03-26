@@ -886,6 +886,21 @@ impl PipelineExecutor {
                         break;
                     }
 
+                    // Check for EOS tokens in the result — the worker may return EOS
+                    // as a token ID without setting finish_reason explicitly.
+                    if result.token_ids.iter().any(|t| eos.contains(t)) {
+                        finish_reason = "stop".to_string();
+                        if let Some(ref tx) = token_tx {
+                            let _ = tx
+                                .send(StreamingTokenEvent {
+                                    text: String::new(),
+                                    finish_reason: Some("stop".to_string()),
+                                })
+                                .await;
+                        }
+                        break;
+                    }
+
                     if let Some(reason) = result.finish_reason {
                         finish_reason = match reason {
                             NetworkFinishReason::Stop => "stop".to_string(),

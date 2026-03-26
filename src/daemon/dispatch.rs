@@ -117,13 +117,10 @@ fn track_forward_participation(
     if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
         stats.forwards_served += 1;
     }
-    // Credits are earned per-token (not per-layer) to stay balanced with the
-    // consume side. For the forward path, we earn a fixed per-forward amount
-    // since we don't know the total token count yet (single decode step).
-    // The pipeline orchestrator earns the bulk credit at completion.
-    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE; // 1 token per forward step
-                                                              // Use atomic accumulator to prevent credit loss on lock contention.
-                                                              // The CreditLedger periodic persist (every 60s) will flush this to DB.
+    // Credits earned per forward step for remote peers serving segments.
+    // Local segments don't go through dispatch — they use process_local_segment
+    // which only earns via apply_credit_direct at pipeline completion.
+    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE;
     shared_state
         .credits
         .pending_credit_earn

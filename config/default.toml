@@ -45,8 +45,6 @@ theme = "dark"                 # "dark" or "light"
 [updates]
 auto_update = "stable"         # "disabled", "stable", or "all"
 check_interval_hours = 6
-auto_restart = true
-keep_versions = 3
 
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
