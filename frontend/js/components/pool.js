@@ -208,7 +208,7 @@
 
         // Device name or truncated ID
         var displayName = m.device_name || (m.node_id ? m.node_id.substring(0, 12) + '...' : '?');
-        if (isSelf) displayName += ' (you)';
+        if (isSelf) displayName += I18n.t('pool.you_suffix');
         if (idEl) idEl.textContent = displayName;
 
         // Online status dot

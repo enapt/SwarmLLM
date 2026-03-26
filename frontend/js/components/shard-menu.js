@@ -71,13 +71,13 @@
       var loadBtn = document.getElementById('shard-ctx-load');
       if (loadBtn) {
         loadBtn.style.display = (shardState === 'local' && !isInVram) ? '' : 'none';
-        loadBtn.title = 'Load this part into memory for inference. The model worker will restart to include it.';
+        loadBtn.title = I18n.t('shard.load_tip');
       }
 
       // Unload button — only when shard is loaded in memory
       if (unloadBtn) {
         unloadBtn.style.display = (shardState === 'local' && isInVram) ? '' : 'none';
-        unloadBtn.title = 'Keeps the file on disk but frees RAM/VRAM. The model worker will restart without this part.';
+        unloadBtn.title = I18n.t('shard.unload_tip');
       }
 
       // Lock button — only for local shards

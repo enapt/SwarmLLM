@@ -691,6 +691,10 @@
   "models.meta_padding_id": "Padding Token ID",
   "models.meta_tensor_info": "{count} tensors, data offset: {offset}",
   "models.meta_all_keys": "All metadata keys ({count})",
+  "shard.load_tip": "Load this part into memory for inference. The model worker will restart to include it.",
+  "shard.unload_tip": "Keeps the file on disk but frees RAM/VRAM. The model worker will restart without this part.",
+  "pool.you_suffix": " (you)",
+  "downloads.active_suffix": "{count} active",
   "pool.members_label": "Members",
   "pool.pending_invitations": "Pending Invitations"
 }

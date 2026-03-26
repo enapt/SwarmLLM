@@ -560,7 +560,7 @@
         if (el) {
           navigator.clipboard.writeText(el.textContent).then(function() {
             target.textContent = I18n.t('actions.copied');
-            setTimeout(function() { target.textContent = 'Copy'; }, 1500);
+            setTimeout(function() { target.textContent = I18n.t('actions.copy'); }, 1500);
           });
         }
         return;
@@ -584,7 +584,7 @@
         if (contentEl) {
           navigator.clipboard.writeText(contentEl.textContent).then(function() {
             target.textContent = I18n.t('actions.copied');
-            setTimeout(function() { target.textContent = 'Copy'; }, 1500);
+            setTimeout(function() { target.textContent = I18n.t('actions.copy'); }, 1500);
           });
         }
         return;
