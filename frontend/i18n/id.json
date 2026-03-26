@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Anda",
-  "chat.role_assistant": "Asisten"
+  "chat.role_assistant": "Asisten",
+  "settings.saved": "Pengaturan disimpan",
+  "settings.save_failed": "Gagal menyimpan pengaturan",
+  "settings.load_failed": "Gagal memuat pengaturan",
+  "settings.storage_load_failed": "Gagal memuat info penyimpanan",
+  "settings.providers_load_failed": "Gagal memuat status penyedia",
+  "settings.providers_saved": "Kunci penyedia disimpan",
+  "settings.providers_save_failed": "Gagal menyimpan kunci penyedia",
+  "settings.enter_key_first": "Masukkan kunci API terlebih dahulu",
+  "settings.key_verified": "Kunci API {name} terverifikasi",
+  "settings.key_test_failed": "Tes {name} gagal: {error}"
 }

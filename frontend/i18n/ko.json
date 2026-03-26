@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "나",
-  "chat.role_assistant": "어시스턴트"
+  "chat.role_assistant": "어시스턴트",
+  "settings.saved": "설정이 저장되었습니다",
+  "settings.save_failed": "설정 저장 실패",
+  "settings.load_failed": "설정 로드 실패",
+  "settings.storage_load_failed": "저장소 정보 로드 실패",
+  "settings.providers_load_failed": "공급자 상태 로드 실패",
+  "settings.providers_saved": "공급자 키가 저장되었습니다",
+  "settings.providers_save_failed": "공급자 키 저장 실패",
+  "settings.enter_key_first": "먼저 API 키를 입력하세요",
+  "settings.key_verified": "{name} API 키가 확인되었습니다",
+  "settings.key_test_failed": "{name} 테스트 실패: {error}"
 }

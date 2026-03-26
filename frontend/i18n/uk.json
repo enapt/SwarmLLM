@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Ви",
-  "chat.role_assistant": "Асистент"
+  "chat.role_assistant": "Асистент",
+  "settings.saved": "Налаштування збережено",
+  "settings.save_failed": "Не вдалося зберегти налаштування",
+  "settings.load_failed": "Не вдалося завантажити налаштування",
+  "settings.storage_load_failed": "Не вдалося завантажити інформацію про сховище",
+  "settings.providers_load_failed": "Не вдалося завантажити статус провайдерів",
+  "settings.providers_saved": "Ключі провайдерів збережено",
+  "settings.providers_save_failed": "Не вдалося зберегти ключі провайдерів",
+  "settings.enter_key_first": "Спочатку введіть API-ключ",
+  "settings.key_verified": "API-ключ {name} підтверджено",
+  "settings.key_test_failed": "Тест {name} не пройдений: {error}"
 }

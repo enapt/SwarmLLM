@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Ty",
-  "chat.role_assistant": "Asistent"
+  "chat.role_assistant": "Asistent",
+  "settings.saved": "Nastavení uložena",
+  "settings.save_failed": "Uložení nastavení selhalo",
+  "settings.load_failed": "Načtení nastavení selhalo",
+  "settings.storage_load_failed": "Načtení informací o úložišti selhalo",
+  "settings.providers_load_failed": "Načtení stavu poskytovatelů selhalo",
+  "settings.providers_saved": "Klíče poskytovatelů uloženy",
+  "settings.providers_save_failed": "Uložení klíčů poskytovatelů selhalo",
+  "settings.enter_key_first": "Nejprve zadejte API klíč",
+  "settings.key_verified": "API klíč {name} ověřen",
+  "settings.key_test_failed": "Test {name} selhal: {error}"
 }

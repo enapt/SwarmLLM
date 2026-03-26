@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "你",
-  "chat.role_assistant": "助手"
+  "chat.role_assistant": "助手",
+  "settings.saved": "设置已保存",
+  "settings.save_failed": "保存设置失败",
+  "settings.load_failed": "加载设置失败",
+  "settings.storage_load_failed": "加载存储信息失败",
+  "settings.providers_load_failed": "加载提供商状态失败",
+  "settings.providers_saved": "提供商密钥已保存",
+  "settings.providers_save_failed": "保存提供商密钥失败",
+  "settings.enter_key_first": "请先输入API密钥",
+  "settings.key_verified": "{name} API密钥已验证",
+  "settings.key_test_failed": "{name} 测试失败：{error}"
 }

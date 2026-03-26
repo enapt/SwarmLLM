@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Bạn",
-  "chat.role_assistant": "Trợ lý"
+  "chat.role_assistant": "Trợ lý",
+  "settings.saved": "Đã lưu cài đặt",
+  "settings.save_failed": "Lưu cài đặt thất bại",
+  "settings.load_failed": "Tải cài đặt thất bại",
+  "settings.storage_load_failed": "Tải thông tin lưu trữ thất bại",
+  "settings.providers_load_failed": "Tải trạng thái nhà cung cấp thất bại",
+  "settings.providers_saved": "Đã lưu khóa nhà cung cấp",
+  "settings.providers_save_failed": "Lưu khóa nhà cung cấp thất bại",
+  "settings.enter_key_first": "Nhập khóa API trước",
+  "settings.key_verified": "Đã xác minh khóa API {name}",
+  "settings.key_test_failed": "Kiểm tra {name} thất bại: {error}"
 }

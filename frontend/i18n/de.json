@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Du",
-  "chat.role_assistant": "Assistent"
+  "chat.role_assistant": "Assistent",
+  "settings.saved": "Einstellungen gespeichert",
+  "settings.save_failed": "Speichern fehlgeschlagen",
+  "settings.load_failed": "Einstellungen konnten nicht geladen werden",
+  "settings.storage_load_failed": "Speicherinfo konnte nicht geladen werden",
+  "settings.providers_load_failed": "Anbieterstatus konnte nicht geladen werden",
+  "settings.providers_saved": "Anbieterschlüssel gespeichert",
+  "settings.providers_save_failed": "Anbieterschlüssel konnten nicht gespeichert werden",
+  "settings.enter_key_first": "Geben Sie zuerst einen API-Schlüssel ein",
+  "settings.key_verified": "{name} API-Schlüssel verifiziert",
+  "settings.key_test_failed": "{name} Test fehlgeschlagen: {error}"
 }

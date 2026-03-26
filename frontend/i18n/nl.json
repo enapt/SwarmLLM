@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Jij",
-  "chat.role_assistant": "Assistent"
+  "chat.role_assistant": "Assistent",
+  "settings.saved": "Instellingen opgeslagen",
+  "settings.save_failed": "Opslaan mislukt",
+  "settings.load_failed": "Instellingen laden mislukt",
+  "settings.storage_load_failed": "Opslaginformatie laden mislukt",
+  "settings.providers_load_failed": "Providerstatus laden mislukt",
+  "settings.providers_saved": "Providersleutels opgeslagen",
+  "settings.providers_save_failed": "Providersleutels opslaan mislukt",
+  "settings.enter_key_first": "Voer eerst een API-sleutel in",
+  "settings.key_verified": "{name} API-sleutel geverifieerd",
+  "settings.key_test_failed": "{name} test mislukt: {error}"
 }

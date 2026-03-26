@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Você",
-  "chat.role_assistant": "Assistente"
+  "chat.role_assistant": "Assistente",
+  "settings.saved": "Configurações salvas",
+  "settings.save_failed": "Falha ao salvar configurações",
+  "settings.load_failed": "Falha ao carregar configurações",
+  "settings.storage_load_failed": "Falha ao carregar info de armazenamento",
+  "settings.providers_load_failed": "Falha ao carregar status dos provedores",
+  "settings.providers_saved": "Chaves de provedor salvas",
+  "settings.providers_save_failed": "Falha ao salvar chaves de provedor",
+  "settings.enter_key_first": "Insira uma chave API primeiro",
+  "settings.key_verified": "Chave API {name} verificada",
+  "settings.key_test_failed": "Teste {name} falhou: {error}"
 }

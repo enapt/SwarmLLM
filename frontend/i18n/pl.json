@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Ty",
-  "chat.role_assistant": "Asystent"
+  "chat.role_assistant": "Asystent",
+  "settings.saved": "Ustawienia zapisane",
+  "settings.save_failed": "Nie udało się zapisać ustawień",
+  "settings.load_failed": "Nie udało się załadować ustawień",
+  "settings.storage_load_failed": "Nie udało się załadować informacji o pamięci",
+  "settings.providers_load_failed": "Nie udało się załadować statusu dostawców",
+  "settings.providers_saved": "Klucze dostawców zapisane",
+  "settings.providers_save_failed": "Nie udało się zapisać kluczy dostawców",
+  "settings.enter_key_first": "Najpierw wprowadź klucz API",
+  "settings.key_verified": "Klucz API {name} zweryfikowany",
+  "settings.key_test_failed": "Test {name} nieudany: {error}"
 }

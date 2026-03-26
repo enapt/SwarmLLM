@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "आप",
-  "chat.role_assistant": "सहायक"
+  "chat.role_assistant": "सहायक",
+  "settings.saved": "सेटिंग्स सहेजी गईं",
+  "settings.save_failed": "सेटिंग्स सहेजने में विफल",
+  "settings.load_failed": "सेटिंग्स लोड करने में विफल",
+  "settings.storage_load_failed": "स्टोरेज जानकारी लोड करने में विफल",
+  "settings.providers_load_failed": "प्रदाता स्थिति लोड करने में विफल",
+  "settings.providers_saved": "प्रदाता कुंजियाँ सहेजी गईं",
+  "settings.providers_save_failed": "प्रदाता कुंजियाँ सहेजने में विफल",
+  "settings.enter_key_first": "पहले API कुंजी दर्ज करें",
+  "settings.key_verified": "{name} API कुंजी सत्यापित",
+  "settings.key_test_failed": "{name} परीक्षण विफल: {error}"
 }

@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Sen",
-  "chat.role_assistant": "Asistan"
+  "chat.role_assistant": "Asistan",
+  "settings.saved": "Ayarlar kaydedildi",
+  "settings.save_failed": "Ayarlar kaydedilemedi",
+  "settings.load_failed": "Ayarlar yüklenemedi",
+  "settings.storage_load_failed": "Depolama bilgisi yüklenemedi",
+  "settings.providers_load_failed": "Sağlayıcı durumu yüklenemedi",
+  "settings.providers_saved": "Sağlayıcı anahtarları kaydedildi",
+  "settings.providers_save_failed": "Sağlayıcı anahtarları kaydedilemedi",
+  "settings.enter_key_first": "Önce bir API anahtarı girin",
+  "settings.key_verified": "{name} API anahtarı doğrulandı",
+  "settings.key_test_failed": "{name} testi başarısız: {error}"
 }

@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "คุณ",
-  "chat.role_assistant": "ผู้ช่วย"
+  "chat.role_assistant": "ผู้ช่วย",
+  "settings.saved": "บันทึกการตั้งค่าแล้ว",
+  "settings.save_failed": "บันทึกการตั้งค่าไม่สำเร็จ",
+  "settings.load_failed": "โหลดการตั้งค่าไม่สำเร็จ",
+  "settings.storage_load_failed": "โหลดข้อมูลพื้นที่เก็บไม่สำเร็จ",
+  "settings.providers_load_failed": "โหลดสถานะผู้ให้บริการไม่สำเร็จ",
+  "settings.providers_saved": "บันทึกคีย์ผู้ให้บริการแล้ว",
+  "settings.providers_save_failed": "บันทึกคีย์ผู้ให้บริการไม่สำเร็จ",
+  "settings.enter_key_first": "กรอก API key ก่อน",
+  "settings.key_verified": "ยืนยัน API key {name} แล้ว",
+  "settings.key_test_failed": "ทดสอบ {name} ไม่ผ่าน: {error}"
 }

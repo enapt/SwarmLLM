@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Vous",
-  "chat.role_assistant": "Assistant"
+  "chat.role_assistant": "Assistant",
+  "settings.saved": "Paramètres enregistrés",
+  "settings.save_failed": "Échec de l'enregistrement",
+  "settings.load_failed": "Échec du chargement des paramètres",
+  "settings.storage_load_failed": "Échec du chargement des infos de stockage",
+  "settings.providers_load_failed": "Échec du chargement de l'état des fournisseurs",
+  "settings.providers_saved": "Clés de fournisseur enregistrées",
+  "settings.providers_save_failed": "Échec de l'enregistrement des clés",
+  "settings.enter_key_first": "Entrez d'abord une clé API",
+  "settings.key_verified": "Clé API {name} vérifiée",
+  "settings.key_test_failed": "Test {name} échoué : {error}"
 }

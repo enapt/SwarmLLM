@@ -84,7 +84,7 @@
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();
       } catch (e) {
-        App.ui.showBanner('error', 'Failed to load settings: ' + (e.message || 'network error'));
+        App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || 'network error'));
       }
       App.settings._apiKeyPromise = App.settings.loadApiKey();
       App.settings.loadProviders();
@@ -182,7 +182,7 @@
           modelsDiv.innerHTML = '<span class="text-muted">No models registered</span>';
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Failed to load storage info');
+        App.ui.showBanner('error', I18n.t('settings.storage_load_failed'));
       }
     },
 
@@ -228,7 +228,7 @@
           if (sel) sel.value = data.key_source;
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Failed to load provider status');
+        App.ui.showBanner('error', I18n.t('settings.providers_load_failed'));
       }
     },
 
@@ -255,9 +255,9 @@
         App.models.load();
         App.modeIndicator.load();
         App.providerHealth.startHealthPolling();
-        App.ui.showBanner('success', 'Provider keys saved');
+        App.ui.showBanner('success', I18n.t('settings.providers_saved'));
       } catch (e) {
-        App.ui.showBanner('error', 'Failed to save provider keys: ' + (e.message || 'network error'));
+        App.ui.showBanner('error', I18n.t('settings.providers_save_failed') + ': ' + (e.message || 'network error'));
       }
     },
 
@@ -267,7 +267,7 @@
       if (!input) return;
       var key = input.value;
       if (!key) {
-        App.ui.showBanner('error', 'Enter an API key first');
+        App.ui.showBanner('error', I18n.t('settings.enter_key_first'));
         return;
       }
       badge.textContent = 'Testing...';
@@ -298,7 +298,7 @@
         if (testResp.ok) {
           badge.textContent = '\u2713 Active';
           badge.className = 'badge provider-badge-active';
-          App.ui.showBanner('success', name + ' API key verified');
+          App.ui.showBanner('success', I18n.t('settings.key_verified', { name: name }));
           var testCard = badge.closest('.provider-card');
           if (testCard) testCard.classList.add('provider-active');
           App.models.load();
@@ -310,13 +310,13 @@
           if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '\u2026';
           badge.textContent = '\u2717 Failed';
           badge.className = 'badge badge-error';
-          App.ui.showBanner('error', name + ' test failed: ' + friendlyErr);
+          App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: friendlyErr }));
         }
         input.value = '';
       } catch (e) {
         badge.textContent = '\u2717 Error';
         badge.className = 'badge badge-error';
-        App.ui.showBanner('error', name + ' test failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: e.message }));
       }
     },
 
@@ -350,11 +350,11 @@
           await App.identity.saveNickname();
           await App.settings.saveProviders();
 
-          App.ui.showBanner('success', 'Settings saved');
+          App.ui.showBanner('success', I18n.t('settings.saved'));
           App.ui.closeSettings();
           App.dashboard.loadInitial();
         } else {
-          var errMsg = await U.getApiErrorMessage(resp, 'Failed to save settings');
+          var errMsg = await U.getApiErrorMessage(resp, I18n.t('settings.save_failed'));
           App.ui.showBanner('error', errMsg);
         }
       } catch (e) {

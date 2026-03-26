@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Tú",
-  "chat.role_assistant": "Asistente"
+  "chat.role_assistant": "Asistente",
+  "settings.saved": "Configuración guardada",
+  "settings.save_failed": "Error al guardar configuración",
+  "settings.load_failed": "Error al cargar configuración",
+  "settings.storage_load_failed": "Error al cargar información de almacenamiento",
+  "settings.providers_load_failed": "Error al cargar estado de proveedores",
+  "settings.providers_saved": "Claves de proveedor guardadas",
+  "settings.providers_save_failed": "Error al guardar claves de proveedor",
+  "settings.enter_key_first": "Introduce una clave API primero",
+  "settings.key_verified": "Clave API de {name} verificada",
+  "settings.key_test_failed": "Prueba de {name} fallida: {error}"
 }

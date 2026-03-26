@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "أنت",
-  "chat.role_assistant": "المساعد"
+  "chat.role_assistant": "المساعد",
+  "settings.saved": "تم حفظ الإعدادات",
+  "settings.save_failed": "فشل في حفظ الإعدادات",
+  "settings.load_failed": "فشل في تحميل الإعدادات",
+  "settings.storage_load_failed": "فشل في تحميل معلومات التخزين",
+  "settings.providers_load_failed": "فشل في تحميل حالة المزودين",
+  "settings.providers_saved": "تم حفظ مفاتيح المزودين",
+  "settings.providers_save_failed": "فشل في حفظ مفاتيح المزودين",
+  "settings.enter_key_first": "أدخل مفتاح API أولاً",
+  "settings.key_verified": "تم التحقق من مفتاح {name}",
+  "settings.key_test_failed": "فشل اختبار {name}: {error}"
 }

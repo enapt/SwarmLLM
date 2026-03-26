@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "あなた",
-  "chat.role_assistant": "アシスタント"
+  "chat.role_assistant": "アシスタント",
+  "settings.saved": "設定を保存しました",
+  "settings.save_failed": "設定の保存に失敗しました",
+  "settings.load_failed": "設定の読み込みに失敗",
+  "settings.storage_load_failed": "ストレージ情報の読み込みに失敗",
+  "settings.providers_load_failed": "プロバイダー状態の読み込みに失敗",
+  "settings.providers_saved": "プロバイダーキーを保存しました",
+  "settings.providers_save_failed": "プロバイダーキーの保存に失敗",
+  "settings.enter_key_first": "APIキーを先に入力してください",
+  "settings.key_verified": "{name} APIキーが検証されました",
+  "settings.key_test_failed": "{name} テスト失敗：{error}"
 }

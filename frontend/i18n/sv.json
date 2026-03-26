@@ -378,5 +378,15 @@
   "pool.failed_generic": "Failed: {error}",
   "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.role_user": "Du",
-  "chat.role_assistant": "Assistent"
+  "chat.role_assistant": "Assistent",
+  "settings.saved": "Inställningar sparade",
+  "settings.save_failed": "Kunde inte spara inställningar",
+  "settings.load_failed": "Kunde inte ladda inställningar",
+  "settings.storage_load_failed": "Kunde inte ladda lagringsinformation",
+  "settings.providers_load_failed": "Kunde inte ladda leverantörsstatus",
+  "settings.providers_saved": "Leverantörsnycklar sparade",
+  "settings.providers_save_failed": "Kunde inte spara leverantörsnycklar",
+  "settings.enter_key_first": "Ange en API-nyckel först",
+  "settings.key_verified": "{name} API-nyckel verifierad",
+  "settings.key_test_failed": "{name} test misslyckades: {error}"
 }
