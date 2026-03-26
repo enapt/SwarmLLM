@@ -89,7 +89,7 @@
     var container = document.getElementById(containerId);
     if (!container || !data || data.length === 0) return;
     var hasActivity = data.some(function(v) { return v !== 0; });
-    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">Credit activity will appear here</span>'; return; }
+    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(I18n.t('chat.credit_activity_empty')) + '</span>'; return; }
     var min = Math.min.apply(null, data);
     var max = Math.max.apply(null, data);
     var range = (max - min) || 1;
@@ -186,7 +186,7 @@
         img.className = 'provider-icon provider-avatar-icon'; img.style.display = 'block';
         avatarEl.appendChild(img);
       } else {
-        avatarEl.textContent = 'AI';
+        avatarEl.textContent = I18n.t('chat.avatar_ai');
       }
     } else {
       var userImg = document.createElement('img');
@@ -208,7 +208,7 @@
     if (opts && opts.encrypted) {
       var lockSpan = document.createElement('span');
       lockSpan.className = 'msg-enc-lock';
-      lockSpan.title = 'Sent with E2E encryption';
+      lockSpan.title = I18n.t('chat.encrypted_title');
       lockSpan.innerHTML = '&#128274;';
       roleEl.appendChild(lockSpan);
     }
@@ -224,10 +224,10 @@
       actions.className = 'msg-actions';
       var copyBtn = document.createElement('button');
       copyBtn.className = 'msg-action-btn'; copyBtn.dataset.action = 'copy';
-      copyBtn.title = 'Copy this response'; copyBtn.textContent = I18n.t('actions.copy');
+      copyBtn.title = I18n.t('chat.copy_response'); copyBtn.textContent = I18n.t('actions.copy');
       var compareBtn = document.createElement('button');
       compareBtn.className = 'msg-action-btn'; compareBtn.dataset.action = 'compare';
-      compareBtn.title = 'Ask other models the same question'; compareBtn.textContent = I18n.t('actions.try_other_models');
+      compareBtn.title = I18n.t('chat.compare_question'); compareBtn.textContent = I18n.t('actions.try_other_models');
       actions.appendChild(copyBtn);
       actions.appendChild(compareBtn);
       div.querySelector('.msg-bubble').appendChild(actions);
@@ -280,7 +280,7 @@
     div.innerHTML = '<div class="chat-empty-icon">' + icon + '</div>' +
       '<div class="chat-empty-title">' + title + '</div>' +
       encHint +
-      '<div class="chat-empty-hint" style="margin:8px 0">Type a message below and press <kbd>Enter</kbd> to send</div>' +
+      '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.type_to_send') + '</div>' +
       '<div class="chat-empty-hint" style="font-size:0.8rem;margin-top:4px">' +
         (modelName ? '' : 'Pick a model from the dropdown above \u2022 ') +
         '<kbd>Shift+Enter</kbd> for new line</div>';
@@ -303,10 +303,10 @@
     if (!text) { el.textContent = ''; el.className = 'token-counter'; return; }
     var tokens = Math.ceil(text.length / 4);
     var words = text.trim().split(/\s+/).length;
-    el.textContent = words + ' words';
-    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = 'Very long message — some models may not handle this length'; }
-    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = 'Long message — response quality may vary'; }
-    else { el.className = 'token-counter'; el.title = 'Message length'; }
+    el.textContent = I18n.t('chat.word_count', { count: words });
+    if (tokens > 7000) { el.className = 'token-counter danger'; el.title = I18n.t('chat.length_very_long'); }
+    else if (tokens > 3000) { el.className = 'token-counter warn'; el.title = I18n.t('chat.length_long'); }
+    else { el.className = 'token-counter'; el.title = I18n.t('chat.length_normal'); }
   }
 
   function updateChatAvailability(hasModels) {

@@ -36,7 +36,7 @@
         });
 
         if (App.compare.models.length === 0) {
-          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">No models available yet. Download a model or add a cloud provider in Settings first.</span>';
+          container.innerHTML = '<span class="text-muted" style="font-size:0.8rem">' + U.escapeHtml(I18n.t('compare.no_models')) + '</span>';
           return;
         }
 
@@ -155,7 +155,7 @@
           });
         }).catch(function(err) {
           clearTimeout(timeoutId);
-          var msg = err.name === 'AbortError' ? 'Timed out after 45s' : err.message;
+          var msg = err.name === 'AbortError' ? I18n.t('compare.timed_out') : err.message;
           return { model: modelId, error: msg, ok: false, latency_ms: Math.round(performance.now() - start) };
         });
       });
@@ -276,7 +276,7 @@
         blocks.forEach(function(b) {
           if (b.type === 'text' && b.text) content += b.text;
         });
-        if (!content) content = '(empty response)';
+        if (!content) content = I18n.t('compare.empty_response');
         inputTokens = (result.data.usage || {}).input_tokens || 0;
         outputTokens = (result.data.usage || {}).output_tokens || 0;
       }

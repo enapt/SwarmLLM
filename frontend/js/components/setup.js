@@ -57,17 +57,17 @@
         var rec = document.getElementById('hw-recommendation');
         if (rec) {
           if (vramMb >= 8000) {
-            rec.textContent = 'Your GPU can run 7B models locally (Qwen 7B, Phi-3.5, Gemma 2B)';
+            rec.textContent = I18n.t('setup.hw_gpu_7b');
           } else if (vramMb >= 4000) {
-            rec.textContent = 'Your GPU can run smaller models locally (TinyLlama, Gemma 2B)';
+            rec.textContent = I18n.t('setup.hw_gpu_small');
           } else if (vramMb > 0) {
-            rec.textContent = 'Limited VRAM — best with CPU inference or cloud providers';
+            rec.textContent = I18n.t('setup.hw_limited_vram');
           } else {
-            rec.textContent = 'No GPU detected — CPU inference works, or add a cloud provider for speed';
+            rec.textContent = I18n.t('setup.hw_no_gpu');
           }
         }
       } catch (e) {
-        document.getElementById('hw-gpu').textContent = 'Detection failed';
+        document.getElementById('hw-gpu').textContent = I18n.t('setup.hw_detection_failed');
         App.setup.hwData = {};
       }
       document.getElementById('hw-loading').classList.add('hidden');
@@ -77,8 +77,8 @@
     joinInvite: async function() {
       var code = (document.getElementById('setup-invite-code').value || '').trim();
       var status = document.getElementById('setup-invite-status');
-      if (!code) { status.textContent = 'Paste an invite code first'; status.style.color = 'var(--text-muted)'; return; }
-      status.textContent = 'Connecting...'; status.style.color = 'var(--text-muted)';
+      if (!code) { status.textContent = I18n.t('setup.paste_code_first'); status.style.color = 'var(--text-muted)'; return; }
+      status.textContent = I18n.t('identity.connecting'); status.style.color = 'var(--text-muted)';
       try {
         var resp = await App.authFetch('/api/admin/join-network', {
           method: 'POST',
@@ -87,7 +87,7 @@
         });
         var result = await resp.json();
         if (resp.ok) {
-          status.textContent = 'Connected! Peer added.';
+          status.textContent = I18n.t('identity.connected');
           status.style.color = 'var(--green)';
           App.setup._joinedPeer = true;
           document.getElementById('setup-invite-code').value = '';
@@ -208,13 +208,13 @@
       }
       localStorage.setItem(App.SETUP_DONE_KEY, 'true');
       document.getElementById('setup-modal').classList.add('hidden');
-      App.ui.showBanner('success', 'Setup complete! Welcome to SwarmLLM.');
+      App.ui.showBanner('success', I18n.t('setup.complete'));
     },
 
     finish: function() {
       localStorage.setItem(App.SETUP_DONE_KEY, 'true');
       document.getElementById('setup-modal').classList.add('hidden');
-      App.ui.showBanner('info', 'Setup skipped \u2014 you can configure everything in Settings.');
+      App.ui.showBanner('info', I18n.t('setup.skipped'));
     }
   };
 })();

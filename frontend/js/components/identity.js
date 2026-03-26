@@ -45,10 +45,10 @@
           }),
         });
         if (!resp.ok) {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to set nickname'));
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('identity.nickname_failed')));
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Error saving nickname: ' + e.message);
+        App.ui.showBanner('error', I18n.t('identity.nickname_error', { error: e.message }));
       }
     },
 
@@ -63,7 +63,7 @@
         var entries = data.leaderboard || [];
 
         if (entries.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">No activity yet. Credits are earned by helping others run AI models.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="text-muted" style="text-align:center;padding:24px">' + U.escapeHtml(I18n.t('leaderboard.empty')) + '</td></tr>';
           return;
         }
 
@@ -117,9 +117,9 @@
       if (input && input.value) {
         navigator.clipboard.writeText(input.value).then(function() {
           if (btn) { btn.textContent = I18n.t('identity.copied'); btn.style.color = 'var(--green)'; setTimeout(function() { btn.textContent = I18n.t('actions.copy'); btn.style.color = ''; }, 2000); }
-          App.notifications.showToast('Network code copied to clipboard', 'success');
+          App.notifications.showToast(I18n.t('identity.code_copied'), 'success');
         }).catch(function() {
-          App.ui.showBanner('error', 'Failed to copy \u2014 try selecting and copying manually');
+          App.ui.showBanner('error', I18n.t('identity.copy_failed'));
         });
       }
     },
@@ -141,13 +141,13 @@
         if (resp.ok) {
           if (status) { status.textContent = I18n.t('identity.connected'); status.style.color = 'var(--green)'; }
           input.value = '';
-          App.notifications.showToast('Peer connected successfully', 'success');
+          App.notifications.showToast(I18n.t('identity.peer_connected'), 'success');
           setTimeout(function() { App.networkCode.load(); }, 2000);
         } else {
           if (status) { status.textContent = (data.error ? (data.error.message || data.error) : I18n.t('identity.failed_to_join')); status.style.color = 'var(--red, #ff6464)'; }
         }
       } catch (e) {
-        if (status) { status.textContent = 'Network error'; status.style.color = 'var(--red, #ff6464)'; }
+        if (status) { status.textContent = I18n.t('identity.network_error'); status.style.color = 'var(--red, #ff6464)'; }
       }
     }
   };

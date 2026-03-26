@@ -350,7 +350,7 @@
       S.pollTimers.forEach(function(t) { clearInterval(t); });
       S.pollTimers = [];
       if (S.wsWasConnected) {
-        showWsBanner('connected', 'Connected');
+        showWsBanner('connected', I18n.t('connection.connected'));
         hideWsBanner(2000);
         // Reload ALL data on reconnect so nothing is stale
         App.dashboard.loadInitial();

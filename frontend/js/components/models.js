@@ -152,11 +152,11 @@
           filename = btn ? (btn.getAttribute('data-hf-filename') || '') : '';
         }
         if (!filename) {
-          App.ui.showBanner('error', 'No model variant selected');
+          App.ui.showBanner('error', I18n.t('models.no_variant_selected'));
           return;
         }
 
-        App.ui.showBanner('info', 'Checking model availability...');
+        App.ui.showBanner('info', I18n.t('models.checking'));
         var resp = await App.authFetch('/api/admin/hf/download-shards', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -175,7 +175,7 @@
           App.notifications.showToast(data.message || 'Download could not be started', 'warning');
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Download failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.download_failed', { error: e.message }));
       }
     }
   };
@@ -216,11 +216,11 @@
             if (isDistributed) { swarmItems.push(item); } else { localItems.push(item); }
           });
           if (localItems.length > 0) {
-            groups.push({ key: 'local', label: 'On this computer', items: localItems });
+            groups.push({ key: 'local', label: I18n.t('models.group_local'), items: localItems });
             S._modelDropdownData = S._modelDropdownData.concat(localItems);
           }
           if (swarmItems.length > 0) {
-            groups.push({ key: 'swarm', label: 'Swarm network', items: swarmItems });
+            groups.push({ key: 'swarm', label: I18n.t('models.group_network'), items: swarmItems });
             S._modelDropdownData = S._modelDropdownData.concat(swarmItems);
           }
         }
@@ -259,7 +259,7 @@
           App.models.selectDropdown(found ? preferred : allIds[0], { silent: true });
         } else {
           S.currentModel = '';
-          updateModelDropdownLabel('Select model...');
+          updateModelDropdownLabel(I18n.t('models.select_model'));
         }
 
         App.models.syncMobile();
@@ -387,7 +387,7 @@
         var s = S.sessions[S.currentSessionId];
         if (s.messages.length > 0) {
           App.chat.newSession();
-          App.notifications.showToast('New session started for ' + U.formatModelDisplayName(modelId), 'info');
+          App.notifications.showToast(I18n.t('models.new_session', { model: U.formatModelDisplayName(modelId) }), 'info');
         } else {
           s.model = modelId;
           App.chat.saveSessions();

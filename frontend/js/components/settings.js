@@ -197,14 +197,13 @@
             var badge = document.getElementById('provider-status-' + p.name);
             if (badge) {
               if (p.configured && p.source === 'env') {
-                badge.textContent = '\u2713 From .env';
+                badge.textContent = I18n.t('settings.badge_from_env');
                 badge.className = 'badge provider-badge-active';
-                badge.title = 'Loaded from environment variable or .env file';
               } else if (p.configured) {
-                badge.textContent = '\u2713 Active';
+                badge.textContent = I18n.t('settings.badge_active');
                 badge.className = 'badge provider-badge-active';
               } else {
-                badge.textContent = 'Not set';
+                badge.textContent = I18n.t('settings.badge_not_set');
                 badge.className = 'badge';
                 badge.style.color = '';
               }
@@ -270,7 +269,7 @@
         App.ui.showBanner('error', I18n.t('settings.enter_key_first'));
         return;
       }
-      badge.textContent = 'Testing...';
+      badge.textContent = I18n.t('settings.badge_testing');
       badge.className = 'badge badge-testing';
       try {
         var saveBody = {};
@@ -296,7 +295,7 @@
           });
         }
         if (testResp.ok) {
-          badge.textContent = '\u2713 Active';
+          badge.textContent = I18n.t('settings.badge_active');
           badge.className = 'badge provider-badge-active';
           App.ui.showBanner('success', I18n.t('settings.key_verified', { name: name }));
           var testCard = badge.closest('.provider-card');
@@ -308,13 +307,13 @@
           var friendlyErr = err;
           try { var ej = JSON.parse(err); friendlyErr = (ej.error && ej.error.message) || err; } catch(pe) {}
           if (friendlyErr.length > 200) friendlyErr = friendlyErr.substring(0, 200) + '\u2026';
-          badge.textContent = '\u2717 Failed';
+          badge.textContent = I18n.t('settings.badge_failed');
           badge.className = 'badge badge-error';
           App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: friendlyErr }));
         }
         input.value = '';
       } catch (e) {
-        badge.textContent = '\u2717 Error';
+        badge.textContent = I18n.t('settings.badge_error');
         badge.className = 'badge badge-error';
         App.ui.showBanner('error', I18n.t('settings.key_test_failed', { name: name, error: e.message }));
       }
