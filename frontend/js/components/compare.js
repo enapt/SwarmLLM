@@ -201,6 +201,9 @@
           localStorage.setItem(App.COMPARE_HISTORY_KEY, JSON.stringify(history));
           App.compare.renderHistory();
         } catch (e) {}
+      }).catch(function() {
+        App.compare.running = false;
+        if (btn) { btn.disabled = false; btn.textContent = I18n.t('compare.run_compare'); }
       });
     },
 

@@ -125,7 +125,7 @@
 
       // Pool name
       var nameEl = document.getElementById('pool-name');
-      if (nameEl) nameEl.textContent = U.escapeHtml(data.name || 'My Devices');
+      if (nameEl) nameEl.textContent = data.name || 'My Devices';
 
       // Role label
       var roleEl = document.getElementById('pool-role-label');

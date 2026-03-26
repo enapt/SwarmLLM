@@ -427,7 +427,8 @@
       contentEl.innerHTML = '<span class="typing-indicator">' + U.escapeHtml(I18n.t('chat.thinking')) + '</span>';
 
       S.isStreaming = true;
-      document.getElementById('send-btn').disabled = true;
+      var _sendBtn = document.getElementById('send-btn');
+      if (_sendBtn) _sendBtn.disabled = true;
       var startTime = performance.now();
 
       var model = session.model || S.currentModel || 'local';
@@ -560,7 +561,8 @@
       }
 
       S.isStreaming = false;
-      document.getElementById('send-btn').disabled = false;
+      var _sendBtnEnd = document.getElementById('send-btn');
+      if (_sendBtnEnd) _sendBtnEnd.disabled = false;
     },
 
     scrollToBottom: function() {

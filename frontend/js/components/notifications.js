@@ -340,6 +340,8 @@
   }
 
   function connectWebSocket() {
+    // Guard against stacking parallel reconnects
+    if (S.ws && (S.ws.readyState === WebSocket.CONNECTING || S.ws.readyState === WebSocket.OPEN)) return;
     if (!S.wsWasConnected) setDashboardCover(true);
     var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     S.ws = new WebSocket(protocol + '//' + window.location.host + '/api/admin/ws');

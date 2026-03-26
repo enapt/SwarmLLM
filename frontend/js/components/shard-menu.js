@@ -90,7 +90,7 @@
       if (warnEl) {
         warnEl.style.display = 'none';
         if (shardState === 'local') {
-          warnEl.innerHTML = I18n.t('shard.auto_manage_warn');
+          warnEl.textContent = I18n.t('shard.auto_manage_warn');
           warnEl.style.display = '';
         }
       }
