@@ -113,9 +113,19 @@ impl ModelProcessPool {
         let socket_name = format!("swarmllm-worker-{}.sock", uuid::Uuid::new_v4());
         let socket_path = std::env::temp_dir().join(&socket_name);
 
+        // RAII guard: clean up socket file if spawn fails at any step.
+        // Defused (forgotten) on success when WorkerHandle takes ownership.
+        struct SocketCleanup(std::path::PathBuf);
+        impl Drop for SocketCleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+
         // Start listening before spawning so the worker can connect immediately
         let listener = UnixListener::bind(&socket_path)
             .map_err(|e| SwarmError::Internal(format!("socket bind: {e}")))?;
+        let socket_guard = SocketCleanup(socket_path.clone());
 
         // SEC: Restrict socket permissions so only the current user can connect.
         // Without this, any local process can impersonate the worker and intercept
@@ -210,6 +220,8 @@ impl ModelProcessPool {
                 .with_model(model_id.0.clone()),
         );
 
+        // Success — defuse the cleanup guard; WorkerHandle now owns the socket file
+        std::mem::forget(socket_guard);
         Ok(WorkerHandle {
             child,
             socket: Mutex::new((read_half, write_half)),
