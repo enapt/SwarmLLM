@@ -799,14 +799,14 @@
         } else if (isReady) {
           actionHtml = '<button class="btn btn-sm btn-primary" data-select-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_use')) + '</button>';
         } else if (isDownloading) {
-          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.btn_cancel')) + '</button>';
+          actionHtml = '<button class="shard-cancel-btn" data-cancel-download="' + U.escapeHtml(m.id) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('actions.cancel')) + '</button>';
         } else if (m.source === 'network' || m.status === 'available' || m.status === 'partial') {
-          actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_download')) + '</button>';
+          actionHtml = '<button class="btn btn-sm" data-request-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('models.download')) + '</button>';
         }
 
         var removeHtml = '';
         if (hostedShards > 0 && !isDownloading) {
-          removeHtml = '<button class="model-remove-btn" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('dashboard.btn_remove')) + '</button>';
+          removeHtml = '<button class="model-remove-btn" data-remove-model="' + U.escapeHtml(m.id) + '">' + U.escapeHtml(I18n.t('actions.remove')) + '</button>';
         }
 
         var name = U.formatModelDisplayName(m.name || m.id);
@@ -954,7 +954,7 @@
               '<input type="text" class="cloud-model-filter" id="' + filterId + '" placeholder="' + U.escapeHtml(I18n.t('dashboard.cloud_search')) + '" autocomplete="off">' +
               '<select class="cloud-model-sort" id="' + sortId + '">' +
                 '<option value="popular">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_newest')) + '</option>' +
-                '<option value="az">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_az')) + '</option>' +
+                '<option value="az">' + U.escapeHtml(I18n.t('dashboard.sort_az')) + '</option>' +
                 '<option value="ctx-desc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_desc')) + '</option>' +
                 '<option value="ctx-asc">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ctx_asc')) + '</option>' +
                 '<option value="avail">' + U.escapeHtml(I18n.t('dashboard.cloud_sort_ping')) + '</option>' +

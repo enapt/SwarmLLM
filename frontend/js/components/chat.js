@@ -305,7 +305,7 @@
           var providerIcon = (headerModelItem && headerModelItem.group) ? providerIconHtml(headerModelItem.group, 12) : '';
           encBanner.className = 'chat-enc-banner enc-cloud';
           encBanner.innerHTML = (providerIcon ? providerIcon + ' ' : '') +
-            'Routed to ' + U.escapeHtml(providerName) + ' \u2014 subject to their privacy policy \u00b7 not processed by the swarm';
+            U.escapeHtml(I18n.t('chat.cloud_routing', { provider: providerName }));
           encBanner.style.display = '';
         } else if (isAllLocal) {
           encBanner.className = 'chat-enc-banner enc-local';

@@ -77,9 +77,9 @@
           <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.resource_label">Resource Contribution</label>
           <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
           <div class="flex-between mb-1">
-            <span><span data-i18n="setup.contrib_min_label">Minimal</span><span class="contribution-hint">&lt;5% CPU</span></span>
-            <span class="mono" id="contribution-label" data-i18n="setup.contrib_min_label">Minimal</span>
-            <span><span data-i18n="setup.contrib_max_label">Maximum</span><span class="contribution-hint">75%+ CPU</span></span>
+            <span><span data-i18n="setup.contrib_minimal">Minimal</span><span class="contribution-hint">&lt;5% CPU</span></span>
+            <span class="mono" id="contribution-label" data-i18n="setup.contrib_minimal">Minimal</span>
+            <span><span data-i18n="setup.contrib_maximum">Maximum</span><span class="contribution-hint">75%+ CPU</span></span>
           </div>
           <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" aria-label="Resource contribution level">
         </div>
@@ -904,9 +904,9 @@
                   <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
                     <label style="margin:0" data-i18n="compare.pick_models">Pick 2 or more models to compare</label>
                     <div class="compare-filters" id="compare-filters" style="display:flex;gap:4px;margin-left:auto;font-size:0.72rem">
-                      <button class="btn btn-xs compare-filter active" data-filter="all">All</button>
-                      <button class="btn btn-xs compare-filter" data-filter="local">Local</button>
-                      <button class="btn btn-xs compare-filter" data-filter="cloud">Cloud</button>
+                      <button class="btn btn-xs compare-filter active" data-filter="all" data-i18n="compare.filter_all">All</button>
+                      <button class="btn btn-xs compare-filter" data-filter="local" data-i18n="compare.filter_local">Local</button>
+                      <button class="btn btn-xs compare-filter" data-filter="cloud" data-i18n="compare.filter_cloud">Cloud</button>
                     </div>
                   </div>
                   <div class="compare-model-list" id="compare-model-list">

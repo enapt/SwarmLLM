@@ -473,11 +473,11 @@
         if (h.status === 'up') {
           dotClass = h.latency_ms < 500 ? 'dot-fast' : h.latency_ms < 2000 ? 'dot-ok' : 'dot-slow';
           latencyText = h.latency_ms + 'ms';
-        } else if (h.status === 'rate_limited') { dotClass = 'dot-ok'; latencyText = 'Limited'; }
-        else if (h.status === 'timeout') { dotClass = 'dot-slow'; latencyText = 'Timeout'; }
-        else if (h.status === 'auth_error') { dotClass = 'dot-error'; latencyText = 'Key Invalid'; }
-        else if (h.status === 'overloaded') { dotClass = 'dot-ok'; latencyText = 'Busy'; }
-        else { dotClass = 'dot-error'; latencyText = 'Down'; }
+        } else if (h.status === 'rate_limited') { dotClass = 'dot-ok'; latencyText = I18n.t('provider.limited'); }
+        else if (h.status === 'timeout') { dotClass = 'dot-slow'; latencyText = I18n.t('provider.timeout'); }
+        else if (h.status === 'auth_error') { dotClass = 'dot-error'; latencyText = I18n.t('provider.key_invalid'); }
+        else if (h.status === 'overloaded') { dotClass = 'dot-ok'; latencyText = I18n.t('provider.busy'); }
+        else { dotClass = 'dot-error'; latencyText = I18n.t('provider.down'); }
         var name = PROVIDER_NAMES[p] || p;
         badge.querySelector('.pb-icon').innerHTML = providerIconHtml(p, 18);
         badge.querySelector('.pb-name').textContent = name;
@@ -523,11 +523,11 @@
         if (h.status === 'up') {
           statusIcon = h.latency_ms + 'ms';
           statusClass = h.latency_ms < 500 ? 'health-fast' : h.latency_ms < 2000 ? 'health-ok' : 'health-slow';
-        } else if (h.status === 'rate_limited') { statusIcon = 'Rate limited'; statusClass = 'health-warn'; }
-        else if (h.status === 'timeout') { statusIcon = 'Timeout'; statusClass = 'health-down'; }
-        else if (h.status === 'auth_error') { statusIcon = 'Auth error'; statusClass = 'health-down'; }
-        else if (h.status === 'overloaded') { statusIcon = 'Overloaded'; statusClass = 'health-warn'; }
-        else { statusIcon = 'Error'; statusClass = 'health-down'; }
+        } else if (h.status === 'rate_limited') { statusIcon = I18n.t('provider.rate_limited'); statusClass = 'health-warn'; }
+        else if (h.status === 'timeout') { statusIcon = I18n.t('provider.timeout'); statusClass = 'health-down'; }
+        else if (h.status === 'auth_error') { statusIcon = I18n.t('provider.auth_error'); statusClass = 'health-down'; }
+        else if (h.status === 'overloaded') { statusIcon = I18n.t('provider.overloaded'); statusClass = 'health-warn'; }
+        else { statusIcon = I18n.t('provider.error'); statusClass = 'health-down'; }
         badge.className = 'provider-health-badge ' + statusClass;
         badge.textContent = statusIcon;
         badge.title = h.status + (h.detail ? ': ' + h.detail : '') + ' (' + h.latency_ms + 'ms)';
@@ -550,7 +550,7 @@
           existingBadge.textContent = h.latency_ms + 'ms';
         } else {
           existingBadge.className = 'provider-health-badge health-down';
-          existingBadge.textContent = h.status === 'rate_limited' ? 'Limited' : h.status === 'timeout' ? 'Slow' : 'Down';
+          existingBadge.textContent = h.status === 'rate_limited' ? I18n.t('provider.limited') : h.status === 'timeout' ? I18n.t('provider.slow') : I18n.t('provider.down');
         }
       });
     },
@@ -595,11 +595,11 @@
         var cls = s.latency_ms < 1000 ? 'health-fast' : s.latency_ms < 3000 ? 'health-ok' : 'health-slow';
         return '<span class="model-status-badge ' + cls + '" title="Responded in ' + U.escapeHtml(String(s.latency_ms)) + 'ms">' + U.escapeHtml(String(s.latency_ms)) + 'ms</span>';
       }
-      if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="Model timed out (5s)">Slow</span>';
-      if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="Model unavailable (503)">Down</span>';
-      if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="Model not found (404)">N/A</span>';
-      if (s.status === 'rate_limited') return '<span class="model-status-badge health-warn" title="Rate limited">Limited</span>';
-      return '<span class="model-status-badge health-down" title="Error">Err</span>';
+      if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="' + U.escapeHtml(I18n.t('provider.model_timeout')) + '">' + U.escapeHtml(I18n.t('provider.slow')) + '</span>';
+      if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_unavailable')) + '">' + U.escapeHtml(I18n.t('provider.down')) + '</span>';
+      if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_not_found')) + '">N/A</span>';
+      if (s.status === 'rate_limited') return '<span class="model-status-badge health-warn" title="' + U.escapeHtml(I18n.t('provider.rate_limited')) + '">' + U.escapeHtml(I18n.t('provider.limited')) + '</span>';
+      return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.error')) + '">Err</span>';
     },
 
     updateModelBadges: function() {

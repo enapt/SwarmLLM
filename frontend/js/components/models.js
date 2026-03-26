@@ -83,8 +83,8 @@
 
           // Stats meta (downloads, likes, VRAM fit)
           var statsHtml = '';
-          if (repo.downloads) statsHtml += '<span>' + I18n.t('models.hf_downloads', { count: repo.downloads.toLocaleString() }) + '</span>';
-          if (repo.likes) statsHtml += '<span>' + I18n.t('models.hf_likes', { count: repo.likes.toLocaleString() }) + '</span>';
+          if (repo.downloads) statsHtml += '<span>' + I18n.t('models.downloads_count', { count: repo.downloads.toLocaleString() }) + '</span>';
+          if (repo.likes) statsHtml += '<span>' + I18n.t('models.likes_count', { count: repo.likes.toLocaleString() }) + '</span>';
           var shardSizeStr = repo.est_shard_size ? U.formatBytes(repo.est_shard_size) : '';
           var boomerangSizeStr = repo.est_boomerang_size ? U.formatBytes(repo.est_boomerang_size) : '';
           if (repo.fits_boomerang) {
@@ -105,10 +105,10 @@
           var replicas = repo.network_replicas || 0;
           var networkHtml = replicas > 0
             ? '<span class="badge-swarm" title="' + replicas + ' node(s)">' + U.escapeHtml(I18n.t('models.hf_on_swarm', { count: replicas })) + '</span>'
-            : '<span class="badge-new">' + U.escapeHtml(I18n.t('models.hf_new')) + '</span>';
-          if (replicas === 0) networkHtml += '<span style="color:var(--green)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_demand_high')) + '</span>';
-          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_demand_medium')) + '</span>';
-          else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.hf_well_replicated')) + '</span>';
+            : '<span class="badge-new">' + U.escapeHtml(I18n.t('models.badge_new')) + '</span>';
+          if (replicas === 0) networkHtml += '<span style="color:var(--green)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_high')) + '</span>';
+          else if (replicas <= 2) networkHtml += '<span style="color:var(--yellow)">&#128176; ' + U.escapeHtml(I18n.t('models.demand_medium')) + '</span>';
+          else networkHtml += '<span style="color:var(--text-muted)">&#128176; ' + U.escapeHtml(I18n.t('models.well_replicated')) + '</span>';
           card.querySelector('.hf-meta-network').innerHTML = networkHtml;
 
           // Variant selector

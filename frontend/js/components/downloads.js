@@ -155,7 +155,7 @@
             list.prepend(App.downloads.renderItem(acq));
             if (count) {
               var n = list.querySelectorAll('.dl-queue-item').length;
-              count.textContent = I18n.t('downloads.active_suffix', { count: n });
+              count.textContent = I18n.t('downloads.active_count', { count: n });
             }
           }
           return;
