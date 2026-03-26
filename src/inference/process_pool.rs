@@ -260,32 +260,40 @@ impl ModelProcessPool {
         let mut sock = handle.socket.lock().await;
         let (ref mut reader, ref mut writer) = *sock;
 
-        send_daemon(writer, &DaemonMsg::Forward(ipc_fwd), &activations)
-            .await
-            .map_err(|e| SwarmError::Internal(format!("send Forward: {e}")))?;
+        if let Err(e) = send_daemon(writer, &DaemonMsg::Forward(ipc_fwd), &activations).await {
+            drop(sock);
+            self.workers.remove(&model_id);
+            tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+            return Err(SwarmError::Internal(format!("send Forward: {e}")));
+        }
 
         loop {
-            let (msg, payload) = recv_worker(reader)
-                .await
-                .map_err(|e| SwarmError::Internal(format!("recv worker: {e}")))?;
-            match msg {
-                WorkerMsg::LayerResult(r) if r.request_id == request_id => {
-                    let activations = if r.has_activations { payload } else { vec![] };
-                    return Ok(crate::types::LayerResult {
-                        request_id: r.request_id,
-                        token_ids: r.token_ids,
-                        finish_reason: r.finish_reason,
-                        activations,
-                        sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
-                    });
+            match recv_worker(reader).await {
+                Ok((msg, payload)) => match msg {
+                    WorkerMsg::LayerResult(r) if r.request_id == request_id => {
+                        let activations = if r.has_activations { payload } else { vec![] };
+                        return Ok(crate::types::LayerResult {
+                            request_id: r.request_id,
+                            token_ids: r.token_ids,
+                            finish_reason: r.finish_reason,
+                            activations,
+                            sealed_token_ids: if r.sealed { r.sealed_payload } else { None },
+                        });
+                    }
+                    WorkerMsg::Error {
+                        request_id: rid,
+                        message,
+                    } if rid == request_id => {
+                        return Err(SwarmError::Inference(message));
+                    }
+                    _ => continue,
+                },
+                Err(e) => {
+                    drop(sock);
+                    self.workers.remove(&model_id);
+                    tracing::warn!(model = %model_id, error = %e, "Worker recv failed — evicting dead worker");
+                    return Err(SwarmError::Internal(format!("recv worker: {e}")));
                 }
-                WorkerMsg::Error {
-                    request_id: rid,
-                    message,
-                } if rid == request_id => {
-                    return Err(SwarmError::Inference(message));
-                }
-                _ => continue, // unexpected message, skip
             }
         }
     }
@@ -316,9 +324,12 @@ impl ModelProcessPool {
         let mut sock = handle.socket.lock().await;
         let (ref mut reader, ref mut writer) = *sock;
 
-        send_daemon(writer, &DaemonMsg::Generate(gen), &[])
-            .await
-            .map_err(|e| SwarmError::Internal(format!("send Generate: {e}")))?;
+        if let Err(e) = send_daemon(writer, &DaemonMsg::Generate(gen), &[]).await {
+            drop(sock);
+            self.workers.remove(model_id);
+            tracing::warn!(model = %model_id, error = %e, "Worker send failed — evicting dead worker");
+            return Err(SwarmError::Internal(format!("send Generate: {e}")));
+        }
 
         let mut content = String::new();
         #[allow(unused_assignments)]
@@ -329,9 +340,15 @@ impl ModelProcessPool {
         let mut finish_reason = String::new();
 
         loop {
-            let (msg, _) = recv_worker(reader)
-                .await
-                .map_err(|e| SwarmError::Internal(format!("recv generate: {e}")))?;
+            let (msg, _) = match recv_worker(reader).await {
+                Ok(v) => v,
+                Err(e) => {
+                    drop(sock);
+                    self.workers.remove(model_id);
+                    tracing::warn!(model = %model_id, error = %e, "Worker recv failed — evicting dead worker");
+                    return Err(SwarmError::Internal(format!("recv generate: {e}")));
+                }
+            };
             match msg {
                 WorkerMsg::Token {
                     request_id: rid,
