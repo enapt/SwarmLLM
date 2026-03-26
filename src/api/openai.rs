@@ -796,25 +796,8 @@ pub async fn chat_completions(
     if req.model == "auto" {
         let resolved = {
             let info = state.shared_state.loaded_model_info.read().await;
-            info.as_ref().and_then(|i| {
-                // Find the registry key for this loaded model (may differ from display name)
-                let slug = crate::types::slugify_model_name(&i.name);
-                let registry_id = state
-                    .shared_state
-                    .model_registry
-                    .get_manifest(&crate::types::ModelId(slug.clone()))
-                    .map(|m| m.id.0.clone())
-                    .or_else(|| {
-                        state
-                            .shared_state
-                            .model_registry
-                            .models()
-                            .into_iter()
-                            .find(|m| m.name == i.name)
-                            .map(|m| m.id.0.clone())
-                    });
-                registry_id.or(Some(slug))
-            })
+            info.as_ref()
+                .map(|i| resolve_loaded_model_registry_id(&state, &i.name))
         };
         // Fall back to the first model in the registry if nothing loaded locally
         let resolved = resolved.or_else(|| {
@@ -843,31 +826,7 @@ pub async fn chat_completions(
     );
 
     // Get model name — try loaded_model_info cache first, then manifest registry.
-    // loaded_model_info is a singleton that may hold a DIFFERENT model's info
-    // when multiple models are loaded, so always verify against the request.
-    let model_name = {
-        let info = state.shared_state.loaded_model_info.read().await;
-        let cached_name = info.as_ref().map(|i| i.name.clone());
-        // Check if the cached info matches the requested model
-        let matches_request = info.as_ref().is_some_and(|i| {
-            let slug = crate::types::slugify_model_name(&i.name);
-            slug == req.model || i.name == req.model
-        });
-        drop(info);
-        if matches_request {
-            cached_name
-        } else {
-            // Look up from manifest registry for the requested model.
-            // Do NOT fall back to cached_name — if the requested model doesn't
-            // match the loaded model, we must return None so cloud provider
-            // routing works correctly.
-            state
-                .shared_state
-                .model_registry
-                .get_manifest(&crate::types::ModelId(req.model.clone()))
-                .map(|m| m.name.clone())
-        }
-    };
+    let model_name = resolve_model_name(&state, &req.model).await;
 
     // No local full-model executor — use distributed inference or forward.
     // Nodes are NOT required to have all shards. Any node can initiate inference
@@ -1315,6 +1274,95 @@ fn all_shards_available_inner(state: &AppState, model_name: &str) -> bool {
         "all_shards_available: all layers covered across network"
     );
     true
+}
+
+/// Resolve a loaded model's display name to its registry ID.
+///
+/// Looks up the model in the registry by slug, then by display name.
+/// Returns the registry ID if found, otherwise returns the slugified name.
+pub fn resolve_loaded_model_registry_id(state: &AppState, model_display_name: &str) -> String {
+    let slug = crate::types::slugify_model_name(model_display_name);
+    state
+        .shared_state
+        .model_registry
+        .get_manifest(&crate::types::ModelId(slug.clone()))
+        .map(|m| m.id.0.clone())
+        .or_else(|| {
+            state
+                .shared_state
+                .model_registry
+                .models()
+                .into_iter()
+                .find(|m| m.name == model_display_name)
+                .map(|m| m.id.0.clone())
+        })
+        .unwrap_or(slug)
+}
+
+/// Check if a requested model matches the currently loaded model.
+///
+/// Returns true if the request matches by slug, display name, or registry ID.
+pub fn model_matches_loaded(state: &AppState, loaded_name: &str, requested: &str) -> bool {
+    let slug = crate::types::slugify_model_name(loaded_name);
+    requested == slug
+        || requested == loaded_name
+        || state
+            .shared_state
+            .model_registry
+            .get_manifest(&crate::types::ModelId(requested.to_string()))
+            .is_some()
+}
+
+/// Resolve the model name to look up for inference (returns display name if available).
+///
+/// Checks loaded_model_info cache first, verifying it matches the request.
+/// Falls back to manifest registry. Used by openai and anthropic handlers.
+pub async fn resolve_model_name(state: &AppState, requested_model: &str) -> Option<String> {
+    let info = state.shared_state.loaded_model_info.read().await;
+    let cached_name = info.as_ref().map(|i| i.name.clone());
+    let matches_request = info.as_ref().is_some_and(|i| {
+        let slug = crate::types::slugify_model_name(&i.name);
+        slug == requested_model || i.name == requested_model
+    });
+    drop(info);
+    if matches_request {
+        cached_name
+    } else {
+        state
+            .shared_state
+            .model_registry
+            .get_manifest(&crate::types::ModelId(requested_model.to_string()))
+            .map(|m| m.name.clone())
+    }
+}
+
+/// Metadata extracted from a split model entry for prompt building.
+pub struct SplitModelMeta {
+    pub chat_template: Option<String>,
+    pub bos_token: String,
+    pub eos_token_str: String,
+    pub layer_range: (u32, u32),
+}
+
+/// Look up split model metadata by model ID. Used by openai and anthropic handlers.
+pub fn get_split_model_meta(
+    state: &AppState,
+    model_id: &crate::types::ModelId,
+) -> Option<SplitModelMeta> {
+    state
+        .shared_state
+        .split_models
+        .iter()
+        .find(|e| e.key().0 == *model_id)
+        .map(|entry| {
+            let e = entry.value();
+            SplitModelMeta {
+                chat_template: e.cached_chat_template.clone(),
+                bos_token: e.bos_token.clone(),
+                eos_token_str: e.eos_token_str.clone(),
+                layer_range: (e.layer_start as u32, e.layer_end as u32),
+            }
+        })
 }
 
 /// Decode token IDs to text using the split model's tokenizer.
@@ -1847,23 +1895,14 @@ async fn split_non_stream_response(
     model_id: crate::types::ModelId,
 ) -> Result<axum::response::Response, ApiError> {
     // Get metadata from entry (no model lock needed)
-    let model_entry = state
-        .shared_state
-        .split_models
-        .iter()
-        .find(|e| e.key().0 == model_id);
-    let (chat_template, bos_token, eos_token_str, layer_range) = match model_entry {
-        Some(entry) => {
-            let e = entry.value();
-            (
-                e.cached_chat_template.clone(),
-                e.bos_token.clone(),
-                e.eos_token_str.clone(),
-                (e.layer_start as u32, e.layer_end as u32),
-            )
-        }
-        None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
-    };
+    let meta = get_split_model_meta(&state, &model_id)
+        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
+    let (chat_template, bos_token, eos_token_str, layer_range) = (
+        meta.chat_template,
+        meta.bos_token,
+        meta.eos_token_str,
+        meta.layer_range,
+    );
 
     let prompt = chat_template::build_prompt(
         &messages,
@@ -1958,21 +1997,8 @@ async fn split_stream_response(
         }
 
         // Get metadata from entry (no model lock needed)
-        let model_entry = state
-            .shared_state
-            .split_models
-            .iter()
-            .find(|e| e.key().0 == model_id);
-        let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
-            Some(entry) => {
-                let e = entry.value();
-                (
-                    e.cached_chat_template.clone(),
-                    e.bos_token.clone(),
-                    e.eos_token_str.clone(),
-                    (e.layer_start as u32, e.layer_end as u32),
-                )
-            }
+        let (chat_tmpl, bos, eos_str, layer_range) = match get_split_model_meta(&state, &model_id) {
+            Some(m) => (m.chat_template, m.bos_token, m.eos_token_str, m.layer_range),
             None => {
                 tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
                 let _ = tx.send(StreamEvent::Done).await;

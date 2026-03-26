@@ -401,48 +401,25 @@ pub async fn messages(
     let internal_messages = to_internal_messages(&req);
     let sampling_params = to_sampling_params(&req);
 
-    // Try local inference first (same resolution as openai.rs)
-    let model_name = {
-        let info = state.shared_state.loaded_model_info.read().await;
-        info.as_ref().map(|i| i.name.clone())
-    };
-
-    // Resolve model to local registry ID when the requested model matches the loaded
-    // model by slug. Only resolve if the names actually match — never silently substitute
-    // a completely different model than what was requested.
-    let model = if model_name.is_some() && !crate::api::openai::all_shards_available(&state, &model)
-    {
+    // Try local inference first — resolve model to registry ID using shared helper.
+    let model = {
         let info = state.shared_state.loaded_model_info.read().await;
         if let Some(i) = info.as_ref() {
-            let slug = crate::types::slugify_model_name(&i.name);
-            // Only resolve if the requested model matches the loaded model by slug or registry ID
-            let registry_id = state
-                .shared_state
-                .model_registry
-                .get_manifest(&crate::types::ModelId(slug.clone()))
-                .map(|m| m.id.0.clone())
-                .or_else(|| {
-                    state
-                        .shared_state
-                        .model_registry
-                        .models()
-                        .into_iter()
-                        .find(|m| m.name == i.name)
-                        .map(|m| m.id.0.clone())
-                });
-            let resolved = registry_id.unwrap_or(slug);
-            // Only use the resolved ID if the requested model is "auto" or matches
-            // the resolved model. Never silently substitute a different model.
-            if model == "auto" || model == resolved || model == i.name {
-                resolved
+            if !crate::api::openai::all_shards_available(&state, &model) {
+                let resolved =
+                    crate::api::openai::resolve_loaded_model_registry_id(&state, &i.name);
+                // Only use resolved ID if request matches. Never silently substitute.
+                if model == "auto" || model == resolved || model == i.name {
+                    resolved
+                } else {
+                    model
+                }
             } else {
-                model // Keep the original requested model name
+                model
             }
         } else {
             model
         }
-    } else {
-        model
     };
 
     // Check if network has all shards for this model
@@ -490,16 +467,7 @@ pub async fn messages(
     let model_locally_available = {
         let info = state.shared_state.loaded_model_info.read().await;
         info.as_ref()
-            .map(|i| {
-                let slug = crate::types::slugify_model_name(&i.name);
-                model == slug
-                    || model == i.name
-                    || state
-                        .shared_state
-                        .model_registry
-                        .get_manifest(&crate::types::ModelId(model.clone()))
-                        .is_some()
-            })
+            .map(|i| crate::api::openai::model_matches_loaded(&state, &i.name, &model))
             .unwrap_or(false)
     };
 
@@ -1079,23 +1047,14 @@ async fn anthropic_split_non_stream(
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
     let requested_mid = crate::types::ModelId(model.clone());
-    let model_entry = state
-        .shared_state
-        .split_models
-        .iter()
-        .find(|e| e.key().0 == requested_mid);
-    let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
-        Some(entry) => {
-            let e = entry.value();
-            (
-                e.cached_chat_template.clone(),
-                e.bos_token.clone(),
-                e.eos_token_str.clone(),
-                (e.layer_start as u32, e.layer_end as u32),
-            )
-        }
-        None => return Err(ApiError(crate::error::SwarmError::NoModelLoaded)),
-    };
+    let meta = crate::api::openai::get_split_model_meta(state, &requested_mid)
+        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
+    let (chat_tmpl, bos, eos_str, layer_range) = (
+        meta.chat_template,
+        meta.bos_token,
+        meta.eos_token_str,
+        meta.layer_range,
+    );
 
     let prompt = chat_template::build_prompt(messages, chat_tmpl.as_deref(), &bos, &eos_str);
 
@@ -1173,35 +1132,23 @@ async fn anthropic_split_stream(
             .await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
-        let model_entry = state
-            .shared_state
-            .split_models
-            .iter()
-            .find(|e| e.key().0 == requested_mid);
-        let (chat_tmpl, bos, eos_str, layer_range) = match model_entry {
-            Some(entry) => {
-                let e = entry.value();
-                (
-                    e.cached_chat_template.clone(),
-                    e.bos_token.clone(),
-                    e.eos_token_str.clone(),
-                    (e.layer_start as u32, e.layer_end as u32),
-                )
-            }
-            None => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::MessageDelta {
-                        stop_reason: "end_turn".into(),
-                        output_tokens: 0,
-                    })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                return;
-            }
-        };
+        let (chat_tmpl, bos, eos_str, layer_range) =
+            match crate::api::openai::get_split_model_meta(&state, &requested_mid) {
+                Some(m) => (m.chat_template, m.bos_token, m.eos_token_str, m.layer_range),
+                None => {
+                    let _ = sse_tx
+                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                        .await;
+                    let _ = sse_tx
+                        .send(AnthropicSseEvent::MessageDelta {
+                            stop_reason: "end_turn".into(),
+                            output_tokens: 0,
+                        })
+                        .await;
+                    let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                    return;
+                }
+            };
 
         // Build prompt using cached metadata
         let prompt = chat_template::build_prompt(&messages, chat_tmpl.as_deref(), &bos, &eos_str);
