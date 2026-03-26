@@ -20,9 +20,6 @@ pub const PROTOCOL_ID: &str = "/swarmllm/1.0.0";
 /// GossipSub topic for model coordination (shard announcements, capacity updates).
 pub const TOPIC_MODELS: &str = "swarm/models";
 
-/// GossipSub topic for model governance (voting on model additions).
-pub const TOPIC_GOVERNANCE: &str = "swarm/governance";
-
 /// GossipSub topic for credit balance gossip.
 pub const TOPIC_CREDITS: &str = "swarm/credits";
 

@@ -98,7 +98,7 @@ Single Rust binary, three simultaneous functions:
 | PoolManager | NetworkManager | `network_tx` | PoolInvitation, PoolState gossip |
 | AutoShardManager | AcquisitionManager | `acquisition_tx` | AcquisitionCommand (auto downloads) |
 
-The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, ModelVote is processed by the model governance module, and pool messages go to PoolManager.
+The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that routes inbound network messages to the appropriate subsystem. Inference messages go to InferenceRouter, CreditGossip updates peer balance distributions, and pool messages go to PoolManager.
 
 ## Startup Sequence
 
@@ -213,7 +213,7 @@ libp2p Swarm
 │
 ├── GossipSub (pub/sub, mesh_outbound_min=1)
 │   ├── swarm/models/{model_id}       → ShardAnnounce, capacity
-│   ├── swarm/governance              → ModelVote
+│   ├── swarm/credits                 → CreditGossip
 │   ├── swarm/health                  → trust summaries
 │   ├── swarm/identity                → NicknameRecord (signed, timestamp-checked)
 │   └── swarm/pools                   → PoolState, PoolInvitation
@@ -1224,12 +1224,12 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 
 **Backend** (`src/daemon/state.rs`):
 - `ActivityEvent` struct with fields: `kind` (enum, 26 variants), `model_id` (optional), `message` (human-readable string), `timestamp` (Unix seconds)
-- `activity_tx: broadcast::Sender<ActivityEvent>` in SharedState (capacity 256, oldest events dropped on overflow)
-- All 10 subsystems emit events via `state.activity_tx.send()` — fire-and-forget (send errors ignored)
+- `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
+- All 10 subsystems emit events via `state.events.activity_tx.send()` — fire-and-forget (send errors ignored)
 - Example event kinds: `ShardDownloaded`, `ShardPruned`, `InferenceRequest`, `InferenceComplete`, `PeerConnected`, `PeerDisconnected`, `CreditEarned`, `CreditSpent`, `ModelLoaded`, `ModelUnloaded`, `WorkerSpawned`, `WorkerKilled`, `PoolJoined`, `AutoManageCycle`, `HealthPing`, and more
 
 **WebSocket delivery** (`src/api/websocket.rs`):
-- ApiServer subscribes to `activity_tx` on WebSocket upgrade
+- ApiServer subscribes to `state.events.activity_tx` on WebSocket upgrade
 - Events sent to client as `{"type":"activity_event","data":{...}}` JSON messages
 - Dropped messages (slow client) are non-fatal — buffer overflow discards oldest events
 

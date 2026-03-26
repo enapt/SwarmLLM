@@ -5,7 +5,7 @@
 ```
 libp2p Swarm
 ├── Kademlia (DHT) — distributed hash table for peer/shard/model lookup
-├── GossipSub — pub/sub for shard announcements, governance, identity, pools
+├── GossipSub — pub/sub for shard announcements, credits, identity, pools
 ├── request_response — unified protocol (/swarmllm/1.0.0, 300s timeout)
 ├── mDNS — optional LAN peer discovery
 ├── connection_limits — max 1/peer (>1 causes rr round-robin to dead connections), 500 total
@@ -37,7 +37,6 @@ SwarmLLM uses 5 independent discovery layers:
 | Topic | Content |
 |---|---|
 | `swarm/models/{model_id}` | ShardAnnounce, capacity |
-| `swarm/governance` | ModelVote |
 | `swarm/health` | Trust summaries |
 | `swarm/identity` | NicknameRecord (signed) |
 | `swarm/pools` | PoolState, PoolInvitation |
