@@ -175,31 +175,31 @@
     <div class="modal">
       <div class="modal-header">
         <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
-        <button class="btn btn-ghost btn-sm" id="btn-close-settings" aria-label="Close settings">&times;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-close-settings" data-i18n-aria-label="settings.close_aria" aria-label="Close settings">&times;</button>
       </div>
       <div class="form-group">
         <label for="settings-api-key" data-i18n="settings.access_token">Access Token</label>
         <div class="flex gap-1" style="align-items:center">
-          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" placeholder="Loading..." value="">
-          <button class="btn btn-sm" id="btn-copy-api-key" title="Copy access token">Copy</button>
+          <input type="text" id="settings-api-key" readonly style="flex:1;font-family:var(--font-mono);font-size:0.8rem;background:var(--bg-primary)" data-i18n-placeholder="settings.loading" placeholder="Loading..." value="">
+          <button class="btn btn-sm" id="btn-copy-api-key" data-i18n-title="settings.copy_token_title" title="Copy access token" data-i18n="actions.copy">Copy</button>
         </div>
         <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.access_token_hint">Your private key for connecting other apps to SwarmLLM. Keep it secret.</span>
       </div>
       <div class="form-group">
-        <label for="settings-nickname">Nickname</label>
-        <input type="text" id="settings-nickname" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
-        <span class="text-muted" style="font-size:0.75rem">1-32 chars, letters/numbers/underscore/dash only</span>
-        <span class="form-error hidden" id="nickname-error">Only letters, numbers, underscore, and dash allowed</span>
+        <label for="settings-nickname" data-i18n="settings.nickname_label">Nickname</label>
+        <input type="text" id="settings-nickname" data-i18n-placeholder="settings.nickname_anon" placeholder="Anonymous" maxlength="32" pattern="[a-zA-Z0-9_-]+">
+        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.nickname_hint">1-32 chars, letters/numbers/underscore/dash only</span>
+        <span class="form-error hidden" id="nickname-error" data-i18n="settings.nickname_error">Only letters, numbers, underscore, and dash allowed</span>
       </div>
       <div class="form-group">
-        <label for="settings-visibility">Visibility</label>
+        <label for="settings-visibility" data-i18n="settings.visibility_label">Visibility</label>
         <select id="settings-visibility">
-          <option value="anonymous">Anonymous (show ID only)</option>
-          <option value="nickname">Nickname (show your name to others)</option>
+          <option value="anonymous" data-i18n="settings.visibility_anon">Anonymous (show ID only)</option>
+          <option value="nickname" data-i18n="settings.visibility_nick">Nickname (show your name to others)</option>
         </select>
       </div>
       <div class="form-group">
-        <label for="settings-language">Language</label>
+        <label for="settings-language" data-i18n="settings.language_label">Language</label>
         <select id="settings-language">
           <option value="en">English</option>
           <option value="es">Español</option>
@@ -223,61 +223,61 @@
           <option value="uk">Українська</option>
           <option value="cs">Čeština</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem">Dashboard language. Community translations welcome!</span>
+        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.language_hint">Dashboard language. Community translations welcome!</span>
       </div>
       <div class="form-group">
-        <label for="settings-contribution">Contribution Level</label>
+        <label for="settings-contribution" data-i18n="settings.contribution_label">Contribution Level</label>
         <select id="settings-contribution">
-          <option value="minimal">Minimal</option>
-          <option value="moderate" selected>Moderate</option>
-          <option value="maximum">Maximum</option>
+          <option value="minimal" data-i18n="setup.contrib_minimal">Minimal</option>
+          <option value="moderate" selected data-i18n="setup.contrib_moderate">Moderate</option>
+          <option value="maximum" data-i18n="setup.contrib_maximum">Maximum</option>
         </select>
       </div>
       <div class="form-group">
-        <label for="settings-max-requests">Max Concurrent Requests</label>
+        <label for="settings-max-requests" data-i18n="settings.max_requests">Max Concurrent Requests</label>
         <input type="number" id="settings-max-requests" value="10" min="1" max="100">
       </div>
       <div class="form-group">
-        <label for="settings-auto-shards">Auto-Download Models</label>
+        <label for="settings-auto-shards" data-i18n="settings.auto_download">Auto-Download Models</label>
         <select id="settings-auto-shards">
-          <option value="off">Off</option>
-          <option value="on">On — automatically download popular model data</option>
+          <option value="off" data-i18n="settings.auto_off">Off</option>
+          <option value="on" data-i18n="settings.auto_on">On — automatically download popular model data</option>
         </select>
-        <span class="text-muted" style="font-size:0.75rem">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
+        <span class="text-muted" style="font-size:0.75rem" data-i18n="settings.auto_download_hint">Downloads pieces of AI models so the network can run them. Uses disk space.</span>
       </div>
       <div id="settings-storage-info" class="hidden" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:12px;border:1px solid var(--border)">
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Model data stored</span>
+          <span class="text-muted" data-i18n="settings.model_data_stored">Model data stored</span>
           <span class="mono" id="settings-storage-used">--</span>
         </div>
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Max auto-download storage</span>
+          <span class="text-muted" data-i18n="settings.max_auto_storage">Max auto-download storage</span>
           <span class="mono" id="settings-storage-max">--</span>
         </div>
         <div class="flex-between mb-1" style="font-size:0.85rem">
-          <span class="text-muted">Network GPU memory</span>
+          <span class="text-muted" data-i18n="settings.network_gpu_memory">Network GPU memory</span>
           <span class="mono" id="settings-pool-vram">--</span>
         </div>
         <div id="settings-storage-models" style="font-size:0.8rem;margin-top:8px"></div>
       </div>
       <div class="form-group" id="settings-auto-manage-storage-group" style="display:none">
-        <label>Max Auto-Download Storage (MB, 0 = 50% of disk limit)</label>
+        <label data-i18n="settings.max_auto_label">Max Auto-Download Storage (MB, 0 = 50% of disk limit)</label>
         <input type="number" id="settings-auto-manage-storage" value="0" min="0">
       </div>
       <details class="settings-providers" id="settings-providers-section">
-        <summary>Cloud Providers</summary>
+        <summary data-i18n="settings.cloud_providers">Cloud Providers</summary>
         <div class="mt-2" style="font-size:0.8rem">
           <span class="text-muted">Add cloud API keys to access models from OpenAI, Anthropic, DeepSeek, and more. Keys can also be loaded automatically from a <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">.env</code> file in your data directory (e.g. <code style="background:var(--bg-tertiary);padding:1px 4px;border-radius:3px">OPENAI_API_KEY=sk-...</code>).</span>
         </div>
         <div class="mt-2" style="margin-bottom:8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-          <label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px">Key source:
+          <label style="font-size:0.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:4px" data-i18n="settings.key_source_label">Key source:
             <select id="provider-key-source" style="font-size:0.78rem;padding:3px 6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
-              <option value="auto">Auto (dashboard, then .env)</option>
-              <option value="env">.env / environment only</option>
-              <option value="dashboard">Dashboard only</option>
+              <option value="auto" data-i18n="settings.key_source_auto">Auto (dashboard, then .env)</option>
+              <option value="env" data-i18n="settings.key_source_env">.env / environment only</option>
+              <option value="dashboard" data-i18n="settings.key_source_dashboard">Dashboard only</option>
             </select>
           </label>
-          <input type="text" id="provider-filter" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+          <input type="text" id="provider-filter" data-i18n-placeholder="settings.filter_providers" placeholder="Filter providers..." style="flex:1;min-width:150px;font-size:0.8rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
         </div>
         <div id="provider-cards" class="mt-2">
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
@@ -286,8 +286,8 @@
               <span class="badge" id="provider-status-anthropic" style="font-size:0.7rem">Not set</span>
             </div>
             <input type="password" id="provider-key-anthropic" placeholder="sk-ant-..." style="width:100%;font-size:0.8rem;margin-bottom:4px">
-            <button class="btn btn-sm" data-test-provider="anthropic">Test</button>
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="provider-signup-link">Get key &rarr;</a>
+            <button class="btn btn-sm" data-test-provider="anthropic" data-i18n="settings.test_btn">Test</button>
+            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="settings.get_key">Get key &rarr;</a>
           </div>
           <div class="provider-card" style="background:var(--bg-tertiary);border-radius:var(--radius);padding:10px;margin-bottom:8px;border:1px solid var(--border)">
             <div class="flex-between mb-1">
@@ -391,24 +391,24 @@
         </div>
       </details>
       <details class="settings-advanced">
-        <summary>Advanced Settings</summary>
+        <summary data-i18n="settings.advanced">Advanced Settings</summary>
         <div class="mt-2">
           <div class="form-group">
-            <label>Max Bandwidth (Mbps, 0 = unlimited)</label>
+            <label data-i18n="settings.max_bandwidth">Max Bandwidth (Mbps, 0 = unlimited)</label>
             <input type="number" id="settings-bandwidth" value="0" min="0">
           </div>
           <div class="form-group">
-            <label>Max Disk (MB)</label>
+            <label data-i18n="settings.max_disk">Max Disk (MB)</label>
             <input type="number" id="settings-disk" value="50000" min="1000">
           </div>
           <div class="form-group">
-            <label for="settings-health-interval">Provider Health Check Interval (seconds, 0 = off)</label>
+            <label for="settings-health-interval" data-i18n="settings.health_interval">Provider Health Check Interval (seconds, 0 = off)</label>
             <input type="number" id="settings-health-interval" value="30" min="0" max="3600" step="5">
           </div>
         </div>
       </details>
       <div class="mt-2" style="display:flex;gap:8px;align-items:center">
-        <button class="btn btn-primary" id="btn-save-settings">Save Settings</button>
+        <button class="btn btn-primary" id="btn-save-settings" data-i18n="actions.save_settings">Save Settings</button>
         <button class="btn btn-ghost btn-sm" id="btn-rerun-setup" title="Re-run the first-time setup wizard" style="margin-left:auto;font-size:0.75rem">Re-run Setup</button>
       </div>
     </div>
@@ -418,8 +418,8 @@
   <div class="modal-overlay hidden" id="model-browser-modal" role="dialog" aria-modal="true" aria-labelledby="model-browser-title">
     <div class="modal modal-lg">
       <div class="modal-header">
-        <h2 id="model-browser-title">Find &amp; Download Models</h2>
-        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" aria-label="Close model browser">&times;</button>
+        <h2 id="model-browser-title" data-i18n="model_browser.title">Find &amp; Download Models</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-close-model-browser" data-i18n-aria-label="model_browser.close_aria" aria-label="Close model browser">&times;</button>
       </div>
       <div class="hf-swarm-notice">
         <span class="hf-swarm-notice-icon">&#9432;</span>
@@ -455,7 +455,7 @@
       </div>
       <div id="hf-loading" class="hidden" style="text-align:center;padding:20px">
         <div class="spinner"></div>
-        <span class="text-muted ml-1">Searching HuggingFace...</span>
+        <span class="text-muted ml-1" data-i18n="model_browser.searching">Searching HuggingFace...</span>
       </div>
     </div>
   </div>
@@ -477,26 +477,26 @@
     <div class="header-right">
       <div class="model-selector">
         <div class="model-dropdown" id="model-dropdown">
-          <button class="model-dropdown-trigger" id="model-dropdown-trigger" title="Active model">
-            <span id="model-dropdown-label">Select model...</span>
+          <button class="model-dropdown-trigger" id="model-dropdown-trigger" data-i18n-title="nav.active_model" title="Active model">
+            <span id="model-dropdown-label" data-i18n="models.select_model">Select model...</span>
             <span class="model-dropdown-arrow">&#9662;</span>
           </button>
           <div class="model-dropdown-panel" id="model-dropdown-panel">
-            <input type="text" class="model-dropdown-search" id="model-dropdown-search" placeholder="Filter models..." autocomplete="off" />
+            <input type="text" class="model-dropdown-search" id="model-dropdown-search" data-i18n-placeholder="nav.filter_models" placeholder="Filter models..." autocomplete="off" />
             <div class="model-dropdown-list" id="model-dropdown-list"></div>
           </div>
         </div>
         <input type="hidden" id="model-select" value="" />
-        <button class="btn btn-sm" id="btn-open-model-browser" title="Find models on HuggingFace to download and host. Models only run distributed if swarm peers are already hosting them." aria-label="Find models">&#43; Find model</button>
+        <button class="btn btn-sm" id="btn-open-model-browser" data-i18n-title="nav.find_models_tip" title="Find models on HuggingFace to download and host." data-i18n-aria-label="nav.find_models_aria" aria-label="Find models">&#43; Find model</button>
       </div>
       <div class="share-btn-wrap" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-share-network" title="Share your swarm peer address" aria-label="Share peer address" style="font-size:1rem"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></button>
+        <button class="btn btn-ghost btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n-aria-label="nav.share_peer" aria-label="Share peer address" style="font-size:1rem"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></button>
         <div class="share-popover" id="share-popover">
           <label style="font-weight:600;margin-bottom:6px" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
           <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
           <div style="display:flex;gap:0.5rem;margin-bottom:10px">
             <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your peer address">
-            <button class="btn btn-sm" id="btn-copy-network-code" title="Copy to clipboard">Copy</button>
+            <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
           </div>
           <label style="font-weight:600;margin-bottom:4px" data-i18n="network.other_peer_address">Another User's Peer Address</label>
           <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
@@ -508,18 +508,18 @@
           <div class="text-muted" style="font-size:0.68rem;margin-top:6px;border-top:1px solid var(--border);padding-top:6px" data-i18n="network.not_devices">This connects you to the SwarmLLM network. To link your own devices, use the My Devices tab instead.</div>
         </div>
       </div>
-      <button class="btn btn-ghost btn-sm" id="btn-open-settings" title="Settings" aria-label="Settings">&#9881;</button>
+      <button class="btn btn-ghost btn-sm" id="btn-open-settings" data-i18n-title="settings.title" title="Settings" data-i18n-aria-label="settings.title" aria-label="Settings">&#9881;</button>
       <div class="header-lang-picker" style="position:relative">
-        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" title="Language" aria-label="Language"><img src="/static/flags/gb.svg" alt="EN" class="lang-flag-img"></button>
+        <button class="btn btn-ghost btn-sm" id="btn-lang-picker" data-i18n-title="settings.language_label" title="Language" data-i18n-aria-label="settings.language_label" aria-label="Language"><img src="/static/flags/gb.svg" alt="EN" class="lang-flag-img"></button>
         <div class="lang-dropdown" id="lang-dropdown" style="display:none"></div>
       </div>
-      <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
+      <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" data-i18n-title="nav.toggle_theme" title="Toggle light/dark theme" data-i18n-aria-label="nav.toggle_theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
         <span class="mono" id="node-id" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
       </div>
-      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" title="Stop SwarmLLM" aria-label="Stop SwarmLLM">&#9211;</button>
+      <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM">&#9211;</button>
     </div>
   </header>
 
@@ -532,11 +532,11 @@
     <aside class="sidebar collapsed" id="sidebar">
       <!-- Full-height invisible hover strip + visible tab, both ride the sidebar transform -->
       <div class="sidebar-edge-hover"></div>
-      <div class="sidebar-chat-tab" id="sidebar-edge-trigger" title="Open chats">&#128172;</div>
+      <div class="sidebar-chat-tab" id="sidebar-edge-trigger" data-i18n-title="sidebar.open_chats" title="Open chats">&#128172;</div>
       <div class="sidebar-header">
         <span class="sidebar-title" data-i18n="sidebar.title">Chats</span>
-        <button class="btn btn-ghost btn-sm" id="btn-new-session" title="New chat">+</button>
-        <button class="btn btn-ghost btn-sm sidebar-close" id="btn-close-sidebar" title="Close sidebar">&times;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-new-session" data-i18n-title="sidebar.new_chat" title="New chat">+</button>
+        <button class="btn btn-ghost btn-sm sidebar-close" id="btn-close-sidebar" data-i18n-title="sidebar.close" title="Close sidebar">&times;</button>
       </div>
       <div class="session-list" id="session-list"></div>
     </aside>
@@ -547,8 +547,8 @@
       <!-- Chat view -->
       <div class="view" id="view-chat" style="display:none">
         <div class="mobile-model-bar">
-          <select id="mobile-model-select" title="Active model" aria-label="Active model"><option value="">Select model...</option></select>
-          <button class="btn btn-sm" id="btn-mobile-browse" title="Browse models">+</button>
+          <select id="mobile-model-select" data-i18n-title="nav.active_model" title="Active model" aria-label="Active model"><option value="" data-i18n="models.select_model">Select model...</option></select>
+          <button class="btn btn-sm" id="btn-mobile-browse" data-i18n-title="nav.find_models_aria" title="Browse models">+</button>
         </div>
         <div class="chat-container">
           <div class="chat-session-header" id="chat-session-header"></div>
@@ -569,10 +569,10 @@
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
-              <div class="token-counter" id="token-counter" title="Word count for your current message"></div>
-              <button class="chat-layout-toggle" id="chat-layout-toggle" title="Switch between Linear (traditional) and Messenger (bubble) chat layout">
+              <div class="token-counter" id="token-counter" data-i18n-title="chat.word_counter_tip" title="Word count for your current message"></div>
+              <button class="chat-layout-toggle" id="chat-layout-toggle" data-i18n-title="chat.layout_tip" title="Switch between Linear (traditional) and Messenger (bubble) chat layout">
                 <span id="chat-layout-icon">&#9776;</span>
-                <span id="chat-layout-label">Linear</span>
+                <span id="chat-layout-label" data-i18n="chat.layout_linear">Linear</span>
               </button>
             </div>
           </div>
@@ -609,42 +609,42 @@
 
           <!-- Stat strip — compact single row -->
           <div class="stat-strip mb-2" id="stats-row">
-            <div class="stat-card" title="Connected P2P nodes in the swarm network">
+            <div class="stat-card" data-i18n-title="dashboard.stat_peers_tip" title="Connected P2P nodes in the swarm network">
               <div class="stat-icon blue">&#9901;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-peers">0</div>
                 <div class="stat-label"><span data-i18n="stats.peers">Peers</span> <span class="stat-help" data-i18n-title="stats.peers_help" title="Other computers running SwarmLLM that you're connected to">?</span> <span class="lan-badge" id="lan-peer-badge" style="display:none">0 LAN</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Credits earned by helping others run AI">
+            <div class="stat-card" data-i18n-title="dashboard.stat_credits_tip" title="Credits earned by helping others run AI">
               <div class="stat-icon green">&#9733;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-credits">0</div>
                 <div class="stat-label"><span data-i18n="stats.credits">Credits</span> <span class="stat-help" data-i18n-title="stats.credits_help" title="Earned by helping others, spent when you use the network">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Chat requests sent from this node's API">
+            <div class="stat-card" data-i18n-title="dashboard.stat_requests_tip" title="Chat requests sent from this node's API">
               <div class="stat-icon orange">&#9650;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-requests-made">0</div>
                 <div class="stat-label"><span data-i18n="stats.requests">Requests</span> <span class="stat-help" data-i18n-title="stats.requests_help" title="Messages you've sent to AI models">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Full inference requests completed by this node for others">
+            <div class="stat-card" data-i18n-title="dashboard.stat_served_tip" title="Full inference requests completed by this node for others">
               <div class="stat-icon purple">&#9889;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-served">0</div>
                 <div class="stat-label"><span data-i18n="stats.served">Served</span> <span class="stat-help" data-i18n-title="stats.served_help" title="Requests your computer handled for others (earns credits)">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Layer forward passes processed — earns credits">
+            <div class="stat-card" data-i18n-title="dashboard.stat_forwards_tip" title="Layer forward passes processed — earns credits">
               <div class="stat-icon teal">&#9881;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-forwards">0</div>
                 <div class="stat-label"><span data-i18n="stats.forwards">Forwards</span> <span class="stat-help" data-i18n-title="stats.forwards_help" title="Computations your computer did as part of the network (earns credits)">?</span></div>
               </div>
             </div>
-            <div class="stat-card" title="Currently running inference requests">
+            <div class="stat-card" data-i18n-title="dashboard.stat_active_tip" title="Currently running inference requests">
               <div class="stat-icon" style="background:rgba(255,100,100,0.12);color:#ff6464">&#9203;</div>
               <div class="stat-body">
                 <div class="stat-value" id="stat-active">0</div>
@@ -661,28 +661,28 @@
             <!-- Node panel — compact (WI-7) -->
             <div class="panel node-compact">
               <div class="panel-header">
-                <h2>Node</h2>
+                <h2 data-i18n="dashboard.node_title">Node</h2>
                 <span style="display:flex;align-items:center;gap:6px">
-                  <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu">CPU mode</span>
+                  <span id="node-gpu-badge" class="node-mode-badge node-mode-cpu" data-i18n="hw.mode_cpu">CPU mode</span>
                   <span class="mono text-muted" style="font-size:0.75rem"><span id="version">v...</span> &middot; Up <span id="uptime">...</span></span>
                 </span>
               </div>
               <div class="node-hw-grid">
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span>CPU</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span data-i18n="dashboard.cpu_label">CPU</span>
                   <span class="mono node-hw-value" id="node-cpu">...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">▪</span>GPU</span>
-                  <span class="mono node-hw-value" id="node-gpu">Detecting...</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">▪</span data-i18n="dashboard.gpu_label">GPU</span>
+                  <span class="mono node-hw-value" id="node-gpu" data-i18n="dashboard.detecting">Detecting...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">≡</span>RAM</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">≡</span data-i18n="dashboard.ram_label">RAM</span>
                   <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
                   <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">◫</span>Disk</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">◫</span data-i18n="dashboard.disk_label">Disk</span>
                   <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
                   <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
                 </div>
@@ -691,21 +691,21 @@
                   <span class="mono node-hw-value" id="node-vram">...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">⬡</span>Shards</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">⬡</span data-i18n="dashboard.shards_label">Shards</span>
                   <span class="mono node-hw-value" id="hosted-shards">0</span>
                 </div>
               </div>
               <div class="vram-bar-container">
                 <div class="progress-bar vram-progress" style="height:8px">
                   <div class="fill cyan" id="vram-bar" style="width:0%"></div>
-                  <div class="vram-tick" style="left:25%" title="Minimal contribution"></div>
-                  <div class="vram-tick" style="left:50%" title="Moderate contribution"></div>
-                  <div class="vram-tick" style="left:75%" title="Maximum contribution"></div>
+                  <div class="vram-tick" style="left:25%" data-i18n-title="dashboard.tick_minimal" title="Minimal contribution"></div>
+                  <div class="vram-tick" style="left:50%" data-i18n-title="dashboard.tick_moderate" title="Moderate contribution"></div>
+                  <div class="vram-tick" style="left:75%" data-i18n-title="dashboard.tick_maximum" title="Maximum contribution"></div>
                 </div>
                 <div class="vram-tick-labels">
-                  <span style="left:25%">Min</span>
-                  <span style="left:50%">Mod</span>
-                  <span style="left:75%">Max</span>
+                  <span style="left:25%" data-i18n="dashboard.tick_min">Min</span>
+                  <span style="left:50%" data-i18n="dashboard.tick_mod">Mod</span>
+                  <span style="left:75%" data-i18n="dashboard.tick_max">Max</span>
                 </div>
               </div>
             </div>
@@ -713,7 +713,7 @@
             <!-- Credits panel — compact -->
             <div class="panel credits-panel">
               <div class="panel-header">
-                <h2>Credits</h2>
+                <h2 data-i18n="dashboard.credits_title">Credits</h2>
                 <span class="tier-badge silver" id="credit-tier">...</span>
               </div>
               <div class="credits-balance-row">
@@ -721,11 +721,11 @@
               </div>
               <div class="credits-stats-row">
                 <div class="credits-stat">
-                  <span class="credits-stat-label">Earned</span>
+                  <span class="credits-stat-label" data-i18n="dashboard.earned">Earned</span>
                   <span class="mono credits-stat-val text-green" id="credit-earned">+0</span>
                 </div>
                 <div class="credits-stat">
-                  <span class="credits-stat-label">Spent</span>
+                  <span class="credits-stat-label" data-i18n="dashboard.spent">Spent</span>
                   <span class="credits-stat-val mono text-red" id="credit-spent">-0</span>
                 </div>
               </div>
@@ -736,22 +736,22 @@
           <!-- Models -->
           <div class="panel mt-2">
             <div class="panel-header">
-              <h2>Models</h2>
-              <button class="btn btn-sm" id="btn-browse-hf">Find Models</button>
+              <h2 data-i18n="dashboard.models_title">Models</h2>
+              <button class="btn btn-sm" id="btn-browse-hf" data-i18n="dashboard.find_models">Find Models</button>
             </div>
             <div id="models-stats-bar" class="models-stats-bar" style="display:none">
               <span class="models-stat-group">
                 <img src="/static/icons/swarm.svg" width="13" height="13" alt="" aria-hidden="true" style="opacity:0.7;vertical-align:middle">
-                <span class="models-stat-label">Swarm</span>
-                <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span> ready</span>
-                <span class="models-stat-chip dim" id="stat-chip-network" style="display:none"><span class="models-stat-value" id="stat-chip-network-val">0</span> remote</span>
+                <span class="models-stat-label" data-i18n="dashboard.swarm_label">Swarm</span>
+                <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span data-i18n="dashboard.chip_ready"> ready</span>
+                <span class="models-stat-chip dim" id="stat-chip-network" style="display:none"><span class="models-stat-value" id="stat-chip-network-val">0</span data-i18n="dashboard.chip_remote"> remote</span>
               </span>
               <span class="models-stat-sep"></span>
               <span class="models-stat-group" id="stat-group-cloud" style="display:none">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="opacity:0.7;vertical-align:middle;flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>
-                <span class="models-stat-label">Cloud</span>
-                <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span> models</span>
-                <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span> providers</span>
+                <span class="models-stat-label" data-i18n="dashboard.chip_cloud">Cloud</span>
+                <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span data-i18n="dashboard.chip_models"> models</span>
+                <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span data-i18n="dashboard.chip_providers"> providers</span>
               </span>
             </div>
             <div id="models-container">
@@ -772,7 +772,7 @@
           <!-- Network -->
           <div class="panel mt-2">
             <div class="panel-header" data-collapse="network-body">
-              <h2>Network</h2>
+              <h2 data-i18n="dashboard.network_title">Network</h2>
               <span class="text-muted" style="font-size:0.75rem" id="peers-summary"></span>
             </div>
             <div class="panel-body" id="network-body">
@@ -791,23 +791,23 @@
           <div class="grid grid-2 mt-2">
             <div class="panel">
               <div class="panel-header" data-collapse="activity-body">
-                <h2>Activity</h2>
+                <h2 data-i18n="activity.label_activity">Activity</h2>
                 <span class="text-muted" style="font-size:0.75rem" id="activity-count"></span>
               </div>
               <div class="panel-body" id="activity-body">
                 <div id="activity-log" style="max-height:400px;overflow-y:auto">
-                  <div class="text-muted" style="font-size:0.82rem;padding:8px 0">No activity yet.</div>
+                  <div class="text-muted" style="font-size:0.82rem;padding:8px 0" data-i18n="dashboard.no_activity">No activity yet.</div>
                 </div>
               </div>
             </div>
             <div class="panel">
               <div class="panel-header" data-collapse="network-log-body">
-                <h2>Network</h2>
+                <h2 data-i18n="activity.label_network">Network</h2>
                 <span class="text-muted" style="font-size:0.75rem" id="network-log-count"></span>
               </div>
               <div class="panel-body" id="network-log-body">
                 <div id="network-log" style="max-height:400px;overflow-y:auto">
-                  <div class="text-muted" style="font-size:0.82rem;padding:8px 0">No network events yet.</div>
+                  <div class="text-muted" style="font-size:0.82rem;padding:8px 0" data-i18n="dashboard.no_network_events">No network events yet.</div>
                 </div>
               </div>
             </div>
@@ -817,21 +817,21 @@
           <div class="grid grid-2 mt-2">
             <div class="panel">
               <div class="panel-header collapsed" data-collapse="prune-body">
-                <h2>Prune History</h2>
+                <h2 data-i18n="dashboard.prune_title">Prune History</h2>
               </div>
               <div class="panel-body collapsed" id="prune-body">
                 <div id="prune-history-list">
-                  <div class="text-muted" style="font-size:0.85rem">No prune events yet</div>
+                  <div class="text-muted" style="font-size:0.85rem" data-i18n="downloads.no_prune_events">No prune events yet</div>
                 </div>
               </div>
             </div>
             <div class="panel">
               <div class="panel-header collapsed" data-collapse="schedule-body">
-                <h2>Resource Schedule</h2>
+                <h2 data-i18n="dashboard.schedule_title">Resource Schedule</h2>
               </div>
               <div class="panel-body collapsed" id="schedule-body">
                 <div id="schedule-form">
-                  <div class="text-muted" style="font-size:0.85rem">Loading...</div>
+                  <div class="text-muted" style="font-size:0.85rem" data-i18n="dashboard.loading">Loading...</div>
                 </div>
               </div>
             </div>
@@ -844,19 +844,19 @@
         <div class="container">
           <div class="panel">
             <div class="panel-header">
-              <h2>Network Map</h2>
+              <h2 data-i18n="dashboard.map_title">Network Map</h2>
               <div class="flex gap-1" style="align-items:center">
                 <select id="map-model-filter" style="width:auto;min-width:120px;padding:5px 10px;font-size:0.78rem">
-                  <option value="">All models</option>
+                  <option value="" data-i18n="dashboard.all_models">All models</option>
                 </select>
-                <button class="btn btn-sm" id="btn-refresh-map">Refresh</button>
+                <button class="btn btn-sm" id="btn-refresh-map" data-i18n="dashboard.refresh">Refresh</button>
               </div>
             </div>
             <div id="world-map-container" class="world-map-container">
               <div id="world-map"></div>
             </div>
             <div id="map-legend" class="map-legend">
-              <span class="text-muted" style="font-size:0.75rem">Node density:</span>
+              <span class="text-muted" style="font-size:0.75rem" data-i18n="dashboard.node_density">Node density:</span>
               <div class="legend-gradient">
                 <span class="text-muted" style="font-size:0.7rem">0</span>
                 <div class="legend-bar"></div>
