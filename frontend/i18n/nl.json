@@ -29,7 +29,7 @@
   "chat.no_response": "Geen antwoord ontvangen. Het model is mogelijk nog aan het laden — wacht even en probeer opnieuw.",
   "chat.connection_failed": "Verbinding mislukt — controleer of de server draait en probeer opnieuw.",
   "chat.response_time": "Reactietijd: {seconds}s",
-  "chat.source_local": "Je PC",
+  "chat.source_local": "Jouw PC",
   "chat.source_cloud": "Cloud",
   "chat.source_network": "Netwerk",
   "sidebar.title": "Chats",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "Jij",
+  "chat.role_assistant": "Assistent"
 }

@@ -30,7 +30,7 @@
   "chat.connection_failed": "فشل الاتصال — تأكد من أن الخادم يعمل وحاول مرة أخرى.",
   "chat.response_time": "وقت الاستجابة: {seconds}ث",
   "chat.source_local": "جهازك",
-  "chat.source_cloud": "سحابي",
+  "chat.source_cloud": "السحابة",
   "chat.source_network": "الشبكة",
   "sidebar.title": "المحادثات",
   "stats.peers": "الأقران",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "أنت",
+  "chat.role_assistant": "المساعد"
 }

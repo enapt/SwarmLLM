@@ -735,8 +735,8 @@ pub async fn join_network(
 
     // Validate the multiaddr
     let _addr: libp2p::Multiaddr = addr_str.parse().map_err(|e: libp2p::multiaddr::Error| {
-        ApiError(crate::error::SwarmError::Network(format!(
-            "Invalid address: {e}"
+        ApiError(crate::error::SwarmError::Validation(format!(
+            "Invalid address in invite code: {e}"
         )))
     })?;
 

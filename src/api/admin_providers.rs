@@ -845,8 +845,8 @@ pub async fn apply_update(
     let tmp_path = binary_path.with_extension("update.tmp");
 
     if !tmp_path.exists() {
-        return Err(ApiError(crate::error::SwarmError::Internal(
-            "Downloaded update file not found — re-run update check".to_string(),
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Downloaded update file not found — re-run update check first".to_string(),
         )));
     }
 

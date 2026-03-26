@@ -425,8 +425,8 @@ pub async fn auth_middleware(
             let body = serde_json::json!({
                 "error": {
                     "message": "Invalid or missing API key. Provide a valid Bearer token in the Authorization header.",
-                    "type": "auth_error",
-                    "code": 401
+                    "type": "authentication_error",
+                    "code": "authentication_error"
                 }
             });
             (StatusCode::UNAUTHORIZED, Json(body)).into_response()

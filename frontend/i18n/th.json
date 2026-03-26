@@ -29,7 +29,7 @@
   "chat.no_response": "ไม่ได้รับการตอบกลับ โมเดลอาจยังกำลังโหลดอยู่ — รอสักครู่แล้วลองอีกครั้ง",
   "chat.connection_failed": "การเชื่อมต่อล้มเหลว — ตรวจสอบว่าเซิร์ฟเวอร์กำลังทำงานอยู่แล้วลองอีกครั้ง",
   "chat.response_time": "เวลาตอบกลับ: {seconds} วินาที",
-  "chat.source_local": "เครื่องคุณ",
+  "chat.source_local": "เครื่องของคุณ",
   "chat.source_cloud": "คลาวด์",
   "chat.source_network": "เครือข่าย",
   "sidebar.title": "แชท",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "คุณ",
+  "chat.role_assistant": "ผู้ช่วย"
 }

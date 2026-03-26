@@ -147,7 +147,7 @@ pub async fn pool_accept(
         .find(|i| i.id == invitation_id)
         .ok_or_else(|| {
             ApiError(crate::error::SwarmError::Validation(
-                "Invitation not found".into(),
+                "Invitation not found or expired".into(),
             ))
         })?;
 
@@ -283,6 +283,11 @@ pub async fn pool_set_device_name(
     State(state): State<AppState>,
     Json(body): Json<PoolDeviceNameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.name.len() > 64 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Device name must be 64 characters or fewer".into(),
+        )));
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     send_pool_command(
         &state,
@@ -306,6 +311,11 @@ pub async fn pool_set_credit_split(
     State(state): State<AppState>,
     Json(body): Json<PoolCreditSplitRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.pct > 100 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Credit split percentage must be 0–100".into(),
+        )));
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     send_pool_command(
         &state,

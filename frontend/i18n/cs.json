@@ -29,7 +29,7 @@
   "chat.no_response": "Žádná odpověď. Model se možná ještě načítá — chvíli počkejte a zkuste znovu.",
   "chat.connection_failed": "Připojení selhalo — zkontrolujte, zda server běží, a zkuste znovu.",
   "chat.response_time": "Doba odezvy: {seconds}s",
-  "chat.source_local": "Váš PC",
+  "chat.source_local": "Tvůj PC",
   "chat.source_cloud": "Cloud",
   "chat.source_network": "Síť",
   "sidebar.title": "Konverzace",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "Ty",
+  "chat.role_assistant": "Asistent"
 }

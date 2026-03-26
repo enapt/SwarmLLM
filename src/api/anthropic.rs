@@ -1348,9 +1348,10 @@ async fn anthropic_to_openai_proxy(
         } else {
             scrubbed
         };
-        return Err(ApiError(crate::error::SwarmError::Internal(format!(
-            "Cloud provider returned {status}: {truncated}"
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ProviderError {
+            status: status.as_u16(),
+            body: truncated,
+        }));
     }
 
     // Handle streaming vs non-streaming responses

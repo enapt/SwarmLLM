@@ -35,7 +35,7 @@ Trigger model acquisition from the network.
 ### GET /api/admin/models/:id/status
 Check model acquisition progress.
 
-### DELETE /api/admin/models/:model_id
+### DELETE /api/admin/models/:id
 Remove model (shards + manifest + state).
 
 ### DELETE /api/admin/models/:id/shards/:index
@@ -49,9 +49,6 @@ Per-model encrypted pipeline toggle. GET returns current status, readiness (whet
 
 ### PUT /api/admin/models/:id/shards/:index/lock
 Lock/unlock a shard to prevent auto-pruning.
-
-### PUT /api/admin/models/:id/trust
-Set a model's trust level (e.g., pin a model). Bearer auth required. Body: `{"trust_level": "Pinned"}`
 
 ## Storage & Shards
 

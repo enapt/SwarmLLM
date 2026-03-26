@@ -29,7 +29,7 @@
   "chat.no_response": "Yanıt alınamadı. Model hâlâ yükleniyor olabilir — bir süre bekleyip tekrar deneyin.",
   "chat.connection_failed": "Bağlantı başarısız — sunucunun çalıştığını kontrol edin ve tekrar deneyin.",
   "chat.response_time": "Yanıt süresi: {seconds}sn",
-  "chat.source_local": "Bilgisayarınız",
+  "chat.source_local": "Bilgisayarın",
   "chat.source_cloud": "Bulut",
   "chat.source_network": "Ağ",
   "sidebar.title": "Sohbetler",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "Sen",
+  "chat.role_assistant": "Asistan"
 }

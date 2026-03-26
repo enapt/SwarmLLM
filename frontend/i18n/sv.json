@@ -29,7 +29,7 @@
   "chat.no_response": "Inget svar mottaget. Modellen kanske fortfarande laddas — vänta en stund och försök igen.",
   "chat.connection_failed": "Anslutningen misslyckades — kontrollera att servern körs och försök igen.",
   "chat.response_time": "Svarstid: {seconds}s",
-  "chat.source_local": "Din PC",
+  "chat.source_local": "Din dator",
   "chat.source_cloud": "Moln",
   "chat.source_network": "Nätverk",
   "sidebar.title": "Chattar",
@@ -376,5 +376,7 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}"
+  "pool.failed_unlink": "Failed to unlink: {error}",
+  "chat.role_user": "Du",
+  "chat.role_assistant": "Assistent"
 }

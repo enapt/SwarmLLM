@@ -197,9 +197,9 @@
 
     // Role label + source badge + encryption lock
     var roleEl = div.querySelector('.msg-role');
-    roleEl.textContent = role === 'user' ? 'You' : 'Assistant';
+    roleEl.textContent = role === 'user' ? I18n.t('chat.role_user') : I18n.t('chat.role_assistant');
     if (role === 'assistant') {
-      var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Network';
+      var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
       var sourceBadge = document.createElement('span');
       sourceBadge.className = 'msg-source-badge source-' + source;
       sourceBadge.textContent = sourceLabel;

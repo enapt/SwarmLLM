@@ -33,7 +33,6 @@
         'pool-invite-code-btn': function () { self.generateInviteCode(); },
         'pool-leave-btn': function () { self.leavePool(); },
         'pool-copy-code-btn': function () { self.copyInviteCode(); },
-        'pool-save-split-btn': function () { self.saveCreditSplit(); },
         'pool-save-name-btn': function () { self.saveDeviceName(); }
       };
       Object.keys(ids).forEach(function (id) {
@@ -48,23 +47,6 @@
         if (el) el.addEventListener('keydown', function (e) {
           if (e.key === 'Enter') self[enterBind[id]]();
         });
-      });
-
-      // Slave banner join button
-      var slaveJoinBtn = document.getElementById('slave-join-btn');
-      if (slaveJoinBtn) slaveJoinBtn.addEventListener('click', function () {
-        var input = document.getElementById('slave-join-code');
-        var code = input ? input.value.trim().toUpperCase() : '';
-        if (code.length === 8) {
-          // Must leave current pool first, then join new one
-          App.pool.leaveAndRejoin(code);
-        } else {
-          App.notifications.showToast(I18n.t('pool.code_invalid'), 'error');
-        }
-      });
-      var slaveJoinInput = document.getElementById('slave-join-code');
-      if (slaveJoinInput) slaveJoinInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' && slaveJoinBtn) slaveJoinBtn.click();
       });
 
       // Setup wizard pool join button
@@ -179,18 +161,7 @@
       if (el('pool-total-vram')) el('pool-total-vram').textContent = totalVram > 0 ? U.formatMB(totalVram) : '—';
       if (el('pool-online-count')) el('pool-online-count').textContent = onlineCount + '/' + members.length;
 
-      // Credit split slider
-      var splitSlider = document.getElementById('pool-split-slider');
-      var splitLabel = document.getElementById('pool-split-label');
-      if (splitSlider && data.member_credit_split_pct !== undefined) {
-        splitSlider.value = data.member_credit_split_pct;
-        if (splitLabel) {
-          var pct = data.member_credit_split_pct;
-          splitLabel.textContent = pct === 0
-            ? I18n.t('pool.split_all_owner')
-            : I18n.t('pool.credit_split_label', { kept: pct, forwarded: (100 - pct) });
-        }
-      }
+
 
       // Device name input (my current name)
       var nameInput = document.getElementById('pool-device-name-input');
@@ -484,26 +455,6 @@
       }
     },
 
-    saveCreditSplit: async function () {
-      var slider = document.getElementById('pool-split-slider');
-      var pct = slider ? parseInt(slider.value, 10) : 0;
-      try {
-        var resp = await App.authFetch('/api/pool/credit-split', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pct: pct })
-        });
-        var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.split_saved'), 'success');
-        }
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
-      }
-    },
-
     leavePool: async function () {
       if (!confirm(I18n.t('pool.confirm_leave'))) return;
       try {
@@ -596,36 +547,6 @@
         }
       } else {
         banner.classList.remove('visible');
-      }
-    },
-
-    /// Leave current pool and join a new one with a code
-    leaveAndRejoin: async function (code) {
-      try {
-        // Leave current pool first
-        var leaveResp = await App.authFetch('/api/pool/leave', { method: 'POST' });
-        var leaveData = await leaveResp.json();
-        if (leaveData.error) {
-          App.notifications.showToast(I18n.t('pool.failed_unlink', { error: leaveData.error }), 'error');
-          return;
-        }
-        // Now join with new code
-        var joinResp = await App.authFetch('/api/pool/join', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: code })
-        });
-        var joinData = await joinResp.json();
-        if (joinData.error) {
-          App.notifications.showToast(joinData.error, 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
-          var input = document.getElementById('slave-join-code');
-          if (input) input.value = '';
-          setTimeout(function () { App.pool.load(); }, 5000);
-        }
-      } catch (e) {
-        App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
     }
   };

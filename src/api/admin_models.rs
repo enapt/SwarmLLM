@@ -597,6 +597,11 @@ pub async fn add_model_interest(
     State(state): State<AppState>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if model_id.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Model ID must be 256 characters or fewer".into(),
+        )));
+    }
     tracing::info!(model_id = %model_id, "Model acquisition requested");
 
     let mid = crate::types::ModelId(model_id.clone());
@@ -839,10 +844,7 @@ pub async fn delete_model(
 
     // Verify the model exists
     if shared.model_registry.get_manifest(&mid).is_none() {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Model '{}' not found",
-            model_id
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ModelNotAvailable(mid)));
     }
 
     let node_id = shared.identity.node_id().clone();
@@ -1310,10 +1312,7 @@ pub async fn delete_shard(
     };
     let holders = shared.model_registry.shard_holders(&shard_id);
     if !holders.contains(&local_node_id) {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Shard {} of model '{}' is not held locally",
-            shard_index, model_id
-        ))));
+        return Err(ApiError(crate::error::SwarmError::ShardNotFound(shard_id)));
     }
 
     // Delete shard file from disk
@@ -2293,7 +2292,8 @@ pub async fn delete_adapter(
         })))
     } else {
         Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Adapter '{adapter_id}' not found"
+            "Adapter '{}' not found",
+            adapter_id
         ))))
     }
 }

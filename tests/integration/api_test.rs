@@ -271,7 +271,7 @@ async fn unauthenticated_openai_endpoint_returns_401() {
     assert_eq!(resp.status(), 401);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], 401);
+    assert_eq!(body["error"]["code"], "authentication_error");
 }
 
 #[tokio::test]

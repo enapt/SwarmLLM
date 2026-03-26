@@ -861,7 +861,7 @@ mod tests {
         let saved = mgr.save_to_db(&db, false).unwrap();
         assert_eq!(saved, 1);
 
-        std::thread::sleep(Duration::from_millis(1100));
+        std::thread::sleep(Duration::from_millis(1500));
 
         let mut mgr2 = KvCacheManager::new(Duration::from_secs(600));
         let restored = mgr2.restore_from_db(&db).unwrap();
