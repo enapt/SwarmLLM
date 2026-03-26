@@ -262,7 +262,7 @@ fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
         temperature: req.temperature.unwrap_or(1.0).clamp(0.0, 2.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(f32::EPSILON, 1.0),
         top_k: req.top_k.unwrap_or(40),
-        max_tokens: req.max_tokens.min(32768),
+        max_tokens: req.max_tokens.clamp(1, 32768),
         stop: req.stop_sequences.clone().unwrap_or_default(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

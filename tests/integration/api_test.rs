@@ -240,8 +240,11 @@ async fn identity_leaderboard_returns_ok() {
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    // Should return valid JSON (array or object with entries)
-    assert!(body.is_array() || body.is_object());
+    // Should return an object with a leaderboard array
+    assert!(
+        body["leaderboard"].is_array(),
+        "Leaderboard should contain an array, got: {body}"
+    );
 }
 
 #[tokio::test]

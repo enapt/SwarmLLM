@@ -72,7 +72,7 @@
         var resp = await App.authFetch('/api/admin/config');
         if (!resp.ok) return;
         var data = await resp.json();
-        document.getElementById('settings-contribution').value = data.contribution || 'moderate';
+        document.getElementById('settings-contribution').value = data.contribution || 'minimal';
         document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
         document.getElementById('settings-bandwidth').value = data.max_bandwidth_mbps || 0;
         document.getElementById('settings-disk').value = data.max_disk_mb || 50000;
@@ -341,25 +341,25 @@
           body: JSON.stringify(config),
         });
         if (resp.ok) {
+          // Save ancillary settings only if main config save succeeded
+          var healthIntervalEl = document.getElementById('settings-health-interval');
+          if (healthIntervalEl) {
+            try { localStorage.setItem(App.HEALTH_INTERVAL_KEY, healthIntervalEl.value); } catch(e) {}
+            App.providerHealth.startHealthPolling();
+          }
+          await App.identity.saveNickname();
+          await App.settings.saveProviders();
+
           App.ui.showBanner('success', 'Settings saved');
           App.ui.closeSettings();
-          // Refresh dashboard to reflect new config immediately
           App.dashboard.loadInitial();
         } else {
-          App.ui.showBanner('error', 'Failed to save settings');
+          var errMsg = await U.getApiErrorMessage(resp, 'Failed to save settings');
+          App.ui.showBanner('error', errMsg);
         }
       } catch (e) {
         App.ui.showBanner('error', 'Error: ' + e.message);
       }
-
-      var healthIntervalEl = document.getElementById('settings-health-interval');
-      if (healthIntervalEl) {
-        try { localStorage.setItem(App.HEALTH_INTERVAL_KEY, healthIntervalEl.value); } catch(e) {}
-        App.providerHealth.startHealthPolling();
-      }
-
-      await App.identity.saveNickname();
-      await App.settings.saveProviders();
 
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = I18n.t('actions.save_settings'); }
     }

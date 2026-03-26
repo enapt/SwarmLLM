@@ -66,7 +66,7 @@
           body: JSON.stringify({ code: code })
         }).then(function (r) { return r.json(); }).then(function (data) {
           if (data.error) {
-            if (status) { status.textContent = data.error; status.style.color = 'var(--red)'; }
+            if (status) { status.textContent = (data.error && data.error.message) || data.error || 'Join failed'; status.style.color = 'var(--red)'; }
           } else {
             if (status) { status.textContent = I18n.t('pool.link_sent'); status.style.color = 'var(--green)'; }
             if (input) input.value = '';

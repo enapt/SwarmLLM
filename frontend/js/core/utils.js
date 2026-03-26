@@ -326,7 +326,7 @@
     }
     if (emptyState && !hasModels) {
       // Check if we have peers — different message for connected vs isolated
-      var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peer_count || 0) : 0;
+      var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peers || 0) : 0;
       if (peerCount > 0) {
         // Connected to peers but no models ready yet — they're coming
         emptyState.innerHTML = '<div class="chat-empty-icon" style="font-size:2rem">' +

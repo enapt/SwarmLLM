@@ -439,8 +439,8 @@ impl ChatCompletionRequest {
             // Clamp top_p to (0.0, 1.0]
             top_p: self.top_p.clamp(f32::EPSILON, 1.0),
             top_k: 40,
-            // Clamp max_tokens to a reasonable range
-            max_tokens: self.max_tokens.min(32768),
+            // Clamp max_tokens to [1, 32768] — 0 is not valid per OpenAI spec
+            max_tokens: self.max_tokens.clamp(1, 32768),
             stop,
             frequency_penalty: self.frequency_penalty.clamp(-2.0, 2.0),
             presence_penalty: self.presence_penalty.clamp(-2.0, 2.0),
