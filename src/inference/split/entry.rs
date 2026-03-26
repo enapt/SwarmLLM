@@ -76,73 +76,28 @@ impl SplitModelEntry {
         is_last: bool,
         vram_estimate_mb: u64,
     ) -> Self {
-        use candle_core::quantized::gguf_file;
+        let tok = super::gguf_meta::GgufTokenizerMeta::from_gguf_file(header_path).ok();
 
-        let (vocab, bos_token, eos_token_str, eos_tokens, chat_template) =
-            if let Ok(bytes) = std::fs::read(header_path) {
-                let mut cursor = std::io::Cursor::new(&bytes);
-                if let Ok(ct) = gguf_file::Content::read(&mut cursor) {
-                    let vocab: Vec<String> = ct
-                        .metadata
-                        .get("tokenizer.ggml.tokens")
-                        .and_then(|v| v.to_vec().ok())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.to_string().ok().cloned())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let eos_id = ct
-                        .metadata
-                        .get("tokenizer.ggml.eos_token_id")
-                        .and_then(|v| v.to_u32().ok())
-                        .unwrap_or(2);
-                    let bos_id = ct
-                        .metadata
-                        .get("tokenizer.ggml.bos_token_id")
-                        .and_then(|v| v.to_u32().ok())
-                        .unwrap_or(1);
-                    let eos_tokens_extra: Vec<u32> = ct
-                        .metadata
-                        .get("tokenizer.ggml.eos_token_ids")
-                        .and_then(|v| v.to_vec().ok())
-                        .map(|arr| arr.iter().filter_map(|v| v.to_u32().ok()).collect())
-                        .unwrap_or_default();
-                    let mut eos_tok = vec![eos_id];
-                    for t in eos_tokens_extra {
-                        if t != eos_id {
-                            eos_tok.push(t);
-                        }
-                    }
-                    let bos = vocab.get(bos_id as usize).cloned().unwrap_or_default();
-                    let eos_str = vocab.get(eos_id as usize).cloned().unwrap_or_default();
-                    let tmpl = ct
-                        .metadata
-                        .get("tokenizer.chat_template")
-                        .and_then(|v| v.to_string().ok().cloned());
-                    (vocab, bos, eos_str, eos_tok, tmpl)
-                } else {
-                    // Fallback: include common EOS tokens across architectures
-                    // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
-                    (
-                        vec![],
-                        String::new(),
-                        String::new(),
-                        vec![2, 107, 32000],
-                        None,
-                    )
-                }
+        let (vocab, bos_token, eos_token_str, eos_tokens, chat_template) = if let Some(t) = tok {
+            let bos = t.bos_string();
+            let eos_str = t.eos_string();
+            let eos_ids = if t.eos_token_ids.is_empty() {
+                vec![2, 107, 32000]
             } else {
-                // Fallback: include common EOS tokens across architectures
-                // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
-                (
-                    vec![],
-                    String::new(),
-                    String::new(),
-                    vec![2, 107, 32000],
-                    None,
-                )
+                t.eos_token_ids
             };
+            (t.vocab, bos, eos_str, eos_ids, t.chat_template)
+        } else {
+            // Fallback: include common EOS tokens across architectures
+            // (2=LLaMA </s>, 107=Gemma, 32000=Mistral/Mixtral)
+            (
+                vec![],
+                String::new(),
+                String::new(),
+                vec![2, 107, 32000],
+                None,
+            )
+        };
 
         Self {
             last_used: std::sync::atomic::AtomicU64::new(Self::now_secs()),

@@ -17,47 +17,14 @@ use crate::types::{
 };
 
 /// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
-/// Used by distributed-only nodes that have the probe but no loaded model.
+/// Uses the centralized `GgufTokenizerMeta` extractor.
 pub fn template_from_header(
     header_path: &std::path::Path,
 ) -> Option<(Option<String>, String, String)> {
-    use candle_core::quantized::gguf_file;
-
-    let header_bytes = std::fs::read(header_path).ok()?;
-    let mut cursor = std::io::Cursor::new(&header_bytes);
-    let ct = gguf_file::Content::read(&mut cursor).ok()?;
-
-    let chat_template = ct
-        .metadata
-        .get("tokenizer.chat_template")
-        .and_then(|v| v.to_string().ok().cloned());
-
-    let vocab: Vec<String> = ct
-        .metadata
-        .get("tokenizer.ggml.tokens")
-        .and_then(|v| v.to_vec().ok())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.to_string().ok().cloned())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let bos_id = ct
-        .metadata
-        .get("tokenizer.ggml.bos_token_id")
-        .and_then(|v| v.to_u32().ok())
-        .unwrap_or(1) as usize;
-    let eos_id = ct
-        .metadata
-        .get("tokenizer.ggml.eos_token_id")
-        .and_then(|v| v.to_u32().ok())
-        .unwrap_or(2) as usize;
-
-    let bos = vocab.get(bos_id).cloned().unwrap_or_default();
-    let eos = vocab.get(eos_id).cloned().unwrap_or_default();
-
-    Some((chat_template, bos, eos))
+    let tok = crate::inference::split::GgufTokenizerMeta::from_gguf_file(header_path).ok()?;
+    let bos = tok.bos_string();
+    let eos = tok.eos_string();
+    Some((tok.chat_template, bos, eos))
 }
 
 /// Cached vocabulary and tokenizer state for lock-free token decoding during streaming.

@@ -898,10 +898,12 @@ pub struct GgufModelMeta {
     pub bos_token: String,
     /// EOS token string (resolved from token ID + vocabulary).
     pub eos_token: String,
+    /// Architecture string from `general.architecture` (e.g., "llama", "qwen2").
+    pub architecture: String,
 }
 
 /// Extract metadata from a GGUF file (name, chat template, special tokens).
-/// Returns None if the file can't be read.
+/// Returns None if the file can't be read. Uses centralized `GgufTokenizerMeta`.
 pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
     let mut file = std::fs::File::open(path).ok()?;
     let ct = candle_core::quantized::gguf_file::Content::read(&mut file).ok()?;
@@ -912,39 +914,11 @@ pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
         .and_then(|v| v.to_string().ok().cloned())
         .filter(|s| !s.is_empty());
 
-    let chat_template = ct
-        .metadata
-        .get("tokenizer.chat_template")
-        .and_then(|v| v.to_string().ok().cloned())
-        .filter(|s| !s.is_empty());
+    let tok = crate::inference::split::GgufTokenizerMeta::from_content(&ct);
 
-    // Resolve BOS/EOS token strings from their IDs + vocabulary
-    let vocab: Vec<String> = ct
-        .metadata
-        .get("tokenizer.ggml.tokens")
-        .and_then(|v| v.to_vec().ok())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.to_string().ok().cloned())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let bos_id = ct
-        .metadata
-        .get("tokenizer.ggml.bos_token_id")
-        .and_then(|v| v.to_u32().ok());
-    let eos_id = ct
-        .metadata
-        .get("tokenizer.ggml.eos_token_id")
-        .and_then(|v| v.to_u32().ok());
-
-    let bos_token = bos_id
-        .and_then(|id| vocab.get(id as usize).cloned())
-        .unwrap_or_default();
-    let eos_token = eos_id
-        .and_then(|id| vocab.get(id as usize).cloned())
-        .unwrap_or_default();
+    let bos_token = tok.bos_string();
+    let eos_token = tok.eos_string();
+    let chat_template = tok.chat_template.filter(|s| !s.is_empty());
 
     if chat_template.is_some() {
         tracing::info!(
@@ -955,11 +929,18 @@ pub fn extract_gguf_metadata(path: &Path) -> Option<GgufModelMeta> {
         );
     }
 
+    let architecture = ct
+        .metadata
+        .get("general.architecture")
+        .and_then(|v| v.to_string().ok().cloned())
+        .unwrap_or_else(|| "llama".to_string());
+
     Some(GgufModelMeta {
         name,
         chat_template,
         bos_token,
         eos_token,
+        architecture,
     })
 }
 

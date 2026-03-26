@@ -159,6 +159,186 @@ impl GgufTensorMeta {
     }
 }
 
+/// Tokenizer metadata extracted from GGUF header — consolidates all vocab/BOS/EOS/template
+/// extraction that was previously duplicated across 9 call sites.
+#[derive(Clone, Debug, Default)]
+pub struct GgufTokenizerMeta {
+    pub vocab: Vec<String>,
+    pub bos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
+    /// All EOS token IDs (primary + extras from `eos_token_ids` array).
+    pub eos_token_ids: Vec<u32>,
+    pub chat_template: Option<String>,
+    pub merges: Vec<String>,
+    pub pre_tokenizer: String,
+    pub tokenizer_model: String,
+    pub scores: Vec<f32>,
+    pub add_space_prefix: bool,
+    pub add_bos_token: bool,
+}
+
+impl GgufTokenizerMeta {
+    /// Extract tokenizer metadata from a GGUF header file on disk.
+    pub fn from_gguf_file(path: &Path) -> Result<Self, SwarmError> {
+        let mut file = std::fs::File::open(path).map_err(SwarmError::Io)?;
+        let ct = gguf_file::Content::read(&mut file)
+            .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF header: {e}")))?;
+        Ok(Self::from_content(&ct))
+    }
+
+    /// Extract tokenizer metadata from an already-parsed GGUF Content.
+    pub fn from_content(ct: &gguf_file::Content) -> Self {
+        let md = &ct.metadata;
+
+        let vocab: Vec<String> = md
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| {
+                if let gguf_file::Value::Array(arr) = v {
+                    Some(
+                        arr.iter()
+                            .filter_map(|v| {
+                                if let gguf_file::Value::String(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let bos_token_id = md
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.to_u32().ok());
+
+        let eos_token_id = md
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.to_u32().ok());
+
+        // Collect all EOS IDs: primary + extras array
+        let mut eos_ids = Vec::new();
+        if let Some(id) = eos_token_id {
+            eos_ids.push(id);
+        }
+        if let Some(gguf_file::Value::Array(arr)) = md.get("tokenizer.ggml.eos_token_ids") {
+            for v in arr {
+                if let Ok(id) = v.to_u32() {
+                    if !eos_ids.contains(&id) {
+                        eos_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        let chat_template = md
+            .get("tokenizer.chat_template")
+            .and_then(|v| v.to_string().ok().cloned());
+
+        let merges: Vec<String> = md
+            .get("tokenizer.ggml.merges")
+            .and_then(|v| {
+                if let gguf_file::Value::Array(arr) = v {
+                    Some(
+                        arr.iter()
+                            .filter_map(|v| {
+                                if let gguf_file::Value::String(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let pre_tokenizer = md
+            .get("tokenizer.ggml.pre")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "gpt2".to_string());
+
+        let tokenizer_model = md
+            .get("tokenizer.ggml.model")
+            .and_then(|v| v.to_string().ok().cloned())
+            .unwrap_or_else(|| "gpt2".to_string());
+
+        let scores: Vec<f32> = md
+            .get("tokenizer.ggml.scores")
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
+            .unwrap_or_default();
+
+        let add_space_prefix = md
+            .get("tokenizer.ggml.add_space_prefix")
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(true);
+
+        let add_bos_token = md
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.to_bool().ok())
+            .unwrap_or(false);
+
+        Self {
+            vocab,
+            bos_token_id,
+            eos_token_id,
+            eos_token_ids: eos_ids,
+            chat_template,
+            merges,
+            pre_tokenizer,
+            tokenizer_model,
+            scores,
+            add_space_prefix,
+            add_bos_token,
+        }
+    }
+
+    /// Resolve BOS token ID to its string representation from the vocab.
+    pub fn bos_string(&self) -> String {
+        self.bos_token_id
+            .and_then(|id| self.vocab.get(id as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Resolve primary EOS token ID to its string representation from the vocab.
+    pub fn eos_string(&self) -> String {
+        self.eos_token_id
+            .and_then(|id| self.vocab.get(id as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get vocab size.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
+    /// Get EOS token IDs with architecture-specific fallbacks.
+    pub fn eos_tokens_with_arch_fallback(&self, arch: &str) -> Vec<u32> {
+        let mut ids = self.eos_token_ids.clone();
+        if ids.is_empty() {
+            ids.push(2); // common default
+        }
+        // Qwen2 uses additional EOS tokens
+        if arch.starts_with("qwen") {
+            for &extra in &[151643u32, 151645] {
+                if !ids.contains(&extra) {
+                    ids.push(extra);
+                }
+            }
+        }
+        ids
+    }
+}
+
 // ── GGUF Header Extraction ──
 
 /// Save the raw GGUF header (metadata + tensor info table) to a file.

@@ -34,45 +34,11 @@ fn is_valid_hf_filename(filename: &str) -> bool {
 }
 
 /// Extract EOS token IDs from a GGUF file, with architecture-specific fallbacks.
-/// Mirrors the logic in inference/split.rs for consistency.
-fn extract_eos_token_ids(path: &std::path::Path) -> Vec<u32> {
-    let mut eos_tokens = Vec::new();
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return vec![2];
-    };
-    let Ok(ct) = candle_core::quantized::gguf_file::Content::read(&mut file) else {
-        return vec![2];
-    };
-    if let Some(eos_id) = ct
-        .metadata
-        .get("tokenizer.ggml.eos_token_id")
-        .and_then(|v| v.to_u32().ok())
-    {
-        eos_tokens.push(eos_id);
+fn extract_eos_token_ids(path: &std::path::Path, arch: &str) -> Vec<u32> {
+    match crate::inference::split::GgufTokenizerMeta::from_gguf_file(path) {
+        Ok(tok) => tok.eos_tokens_with_arch_fallback(arch),
+        Err(_) => vec![2],
     }
-    let arch = ct
-        .metadata
-        .get("general.architecture")
-        .and_then(|v| v.to_string().ok().cloned())
-        .unwrap_or_default();
-    match arch.as_str() {
-        "qwen2" => {
-            for &id in &[151643u32, 151645] {
-                if !eos_tokens.contains(&id) {
-                    eos_tokens.push(id);
-                }
-            }
-        }
-        _ => {
-            if !eos_tokens.contains(&2) {
-                eos_tokens.push(2);
-            }
-        }
-    }
-    if eos_tokens.is_empty() {
-        eos_tokens.push(2);
-    }
-    eos_tokens
 }
 // ---- HuggingFace Endpoints ----
 
@@ -431,7 +397,11 @@ pub async fn hf_download(
                     Ok(()) => {
                         let size = exec.model_size_bytes().unwrap_or(0);
                         let gguf_meta = crate::inference::executor::extract_gguf_metadata(&path);
-                        let eos_tokens = extract_eos_token_ids(&path);
+                        let arch = gguf_meta
+                            .as_ref()
+                            .map(|m| m.architecture.as_str())
+                            .unwrap_or("llama");
+                        let eos_tokens = extract_eos_token_ids(&path, arch);
                         *download_shared.loaded_model_info.write().await =
                             Some(crate::daemon::LoadedModelInfo {
                                 name: model_name.clone(),
