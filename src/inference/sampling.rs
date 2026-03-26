@@ -78,9 +78,14 @@ pub fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContex
     ctx.indexed_logits.clear();
     ctx.indexed_logits
         .extend(logits.iter().copied().enumerate());
-    ctx.indexed_logits.select_nth_unstable_by(k_usize, |a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Partition so the k largest values end up in [..k_usize].
+    // select_nth_unstable_by(n, desc) places the n-th largest at index n,
+    // with all elements in [..n] being >= it. Using k_usize-1 as the pivot
+    // ensures exactly k elements (indices 0..k) are in the top partition.
+    ctx.indexed_logits
+        .select_nth_unstable_by(k_usize - 1, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
     // Reuse keep_mask bitmap (clear relevant portion)
     for v in ctx.keep_mask[..len].iter_mut() {

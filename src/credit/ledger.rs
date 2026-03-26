@@ -147,7 +147,6 @@ impl CreditLedger {
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
         let amount = rates.inference_serve.saturating_mul(tokens as i64);
-        self.apply_credit(amount, true).await?;
 
         tracing::info!(
             amount,
@@ -157,27 +156,24 @@ impl CreditLedger {
         );
 
         // Forward credits to pool owner if we're a member (not owner).
-        // Deduct the forwarded amount from the member's balance to prevent double-spend.
-        // Apply both earn + deduct before persisting to avoid crash-window credit inflation.
+        // Credits are only applied to the local balance if they are NOT forwarded.
+        // This prevents credit inflation if forwarding fails.
         if let Some(ref ss) = self.shared_state {
             match crate::pool::forward::forward_credits_to_owner(ss, amount).await {
                 Ok(true) => {
-                    // Credits were forwarded — deduct from member's local balance
-                    // Use balance-only adjustment to avoid inflating lifetime_spent
-                    self.adjust_balance(-amount).await?;
+                    // Credits forwarded to pool owner — member retains nothing
                     tracing::info!(amount, "Forwarded earned credits to pool owner");
-                    // Single persist after both earn and forwarding deduction
-                    self.persist_balance().await?;
-                    return Ok(0); // Member retained nothing — return 0 to avoid inflated accounting
+                    return Ok(0);
                 }
-                Ok(false) => {} // Not in a pool or is the owner — keep credits
+                Ok(false) => {} // Not in a pool or is the owner — credit locally below
                 Err(e) => {
-                    tracing::debug!(error = %e, "Pool credit forwarding skipped");
+                    tracing::debug!(error = %e, "Pool credit forwarding failed — crediting locally");
                 }
             }
         }
 
-        // Single persist after earn (no forwarding)
+        // Credit locally (not in pool, or forwarding failed/unavailable)
+        self.apply_credit(amount, true).await?;
         self.persist_balance().await?;
 
         Ok(amount)
@@ -328,15 +324,6 @@ impl CreditLedger {
             "Credit balance updated"
         );
 
-        Ok(())
-    }
-
-    /// Adjust balance without affecting lifetime_earned or lifetime_spent.
-    /// Used for pool credit forwarding where the balance transfer is internal accounting.
-    async fn adjust_balance(&self, delta: i64) -> Result<(), SwarmError> {
-        let mut bal = self.balance.write().await;
-        bal.balance = bal.balance.saturating_add(delta);
-        bal.last_updated = chrono::Utc::now();
         Ok(())
     }
 

@@ -1069,8 +1069,8 @@ impl PipelineExecutor {
             let vocab = entry.value().vocab.clone().unwrap_or_default();
 
             // Approximate prompt token count (no tokenizer in-process)
-            // Rough estimate: chars / 4 (average BPE token length)
-            let ptc = prompt.chars().count() / 4;
+            // Rough estimate: chars / 4 (average BPE token length), minimum 1
+            let ptc = (prompt.chars().count() / 4).max(1);
 
             let decoder = CachedDecoder {
                 vocab: vocab.clone(),
@@ -1097,7 +1097,7 @@ impl PipelineExecutor {
                         let ptc = if let Some(ref tok) = tokenizer_opt {
                             tok.encode(prompt).len()
                         } else {
-                            prompt.chars().count() / 4
+                            (prompt.chars().count() / 4).max(1)
                         };
                         tracing::debug!(
                             model = %model_id,
@@ -1108,7 +1108,7 @@ impl PipelineExecutor {
                         (ptc, eos, decoder)
                     }
                     None => {
-                        let ptc = prompt.chars().count() / 4;
+                        let ptc = (prompt.chars().count() / 4).max(1);
                         (
                             ptc,
                             vec![2],
