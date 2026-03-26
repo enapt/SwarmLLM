@@ -17,7 +17,7 @@
     <div class="modal">
       <div class="modal-header">
         <div id="setup-lang-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:4px">
-          <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none">Continue in English</button>
+          <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none" data-i18n="setup.lang_english">Continue in English</button>
           <img id="setup-lang-flag" src="/static/flags/gb.svg" alt="" class="lang-flag-img" style="width:20px;height:15px">
           <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" title="Language">
             <option value="en">English</option>
@@ -47,18 +47,18 @@
         <span class="text-muted" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</span>
       </div>
       <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
-        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" aria-label="Step 1: About You">1</button>
+        <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" data-i18n-aria-label="setup.step1_aria" aria-label="Step 1: About You">1</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" aria-label="Step 2: Connect">2</button>
+        <button class="wizard-step" data-step="2" role="tab" aria-selected="false" data-i18n-aria-label="setup.step2_aria" aria-label="Step 2: Connect">2</button>
         <div class="wizard-connector"></div>
-        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" aria-label="Step 3: Ready">3</button>
+        <button class="wizard-step" data-step="3" role="tab" aria-selected="false" data-i18n-aria-label="setup.step3_aria" aria-label="Step 3: Ready">3</button>
       </div>
       <!-- Step 1: About You (hardware + preferences merged) -->
       <div class="wizard-body" id="step-1">
-        <h3>About You</h3>
+        <h3 data-i18n="setup.about_you">About You</h3>
         <div id="hw-loading" class="flex gap-1" style="align-items:center;margin-bottom:8px">
           <div class="spinner"></div>
-          <span class="text-muted">Detecting hardware...</span>
+          <span class="text-muted" data-i18n="setup.detecting_hw">Detecting hardware...</span>
         </div>
         <div id="hw-results" class="hidden" style="padding:8px 12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border);margin-bottom:12px">
           <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:0.82rem">
@@ -70,32 +70,32 @@
           <div id="hw-recommendation" class="text-muted" style="font-size:0.78rem;margin-top:4px"></div>
         </div>
         <div class="form-group">
-          <label style="font-size:0.85rem;font-weight:600">Nickname <span class="text-muted" style="font-weight:normal">(optional)</span></label>
-          <input type="text" id="setup-nickname" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
+          <label style="font-size:0.85rem;font-weight:600"><span data-i18n="setup.nickname_label">Nickname</span> <span class="text-muted" style="font-weight:normal" data-i18n="setup.nickname_optional">(optional)</span></label>
+          <input type="text" id="setup-nickname" data-i18n-placeholder="setup.nickname_placeholder" placeholder="e.g. HomePC, GamerRig, ServerBox" maxlength="32" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-top:4px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
         </div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
-          <label style="font-size:0.85rem;font-weight:600">Resource Contribution</label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Let others use your compute to help run AI. You earn credits in return.</p>
+          <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.resource_label">Resource Contribution</label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.resource_desc">Let others use your compute to help run AI. You earn credits in return.</p>
           <div class="flex-between mb-1">
-            <span>Minimal<span class="contribution-hint">&lt;5% CPU</span></span>
-            <span class="mono" id="contribution-label">Minimal</span>
-            <span>Maximum<span class="contribution-hint">75%+ CPU</span></span>
+            <span><span data-i18n="setup.contrib_min_label">Minimal</span><span class="contribution-hint">&lt;5% CPU</span></span>
+            <span class="mono" id="contribution-label" data-i18n="setup.contrib_min_label">Minimal</span>
+            <span><span data-i18n="setup.contrib_max_label">Maximum</span><span class="contribution-hint">75%+ CPU</span></span>
           </div>
           <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" aria-label="Resource contribution level">
         </div>
-        <div class="text-muted" style="font-size:0.78rem" id="contribution-desc">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
+        <div class="text-muted" style="font-size:0.78rem" id="contribution-desc" data-i18n="setup.contrib_desc_minimal">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
             <input type="checkbox" id="setup-auto-manage" checked style="width:18px;height:18px">
-            <span>Auto-download AI models</span>
+            <span data-i18n="setup.auto_download_label">Auto-download AI models</span>
           </label>
-          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
+          <span class="text-muted" style="font-size:0.75rem;display:block;margin-top:4px" data-i18n="setup.auto_download_desc">Automatically download popular AI models that fit your hardware. Uses disk space and bandwidth. You can set limits in Settings.</span>
         </div>
       </div>
       <!-- Step 2: Connect (invite code + cloud provider) -->
       <div class="wizard-body hidden" id="step-2">
-        <h3>Connect</h3>
-        <p class="text-muted mb-2">Choose one or both. You can also skip this and configure later.</p>
+        <h3 data-i18n="setup.connect_title">Connect</h3>
+        <p class="text-muted mb-2" data-i18n="setup.connect_subtitle">Choose one or both. You can also skip this and configure later.</p>
         <!-- Peer address section (NOT device pool — this connects to the P2P swarm) -->
         <div style="margin-bottom:16px">
           <label style="font-size:0.85rem;font-weight:600" data-i18n="setup.connect_peer">Connect to a swarm peer</label>
@@ -120,10 +120,10 @@
 
         <!-- Cloud provider section -->
         <div style="border-top:1px solid var(--border);padding-top:12px">
-          <label style="font-size:0.85rem;font-weight:600">Cloud AI Service <span class="text-muted" style="font-weight:normal">(optional — chat instantly)</span></label>
-          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px">Add an API key to start chatting right away while local models download.</p>
+          <label style="font-size:0.85rem;font-weight:600"><span data-i18n="setup.cloud_label">Cloud AI Service</span> <span class="text-muted" style="font-weight:normal" data-i18n="setup.cloud_optional">(optional — chat instantly)</span></label>
+          <p class="text-muted" style="font-size:0.78rem;margin:4px 0 8px" data-i18n="setup.cloud_desc">Add an API key to start chatting right away while local models download.</p>
           <select id="setup-provider-select" style="width:100%;font-size:0.85rem;padding:6px 10px;margin-bottom:6px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary)">
-            <option value="">Select a provider...</option>
+            <option value="" data-i18n="setup.select_provider">Select a provider...</option>
             <option value="openai">OpenAI</option>
             <option value="deepseek">DeepSeek (free tier available)</option>
             <option value="groq">Groq (free tier)</option>
@@ -137,10 +137,10 @@
             <option value="deepinfra">DeepInfra</option>
           </select>
           <div id="setup-provider-input" class="hidden" style="margin-top:6px">
-            <input type="password" id="setup-provider-key" placeholder="Paste your API key here..." style="width:100%;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);margin-bottom:4px">
+            <input type="password" id="setup-provider-key" data-i18n-placeholder="setup.paste_key" placeholder="Paste your API key here..." style="width:100%;font-size:0.85rem;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);margin-bottom:4px">
             <div style="display:flex;gap:8px;align-items:center">
-              <button class="btn btn-sm" id="setup-provider-save">Save Key</button>
-              <a id="setup-provider-signup" href="#" target="_blank" rel="noopener" class="provider-signup-link">Get a free key &rarr;</a>
+              <button class="btn btn-sm" id="setup-provider-save" data-i18n="setup.save_key">Save Key</button>
+              <a id="setup-provider-signup" href="#" target="_blank" rel="noopener" class="provider-signup-link" data-i18n="setup.get_free_key">Get a free key &rarr;</a>
               <span id="setup-provider-status" style="font-size:0.78rem"></span>
             </div>
           </div>
@@ -148,24 +148,24 @@
       </div>
       <!-- Step 3: Ready (dynamic summary) -->
       <div class="wizard-body hidden" id="step-3">
-        <h3>Ready to Go</h3>
+        <h3 data-i18n="setup.ready_title">Ready to Go</h3>
         <div class="mt-1">
-          <div class="flex-between mb-1"><span class="text-muted">Hardware</span><span class="mono" id="summary-gpu">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
-          <div class="flex-between mb-1"><span class="text-muted">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
-          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
-          <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_hw">Hardware</span><span class="mono" id="summary-gpu">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_nickname">Nickname</span><span class="mono" id="summary-nickname">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_contribution">Contribution</span><span class="mono" id="summary-contribution">---</span></div>
+          <div class="flex-between mb-1"><span class="text-muted" data-i18n="setup.summary_auto_download">Auto-Download</span><span class="mono" id="summary-auto-manage">---</span></div>
+          <div id="summary-invite-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_peer">Swarm Peer</span><span class="mono" id="summary-invite">---</span></div>
+          <div id="summary-provider-row" class="flex-between mb-1 hidden"><span class="text-muted" data-i18n="setup.summary_provider">Cloud Provider</span><span class="mono" id="summary-provider">---</span></div>
         </div>
         <div id="summary-next-steps" style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:var(--radius);border:1px solid var(--border)">
-          <p style="font-size:0.85rem;font-weight:600;margin-bottom:4px">What happens next:</p>
+          <p style="font-size:0.85rem;font-weight:600;margin-bottom:4px" data-i18n="setup.next_steps_title">What happens next:</p>
           <div id="summary-next-list" class="text-muted" style="font-size:0.8rem"></div>
         </div>
       </div>
       <div class="wizard-footer">
-        <button class="btn hidden" id="btn-prev">Back</button>
-        <a href="#" id="btn-skip-setup" style="font-size:0.78rem;color:var(--text-muted);text-decoration:none;align-self:center" title="Skip setup and go straight to the dashboard">Skip setup</a>
-        <button class="btn btn-primary btn-lg" id="btn-next">Continue</button>
+        <button class="btn hidden" id="btn-prev" data-i18n="setup.btn_back">Back</button>
+        <a href="#" id="btn-skip-setup" style="font-size:0.78rem;color:var(--text-muted);text-decoration:none;align-self:center" data-i18n="setup.btn_skip" data-i18n-title="setup.btn_skip_title" title="Skip setup and go straight to the dashboard">Skip setup</a>
+        <button class="btn btn-primary btn-lg" id="btn-next" data-i18n="setup.continue">Continue</button>
       </div>
     </div>
   </div>
