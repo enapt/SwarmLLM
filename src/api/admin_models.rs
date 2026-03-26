@@ -38,6 +38,27 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         }
     }
 
+    // Helper: count local and global shard availability for a manifest
+    let count_shard_availability =
+        |m: &crate::types::ModelManifest, state: &AppState| -> (usize, usize) {
+            let mut local_count = 0usize;
+            let mut global_count = 0usize;
+            for idx in 0..m.shard_count {
+                let sid = crate::types::ShardId {
+                    model_id: m.id.clone(),
+                    index: idx,
+                };
+                let holders = state.shared_state.model_registry.shard_holders(&sid);
+                if holders.contains(&local_node_id) {
+                    local_count += 1;
+                }
+                if !holders.is_empty() {
+                    global_count += 1;
+                }
+            }
+            (local_count, global_count)
+        };
+
     // Helper: build per-shard detail for a manifest, including download state
     let build_shard_detail = |m: &crate::types::ModelManifest,
                               state: &AppState|
@@ -276,32 +297,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             let (shard_count, hosted_local, global_available, shard_detail) = match manifest {
                 Some(ref m) => {
                     let detail = build_shard_detail(m, &state);
-                    let local_count = (0..m.shard_count)
-                        .filter(|&idx| {
-                            let sid = crate::types::ShardId {
-                                model_id: m.id.clone(),
-                                index: idx,
-                            };
-                            state
-                                .shared_state
-                                .model_registry
-                                .shard_holders(&sid)
-                                .contains(local_node_id)
-                        })
-                        .count();
-                    let global = (0..m.shard_count)
-                        .filter(|&idx| {
-                            let sid = crate::types::ShardId {
-                                model_id: m.id.clone(),
-                                index: idx,
-                            };
-                            !state
-                                .shared_state
-                                .model_registry
-                                .shard_holders(&sid)
-                                .is_empty()
-                        })
-                        .count();
+                    let (local_count, global) = count_shard_availability(m, &state);
                     (m.shard_count, local_count, global, detail)
                 }
                 None => (1, 1, 1, vec![]),
@@ -394,16 +390,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         }
         seen_ids.insert(m.id.0.clone());
 
-        let hosted_count = (0..m.shard_count)
-            .filter(|&idx| {
-                let shard_id = crate::types::ShardId {
-                    model_id: m.id.clone(),
-                    index: idx,
-                };
-                let holders = state.shared_state.model_registry.shard_holders(&shard_id);
-                holders.contains(&local_node_id)
-            })
-            .count();
+        let (hosted_count, global_available) = count_shard_availability(m, &state);
 
         let peer_count = model_peers.get(&m.id.0).map_or(0, |s| s.len());
         let shard_detail = build_shard_detail(m, &state);
@@ -415,21 +402,6 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         } else {
             ("network", "distributed")
         };
-
-        // Compute global shard availability (any holder, not just local)
-        let global_available = (0..m.shard_count)
-            .filter(|&idx| {
-                let shard_id = crate::types::ShardId {
-                    model_id: m.id.clone(),
-                    index: idx,
-                };
-                !state
-                    .shared_state
-                    .model_registry
-                    .shard_holders(&shard_id)
-                    .is_empty()
-            })
-            .count();
 
         // Check if the model is loaded and ready for inference.
         // A model is "ready" when all layers are covered across the network —

@@ -1365,6 +1365,58 @@ pub fn get_split_model_meta(
         })
 }
 
+/// Submit a streaming inference request to the router.
+///
+/// Creates the InferenceRequest and sends StreamSubmit. Returns receivers for
+/// the final result and streaming tokens. Used by both openai and anthropic handlers.
+pub async fn submit_stream_to_router(
+    router_tx: &tokio::sync::mpsc::Sender<RouterCommand>,
+    model_id: ModelId,
+    messages: Vec<ChatMessage>,
+    sampling_params: SamplingParams,
+    session_id: Option<String>,
+    lora_adapter: Option<String>,
+) -> Result<
+    (
+        tokio::sync::oneshot::Receiver<
+            Result<crate::inference::router::InferenceOutput, crate::error::SwarmError>,
+        >,
+        tokio::sync::mpsc::Receiver<StreamingTokenEvent>,
+    ),
+    ApiError,
+> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (token_tx, token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
+
+    let inference_req = InferenceRequest {
+        id: uuid::Uuid::new_v4(),
+        model_id,
+        messages,
+        sampling_params,
+        stream: true,
+        requester: NodeId([0u8; 32]),
+        priority: PriorityTier::Silver,
+        created_at: chrono::Utc::now(),
+        session_id,
+        lora_adapter,
+    };
+
+    router_tx
+        .send(RouterCommand::StreamSubmit {
+            request: inference_req,
+            result_tx,
+            token_tx,
+        })
+        .await
+        .map_err(|_| {
+            ApiError(crate::error::SwarmError::ServiceUnavailable(
+                "Router unavailable".into(),
+            ))
+        })?;
+
+    Ok((result_rx, token_rx))
+}
+
 /// Decode token IDs to text using the split model's tokenizer.
 ///
 /// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
@@ -1619,34 +1671,15 @@ async fn router_inference_stream(
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
-
-    let inference_req = InferenceRequest {
-        id: uuid::Uuid::new_v4(),
-        model_id: ModelId(req.model.clone()),
+    let (result_rx, mut token_rx) = submit_stream_to_router(
+        &router_tx,
+        ModelId(req.model.clone()),
         messages,
-        sampling_params: req.to_sampling_params(),
-        stream: true,
-        requester: NodeId([0u8; 32]),
-        priority: PriorityTier::Silver,
-        created_at: chrono::Utc::now(),
-        session_id: req.session_id.clone(),
-        lora_adapter: req.lora_adapter.clone(),
-    };
-
-    router_tx
-        .send(RouterCommand::StreamSubmit {
-            request: inference_req,
-            result_tx,
-            token_tx,
-        })
-        .await
-        .map_err(|_| {
-            ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router unavailable".into(),
-            ))
-        })?;
+        req.to_sampling_params(),
+        req.session_id.clone(),
+        req.lora_adapter.clone(),
+    )
+    .await?;
 
     let model_name = req.model.clone();
     let rid = request_id.clone();

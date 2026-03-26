@@ -798,34 +798,15 @@ async fn anthropic_stream(
     request_id: String,
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
-
-    let inference_req = InferenceRequest {
-        id: uuid::Uuid::new_v4(),
-        model_id: ModelId(model.clone()),
+    let (result_rx, mut token_rx) = crate::api::openai::submit_stream_to_router(
+        &router_tx,
+        ModelId(model.clone()),
         messages,
-        sampling_params: params,
-        stream: true,
-        requester: NodeId([0u8; 32]),
-        priority: PriorityTier::Silver,
-        created_at: chrono::Utc::now(),
-        session_id: None,
-        lora_adapter: None,
-    };
-
-    router_tx
-        .send(RouterCommand::StreamSubmit {
-            request: inference_req,
-            result_tx,
-            token_tx,
-        })
-        .await
-        .map_err(|_| {
-            ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router unavailable".into(),
-            ))
-        })?;
+        params,
+        None,
+        None,
+    )
+    .await?;
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<AnthropicSseEvent>(64);
 
@@ -1156,8 +1137,7 @@ async fn anthropic_split_stream(
         let gen_rid = uuid::Uuid::parse_str(&rid).unwrap_or_else(|_| uuid::Uuid::new_v4());
 
         // Stream tokens via worker subprocess
-        let (token_tx, mut token_rx) =
-            tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
+        let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
 
         let pool = state.shared_state.model_process_pool.clone();
         let requested_mid = requested_mid.clone();
