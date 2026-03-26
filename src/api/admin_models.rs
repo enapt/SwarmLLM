@@ -79,11 +79,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     .model_process_pool
                     .get_shard_window(&m.id);
                 let is_model_loaded = state.shared_state.model_process_pool.is_loaded(&m.id)
-                    || state
-                        .shared_state
-                        .split_models
-                        .iter()
-                        .any(|e| e.key().0 == m.id)
+                    || state.shared_state.has_split_model(&m.id)
                     || legacy_loaded;
                 let in_vram = if local {
                     match &shard_window {
@@ -440,11 +436,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         // no single node needs all shards. Nodes participate with whatever
         // shards they have; the pipeline scheduler assembles the full pipeline.
         let is_loaded = if hosted_count > 0 {
-            state
-                .shared_state
-                .split_models
-                .iter()
-                .any(|e| e.key().0 == m.id)
+            state.shared_state.has_split_model(&m.id)
                 || state.shared_state.model_process_pool.is_loaded(&m.id)
         } else {
             false
@@ -910,6 +902,7 @@ pub async fn delete_model(
 
     // Remove split models for this model
     shared.split_models.retain(|key, _| key.0 != mid);
+    shared.index_split_model_remove_all(&mid);
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
@@ -971,6 +964,7 @@ pub async fn unload_model(
             true
         }
     });
+    shared.index_split_model_remove_all(&mid);
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
@@ -1088,6 +1082,7 @@ pub async fn unload_shard(
         // Unloading the last shard = unload the model entirely
         shared.model_process_pool.unload_model(&mid).await;
         shared.split_models.retain(|key, _| key.0 != mid);
+        shared.index_split_model_remove_all(&mid);
     } else {
         // Narrow window and restart worker — next inference request
         // respawns loading only the remaining shards
@@ -1097,6 +1092,7 @@ pub async fn unload_shard(
             .await;
         // Remove split model entries so they reload with new window
         shared.split_models.retain(|key, _| key.0 != mid);
+        shared.index_split_model_remove_all(&mid);
     }
 
     // Clear stale model_loaded history so updated layer range emits fresh
@@ -1221,6 +1217,7 @@ pub async fn load_shard(
         .await;
     // Clear split models so they reload with new window
     shared.split_models.retain(|key, _| key.0 != mid);
+    shared.index_split_model_remove_all(&mid);
     // Clear stale model_loaded history so the new layer range emits a fresh event
     if let Ok(mut history) = shared.events.activity_history.lock() {
         history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
@@ -1323,6 +1320,7 @@ pub async fn delete_shard(
 
     // Evict any cached split model segments that included this shard
     shared.split_models.retain(|key, _| key.0 != mid);
+    shared.index_split_model_remove_all(&mid);
 
     // Kill the worker subprocess to free GPU memory and clear the shard window
     // so next spawn doesn't try to load the deleted shard

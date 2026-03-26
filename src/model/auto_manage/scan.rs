@@ -138,20 +138,22 @@ pub async fn rescan_local_shards(
         let vram_budget = compute_vram_budget(shared);
         for model_id in &changed_models {
             // Evict old model segments so they reload with updated layer ranges
-            let keys_to_remove: Vec<_> = shared
-                .split_models
-                .iter()
-                .filter(|e| e.key().0 == *model_id)
-                .map(|e| e.key().clone())
-                .collect();
-            for key in keys_to_remove {
+            // Use secondary index for O(1) lookup of segments to evict
+            let ranges: Vec<(usize, usize)> = shared
+                .split_model_index
+                .get(model_id)
+                .map(|v| v.clone())
+                .unwrap_or_default();
+            for (s, e) in ranges {
+                let key = (model_id.clone(), s, e);
                 shared.split_models.remove(&key);
                 tracing::info!(
                     model = %model_id,
-                    range = format!("[{}..{})", key.1, key.2),
+                    range = format!("[{}..{})", s, e),
                     "Rescan: evicted old model segment for reload"
                 );
             }
+            shared.index_split_model_remove_all(model_id);
 
             check_and_load_model(shared, model_id, vram_budget).await;
         }
@@ -452,6 +454,7 @@ manifest.name, budget - total_after
                 new_entry.estimated_vram_mb,
             );
         }
+        shared.index_split_model_insert(&split_key.0, split_key.1, split_key.2);
         shared.split_models.insert(split_key, new_entry);
 
         // Update loaded_model_info so the API knows the model is available

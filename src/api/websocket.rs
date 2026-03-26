@@ -403,7 +403,7 @@ async fn build_stats_message(
                                 Some(w) => w.contains(&s.index),
                                 None => {
                                     state.model_process_pool.is_loaded(&mid)
-                                        || state.split_models.iter().any(|e| e.key().0 == mid)
+                                        || state.has_split_model(&mid)
                                 }
                             }
                         } else {

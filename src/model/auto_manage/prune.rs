@@ -677,13 +677,18 @@ impl AutoShardManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.shared_state.split_models.iter().any(|entry| {
-            if entry.key().0 != *model_id {
-                return false;
+        if let Some(ranges) = self.shared_state.split_model_index.get(model_id) {
+            for &(s, e) in ranges.iter() {
+                let key = (model_id.clone(), s, e);
+                if let Some(entry) = self.shared_state.split_models.get(&key) {
+                    let last = entry.value().last_used_secs();
+                    if now_secs.saturating_sub(last) < 300 {
+                        return true;
+                    }
+                }
             }
-            let last = entry.value().last_used_secs();
-            now_secs.saturating_sub(last) < 300
-        })
+        }
+        false
     }
 
     /// Check if we can re-acquire this shard if needed later.

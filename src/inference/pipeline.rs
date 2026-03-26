@@ -1028,11 +1028,10 @@ impl PipelineExecutor {
     /// Decode token IDs to text using cached vocabulary from the split model metadata.
     async fn decode_tokens(&self, token_ids: &[u32]) -> String {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let entry = self
-            .shared_state
-            .split_models
-            .iter()
-            .find(|e| e.key().0 == *model_id);
+        let entry_key = self.shared_state.find_split_model_key(model_id);
+        let entry = entry_key
+            .as_ref()
+            .and_then(|k| self.shared_state.split_models.get(k));
         if let Some(entry) = entry {
             if let Some(ref vocab) = entry.value().vocab {
                 // Fallback: raw vocab concatenation with GPT-2 byte decode
@@ -1058,11 +1057,10 @@ impl PipelineExecutor {
     /// No model lock needed — uses cached metadata from SplitModelEntry.
     async fn extract_model_cache(&self, prompt: &str) -> (usize, Vec<u32>, CachedDecoder) {
         let model_id = &self.assignment.segments[0].shard_id.model_id;
-        let entry = self
-            .shared_state
-            .split_models
-            .iter()
-            .find(|e| e.key().0 == *model_id);
+        let entry_key = self.shared_state.find_split_model_key(model_id);
+        let entry = entry_key
+            .as_ref()
+            .and_then(|k| self.shared_state.split_models.get(k));
 
         if let Some(entry) = entry {
             let eos = entry.value().eos_tokens.clone();

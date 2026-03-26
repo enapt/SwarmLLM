@@ -251,6 +251,8 @@ pub struct SharedState {
     pub active_pipelines: DashMap<uuid::Uuid, PipelineAssignment>,
     pub split_models:
         DashMap<crate::inference::split::SplitModelKey, crate::inference::split::SplitModelEntry>,
+    /// Secondary index: model_id → loaded segment ranges for O(1) lookup by model.
+    pub split_model_index: DashMap<crate::types::ModelId, Vec<(usize, usize)>>,
     pub kv_cache_store: Arc<crate::inference::split::KvCacheStore>,
     pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
     pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
@@ -720,6 +722,7 @@ impl SharedState {
             gpu_info,
             pending_layer_results: DashMap::new(),
             split_models: DashMap::new(),
+            split_model_index: DashMap::new(),
             kv_cache_store: Arc::new(crate::inference::split::KvCacheStore::new(
                 std::time::Duration::from_secs(kv_cache_ttl_secs),
             )),
@@ -813,6 +816,69 @@ impl SharedState {
         } else {
             "RAM"
         }
+    }
+
+    /// Look up the first loaded segment key for a model by its model_id. O(1) via secondary index.
+    /// Falls back gracefully if the index is stale (e.g., after LRU eviction).
+    pub fn find_split_model_key(
+        &self,
+        model_id: &crate::types::ModelId,
+    ) -> Option<crate::inference::split::SplitModelKey> {
+        if let Some(ranges) = self.split_model_index.get(model_id) {
+            for &(s, e) in ranges.iter() {
+                let key = (model_id.clone(), s, e);
+                if self.split_models.contains_key(&key) {
+                    return Some(key);
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if any segment of a model is loaded. O(1) via secondary index.
+    pub fn has_split_model(&self, model_id: &crate::types::ModelId) -> bool {
+        if let Some(ranges) = self.split_model_index.get(model_id) {
+            for &(s, e) in ranges.iter() {
+                if self.split_models.contains_key(&(model_id.clone(), s, e)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Register a split model segment in the secondary index.
+    pub fn index_split_model_insert(
+        &self,
+        model_id: &crate::types::ModelId,
+        layer_start: usize,
+        layer_end: usize,
+    ) {
+        self.split_model_index
+            .entry(model_id.clone())
+            .or_default()
+            .push((layer_start, layer_end));
+    }
+
+    /// Remove a split model segment from the secondary index.
+    pub fn index_split_model_remove(
+        &self,
+        model_id: &crate::types::ModelId,
+        layer_start: usize,
+        layer_end: usize,
+    ) {
+        if let Some(mut ranges) = self.split_model_index.get_mut(model_id) {
+            ranges.retain(|&(s, e)| s != layer_start || e != layer_end);
+            if ranges.is_empty() {
+                drop(ranges);
+                self.split_model_index.remove(model_id);
+            }
+        }
+    }
+
+    /// Remove all segments for a model from the secondary index.
+    pub fn index_split_model_remove_all(&self, model_id: &crate::types::ModelId) {
+        self.split_model_index.remove(model_id);
     }
 
     /// Emit a rich activity event to the dashboard.

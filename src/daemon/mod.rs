@@ -1270,7 +1270,7 @@ impl Daemon {
                     count_b.cmp(&count_a)
                 });
                 for m in &manifests {
-                    if sm.split_models.iter().any(|e| e.key().0 == m.id) {
+                    if sm.has_split_model(&m.id) {
                         continue;
                     }
                     // Recompute VRAM budget each iteration since loading a model consumes VRAM
