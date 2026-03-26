@@ -473,9 +473,8 @@ async fn handle_forward(
             };
 
             if is_last {
-                let token_id =
-                    split::sample_token(&output, fwd.sampling.temperature, fwd.sampling.top_p)
-                        .map_err(|e| format!("Sample: {e}"))?;
+                let token_id = split::sample_token_with_params(&output, &fwd.sampling)
+                    .map_err(|e| format!("Sample: {e}"))?;
                 let eos_tokens = model.eos_tokens();
                 let finish = if eos_tokens.contains(&token_id) {
                     Some(NetworkFinishReason::Stop)
@@ -624,6 +623,26 @@ async fn handle_generate(
         next_token = tok;
         token_logprob = lp;
         index_pos += 1;
+    }
+
+    // If the loop exhausted max_tokens (not EOS/stop), the last sampled token
+    // was never sent. Emit it now to avoid the off-by-one.
+    if finish_reason == "length" && !eos.contains(&next_token) {
+        let text = decode_token(model, next_token);
+        generated.push(next_token);
+        send_worker(
+            writer,
+            &WorkerMsg::Token {
+                request_id,
+                token_id: next_token,
+                text,
+                is_eos: false,
+                logprob: if use_logprobs { token_logprob } else { None },
+            },
+            &[],
+        )
+        .await
+        .map_err(|e| SwarmError::Internal(format!("send final Token: {e}")))?;
     }
 
     // Send GenerateDone

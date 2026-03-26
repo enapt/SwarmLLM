@@ -402,23 +402,33 @@ impl PipelineExecutor {
         Ok(buf)
     }
 
-    /// Build chat prompt using the template from the loaded model (if available).
+    /// Build chat prompt by reading GGUF header from disk (convenience wrapper).
     async fn build_prompt(&self) -> String {
-        // Try to get template from the specific model's GGUF header (not the singleton loaded_model_info
-        // which may hold a different model's info).
         let model_id = &self.request.model_id;
-        let shard_store =
-            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-        let header_path = shard_store
-            .models_dir()
+        let header_path = self
+            .shared_state
+            .config
+            .node
+            .data_dir
+            .join("models")
             .join(&model_id.0)
             .join("gguf_header.bin");
-        if let Some((tmpl, bos, eos)) = template_from_header(&header_path) {
+        let header_data = template_from_header(&header_path);
+        self.build_prompt_with_header(header_data.as_ref()).await
+    }
+
+    /// Build chat prompt using pre-parsed GGUF header data or loaded_model_info fallback.
+    async fn build_prompt_with_header(
+        &self,
+        header_data: Option<&(Option<String>, String, String)>,
+    ) -> String {
+        let model_id = &self.request.model_id;
+        if let Some((tmpl, bos, eos)) = header_data {
             let prompt = chat_template::build_prompt_with_model(
                 &self.request.messages,
                 tmpl.as_deref(),
-                &bos,
-                &eos,
+                bos,
+                eos,
                 Some(&model_id.0),
             );
             tracing::info!(
@@ -580,8 +590,22 @@ impl PipelineExecutor {
             });
         }
 
+        // Read GGUF header ONCE and cache for both prompt building and stop strings
+        let header_data: Option<(Option<String>, String, String)> = {
+            let model_id = &self.request.model_id;
+            let header_path = self
+                .shared_state
+                .config
+                .node
+                .data_dir
+                .join("models")
+                .join(&model_id.0)
+                .join("gguf_header.bin");
+            template_from_header(&header_path)
+        };
+
         // Build the initial prompt representation
-        let prompt = self.build_prompt().await;
+        let prompt = self.build_prompt_with_header(header_data.as_ref()).await;
         let prompt_bytes = prompt.as_bytes().to_vec();
 
         let mut generated_tokens: Vec<u32> = Vec::new();
@@ -603,23 +627,13 @@ impl PipelineExecutor {
         } else {
             None
         };
-        // Text-based stop sequences from the chat template (e.g. "<|user|>")
-        // Use the specific model's GGUF header first, fall back to loaded_model_info singleton.
-        let stop_strings = {
-            let model_id = &self.request.model_id;
-            let shard_store =
-                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-            let header_path = shard_store
-                .models_dir()
-                .join(&model_id.0)
-                .join("gguf_header.bin");
-            if let Some((tmpl, _, _)) = template_from_header(&header_path) {
-                chat_template::extract_stop_strings(tmpl.as_deref())
-            } else {
-                let info = self.shared_state.loaded_model_info.read().await;
-                let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
-                chat_template::extract_stop_strings(tmpl)
-            }
+        // Text-based stop sequences from the cached GGUF header (read once above)
+        let stop_strings = if let Some((ref tmpl, _, _)) = header_data {
+            chat_template::extract_stop_strings(tmpl.as_deref())
+        } else {
+            let info = self.shared_state.loaded_model_info.read().await;
+            let tmpl = info.as_ref().and_then(|i| i.chat_template.as_deref());
+            chat_template::extract_stop_strings(tmpl)
         };
         // Accumulate decoded text for stop-string matching (both streaming and non-streaming)
         let mut accumulated_text = String::new();
@@ -627,23 +641,25 @@ impl PipelineExecutor {
         // T14: Pre-compute vision embeddings before the token generation loop.
         // This decouples vision encoding from the text pipeline — any node with
         // mmproj can encode, and the embeddings travel with LayerForward.
-        let mut precomputed_vision: Option<Vec<u8>> =
-            if !crate::inference::vision::collect_images(&self.request.messages).is_empty() {
-                match self.precompute_vision_embeddings().await {
-                    Ok(Some(bytes)) => Some(bytes),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(
-                            request_id = %request_id,
-                            error = %e,
-                            "Vision pre-computation failed, proceeding without images"
-                        );
-                        None
-                    }
+        // Collect images once to avoid scanning messages twice.
+        let has_images =
+            !crate::inference::vision::collect_images(&self.request.messages).is_empty();
+        let mut precomputed_vision: Option<Vec<u8>> = if has_images {
+            match self.precompute_vision_embeddings().await {
+                Ok(Some(bytes)) => Some(bytes),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        error = %e,
+                        "Vision pre-computation failed, proceeding without images"
+                    );
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         // Local embedding privacy: check if we should embed locally before sending
         // activations to the first pipeline segment. This prevents remote nodes from

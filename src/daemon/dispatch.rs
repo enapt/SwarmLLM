@@ -113,6 +113,7 @@ fn track_forward_participation(
     _layer_start: usize,
     _layer_end: usize,
     _max_layers: usize,
+    estimated_tokens: u32,
 ) {
     if let Ok(mut stats) = shared_state.metrics.node_stats.try_write() {
         stats.forwards_served += 1;
@@ -120,7 +121,9 @@ fn track_forward_participation(
     // Credits earned per forward step for remote peers serving segments.
     // Local segments don't go through dispatch — they use process_local_segment
     // which only earns via apply_credit_direct at pipeline completion.
-    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE;
+    // Multiply by estimated token count to account for prefill (many tokens in one forward).
+    let tokens = estimated_tokens.max(1) as i64;
+    let earned = crate::credit::ledger::RATE_INFERENCE_SERVE.saturating_mul(tokens);
     shared_state
         .credits
         .pending_credit_earn
@@ -1349,11 +1352,21 @@ async fn handle_layer_forward(
         }
     };
 
+    // Estimate token count for credit accounting: prefill carries many tokens,
+    // decode carries 1. For prefill (seq==0), estimate from activation bytes
+    // (raw prompt: ~4 bytes/token, embedded: hidden_dim*4 bytes/token).
+    let estimated_tokens: u32 = if forward.sequence_num == 0 {
+        // Rough estimate: prompt bytes / 4 chars per token
+        (forward.activations.len() / 4).max(1) as u32
+    } else {
+        1
+    };
     let forward_start = std::time::Instant::now();
     tracing::info!(
         request_id = %request_id,
         seq = forward.sequence_num,
         activation_bytes = forward.activations.len(),
+        estimated_tokens,
         model_id = %forward.model_id,
         layer_range = ?forward.layer_range,
         "DIAG: processing LayerForward locally"
@@ -1516,7 +1529,13 @@ async fn handle_layer_forward(
         "DIAG: LayerForward processed via worker subprocess"
     );
 
-    track_forward_participation(&shared_state, layer_start, layer_end, total_layers);
+    track_forward_participation(
+        &shared_state,
+        layer_start,
+        layer_end,
+        total_layers,
+        estimated_tokens,
+    );
 
     // Pipeline sealing: encrypt token IDs for requester if this is the final segment
     let mut result = result;
