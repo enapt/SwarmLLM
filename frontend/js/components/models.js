@@ -35,14 +35,14 @@
         if (!resp.ok) {
           var errBody = await resp.text();
           try { var errJson = JSON.parse(errBody); errBody = errJson.error ? errJson.error.message : errBody; } catch (e2) {}
-          results.innerHTML = '<div class="empty-state"><p>Search failed: ' + U.escapeHtml(errBody) + '</p></div>';
+          results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.search_failed', { error: errBody })) + '</p></div>';
           return;
         }
 
         var data = await resp.json();
 
         if (!Array.isArray(data) || data.length === 0) {
-          results.innerHTML = '<div class="empty-state"><p>No GGUF models found for "' + U.escapeHtml(query) + '"</p></div>';
+          results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.no_gguf_found', { query: query })) + '</p></div>';
           return;
         }
 
@@ -51,7 +51,7 @@
         App.hf._renderResults(data);
       } catch (e) {
         loading.classList.add('hidden');
-        results.innerHTML = '<div class="empty-state"><p>Search failed: ' + U.escapeHtml(e.message) + '</p></div>';
+        results.innerHTML = '<div class="empty-state"><p>' + U.escapeHtml(I18n.t('models.search_failed', { error: e.message })) + '</p></div>';
       }
     },
 
@@ -172,7 +172,7 @@
           App.notifications.showToast(I18n.t('models.download_started'), 'success');
           App.ui.closeModelBrowser();
         } else {
-          App.notifications.showToast(data.message || 'Download could not be started', 'warning');
+          App.notifications.showToast(data.message || I18n.t('models.download_could_not_start'), 'warning');
         }
       } catch (e) {
         App.ui.showBanner('error', I18n.t('models.download_failed', { error: e.message }));
@@ -464,10 +464,10 @@
           S.activeAcquisitions[modelId] = { started: Date.now() };
           App.dashboard.renderAcquisitionPanel(modelId, null);
         } else {
-          App.ui.showBanner('warning', data.message || 'Model download unavailable');
+          App.ui.showBanner('warning', data.message || I18n.t('models.download_unavailable'));
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Failed to request model: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.request_failed', { error: e.message }));
       }
     },
 
@@ -503,10 +503,10 @@
           delete S.activeAcquisitions[modelId];
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
         } else {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to cancel download'));
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.cancel_failed')));
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Cancel failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.cancel_error', { error: e.message }));
       }
     },
 
@@ -520,10 +520,10 @@
           if (card) card.remove();
           setTimeout(function() { App.dashboard.loadInitial(); }, 1000);
         } else {
-          App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to remove model'));
+          App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('models.remove_failed')));
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Remove failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('models.remove_error', { error: e.message }));
       }
     },
 
@@ -540,10 +540,10 @@
           App.notifications.showToast(msg, 'success');
           App.models.load();
         } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to unload model'), 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('models.unload_failed')), 'error');
         }
       } catch (e) {
-        App.notifications.showToast('Unload failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('models.unload_error', { error: e.message }), 'error');
       }
     },
 

@@ -159,7 +159,7 @@
               gpuBadge.className = 'node-mode-badge node-mode-gpu';
               gpuBadge.title = I18n.t('hw.gpu_mode_tip');
             } else {
-              gpuBadge.textContent = 'CPU mode';
+              gpuBadge.textContent = I18n.t('hw.mode_cpu');
               gpuBadge.className = 'node-mode-badge node-mode-cpu';
               gpuBadge.title = I18n.t('hw.cpu_mode_tip');
             }
@@ -171,7 +171,7 @@
 
             var vramLabel = document.getElementById('vram-label');
             if (hw.gpu_inference) {
-              if (vramLabel) vramLabel.textContent = 'VRAM';
+              if (vramLabel) vramLabel.textContent = I18n.t('hw.vram');
               // GPU mode: show model-estimated VRAM for loaded models
               var activeVramMb = 0;
               if (App.data.cache.models && App.data.cache.models.length) {
@@ -191,7 +191,7 @@
               document.getElementById('vram-bar').style.width = vramPct.toFixed(1) + '%';
               document.getElementById('vram-bar').className = vramPct > 90 ? 'fill red' : (vramPct > 70 ? 'fill orange' : 'fill cyan');
             } else {
-              if (vramLabel) vramLabel.textContent = 'VRAM (idle)';
+              if (vramLabel) vramLabel.textContent = I18n.t('hw.vram_idle');
               // CPU mode: show actual GPU VRAM (driver baseline only, models use RAM)
               vramEl.textContent = U.formatMB(vramUsed) + ' / ' + U.formatMB(vramTotal);
               vramEl.title = I18n.t('hw.vram_idle_tip');
@@ -201,9 +201,9 @@
             }
           }
         } else {
-          gpuEl.textContent = 'None';
+          gpuEl.textContent = I18n.t('hw.none');
           if (gpuBadge) {
-            gpuBadge.textContent = 'CPU only';
+            gpuBadge.textContent = I18n.t('hw.mode_cpu_only');
             gpuBadge.className = 'node-mode-badge node-mode-cpu';
             gpuBadge.title = I18n.t('hw.cpu_only_tip');
           }
@@ -456,7 +456,7 @@
         } else if (isDownloading) {
           statusHtml = '<span class="model-status-pill downloading"><span class="spinner" style="width:10px;height:10px;border-width:1.5px;vertical-align:middle;margin-right:3px"></span>' + U.escapeHtml(I18n.t('dashboard.status_downloading')) + '</span>';
         } else if (isPartial) {
-          statusHtml = '<span class="model-status-pill partial">' + hostedShards + '/' + shardCount + ' local</span>';
+          statusHtml = '<span class="model-status-pill partial">' + U.escapeHtml(I18n.t('dashboard.local_status', { hosted: hostedShards, total: shardCount })) + '</span>';
         } else {
           statusHtml = '<span class="model-status-pill network">' + U.escapeHtml(I18n.t('dashboard.status_on_network')) + '</span>';
         }
@@ -624,10 +624,10 @@
 
           // Health label based on network replication quality
           var healthLabel, healthClass;
-          if (networkMissing > 0) { healthLabel = 'At risk'; healthClass = 'health-low'; }
-          else if (fragile > 0) { healthLabel = 'Fragile'; healthClass = 'health-partial'; }
-          else if (avgHolders >= 2) { healthLabel = 'Healthy'; healthClass = 'health-full'; }
-          else { healthLabel = 'Good'; healthClass = 'health-good'; }
+          if (networkMissing > 0) { healthLabel = I18n.t('dashboard.health_at_risk'); healthClass = 'health-low'; }
+          else if (fragile > 0) { healthLabel = I18n.t('dashboard.health_fragile'); healthClass = 'health-partial'; }
+          else if (avgHolders >= 2) { healthLabel = I18n.t('dashboard.health_healthy'); healthClass = 'health-full'; }
+          else { healthLabel = I18n.t('dashboard.health_good'); healthClass = 'health-good'; }
 
           // Health tooltip — scale-aware language
           var barTooltipLines = [];
@@ -1304,9 +1304,7 @@
         var lanCount = peers.filter(function(p) { return p.is_lan_peer; }).length;
         var healthyCount = peers.filter(function(p) { return p.healthy; }).length;
         if (summary) {
-          summary.textContent = peers.length + ' peer' + (peers.length !== 1 ? 's' : '') +
-            (lanCount > 0 ? ' \u00B7 ' + lanCount + ' LAN' : '') +
-            ' \u00B7 ' + healthyCount + ' healthy';
+          summary.textContent = I18n.t('dashboard.peers_summary', { count: peers.length, lan: lanCount, healthy: healthyCount });
         }
 
         list.innerHTML = '';
@@ -1320,7 +1318,7 @@
           if (peers.length > PEER_LIMIT) {
             overflow.style.display = '';
             var btn = document.getElementById('btn-show-all-peers');
-            if (btn) btn.textContent = showAll ? 'Show fewer' : 'Show all ' + peers.length + ' peers';
+            if (btn) btn.textContent = showAll ? I18n.t('dashboard.show_fewer') : I18n.t('dashboard.show_all', { count: peers.length });
           } else {
             overflow.style.display = 'none';
           }

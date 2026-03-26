@@ -273,18 +273,18 @@
         return;
       }
       var s = S.sessions[S.currentSessionId];
-      var modelName = s.model ? U.formatModelDisplayName(s.model) : 'No model';
+      var modelName = s.model ? U.formatModelDisplayName(s.model) : I18n.t('chat.no_model');
       var allIds = S._modelDropdownData.map(function(m) { return m.id; });
       var available = !s.model || allIds.indexOf(s.model) !== -1;
       var headerSource = U.getModelSource(s.model || '');
       var badgeClass = 'chat-session-model source-' + headerSource + (available ? '' : ' unavailable');
-      var badgeTitle = available ? s.model : 'Model no longer available';
+      var badgeTitle = available ? s.model : I18n.t('chat.model_unavailable');
       var headerModelItem = s.model ? S._modelDropdownData.find(function(m) { return m.id === s.model; }) : null;
       var isEncrypted = headerModelItem && headerModelItem.encrypted;
       var _hdrIconKey = (headerModelItem && headerModelItem.group && _ICON_MAP[headerModelItem.group]) ? headerModelItem.group : modelIconKey(s.model || '');
       var hdrIconHtml = _hdrIconKey ? providerIconHtml(_hdrIconKey, 12) : '';
       var msgCount = s.messages.length;
-      var countLabel = msgCount === 0 ? 'New' : (msgCount === 1 ? '1 message' : msgCount + ' messages');
+      var countLabel = msgCount === 0 ? I18n.t('chat.count_new') : (msgCount === 1 ? I18n.t('chat.count_one') : I18n.t('chat.count_many', { count: msgCount }));
       var countClass = 'chat-session-count' + (msgCount === 0 ? ' is-new' : '');
       var safeModelId = U.escapeHtml(s.model || '');
       header.classList.add('visible');

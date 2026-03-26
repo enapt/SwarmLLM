@@ -60,8 +60,8 @@
       var provider = document.getElementById('setup-provider-select').value;
       var key = document.getElementById('setup-provider-key').value.trim();
       var status = document.getElementById('setup-provider-status');
-      if (!provider || !key) { status.textContent = 'Select a provider and enter a key'; status.style.color = 'var(--red)'; return; }
-      status.textContent = 'Saving...'; status.style.color = 'var(--text-muted)';
+      if (!provider || !key) { status.textContent = I18n.t('init.select_provider'); status.style.color = 'var(--red)'; return; }
+      status.textContent = I18n.t('init.saving'); status.style.color = 'var(--text-muted)';
       try {
         var body = {}; body[provider + '_key'] = key;
         var resp = await App.authFetch('/api/admin/providers', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
@@ -70,7 +70,7 @@
           status.innerHTML = '<span style="color:var(--green)">\u2713 Connected!</span>';
           App.setup._savedProvider = provider;
         } else {
-          status.innerHTML = '<span style="color:var(--red)">Key saved but provider not responding</span>';
+          status.innerHTML = '<span style="color:var(--red)">' + U.escapeHtml(I18n.t('init.key_saved_no_response')) + '</span>';
           App.setup._savedProvider = provider;
         }
       } catch (e) { status.textContent = 'Error: ' + e.message; status.style.color = 'var(--red)'; }
@@ -223,7 +223,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key_source: this.value })
         }).then(function() {
-          App.ui.showBanner('success', 'Key source updated to: ' + keySourceSel.value);
+          App.ui.showBanner('success', I18n.t('init.key_source_updated', { source: keySourceSel.value }));
           App.settings.loadProviders();
         });
       });
@@ -499,7 +499,7 @@
         } else {
           if (confirm(I18n.t('init.confirm_download_shards'))) {
             App.authFetch('/api/admin/hf/source/' + encodeURIComponent(encToggle)).then(function(r) {
-              if (!r.ok) { App.ui.showBanner('error', 'No HuggingFace source found for ' + encToggle); return; }
+              if (!r.ok) { App.ui.showBanner('error', I18n.t('init.no_hf_source', { model: encToggle })); return; }
               return r.json();
             }).then(function(src) {
               if (!src) return;
@@ -511,14 +511,14 @@
                 if (first && !first.local) missing.push(first.index);
                 if (last && !last.local) missing.push(last.index);
               }
-              if (missing.length === 0) { App.ui.showBanner('info', 'No missing endpoint shards detected'); return; }
+              if (missing.length === 0) { App.ui.showBanner('info', I18n.t('init.no_missing_shards')); return; }
               App.authFetch('/api/admin/hf/download-shards', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: missing }),
               }).then(function(r) {
-                if (r.ok) App.ui.showBanner('success', 'Downloading shard(s) ' + missing.join(', ') + ' for encrypted pipeline');
-                else App.ui.showBanner('error', 'Download failed');
+                if (r.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.join(', ') }));
+                else App.ui.showBanner('error', I18n.t('shard.download_failed', { error: '' }));
               });
             });
           }
@@ -547,7 +547,7 @@
             App.chat.newSession();
             App.ui.switchTab('chat');
           } else {
-            App.ui.showBanner('warning', 'Model not ready \u2014 download all shards first');
+            App.ui.showBanner('warning', I18n.t('init.model_not_ready'));
           }
           return;
         }
@@ -559,7 +559,7 @@
         var el = document.getElementById(copyCompare);
         if (el) {
           navigator.clipboard.writeText(el.textContent).then(function() {
-            target.textContent = 'Copied!';
+            target.textContent = I18n.t('actions.copied');
             setTimeout(function() { target.textContent = 'Copy'; }, 1500);
           });
         }
@@ -583,7 +583,7 @@
         var contentEl = msgEl ? msgEl.querySelector('.msg-content') : null;
         if (contentEl) {
           navigator.clipboard.writeText(contentEl.textContent).then(function() {
-            target.textContent = 'Copied!';
+            target.textContent = I18n.t('actions.copied');
             setTimeout(function() { target.textContent = 'Copy'; }, 1500);
           });
         }
@@ -601,7 +601,7 @@
               var promptEl = document.getElementById('compare-prompt');
               if (promptEl) promptEl.value = userContent.textContent;
               App.compare.loadModels();
-              App.notifications.showToast('Your question is ready \u2014 pick models and hit Compare', 'info');
+              App.notifications.showToast(I18n.t('init.compare_ready'), 'info');
             }
           }
         }
