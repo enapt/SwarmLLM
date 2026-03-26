@@ -312,6 +312,8 @@ impl ModelExecutor {
         let mut completion_tokens = 0u32;
         let mut cur_pos = tokens.len();
         let eos = model.token_eos();
+        let stop_sequences = &params.stop;
+        let mut accumulated_text = String::new();
 
         for _ in 0..max_gen {
             // Sample next token
@@ -327,6 +329,17 @@ impl ModelExecutor {
             let piece = model
                 .token_to_piece(new_token, &mut decoder, true, None)
                 .map_err(|e| SwarmError::Inference(format!("Token to piece failed: {e}")))?;
+
+            accumulated_text.push_str(&piece);
+
+            // Check user-provided stop sequences
+            if !stop_sequences.is_empty()
+                && stop_sequences
+                    .iter()
+                    .any(|s| accumulated_text.contains(s.as_str()))
+            {
+                break;
+            }
 
             completion_tokens += 1;
 

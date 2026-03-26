@@ -574,7 +574,9 @@ async fn handle_generate(
         crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
 
     let eos = model.eos_tokens().to_vec();
+    let stop_sequences = &gen.sampling.stop;
     let mut generated: Vec<u32> = Vec::new();
+    let mut accumulated_text = String::new();
     let mut index_pos = prompt_tokens;
     let mut finish_reason = "length".to_string();
 
@@ -584,9 +586,20 @@ async fn handle_generate(
             break;
         }
 
-        generated.push(next_token);
-
         let text = decode_token(model, next_token);
+        accumulated_text.push_str(&text);
+
+        // Check user-provided stop sequences
+        if !stop_sequences.is_empty()
+            && stop_sequences
+                .iter()
+                .any(|s| accumulated_text.contains(s.as_str()))
+        {
+            finish_reason = "stop".to_string();
+            break;
+        }
+
+        generated.push(next_token);
 
         send_worker(
             writer,
