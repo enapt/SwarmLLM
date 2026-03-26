@@ -182,6 +182,7 @@
 
     renderSessionList: function() {
       var list = document.getElementById('session-list');
+      if (!list) return;
       var sorted = Object.values(S.sessions).sort(function(a, b) { return b.created - a.created; });
       if (sorted.length === 0) {
         list.innerHTML = '<div class="text-muted" style="padding:12px;font-size:0.8rem">' + U.escapeHtml(I18n.t('chat.no_chats_yet')) + '</div>';
@@ -339,6 +340,7 @@
 
     renderMessages: function() {
       var container = document.getElementById('chat-messages');
+      if (!container) return;
       container.innerHTML = '';
 
       App.chat.updateChatHeader();
@@ -475,7 +477,8 @@
           contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">Retry</button></div>';
           contentEl.classList.add('chat-error');
           S.isStreaming = false;
-          document.getElementById('send-btn').disabled = false;
+          var _sb = document.getElementById('send-btn');
+          if (_sb) _sb.disabled = false;
           return;
         }
 
@@ -567,7 +570,7 @@
 
     scrollToBottom: function() {
       var container = document.getElementById('chat-messages');
-      container.scrollTop = container.scrollHeight;
+      if (container) container.scrollTop = container.scrollHeight;
     },
 
     saveSessions: function() {

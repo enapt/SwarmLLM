@@ -356,9 +356,7 @@ impl InferenceRouter {
                 .is_some();
             let has_split = self
                 .shared_state
-                .split_models
-                .iter()
-                .any(|e| e.key().0 == adjusted_request.model_id);
+                .has_split_model(&adjusted_request.model_id);
             let has_loaded = {
                 let model_loaded = self
                     .shared_state

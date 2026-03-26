@@ -594,7 +594,7 @@ impl PipelineExecutor {
 
         // Cached EOS tokens and decoder — extracted once after prefill under a single
         // model lock acquisition. Avoids per-token mutex + DashMap scan.
-        let mut cached_eos: Option<Vec<u32>> = None;
+        let mut cached_eos: Option<std::collections::HashSet<u32>> = None;
         let mut cached_decoder: Option<CachedDecoder> = None;
         let is_streaming = token_tx.is_some();
         // For streaming: accumulate decoded text to avoid redundant final decode
@@ -769,7 +769,7 @@ impl PipelineExecutor {
                         };
                         index_pos = ptc + vision_expand;
                         prompt_token_count = Some(ptc + vision_expand);
-                        cached_eos = Some(eos);
+                        cached_eos = Some(eos.into_iter().collect());
                         cached_decoder = Some(decoder);
                     } else {
                         index_pos += 1;
@@ -778,7 +778,8 @@ impl PipelineExecutor {
                     generated_tokens.extend(&result.token_ids);
 
                     // Decode and stream each non-EOS token, checking for stop strings.
-                    let eos = cached_eos.as_deref().unwrap_or(&[2]);
+                    let default_eos: std::collections::HashSet<u32> = [2].into_iter().collect();
+                    let eos = cached_eos.as_ref().unwrap_or(&default_eos);
                     let decoder = cached_decoder.as_ref();
                     let mut hit_stop_string = false;
                     for &tid in &result.token_ids {
@@ -914,7 +915,7 @@ impl PipelineExecutor {
         }
 
         // Strip EOS tokens before decoding (loaded from GGUF metadata)
-        let eos_tokens = cached_eos.unwrap_or_else(|| vec![2]);
+        let eos_tokens = cached_eos.unwrap_or_else(|| [2].into_iter().collect());
         let clean_tokens: Vec<u32> = generated_tokens
             .iter()
             .copied()
@@ -1038,7 +1039,7 @@ impl PipelineExecutor {
             let ptc = (prompt.chars().count() / 4).max(1);
 
             let decoder = CachedDecoder {
-                vocab: vocab.clone(),
+                vocab,
                 byte_decoder: HashMap::new(),
                 is_sentencepiece: false,
                 has_tokenizer: false,
@@ -1129,7 +1130,7 @@ impl PipelineExecutor {
                         }
                     }
                 }
-                let ptc = prompt.chars().count() / 4;
+                let ptc = (prompt.chars().count() / 4).max(1);
                 (
                     ptc,
                     vec![2],

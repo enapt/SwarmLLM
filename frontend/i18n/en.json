@@ -858,5 +858,6 @@
   "setup.cpu_only": "CPU only",
   "leaderboard.load_failed": "Failed to load",
   "leaderboard.load_error": "Error: {error}",
-  "leaderboard.tier_default": "Silver"
+  "leaderboard.tier_default": "Silver",
+  "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device"
 }
