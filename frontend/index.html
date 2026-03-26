@@ -423,7 +423,7 @@
       </div>
       <div class="hf-swarm-notice">
         <span class="hf-swarm-notice-icon">&#9432;</span>
-        <span>Downloading a model lets you <strong>host it</strong> and earn credits. To run inference without enough local VRAM, swarm peers must already be hosting it — check the <strong>On Swarm</strong> badge in results.</span>
+        <span data-i18n="model_browser.hosting_notice">Downloading a model lets you <strong>host it</strong> and earn credits. To run inference without enough local VRAM, swarm peers must already be hosting it — check the <strong>On Swarm</strong> badge in results.</span>
       </div>
       <div class="model-browser-search">
         <input type="text" id="hf-search-input" placeholder="Search HuggingFace models (e.g. llama, qwen, phi, gemma)..." data-i18n-placeholder="model_browser.search_placeholder">
@@ -463,7 +463,7 @@
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
-      <button class="hamburger-btn" id="hamburger-btn" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
+      <button class="hamburger-btn" id="hamburger-btn" data-i18n-aria-label="nav.toggle_sidebar" aria-label="Toggle sidebar" aria-expanded="false">&#9776;</button>
       <div class="logo" id="logo" style="cursor:pointer"><img src="/static/icons/swarm.svg" width="20" height="20" alt="" aria-hidden="true" class="logo-icon">SwarmLLM</div>
     </div>
     <div class="header-center">
@@ -564,7 +564,7 @@
             <div id="image-preview-area" style="display:none;max-width:740px;margin:0 auto 6px;padding:6px;background:var(--bg-tertiary);border-radius:8px;"></div>
             <div class="chat-input-wrap">
               <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
-              <button class="btn" id="image-upload-btn" title="Attach image (or paste/drag)" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
+              <button class="btn" id="image-upload-btn" data-i18n-title="chat.attach_image" title="Attach image (or paste/drag)" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" data-i18n-placeholder="chat.placeholder" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
@@ -885,13 +885,13 @@
               <details style="margin-bottom:4px">
                 <summary style="font-size:0.78rem;color:var(--text-muted);cursor:pointer" data-i18n="compare.advanced">Advanced: system prompt &amp; parameters</summary>
                 <div class="form-group mt-1">
-                  <label for="compare-system">System prompt (sets the AI's behavior)</label>
-                  <input type="text" id="compare-system" placeholder="You are a helpful assistant." style="font-size:0.85rem">
+                  <label for="compare-system" data-i18n="compare.system_prompt_label">System prompt (sets the AI's behavior)</label>
+                  <input type="text" id="compare-system" data-i18n-placeholder="compare.system_default" placeholder="You are a helpful assistant." style="font-size:0.85rem">
                 </div>
                 <div style="display:flex;gap:12px;align-items:flex-end;margin-top:8px">
                   <div class="form-group" style="width:100px">
                     <label for="compare-temp" data-i18n="compare.creativity">Creativity</label>
-                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem" title="Lower = more focused, Higher = more creative">
+                    <input type="number" id="compare-temp" value="0.7" min="0" max="2" step="0.1" style="font-size:0.85rem" data-i18n-title="compare.creativity_tip" title="Lower = more focused, Higher = more creative">
                   </div>
                   <div class="form-group" style="width:140px">
                     <label for="compare-max-tokens" data-i18n="compare.max_length">Max response length</label>
@@ -935,16 +935,16 @@
         <div class="container">
           <div class="panel">
             <div class="panel-header">
-              <h2>Network Leaderboard</h2>
-              <button class="btn btn-sm" id="btn-refresh-leaderboard">Refresh</button>
+              <h2 data-i18n="leaderboard.title">Network Leaderboard</h2>
+              <button class="btn btn-sm" id="btn-refresh-leaderboard" data-i18n="dashboard.refresh">Refresh</button>
             </div>
             <table class="data-table" id="leaderboard-table">
               <thead>
                 <tr>
-                  <th scope="col" style="width:60px">#</th>
-                  <th scope="col">Node</th>
-                  <th scope="col">Credits</th>
-                  <th scope="col">Tier</th>
+                  <th scope="col" style="width:60px" data-i18n="leaderboard.rank">#</th>
+                  <th scope="col" data-i18n="leaderboard.node">Node</th>
+                  <th scope="col" data-i18n="leaderboard.credits">Credits</th>
+                  <th scope="col" data-i18n="leaderboard.tier">Tier</th>
                 </tr>
               </thead>
               <tbody id="leaderboard-body">
@@ -1056,7 +1056,7 @@
                 <div class="panel-header"><h3 style="margin:0" data-i18n="pool.my_device_name">My Device Name</h3></div>
                 <div class="panel-body" style="padding:12px">
                   <div style="display:flex;gap:8px">
-                    <input type="text" id="pool-device-name-input" placeholder="e.g., Gaming PC" maxlength="32" style="flex:1">
+                    <input type="text" id="pool-device-name-input" data-i18n-placeholder="pool.device_name_example" placeholder="e.g., Gaming PC" maxlength="32" style="flex:1">
                     <button class="btn btn-sm btn-primary" id="pool-save-name-btn" data-i18n="actions.save">Save</button>
                   </div>
                   <p class="text-muted" style="font-size:0.72rem;margin:4px 0 0" data-i18n="pool.name_hint">Give this device a recognizable name so you can tell your machines apart.</p>
@@ -1094,8 +1094,8 @@
     <div class="shard-ctx-status" id="shard-ctx-status"></div>
     <div class="shard-ctx-actions">
       <button class="shard-ctx-btn" id="shard-ctx-action"></button>
-      <button class="shard-ctx-btn" id="shard-ctx-load" style="display:none">Load into memory</button>
-      <button class="shard-ctx-btn" id="shard-ctx-unload" style="display:none">Unload from memory</button>
+      <button class="shard-ctx-btn" id="shard-ctx-load" style="display:none" data-i18n="shard.load_memory">Load into memory</button>
+      <button class="shard-ctx-btn" id="shard-ctx-unload" style="display:none" data-i18n="shard.unload_memory">Unload from memory</button>
       <button class="shard-ctx-btn" id="shard-ctx-lock"></button>
     </div>
     <div class="shard-ctx-warn" id="shard-ctx-warn" style="display:none"></div>
@@ -1140,14 +1140,14 @@
   <template id="tmpl-session-item">
     <div class="session-item">
       <div class="session-info">
-        <span class="session-title" title="Double-click to rename"></span>
+        <span class="session-title" data-i18n-title="chat.rename_tip" title="Double-click to rename"></span>
         <span class="session-meta">
           <span class="session-time"></span>
           <span class="session-model-badge" hidden></span>
-          <span class="session-enc-lock" title="Encrypted pipeline active" hidden>&#128274;</span>
+          <span class="session-enc-lock" data-i18n-title="chat.encrypted_title" title="Encrypted pipeline active" hidden>&#128274;</span>
         </span>
       </div>
-      <button class="btn btn-ghost btn-sm session-delete" title="Delete">&times;</button>
+      <button class="btn btn-ghost btn-sm session-delete" data-i18n-title="actions.delete" title="Delete">&times;</button>
     </div>
   </template>
 
@@ -1190,7 +1190,7 @@
           <span class="compare-card-status"></span>
         </div>
         <div class="compare-card-actions">
-          <button class="compare-card-copy-btn" title="Copy response">Copy</button>
+          <button class="compare-card-copy-btn" data-i18n-title="chat.copy_response" title="Copy response" data-i18n="actions.copy">Copy</button>
         </div>
       </div>
       <div class="compare-card-body"></div>
@@ -1232,7 +1232,7 @@
       </div>
       <div class="hf-model-actions">
         <select class="hf-quant-select" hidden></select>
-        <button class="btn btn-sm btn-primary hf-dl-btn">Download</button>
+        <button class="btn btn-sm btn-primary hf-dl-btn" data-i18n="models.download">Download</button>
       </div>
     </div>
   </template>
@@ -1256,7 +1256,7 @@
   <template id="tmpl-pool-member-row">
     <div class="pool-member-row" style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px">
-        <span class="pool-member-status" style="font-size:0.7rem" title="Online status"></span>
+        <span class="pool-member-status" style="font-size:0.7rem" data-i18n-title="pool.online_status" title="Online status"></span>
         <span class="pool-member-icon" style="font-size:1.2rem">&#128187;</span>
         <div>
           <div class="pool-member-id" style="font-size:0.88rem;font-weight:500"></div>
@@ -1270,10 +1270,10 @@
           <div class="text-muted" style="font-size:0.7rem" data-i18n="pool.credits_contributed">credits</div>
         </div>
         <div class="pool-member-contribution" style="display:none;text-align:center;min-width:60px">
-          <input type="range" class="pool-contrib-slider" min="0" max="100" value="100" style="width:56px;margin:0" title="Contribution level">
+          <input type="range" class="pool-contrib-slider" min="0" max="100" value="100" style="width:56px;margin:0" data-i18n-title="pool.contribution_level" title="Contribution level">
           <div class="pool-contrib-label text-muted" style="font-size:0.65rem">100%</div>
         </div>
-        <button class="btn btn-sm btn-ghost pool-member-remove-btn" style="color:var(--red);display:none" title="Remove">&times;</button>
+        <button class="btn btn-sm btn-ghost pool-member-remove-btn" style="color:var(--red);display:none" data-i18n-title="actions.remove" title="Remove">&times;</button>
       </div>
     </div>
   </template>
