@@ -12,6 +12,7 @@
   // --- Activity + Network Logs (persisted to sessionStorage) ---
   var ACTIVITY_STORAGE_KEY = App.ACTIVITY_KEY;
   var NETWORK_STORAGE_KEY = App.NETWORK_LOG_KEY;
+  var _modelsChangedTimer = null;
   var _activityEntries = (function() {
     try { var s = sessionStorage.getItem(ACTIVITY_STORAGE_KEY); if (s) return JSON.parse(s); } catch (e) {}
     return [];
@@ -392,8 +393,8 @@
           _handleActivityEvent(msg.data || {});
         } else if (msg.type === 'models_changed') {
           // Refresh model list — activity logging is handled by activity_event messages
-          if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
-          window._modelsChangedTimer = setTimeout(function() {
+          if (_modelsChangedTimer) clearTimeout(_modelsChangedTimer);
+          _modelsChangedTimer = setTimeout(function() {
             App.data.invalidateDedup('models');
             App.models.load();
             App.modeIndicator.load();

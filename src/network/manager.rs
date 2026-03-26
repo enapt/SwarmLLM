@@ -2587,7 +2587,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         };
 
         // Try to find the peer's NodeId for encryption
-        let peer_node_id = self.find_node_id_for_peer(&peer_id);
+        let peer_node_id = self.peer_to_node_id(&peer_id);
         let use_encryption =
             self.shared_state.config.network.enable_encryption && peer_node_id.is_some();
 
@@ -2969,7 +2969,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                 );
                 match protocol::decode_layer_forward_encrypted(payload) {
                     Ok((mut forward, sealed, aad)) => {
-                        let sender_node_id = self.find_node_id_for_peer(&peer);
+                        let sender_node_id = self.peer_to_node_id(&peer);
                         tracing::debug!(
                             %peer,
                             request_id = %forward.request_id,
@@ -3177,11 +3177,6 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         if let Ok(mut stats) = self.shared_state.metrics.node_stats.try_write() {
             stats.peers_connected = count;
         }
-    }
-
-    /// NET-C4: O(1) lookup of NodeId for a libp2p PeerId via reverse index.
-    fn find_node_id_for_peer(&self, peer_id: &libp2p::PeerId) -> Option<crate::types::NodeId> {
-        self.peer_to_node.get(peer_id).map(|v| v.clone())
     }
 
     /// Save current peer addresses to the persistent cache.

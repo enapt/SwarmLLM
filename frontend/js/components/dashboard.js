@@ -65,7 +65,7 @@
       var netEvents = _modelNetEvents[modelId] || [];
       if (actEvents.length === 0 && netEvents.length === 0) return;
 
-      var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+      var safeId = U.safeId(modelId);
       var ticker = document.querySelector('[data-model-ticker="' + safeId + '"]');
       if (!ticker) return;
 
@@ -438,7 +438,7 @@
         // In that case, show as Ready (not Downloading) — the download is just local caching.
         var isCachingLocally = isDownloading && isReady;
         var isPartial = !isReady && hostedShards > 0 && hostedShards < shardCount;
-        var safeId = (m.id || '').replace(/[^a-zA-Z0-9]/g, '_');
+        var safeId = U.safeId(m.id || '');
 
         var card = document.createElement('div');
         card.className = 'model-card' + (isReady ? ' ready' : (isDownloading ? ' downloading' : (isPartial ? ' partial' : '')));
@@ -1004,7 +1004,7 @@
         acquisitions.forEach(function(acq) {
           var modelId = acq.model_id;
           if (!modelId) return;
-          var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+          var safeId = U.safeId(modelId);
 
           var shardDetails = acq.shard_details || [];
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
@@ -1155,7 +1155,7 @@
       // Update shard cells from shard registry changes
       if (shardRegistry) {
         Object.keys(shardRegistry).forEach(function(modelId) {
-          var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+          var safeId = U.safeId(modelId);
           var shards = shardRegistry[modelId] || [];
           shards.forEach(function(s) {
             var cellId = safeId + '-' + s.index;
@@ -1217,7 +1217,7 @@
       // Update shard cells with peer download progress
       if (peerDownloads && peerDownloads.length > 0) {
         peerDownloads.forEach(function(pd) {
-          var safeId = pd.model_id.replace(/[^a-zA-Z0-9]/g, '_');
+          var safeId = U.safeId(pd.model_id);
           var cellId = safeId + '-' + pd.shard_index;
           var cell = document.querySelector('[data-shard="' + cellId + '"]');
           if (!cell) return;
@@ -1382,7 +1382,7 @@
 
         // Remove download bar immediately on complete or fail
         function _removeDownloadBar(mid) {
-          var safeId2 = mid.replace(/[^a-zA-Z0-9]/g, '_');
+          var safeId2 = U.safeId(mid);
           var progBar = document.querySelector('[data-model-progress="' + safeId2 + '"]');
           if (progBar) progBar.remove();
           var card2 = document.querySelector('[data-model-id="' + U.cssSafeAttr(mid) + '"]');
@@ -1392,7 +1392,7 @@
         if (isComplete && !S.activeAcquisitions[modelId]._completeFired) {
           S.activeAcquisitions[modelId]._completeFired = true;
           // Flash "Download complete" then fade out
-          var safeIdC = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+          var safeIdC = U.safeId(modelId);
           var progBarC = document.querySelector('[data-model-progress="' + safeIdC + '"]');
           if (progBarC) {
             progBarC.innerHTML = '<div class="dl-complete-flash">' + U.escapeHtml(I18n.t('dashboard.download_complete')) + '</div>';
@@ -1418,7 +1418,7 @@
     renderAcquisitionPanel: function(modelId, status) {
       if (!status) return;
       if (!S.activeAcquisitions[modelId]) return;
-      var safeId = modelId.replace(/[^a-zA-Z0-9]/g, '_');
+      var safeId = U.safeId(modelId);
       var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
       if (!card) {
         App.models.load();

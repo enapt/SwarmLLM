@@ -143,7 +143,6 @@ impl CreditLedger {
         &self,
         request_id: uuid::Uuid,
         tokens: u32,
-        _layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
         let amount = rates.inference_serve.saturating_mul(tokens as i64);
@@ -185,7 +184,6 @@ impl CreditLedger {
         &self,
         request_id: uuid::Uuid,
         tokens: u32,
-        _layers: u32,
     ) -> Result<i64, SwarmError> {
         let rates = self.credit_rates();
         let amount = rates.inference_consume.saturating_mul(tokens as i64);
@@ -760,11 +758,11 @@ mod tests {
         );
 
         let earned = ledger
-            .earn_inference(uuid::Uuid::new_v4(), 10, 2)
+            .earn_inference(uuid::Uuid::new_v4(), 10)
             .await
             .unwrap();
 
-        // 10 credits/token * 10 tokens = 100 (no layer multiplier — balanced with consume)
+        // 10 credits/token * 10 tokens = 100
         assert_eq!(earned, 100);
 
         let bal = balance.read().await;
@@ -798,11 +796,11 @@ mod tests {
         );
 
         let spent = ledger
-            .spend_inference(uuid::Uuid::new_v4(), 5, 3)
+            .spend_inference(uuid::Uuid::new_v4(), 5)
             .await
             .unwrap();
 
-        // 10 credits/token * 5 tokens = 50 (no layer multiplier — balanced with earn)
+        // 10 credits/token * 5 tokens = 50
         assert_eq!(spent, 50);
 
         let bal = balance.read().await;
@@ -906,13 +904,13 @@ mod tests {
         );
 
         ledger
-            .earn_inference(uuid::Uuid::new_v4(), 10, 1)
+            .earn_inference(uuid::Uuid::new_v4(), 10)
             .await
             .unwrap();
 
         // Check it was persisted
         let stored: CreditBalance = db.get_json(TREE_CREDITS, KEY_BALANCE).unwrap().unwrap();
-        assert_eq!(stored.balance, 100); // 10 * 1 * 10
+        assert_eq!(stored.balance, 100); // 10 credits/token * 10 tokens
         assert_eq!(stored.node_id, node_id);
     }
 

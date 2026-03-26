@@ -649,7 +649,7 @@ fn decode_token(model: &SplitModel, token_id: u32) -> String {
         if let Some(token_str) = vocab.get(token_id as usize) {
             if let Some(tokenizer) = model.tokenizer() {
                 let bytes = tokenizer.decode_token(token_str);
-                return String::from_utf8_lossy(&bytes).to_string();
+                return String::from_utf8_lossy(&bytes).into_owned();
             }
             return token_str.clone();
         }

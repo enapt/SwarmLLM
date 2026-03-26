@@ -79,7 +79,7 @@ impl CachedDecoder {
                     bytes.extend(self.decode_token_bytes(token_str));
                 }
             }
-            String::from_utf8_lossy(&bytes).to_string()
+            String::from_utf8_lossy(&bytes).into_owned()
         } else if !self.vocab.is_empty() {
             let mut raw = String::new();
             for &id in token_ids {
@@ -660,7 +660,7 @@ impl PipelineExecutor {
         // T14: Pre-compute vision embeddings before the token generation loop.
         // This decouples vision encoding from the text pipeline — any node with
         // mmproj can encode, and the embeddings travel with LayerForward.
-        let precomputed_vision: Option<Vec<u8>> =
+        let mut precomputed_vision: Option<Vec<u8>> =
             if !crate::inference::vision::collect_images(&self.request.messages).is_empty() {
                 match self.precompute_vision_embeddings().await {
                     Ok(Some(bytes)) => Some(bytes),
@@ -746,9 +746,9 @@ impl PipelineExecutor {
 
             // Forward through each segment
             let fwd_start = std::time::Instant::now();
-            // Attach pre-computed vision on first forward only
+            // Attach pre-computed vision on first forward only (take ownership to avoid clone)
             let vision_for_forward = if seq_num == 0 {
-                precomputed_vision.clone()
+                precomputed_vision.take()
             } else {
                 None
             };
@@ -2182,7 +2182,7 @@ fn decode_bpe_text(text: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&bytes).to_string()
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Reverse the GPT-2 byte-to-unicode mapping for a Unicode codepoint.
