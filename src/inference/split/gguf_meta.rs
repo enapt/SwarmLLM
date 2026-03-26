@@ -192,22 +192,11 @@ impl GgufTokenizerMeta {
 
         let vocab: Vec<String> = md
             .get("tokenizer.ggml.tokens")
-            .and_then(|v| {
-                if let gguf_file::Value::Array(arr) = v {
-                    Some(
-                        arr.iter()
-                            .filter_map(|v| {
-                                if let gguf_file::Value::String(s) = v {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
-                    )
-                } else {
-                    None
-                }
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -224,8 +213,11 @@ impl GgufTokenizerMeta {
         if let Some(id) = eos_token_id {
             eos_ids.push(id);
         }
-        if let Some(gguf_file::Value::Array(arr)) = md.get("tokenizer.ggml.eos_token_ids") {
-            for v in arr {
+        if let Some(extra) = md
+            .get("tokenizer.ggml.eos_token_ids")
+            .and_then(|v| v.to_vec().ok())
+        {
+            for v in extra {
                 if let Ok(id) = v.to_u32() {
                     if !eos_ids.contains(&id) {
                         eos_ids.push(id);
@@ -240,22 +232,11 @@ impl GgufTokenizerMeta {
 
         let merges: Vec<String> = md
             .get("tokenizer.ggml.merges")
-            .and_then(|v| {
-                if let gguf_file::Value::Array(arr) = v {
-                    Some(
-                        arr.iter()
-                            .filter_map(|v| {
-                                if let gguf_file::Value::String(s) = v {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect(),
-                    )
-                } else {
-                    None
-                }
+            .and_then(|v| v.to_vec().ok())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.to_string().ok().cloned())
+                    .collect()
             })
             .unwrap_or_default();
 
