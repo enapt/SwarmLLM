@@ -12,6 +12,8 @@ pub struct SamplingContext {
     probs: Vec<f32>,
     /// Scratch buffer for index sorting in top-p.
     indices: Vec<usize>,
+    /// Saved raw logits (pre-temperature/top-k/top-p) for computing logprobs.
+    raw_logits: Vec<f32>,
 }
 
 impl SamplingContext {
@@ -22,6 +24,7 @@ impl SamplingContext {
             keep_mask: vec![false; vocab_size],
             probs: Vec::with_capacity(vocab_size),
             indices: Vec::with_capacity(vocab_size),
+            raw_logits: Vec::with_capacity(vocab_size),
         }
     }
 
@@ -249,15 +252,23 @@ pub struct SampledTokenLogProb {
 
 /// Sample a token and optionally return logprob information.
 ///
-/// When `top_logprobs > 0`, computes log-softmax over the raw logits (before
-/// temperature/top-k/top-p) and returns the top-N tokens by probability along
-/// with the sampled token's logprob.
+/// When `top_logprobs > 0`, saves the raw logits before temperature/top-k/top-p
+/// mutation, then computes log-softmax over those raw logits. Returns the top-N
+/// tokens by pre-sampling probability along with the sampled token's logprob.
+/// This matches the OpenAI spec (logprobs reflect the model's raw distribution).
 pub fn sample_token_with_logprobs(
     logits: &mut [f32],
     params: &SamplingParams,
     ctx: &mut SamplingContext,
 ) -> (u32, Option<SampledTokenLogProb>) {
     let need_logprobs = params.logprobs && params.top_logprobs > 0;
+
+    // Save raw logits BEFORE sampling mutates them (temperature/top-k/top-p).
+    // OpenAI spec: logprobs are computed from the pre-sampling distribution.
+    if need_logprobs {
+        ctx.raw_logits.clear();
+        ctx.raw_logits.extend_from_slice(logits);
+    }
 
     // Clear probs buffer before sampling to prevent stale data from previous tokens
     // (especially important for greedy/temperature=0 which skips softmax)
@@ -266,69 +277,52 @@ pub fn sample_token_with_logprobs(
     let token_id = sample_token_with_ctx(logits, params, ctx);
 
     let logprob_info = if need_logprobs {
-        // We need the original logits, but they've been mutated by temperature/top-k/top-p.
-        // The log-softmax for the sampled token is: logit[token] - log_sum_exp
-        // But logits are mutated. We saved log_sum_exp before mutation, so we need
-        // to recover from the probs buffer which has the post-sampling softmax.
-        //
-        // Actually, we computed log_sum_exp from the raw logits before sample_token_with_ctx
-        // mutated them. But sample_token_with_ctx already consumed and modified logits.
-        // The probs in ctx.probs are post-temperature softmax probs.
-        //
-        // For correct logprobs, we use the post-temperature softmax (which is what the
-        // model actually sampled from). This matches what vLLM and other implementations do.
-        let sum: f32 = ctx.probs.iter().sum();
-        if sum > 0.0 {
-            let inv_sum = 1.0 / sum;
-            let sampled_prob = ctx.probs.get(token_id as usize).copied().unwrap_or(0.0) * inv_sum;
-            let sampled_logprob = if sampled_prob > 0.0 {
-                sampled_prob.ln()
-            } else {
-                -9999.0
-            };
+        // Compute log-softmax from raw (pre-sampling) logits per OpenAI spec.
+        let max_logit = ctx
+            .raw_logits
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let log_sum_exp = ctx
+            .raw_logits
+            .iter()
+            .map(|l| (l - max_logit).exp())
+            .sum::<f32>()
+            .ln()
+            + max_logit;
 
-            // Get top-N tokens by probability
-            let n = params.top_logprobs.min(20) as usize;
-            ctx.indexed_logits.clear();
-            ctx.indexed_logits.extend(
-                ctx.probs
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .filter(|(_, p)| *p > 0.0),
-            );
-            // Partial sort to get top-N
-            if ctx.indexed_logits.len() > n {
-                ctx.indexed_logits.select_nth_unstable_by(n, |a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                ctx.indexed_logits.truncate(n);
-            }
-            ctx.indexed_logits.sort_unstable_by(|a, b| {
+        let sampled_logprob = ctx
+            .raw_logits
+            .get(token_id as usize)
+            .map(|l| l - log_sum_exp)
+            .unwrap_or(-9999.0);
+
+        // Get top-N tokens by raw logit value (highest logit = highest probability)
+        let n = params.top_logprobs.min(20) as usize;
+        ctx.indexed_logits.clear();
+        ctx.indexed_logits
+            .extend(ctx.raw_logits.iter().copied().enumerate());
+        // Partial sort to get top-N by logit value
+        if ctx.indexed_logits.len() > n {
+            ctx.indexed_logits.select_nth_unstable_by(n, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
-
-            let top: Vec<(u32, f32)> = ctx
-                .indexed_logits
-                .iter()
-                .map(|&(idx, p)| {
-                    let lp = if p * inv_sum > 0.0 {
-                        (p * inv_sum).ln()
-                    } else {
-                        -9999.0
-                    };
-                    (idx as u32, lp)
-                })
-                .collect();
-
-            Some(SampledTokenLogProb {
-                token_id,
-                logprob: sampled_logprob,
-                top_logprobs: top,
-            })
-        } else {
-            None
+            ctx.indexed_logits.truncate(n);
         }
+        ctx.indexed_logits
+            .sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let top: Vec<(u32, f32)> = ctx
+            .indexed_logits
+            .iter()
+            .map(|&(idx, logit)| (idx as u32, logit - log_sum_exp))
+            .collect();
+
+        Some(SampledTokenLogProb {
+            token_id,
+            logprob: sampled_logprob,
+            top_logprobs: top,
+        })
     } else {
         None
     };
@@ -485,11 +479,17 @@ mod tests {
             ..Default::default()
         };
         let mut ctx = SamplingContext::new(logits.len());
-        let (token, _lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
+        let (token, lp) = sample_token_with_logprobs(&mut logits, &params, &mut ctx);
         assert_eq!(token, 1); // index of 5.0 (highest)
-                              // Greedy path: logprobs come from probs buffer which isn't populated by argmax.
-                              // For greedy, logprobs may be None because the softmax probs aren't computed.
-                              // This is acceptable — logprobs are most useful with temperature > 0.
+        let lp = lp.expect("logprobs should be present even in greedy mode");
+        assert_eq!(lp.token_id, 1);
+        assert!(lp.logprob > -1.0); // highest logit → near-zero logprob
+        assert_eq!(lp.top_logprobs.len(), 3);
+        // Top logprobs should be sorted descending by logprob
+        assert!(lp.top_logprobs[0].1 >= lp.top_logprobs[1].1);
+        assert!(lp.top_logprobs[1].1 >= lp.top_logprobs[2].1);
+        // First entry should be the highest-logit token (index 1, logit 5.0)
+        assert_eq!(lp.top_logprobs[0].0, 1);
     }
 
     #[test]
