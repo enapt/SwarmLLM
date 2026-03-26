@@ -143,10 +143,10 @@
         var vramEl = document.getElementById('settings-pool-vram');
         if (vramEl) {
           if (networkVram > 0) {
-            vramEl.innerHTML = '<strong>' + U.formatMB(networkVram) + '</strong> swarm network VRAM' +
-              ' (your GPU: ' + U.formatMB(localVram) + ', ' + peerCount + ' swarm peer' + (peerCount !== 1 ? 's' : '') + ')';
+            vramEl.innerHTML = '<strong>' + U.formatMB(networkVram) + '</strong> ' + U.escapeHtml(I18n.t('settings.network_vram')) +
+              ' (' + U.escapeHtml(I18n.t('settings.your_gpu')) + U.formatMB(localVram) + ', ' + peerCount + ' ' + U.escapeHtml(I18n.t('settings.swarm_peers')) + ')';
           } else {
-            vramEl.innerHTML = '<span class="text-muted">No GPU detected</span>';
+            vramEl.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('settings.no_gpu')) + '</span>';
           }
         }
 
@@ -176,10 +176,10 @@
             }
           });
           if (modelsDiv.children.length === 0) {
-            modelsDiv.innerHTML = '<span class="text-muted">No local shards yet</span>';
+            modelsDiv.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('settings.no_local_shards')) + '</span>';
           }
         } else {
-          modelsDiv.innerHTML = '<span class="text-muted">No models registered</span>';
+          modelsDiv.innerHTML = '<span class="text-muted">' + U.escapeHtml(I18n.t('settings.no_models')) + '</span>';
         }
       } catch (e) {
         App.ui.showBanner('error', I18n.t('settings.storage_load_failed'));

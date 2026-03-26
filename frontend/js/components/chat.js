@@ -211,7 +211,7 @@
         var badgeEl = div.querySelector('.session-model-badge');
         if (s.model) {
           var source = U.getModelSource(s.model);
-          var sourceLabel = source === 'local' ? 'Your PC' : source === 'cloud' ? 'Cloud' : 'Swarm';
+          var sourceLabel = source === 'local' ? I18n.t('chat.source_local') : source === 'cloud' ? I18n.t('chat.source_cloud') : I18n.t('chat.source_network');
           var _sibIconKey = (modelItem && modelItem.group && _ICON_MAP[modelItem.group]) ? modelItem.group : modelIconKey(s.model);
           var sibIconHtml = _sibIconKey ? providerIconHtml(_sibIconKey, 11) : '';
           badgeEl.removeAttribute('hidden');

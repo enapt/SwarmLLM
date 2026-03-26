@@ -558,5 +558,10 @@
   "settings.no_local_shards": "No local shards yet",
   "settings.no_models": "No models registered",
   "identity.load_failed": "Failed to load",
-  "identity.tier_default": "Silver"
+  "identity.tier_default": "Silver",
+  "dashboard.cloud_providers": "Cloud Providers",
+  "dashboard.health_replicated": "{avg}× replicated across the swarm",
+  "dashboard.health_distributed": "{count} parts distributed",
+  "dashboard.health_under_replicated": "{count} part(s) under-replicated",
+  "dashboard.health_missing": "{count} part(s) missing from swarm"
 }

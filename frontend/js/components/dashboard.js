@@ -396,8 +396,7 @@
           var hc = m.hosted_shards || 0, sc = m.shard_count || (m.shards || []).length;
           return m.status === 'loaded' || m.status === 'ready' || (hc === sc && sc > 0);
         }).length;
-        var swarmMeta = models.length + ' model' + (models.length !== 1 ? 's' : '') +
-          (swarmReadyCount > 0 ? ' \u00b7 ' + swarmReadyCount + ' ready' : '');
+        var swarmMeta = I18n.t('dashboard.models_count', { count: models.length, ready: swarmReadyCount });
         swarmSection.innerHTML = '<summary class="models-section-header">' +
           '<img src="/static/icons/swarm.svg" width="16" height="16" alt="" aria-hidden="true" class="models-section-logo">' +
           '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.swarm_models')) + '</span>' +
@@ -550,14 +549,14 @@
             }
 
             var title = 'Part ' + (s.index + 1) + (s.size_bytes ? ' (' + U.formatBytes(s.size_bytes) + ')' : '');
-            if (cls === 'local vram') title += ' \u2014 Active (loaded in ' + (S._gpuInference ? 'VRAM' : 'RAM') + ')';
-            else if (cls === 'local') title += ' \u2014 On disk (not loaded)';
-            else if (cls === 'peer') title += ' \u2014 Available from ' + s.holders + ' peer' + (s.holders !== 1 ? 's' : '');
-            else if (cls === 'downloading') title += ' \u2014 Downloading (' + dlPct + '%)';
-            else if (cls === 'verifying') title += ' \u2014 Verifying';
-            else if (cls === 'peer-downloading') title += ' \u2014 Peer downloading (' + dlPct + '%)';
-            else title += ' \u2014 Not available';
-            title += '\nClick to manage';
+            if (cls === 'local vram') title += ' \u2014 ' + I18n.t(S._gpuInference ? 'shard.tooltip_active_vram' : 'shard.tooltip_active_ram');
+            else if (cls === 'local') title += ' \u2014 ' + I18n.t('shard.tooltip_on_disk');
+            else if (cls === 'peer') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_available', { count: s.holders });
+            else if (cls === 'downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_downloading', { pct: dlPct });
+            else if (cls === 'verifying') title += ' \u2014 ' + I18n.t('shard.tooltip_verifying');
+            else if (cls === 'peer-downloading') title += ' \u2014 ' + I18n.t('shard.tooltip_peer_downloading', { pct: dlPct });
+            else title += ' \u2014 ' + I18n.t('shard.tooltip_unavailable');
+            title += '\n' + I18n.t('shard.tooltip_click');
 
             var style = '';
             if (cls === 'downloading' || cls === 'peer-downloading') {
@@ -675,13 +674,13 @@
           // Summary: scale-aware detail
           var healthDetail = '';
           if (healthClass === 'health-full') {
-            healthDetail = avgHolders.toFixed(1) + '\u00d7 replicated across the swarm';
+            healthDetail = I18n.t('dashboard.health_replicated', { avg: avgHolders.toFixed(1) });
           } else if (healthClass === 'health-good') {
-            healthDetail = totalShards + ' parts distributed';
+            healthDetail = I18n.t('dashboard.health_distributed', { count: totalShards });
           } else if (fragile > 0) {
-            healthDetail = fragile + ' part' + (fragile !== 1 ? 's' : '') + ' under-replicated';
+            healthDetail = I18n.t('dashboard.health_under_replicated', { count: fragile });
           } else if (networkMissing > 0) {
-            healthDetail = networkMissing + ' part' + (networkMissing !== 1 ? 's' : '') + ' missing from swarm';
+            healthDetail = I18n.t('dashboard.health_missing', { count: networkMissing });
           }
           var healthSummary = '<div class="shard-health-summary ' + healthClass + '">' +
             '<span class="shard-health-label">' + healthLabel + '</span>' +
@@ -724,7 +723,7 @@
           var dlSource = ap.source || '';
           var dlTrigger = ap.trigger || '';
           var triggerText = dlTrigger === 'auto_manage' ? I18n.t('dashboard.auto_manage') : (dlTrigger === 'user' ? I18n.t('dashboard.manual') : '');
-          var sourceText = dlSource === 'huggingface' ? 'from HuggingFace' : (dlSource === 'peers' ? 'from peers' : '');
+          var sourceText = dlSource === 'huggingface' ? I18n.t('dashboard.from_hf') : (dlSource === 'peers' ? I18n.t('dashboard.from_peers') : '');
           if (isCachingLocally) {
             shardLabel = (triggerText || I18n.t('dashboard.auto_manage')) + ': saving to this device (' + localNow + '/' + shardCount + ')';
           } else {
@@ -923,11 +922,10 @@
         var cloudSection = document.createElement('details');
         cloudSection.className = 'models-section';
         cloudSection.open = true;
-        var cloudMeta = providerCount + ' provider' + (providerCount !== 1 ? 's' : '') +
-          ' \u00b7 ' + cloudModels.length + ' models';
+        var cloudMeta = I18n.t('dashboard.providers_count', { count: providerCount, models: cloudModels.length });
         cloudSection.innerHTML = '<summary class="models-section-header">' +
           '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" class="models-section-logo" style="flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>' +
-          '<span class="models-section-title">Cloud Providers</span>' +
+          '<span class="models-section-title">' + U.escapeHtml(I18n.t('dashboard.cloud_providers')) + '</span>' +
           '<span class="models-section-count">' + cloudMeta + '</span>' +
           '</summary>';
         var cloudBody = document.createElement('div');
@@ -1401,7 +1399,7 @@
           var safeIdC = modelId.replace(/[^a-zA-Z0-9]/g, '_');
           var progBarC = document.querySelector('[data-model-progress="' + safeIdC + '"]');
           if (progBarC) {
-            progBarC.innerHTML = '<div class="dl-complete-flash">\u2705 Download complete</div>';
+            progBarC.innerHTML = '<div class="dl-complete-flash">' + U.escapeHtml(I18n.t('dashboard.download_complete')) + '</div>';
             progBarC.classList.add('dl-complete');
             setTimeout(function() { _removeDownloadBar(modelId); }, 3000);
           }
@@ -1462,7 +1460,7 @@
       var speedStr = speed > 0 ? ' - ' + U.formatSpeed(speed) : '';
       progressEl.innerHTML =
         '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-        '<span class="text-muted">Downloading model data</span>' +
+        '<span class="text-muted">' + U.escapeHtml(I18n.t('dashboard.downloading_data')) + '</span>' +
         '<span style="display:flex;align-items:center;gap:8px">' +
           '<span class="mono dl-progress-text">' + U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
           '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="Cancel download">&times; Cancel</button>' +
