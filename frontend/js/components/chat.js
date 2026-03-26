@@ -302,7 +302,7 @@
         var disableBtn = '<button class="btn btn-xs enc-banner-btn" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.disable')) + '</button>';
         var enableBtn = '<button class="btn btn-xs enc-banner-btn enc-banner-btn-enable" data-enc-toggle="' + safeModelId + '" data-enc-ready="1">' + U.escapeHtml(I18n.t('enc.enable_privacy')) + '</button>';
         if (headerSource === 'cloud') {
-          var providerName = (headerModelItem && headerModelItem.group) ? (PROVIDER_NAMES[headerModelItem.group] || headerModelItem.group) : 'cloud provider';
+          var providerName = (headerModelItem && headerModelItem.group) ? (PROVIDER_NAMES[headerModelItem.group] || headerModelItem.group) : I18n.t('chat.unknown_provider');
           var providerIcon = (headerModelItem && headerModelItem.group) ? providerIconHtml(headerModelItem.group, 12) : '';
           encBanner.className = 'chat-enc-banner enc-cloud';
           encBanner.innerHTML = (providerIcon ? providerIcon + ' ' : '') +

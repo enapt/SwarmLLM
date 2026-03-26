@@ -101,13 +101,13 @@ impl PoolManager {
             tokio::time::interval(std::time::Duration::from_secs(gossip_secs));
         gossip_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        tracing::info!("PoolManager running");
+        tracing::info!(target: "swarmllm::pool::manager", "PoolManager running");
 
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
-                        tracing::info!("PoolManager shutting down");
+                        tracing::info!(target: "swarmllm::pool::manager", "PoolManager shutting down");
                         break;
                     }
                 }

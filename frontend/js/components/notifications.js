@@ -593,7 +593,7 @@
       if (!s) return '';
       if (s.status === 'up') {
         var cls = s.latency_ms < 1000 ? 'health-fast' : s.latency_ms < 3000 ? 'health-ok' : 'health-slow';
-        return '<span class="model-status-badge ' + cls + '" title="Responded in ' + U.escapeHtml(String(s.latency_ms)) + 'ms">' + U.escapeHtml(String(s.latency_ms)) + 'ms</span>';
+        return '<span class="model-status-badge ' + cls + '" title="' + U.escapeHtml(I18n.t('provider.responded_in', { ms: s.latency_ms })) + '">' + U.escapeHtml(String(s.latency_ms)) + 'ms</span>';
       }
       if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="' + U.escapeHtml(I18n.t('provider.model_timeout')) + '">' + U.escapeHtml(I18n.t('provider.slow')) + '</span>';
       if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_unavailable')) + '">' + U.escapeHtml(I18n.t('provider.down')) + '</span>';

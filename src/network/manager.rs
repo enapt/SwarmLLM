@@ -327,7 +327,11 @@ impl NetworkManager {
         let mut redial_interval = tokio::time::interval(std::time::Duration::from_secs(1));
         redial_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        tracing::info!("NetworkManager running");
+        tracing::info!(
+            target: "swarmllm::network::manager",
+            port = self.shared_state.config.node.listen_port,
+            "NetworkManager running"
+        );
 
         loop {
             tokio::select! {
@@ -335,7 +339,7 @@ impl NetworkManager {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
                         self.save_peer_cache();
-                        tracing::info!("NetworkManager shutting down");
+                        tracing::info!(target: "swarmllm::network::manager", "NetworkManager shutting down");
                         break;
                     }
                 }
@@ -861,7 +865,7 @@ impl NetworkManager {
                     && self.shared_state.config.network.auto_relay
                 {
                     self.relay_activated = true;
-                    tracing::info!("NAT detected, activating relay listener");
+                    tracing::info!(target: "swarmllm::network::manager", "NAT detected, activating relay listener");
 
                     // Try bootstrap peers as relay candidates — they are most likely
                     // to be publicly reachable and have relay enabled.

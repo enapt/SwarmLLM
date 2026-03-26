@@ -170,7 +170,7 @@ pub async fn update_providers(
         }
     }
 
-    tracing::info!("Cloud provider configuration updated");
+    tracing::info!(target: "swarmllm::api::admin_providers", "Cloud provider configuration updated");
 
     // Invalidate provider models cache so next fetch picks up new keys
     {

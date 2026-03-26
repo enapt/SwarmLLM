@@ -339,7 +339,7 @@ impl CreditLedger {
     /// - Gossips bucketed balance for percentile estimation
     /// - Calculates and logs the current tier
     pub async fn run(self) -> Result<(), SwarmError> {
-        tracing::info!("CreditLedger running");
+        tracing::info!(target: "swarmllm::credit::ledger", "CreditLedger running");
 
         // Gossip balance every 5 minutes
         let mut gossip_interval = tokio::time::interval(std::time::Duration::from_secs(300));
@@ -366,7 +366,7 @@ impl CreditLedger {
                     if *shutdown_rx.borrow() {
                         // Final persist on shutdown
                         let _ = self.persist_balance().await;
-                        tracing::info!("CreditLedger shutting down");
+                        tracing::info!(target: "swarmllm::credit::ledger", "CreditLedger shutting down");
                         break;
                     }
                 }

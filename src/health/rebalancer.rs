@@ -53,13 +53,13 @@ impl ShardRebalancer {
 
     /// Run the rebalancer event loop.
     pub async fn run(mut self) -> Result<(), SwarmError> {
-        tracing::info!("ShardRebalancer running");
+        tracing::info!(target: "swarmllm::health::rebalancer", "ShardRebalancer running");
 
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
-                        tracing::info!("ShardRebalancer shutting down");
+                        tracing::info!(target: "swarmllm::health::rebalancer", "ShardRebalancer shutting down");
                         break;
                     }
                 }

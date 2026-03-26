@@ -138,13 +138,13 @@ impl AcquisitionManager {
     }
 
     pub async fn run(mut self) -> Result<(), SwarmError> {
-        tracing::info!("AcquisitionManager running");
+        tracing::info!(target: "swarmllm::model::acquisition", "AcquisitionManager running");
 
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
-                        tracing::info!("AcquisitionManager shutting down");
+                        tracing::info!(target: "swarmllm::model::acquisition", "AcquisitionManager shutting down");
                         break;
                     }
                 }

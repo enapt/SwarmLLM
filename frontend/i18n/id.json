@@ -859,5 +859,20 @@
   "leaderboard.load_failed": "Failed to load",
   "leaderboard.load_error": "Error: {error}",
   "leaderboard.tier_default": "Silver",
-  "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device"
+  "pool.slave_banner_detail": "Linked to {owner} — inference charges go to your main device",
+  "dashboard.badge_popular": "Popular",
+  "dashboard.badge_verified": "Verified",
+  "dashboard.badge_pinned": "Pinned",
+  "dashboard.badge_remote_label": "Remote",
+  "dashboard.shard_grid_aria": "Shard status grid for {model}",
+  "shard.endpoint_first": "1st",
+  "shard.endpoint_last": "last",
+  "shard.locked_tooltip": "Locked (pinned)",
+  "provider.responded_in": "Responded in {ms}ms",
+  "chat.unknown_provider": "cloud provider",
+  "time.just_now": "just now",
+  "time.seconds_ago": "{n}s ago",
+  "time.minutes_ago": "{n}m ago",
+  "time.hours_minutes_ago": "{h}h {m}m ago",
+  "time.days_ago": "{n}d ago"
 }

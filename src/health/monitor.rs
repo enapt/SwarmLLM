@@ -72,13 +72,13 @@ impl HealthMonitor {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut nonce: u64 = 0;
 
-        tracing::info!("HealthMonitor running");
+        tracing::info!(target: "swarmllm::health::monitor", "HealthMonitor running");
 
         loop {
             tokio::select! {
                 _ = self.shutdown_rx.changed() => {
                     if *self.shutdown_rx.borrow() {
-                        tracing::info!("HealthMonitor shutting down");
+                        tracing::info!(target: "swarmllm::health::monitor", "HealthMonitor shutting down");
                         break;
                     }
                 }

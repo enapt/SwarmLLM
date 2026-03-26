@@ -67,13 +67,13 @@
 
   function timeAgo(ts) {
     var secs = Math.round((Date.now() - ts) / 1000);
-    if (secs < 5) return 'just now';
-    if (secs < 60) return secs + 's ago';
+    if (secs < 5) return I18n.t('time.just_now');
+    if (secs < 60) return I18n.t('time.seconds_ago', { n: secs });
     var mins = Math.floor(secs / 60);
-    if (mins < 60) return mins + 'm ago';
+    if (mins < 60) return I18n.t('time.minutes_ago', { n: mins });
     var hrs = Math.floor(mins / 60);
-    if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm ago';
-    return Math.floor(hrs / 24) + 'd ago';
+    if (hrs < 24) return I18n.t('time.hours_minutes_ago', { h: hrs, m: mins % 60 });
+    return I18n.t('time.days_ago', { n: Math.floor(hrs / 24) });
   }
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }

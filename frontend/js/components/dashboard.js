@@ -463,11 +463,11 @@
         // Trust level badge
         var trustBadge = '';
         if (m.trust_level === 'network_popular') {
-          trustBadge = '<span class="badge-trust badge-trust-popular" title="' + U.escapeHtml(I18n.t('dashboard.trust_popular')) + '">Popular</span>';
+          trustBadge = '<span class="badge-trust badge-trust-popular" title="' + U.escapeHtml(I18n.t('dashboard.trust_popular')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_popular')) + '</span>';
         } else if (m.trust_level === 'demand_verified') {
-          trustBadge = '<span class="badge-trust badge-trust-verified" title="' + U.escapeHtml(I18n.t('dashboard.trust_verified')) + '">Verified</span>';
+          trustBadge = '<span class="badge-trust badge-trust-verified" title="' + U.escapeHtml(I18n.t('dashboard.trust_verified')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_verified')) + '</span>';
         } else if (m.trust_level === 'pinned') {
-          trustBadge = '<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">Pinned</span>';
+          trustBadge = '<span class="badge-trust badge-trust-pinned" title="' + U.escapeHtml(I18n.t('dashboard.trust_pinned')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_pinned')) + '</span>';
         }
 
         // Encrypted pipeline badge
@@ -489,7 +489,7 @@
         // Source label
         var sourceLabel = '';
         if (m.source === 'network' && hostedShards === 0) {
-          sourceLabel = '<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">Remote</span>';
+          sourceLabel = '<span class="badge badge-remote" title="' + U.escapeHtml(I18n.t('dashboard.badge_remote')) + '">' + U.escapeHtml(I18n.t('dashboard.badge_remote_label')) + '</span>';
         }
 
         // Gear + info buttons
@@ -503,7 +503,7 @@
         if (shards.length > 0) {
           var lastIdx = shardCount - 1;
           var sizeClass = shardCount > 50 ? ' shard-grid-sm' : (shardCount > 20 ? ' shard-grid-md' : '');
-          shardHtml = '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="Shard status grid for ' + U.escapeHtml(U.formatModelDisplayName(m.name || m.id)) + '" data-model-grid="' + safeId + '">';
+          shardHtml = '<div class="shard-grid' + sizeClass + '" role="grid" aria-label="' + U.escapeHtml(I18n.t('dashboard.shard_grid_aria', { model: U.formatModelDisplayName(m.name || m.id) })) + '" data-model-grid="' + safeId + '">';
           var localCount = 0, peerCount = 0, dlCount = 0, peerDlCount = 0, queuedCount = 0, missingCount = 0;
 
           shards.forEach(function(s) {
@@ -563,16 +563,16 @@
               style = ' style="--dl-pct:' + dlPct + '%"';
             }
 
-            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="Locked (pinned)">\uD83D\uDD12</span>' : '';
+            var lockIcon = s.locked ? '<span class="shard-lock-icon" title="' + U.escapeHtml(I18n.t('shard.locked_tooltip')) + '">\uD83D\uDD12</span>' : '';
 
             var endpointClass = '';
             var endpointLabel = '';
             if (shardCount > 1 && s.index === 0) {
               endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
-              endpointLabel = '<span class="shard-endpoint-tag">1st</span>';
+              endpointLabel = '<span class="shard-endpoint-tag">' + U.escapeHtml(I18n.t('shard.endpoint_first')) + '</span>';
             } else if (shardCount > 1 && s.index === lastIdx) {
               endpointClass = (m.encrypted_pipeline && s.local) ? ' shard-pinned' : ' shard-endpoint';
-              endpointLabel = '<span class="shard-endpoint-tag">last</span>';
+              endpointLabel = '<span class="shard-endpoint-tag">' + U.escapeHtml(I18n.t('shard.endpoint_last')) + '</span>';
             }
 
             shardHtml += '<div class="shard-cell ' + cls + (s.locked ? ' locked' : '') + endpointClass + '"' +
