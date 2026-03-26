@@ -108,6 +108,26 @@ impl AutoShardManager {
                     continue;
                 }
 
+                // Skip shards that are actively being downloaded by this node
+                let is_downloading = self
+                    .shared_state
+                    .models
+                    .acquisition_progress
+                    .get(&manifest.id)
+                    .map(|entry| {
+                        entry
+                            .shard_progress
+                            .get(&shard.index)
+                            .map(|sp| {
+                                sp.state == crate::model::acquisition::ShardState::Downloading
+                            })
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if is_downloading {
+                    continue;
+                }
+
                 // Skip shards for models with encrypted pipeline enabled.
                 // E2E encryption requires local first/last segments -- pruning
                 // any shard of an encrypted model would break the guarantee.

@@ -296,6 +296,16 @@ impl UpdateChecker {
             ));
         }
 
+        // Windows locks the running .exe — rename fails with ACCESS_DENIED.
+        // Reject early with a clear message instead of a confusing I/O error.
+        #[cfg(target_os = "windows")]
+        {
+            return Err(SwarmError::Validation(
+                "Auto-update apply is not supported on Windows. Download the new version manually and replace the binary after stopping the daemon.".to_string(),
+            ));
+        }
+
+        #[cfg(not(target_os = "windows"))]
         let backup_path = self.binary_path.with_extension("old");
 
         // Step 1: Rename current binary to .old (backup)

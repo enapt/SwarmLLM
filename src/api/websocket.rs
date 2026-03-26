@@ -181,15 +181,21 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     }
                 }
                 activity = activity_rx.recv() => {
-                    if let Ok(event) = activity {
-                        let msg = serde_json::json!({
-                            "type": "activity_event",
-                            "data": event,
-                        });
-                        let msg_str = serde_json::to_string(&msg).unwrap_or_default();
-                        if sender.send(Message::Text(msg_str)).await.is_err() {
-                            break;
+                    let event = match activity {
+                        Ok(e) => e,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::debug!(dropped = n, "WebSocket client lagged on activity channel");
+                            continue;
                         }
+                        Err(_) => break,
+                    };
+                    let msg = serde_json::json!({
+                        "type": "activity_event",
+                        "data": event,
+                    });
+                    let msg_str = serde_json::to_string(&msg).unwrap_or_default();
+                    if sender.send(Message::Text(msg_str)).await.is_err() {
+                        break;
                     }
                 }
             }
