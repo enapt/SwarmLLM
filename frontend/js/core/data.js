@@ -56,6 +56,10 @@
     return _inFlight[key];
   }
 
+  function invalidateDedup(key) {
+    delete _inFlight[key];
+  }
+
   function loadModels() {
     return dedupe('models', async function() {
       var models = [];
@@ -97,6 +101,7 @@
   App.data = {
     loadModels: loadModels,
     loadStats: loadStats,
+    invalidateDedup: invalidateDedup,
     cache: cache,
   };
 })();

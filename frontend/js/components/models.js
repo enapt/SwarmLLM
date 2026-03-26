@@ -280,7 +280,7 @@
       list.innerHTML = '';
 
       if (!hasAny) {
-        var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peer_count || 0) : 0;
+        var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peers || 0) : 0;
         if (peerCount > 0) {
           list.innerHTML = '<div class="model-dropdown-empty">' +
             (I18n.t('models.discovering') || 'Discovering models...') +

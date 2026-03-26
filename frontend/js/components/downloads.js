@@ -80,7 +80,7 @@
         var logToggle = document.createElement('button');
         logToggle.className = 'dl-queue-log-toggle';
         logToggle.setAttribute('data-dl-log-toggle', dl.model_id);
-        logToggle.textContent = 'Log (' + dl.log.length + ')';
+        logToggle.textContent = I18n.t('downloads.log_count', { count: dl.log.length });
         logRow.appendChild(logToggle);
 
         var logPanel = document.createElement('div');
@@ -120,7 +120,7 @@
       }
 
       if (empty) empty.classList.add('hidden');
-      if (count) count.textContent = active.length + ' active';
+      if (count) count.textContent = I18n.t('downloads.active_count', { count: active.length });
       list.innerHTML = '';
       active.forEach(function(dl) {
         list.appendChild(App.downloads.renderItem(dl));
@@ -252,10 +252,10 @@
       if (resp.ok) {
         App.ui.showBanner('success', I18n.t('downloads.schedule_saved'));
       } else {
-        App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Save failed'));
+        App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('downloads.save_failed')));
       }
     } catch (e) {
-      App.ui.showBanner('error', 'Save failed: ' + e.message);
+      App.ui.showBanner('error', I18n.t('downloads.save_error', { error: e.message }));
     }
   }
 
@@ -283,7 +283,7 @@
         var s = await resp.json();
         renderScheduleCard(s);
       } catch (e) {
-        if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">No schedule configured</div>';
+        if (el) el.innerHTML = '<div class="text-muted" style="font-size:0.85rem">' + U.escapeHtml(I18n.t('downloads.no_schedule')) + '</div>';
       }
     },
 

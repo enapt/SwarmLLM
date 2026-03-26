@@ -291,7 +291,7 @@
       if (isError) {
         statusEl.style.color = 'var(--red)';
         statusEl.style.fontSize = '0.7rem';
-        statusEl.textContent = 'error';
+        statusEl.textContent = I18n.t('compare.status_error');
       } else {
         statusEl.style.color = 'var(--green)';
         statusEl.style.fontSize = '0.7rem';
@@ -311,8 +311,8 @@
       if (!isError) {
         var footerEl = card.querySelector('.compare-card-footer');
         footerEl.removeAttribute('hidden');
-        footerEl.querySelector('.ccf-in').textContent = 'In: ' + inputTokens;
-        footerEl.querySelector('.ccf-out').textContent = 'Out: ' + outputTokens;
+        footerEl.querySelector('.ccf-in').textContent = I18n.t('compare.label_in') + inputTokens;
+        footerEl.querySelector('.ccf-out').textContent = I18n.t('compare.label_out') + outputTokens;
         footerEl.querySelector('.ccf-latency').textContent = result.latency_ms + 'ms';
         if (outputTokens > 0) {
           var tpsEl = footerEl.querySelector('.ccf-tps');

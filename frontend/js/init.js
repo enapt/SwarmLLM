@@ -497,7 +497,7 @@
             }
           });
         } else {
-          if (confirm('Encrypted pipeline requires first + last shard on this node.\n\nDownload missing shards from HuggingFace?')) {
+          if (confirm(I18n.t('init.confirm_download_shards'))) {
             App.authFetch('/api/admin/hf/source/' + encodeURIComponent(encToggle)).then(function(r) {
               if (!r.ok) { App.ui.showBanner('error', 'No HuggingFace source found for ' + encToggle); return; }
               return r.json();

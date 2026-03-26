@@ -118,13 +118,13 @@
         try {
           var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx, { method: 'DELETE' });
           if (resp.ok) {
-            App.ui.showBanner('success', 'Shard ' + idx + ' removed');
+            App.ui.showBanner('success', I18n.t('shard.removed', { idx: idx }));
             App.models.load();
           } else {
-            App.ui.showBanner('error', await U.getApiErrorMessage(resp, 'Failed to remove shard'));
+            App.ui.showBanner('error', await U.getApiErrorMessage(resp, I18n.t('shard.remove_failed')));
           }
         } catch (e) {
-          App.ui.showBanner('error', 'Remove failed: ' + e.message);
+          App.ui.showBanner('error', I18n.t('shard.remove_error', { error: e.message }));
         }
       } else if (state === 'downloading') {
         App.models.cancelDownload(modelId);
@@ -134,7 +134,7 @@
           var dlResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/download', { method: 'POST' });
           var dlData = await dlResp.json();
           if (dlData.status === 'downloading') {
-            App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from ' + (dlData.source === 'p2p' ? 'peer ' + (dlData.peer || '') : 'peers'));
+            App.ui.showBanner('success', I18n.t('shard.downloading_from', { idx: idx + 1, source: dlData.source === 'p2p' ? 'peer ' + (dlData.peer || '') : 'peers' }));
             App.models.load();
           } else if (dlData.status === 'use_hf') {
             // Backend says use HuggingFace
@@ -144,18 +144,18 @@
               body: JSON.stringify({ repo_id: dlData.repo_id, filename: dlData.filename, shards: [idx], model_id: modelId }),
             });
             if (hfResp.ok) {
-              App.ui.showBanner('success', 'Downloading part ' + (idx + 1) + ' from HuggingFace');
+              App.ui.showBanner('success', I18n.t('shard.downloading_hf', { idx: idx + 1 }));
               App.models.load();
             } else {
               App.ui.showBanner('error', await U.getApiErrorMessage(hfResp, 'Download failed'));
             }
           } else if (dlData.status === 'already_local') {
-            App.ui.showBanner('info', 'Part ' + (idx + 1) + ' is already on this device');
+            App.ui.showBanner('info', I18n.t('shard.already_local', { idx: idx + 1 }));
           } else {
-            App.ui.showBanner('error', dlData.error ? dlData.error.message : 'Download unavailable');
+            App.ui.showBanner('error', dlData.error ? dlData.error.message : I18n.t('shard.download_unavailable'));
           }
         } catch (e) {
-          App.ui.showBanner('error', 'Download failed: ' + e.message);
+          App.ui.showBanner('error', I18n.t('shard.download_failed', { error: e.message }));
         }
       }
     },
@@ -172,13 +172,13 @@
           body: JSON.stringify({ locked: newLocked }),
         });
         if (resp.ok) {
-          App.ui.showBanner('success', 'Shard ' + idx + (newLocked ? ' locked' : ' unlocked'));
+          App.ui.showBanner('success', I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: idx }));
           App.models.load();
         } else {
-          App.ui.showBanner('error', 'Failed to update shard lock');
+          App.ui.showBanner('error', I18n.t('shard.lock_failed'));
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Lock update failed: ' + e.message);
+        App.ui.showBanner('error', I18n.t('shard.lock_error', { error: e.message }));
       }
     },
 
@@ -190,13 +190,13 @@
       try {
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load', { method: 'POST' });
         if (resp.ok) {
-          App.notifications.showToast('Loading shard ' + (idx + 1) + ' into memory...', 'success');
+          App.notifications.showToast(I18n.t('shard.loading', { idx: idx + 1 }), 'success');
           App.models.load();
         } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to load shard'), 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('shard.load_failed')), 'error');
         }
       } catch (e) {
-        App.notifications.showToast('Load failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('shard.load_error', { error: e.message }), 'error');
       }
     },
 
@@ -205,7 +205,7 @@
       var idx = this.currentIndex;
       this.hide();
 
-      if (!confirm('Unload shard ' + (idx + 1) + ' from memory?\n\nThe file stays on disk. The model worker will restart without this shard. Active inference may be briefly interrupted.')) return;
+      if (!confirm(I18n.t('shard.confirm_unload', { idx: idx + 1 }))) return;
 
       try {
         // Unload this specific shard — narrows the shard window and restarts the worker.
@@ -213,13 +213,13 @@
         var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload', { method: 'POST' });
         if (resp.ok) {
           var name = U.formatModelDisplayName(modelId);
-          App.notifications.showToast('Shard ' + (idx + 1) + ' of ' + name + ' unloaded from memory', 'success');
+          App.notifications.showToast(I18n.t('shard.unloaded', { idx: idx + 1, model: name }), 'success');
           App.models.load();
         } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, 'Failed to unload'), 'error');
+          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('shard.unload_failed')), 'error');
         }
       } catch (e) {
-        App.notifications.showToast('Unload failed: ' + e.message, 'error');
+        App.notifications.showToast(I18n.t('shard.unload_error', { error: e.message }), 'error');
       }
     }
   };

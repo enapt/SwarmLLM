@@ -230,6 +230,7 @@
     }
     var icons = { success: '\u2713', error: '\u2717', warning: '\u26A0', info: '\u2139' };
     var tmpl = document.getElementById('tmpl-toast');
+    if (!tmpl) return;
     var toast = tmpl.content.cloneNode(true).firstElementChild;
     toast.className = 'toast toast-' + type;
     toast.querySelector('.toast-icon').textContent = icons[type] || icons.info;
@@ -391,6 +392,7 @@
           // Refresh model list — activity logging is handled by activity_event messages
           if (window._modelsChangedTimer) clearTimeout(window._modelsChangedTimer);
           window._modelsChangedTimer = setTimeout(function() {
+            App.data.invalidateDedup('models');
             App.models.load();
             App.modeIndicator.load();
           }, 1000);
