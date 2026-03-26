@@ -377,34 +377,48 @@ async fn handle_forward(
         split::bytes_to_tensor(&activation_bytes)?
     };
 
-    // Decompress vision embeddings if present
-    let vision_tensor: Option<candle_core::Tensor> =
-        if let Some(ref compressed) = fwd.vision_embeddings {
-            match zstd::decode_all(std::io::Cursor::new(compressed)) {
+    // Decompress vision embeddings if present.
+    // Wire format: 8-byte header (num_tokens u32 LE + hidden_dim u32 LE) + zstd(FP16 data)
+    let vision_tensor: Option<candle_core::Tensor> = if let Some(ref compressed) =
+        fwd.vision_embeddings
+    {
+        if compressed.len() < 8 {
+            tracing::warn!("Vision embedding too short ({} bytes)", compressed.len());
+            None
+        } else {
+            // Read shape header
+            let num_tokens =
+                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
+                    as usize;
+            let hidden_dim =
+                u32::from_le_bytes([compressed[4], compressed[5], compressed[6], compressed[7]])
+                    as usize;
+            let zstd_data = &compressed[8..];
+            match zstd::decode_all(std::io::Cursor::new(zstd_data)) {
                 Ok(raw_bytes) => {
                     const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024;
                     if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES {
                         None
                     } else {
-                        let num_f16 = raw_bytes.len() / 2;
-                        const COMMON_HIDDEN_DIMS: &[usize] =
-                            &[5120, 4096, 3584, 3072, 2560, 2048, 1536, 1024];
-                        let hidden_dim = COMMON_HIDDEN_DIMS
-                            .iter()
-                            .copied()
-                            .find(|&d| num_f16 % d == 0 && (1..2048).contains(&(num_f16 / d)))
-                            .unwrap_or(1024);
-                        let num_tokens = num_f16 / hidden_dim;
                         let f32_values: Vec<f32> = raw_bytes
                             .chunks_exact(2)
                             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
                             .collect();
-                        candle_core::Tensor::from_vec(
-                            f32_values,
-                            &[num_tokens, hidden_dim],
-                            &candle_core::Device::Cpu,
-                        )
-                        .ok()
+                        if f32_values.len() != num_tokens * hidden_dim {
+                            tracing::warn!(
+                                expected = num_tokens * hidden_dim,
+                                actual = f32_values.len(),
+                                "Vision embedding shape mismatch"
+                            );
+                            None
+                        } else {
+                            candle_core::Tensor::from_vec(
+                                f32_values,
+                                &[num_tokens, hidden_dim],
+                                &candle_core::Device::Cpu,
+                            )
+                            .ok()
+                        }
                     }
                 }
                 Err(e) => {
@@ -412,9 +426,10 @@ async fn handle_forward(
                     None
                 }
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     // Load LoRA adapter if requested
     let lora_adapter = if let Some(ref adapter_id) = fwd.adapter_id {

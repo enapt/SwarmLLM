@@ -371,6 +371,12 @@ impl PipelineExecutor {
         &self,
         embeddings: &candle_core::Tensor,
     ) -> Result<Vec<u8>, SwarmError> {
+        let dims = embeddings.dims();
+        let (num_tokens, hidden_dim) = if dims.len() == 2 {
+            (dims[0] as u32, dims[1] as u32)
+        } else {
+            (1u32, embeddings.elem_count() as u32)
+        };
         let fp16 = embeddings
             .to_dtype(candle_core::DType::F16)
             .map_err(|e| SwarmError::Inference(format!("FP16 conversion: {e}")))?;
@@ -380,8 +386,15 @@ impl PipelineExecutor {
             .to_vec1()
             .map_err(|e| SwarmError::Inference(format!("to_vec1: {e}")))?;
         let raw_bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-        zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3)
-            .map_err(|e| SwarmError::Inference(format!("zstd compress: {e}")))
+        let compressed = zstd::encode_all(std::io::Cursor::new(&raw_bytes), 3)
+            .map_err(|e| SwarmError::Inference(format!("zstd compress: {e}")))?;
+        // Prepend 8-byte header: num_tokens (u32 LE) + hidden_dim (u32 LE)
+        // so the worker can reconstruct the exact tensor shape without heuristics.
+        let mut result = Vec::with_capacity(8 + compressed.len());
+        result.extend_from_slice(&num_tokens.to_le_bytes());
+        result.extend_from_slice(&hidden_dim.to_le_bytes());
+        result.extend_from_slice(&compressed);
+        Ok(result)
     }
 
     /// Compress an ImageData to JPEG for wire transfer.
