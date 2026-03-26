@@ -324,9 +324,9 @@ pub async fn messages(
                 "Too many stop sequences (max 16)".into(),
             )));
         }
-        if stops.iter().any(|s| s.len() > 256) {
+        if stops.iter().any(|s| s.is_empty() || s.len() > 256) {
             return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequence too long (max 256 chars)".into(),
+                "Stop sequences must be 1–256 chars each".into(),
             )));
         }
     }

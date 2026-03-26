@@ -694,16 +694,16 @@ fn validate_chat_request(
                 "Too many stop sequences (max 16)".into(),
             )));
         }
-        if v.iter().any(|s| s.len() > 256) {
+        if v.iter().any(|s| s.is_empty() || s.len() > 256) {
             return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequence too long (max 256 chars)".into(),
+                "Stop sequences must be 1–256 chars each".into(),
             )));
         }
     }
     if let Some(crate::api::openai::StopSequence::Single(ref s)) = req.stop {
-        if s.len() > 256 {
+        if s.is_empty() || s.len() > 256 {
             return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequence too long (max 256 chars)".into(),
+                "Stop sequence must be 1–256 chars".into(),
             )));
         }
     }
