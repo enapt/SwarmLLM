@@ -900,11 +900,16 @@ pub(crate) async fn dispatch_network_messages(
                                             let model_dir = shared_state.config.node.data_dir.join("models").join(
                                                 crate::model::shard::sanitize_path_component(&mid.0),
                                             );
-                                            if model_dir.exists() {
-                                                let hf_path = model_dir.join("hf_source.json");
-                                                if !hf_path.exists() {
-                                                    let _ = std::fs::write(&hf_path, serde_json::to_string_pretty(&source).unwrap_or_default());
-                                                }
+                                            {
+                                                let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
+                                                tokio::task::spawn_blocking(move || {
+                                                    if model_dir.is_dir() {
+                                                        let hf_path = model_dir.join("hf_source.json");
+                                                        if !hf_path.exists() {
+                                                            let _ = std::fs::write(&hf_path, json_str);
+                                                        }
+                                                    }
+                                                });
                                             }
                                             // Wake the AutoShardManager so it evaluates promptly
                                             shared_state.models.auto_manage_notify.notify_one();

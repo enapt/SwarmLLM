@@ -267,18 +267,23 @@ impl UpdateChecker {
             }
         }
 
-        std::fs::write(&tmp_path, &bytes).map_err(SwarmError::Io)?;
-
-        // Set executable permission on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&tmp_path, perms).map_err(SwarmError::Io)?;
-        }
+        let download_size = bytes.len();
+        let tp = tmp_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            std::fs::write(&tp, &bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tp, std::fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| SwarmError::Internal(format!("spawn_blocking: {e}")))?
+        .map_err(SwarmError::Io)?;
 
         tracing::info!(
-            bytes = bytes.len(),
+            bytes = download_size,
             path = %tmp_path.display(),
             "Update binary downloaded"
         );

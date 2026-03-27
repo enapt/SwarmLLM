@@ -233,13 +233,19 @@ impl AutoShardManager {
                 // Recently acquired penalty (< 30 min)
                 // Use file modified time as proxy
                 let shard_path = shard_store.shard_path(&manifest.id, shard.index);
-                if let Ok(meta) = std::fs::metadata(&shard_path) {
-                    if let Ok(modified) = meta.modified() {
-                        let age = modified.elapsed().unwrap_or_default();
-                        if age < Duration::from_secs(1800) {
-                            score -= 0.2;
-                        }
-                    }
+                let sp = shard_path.clone();
+                let recently_acquired = tokio::task::spawn_blocking(move || {
+                    std::fs::metadata(&sp)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|age| age < Duration::from_secs(1800))
+                        .unwrap_or(false)
+                })
+                .await
+                .unwrap_or(false);
+                if recently_acquired {
+                    score -= 0.2;
                 }
 
                 // Regional demand penalty: protect shards for models with active
