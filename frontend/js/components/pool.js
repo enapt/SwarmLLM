@@ -542,8 +542,8 @@
         if (textEl) {
           var members = data.members || [];
           var ownerMember = members.find(function (m) { return m.node_id === data.pool_id; });
-          var ownerName = (ownerMember && ownerMember.device_name) || data.name || 'main device';
-          textEl.textContent = (I18n.t('pool.slave_banner_detail') || 'Linked to {owner} — inference charges go to your main device').replace('{owner}', ownerName);
+          var ownerName = (ownerMember && ownerMember.device_name) || data.name || I18n.t('pool.main_device_fallback');
+          textEl.textContent = I18n.t('pool.slave_banner_detail', { owner: ownerName });
         }
       } else {
         banner.classList.remove('visible');

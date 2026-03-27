@@ -598,7 +598,7 @@
           encOverheadNote +
         '</div>' +
         '<div class="am-row">' +
-          '<button class="btn btn-sm btn-primary" data-am-save="' + U.escapeHtml(modelId) + '">Save</button>' +
+          '<button class="btn btn-sm btn-primary" data-am-save="' + U.escapeHtml(modelId) + '">' + U.escapeHtml(I18n.t('actions.save')) + '</button>' +
         '</div>';
       card.appendChild(panel);
     },

@@ -491,13 +491,6 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | DEBUG | `DIAG: set_nickname persisted` | `nickname` |
 | DEBUG | `DIAG: leaderboard query` | `peer_count`, `limit` |
 
-### Internal (internal.rs)
-
-| Level | What | Fields |
-|-------|------|--------|
-| DEBUG | `DIAG: hidden_states request` | `layers`, `prompt_len` |
-| DEBUG | `DIAG: hidden_states gate denied` | — |
-
 ### Metrics (metrics.rs)
 
 | Level | What | Fields |

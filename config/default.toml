@@ -48,7 +48,6 @@ check_interval_hours = 6
 
 [api]
 # api_key = ""                   # Bearer token for API auth. Empty = auto-generate on first run.
-expose_hidden_states = false      # Expose /v1/internal/hidden-states for research (requires auth)
 # rate_limit_rpm = 60            # Max requests/min for /v1/ and /api/chat endpoints (default: 60)
 # rate_limit_admin_rpm = 200     # Max requests/min for /api/admin/ endpoints (default: 200)
 

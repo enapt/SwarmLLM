@@ -412,17 +412,6 @@
       var cloudRow = target.closest('[data-select-cloud]');
       if (cloudRow) { App.models.selectDropdown(cloudRow.getAttribute('data-select-cloud')); App.chat.newSession(); App.ui.switchTab('chat'); return; }
 
-      var toggleTags = target.getAttribute('data-toggle-tags');
-      if (toggleTags) {
-        var hidden = document.getElementById(toggleTags);
-        if (hidden) {
-          var isHidden = hidden.style.display === 'none';
-          hidden.style.display = isHidden ? 'inline' : 'none';
-          target.textContent = isHidden ? 'Show less' : target.getAttribute('data-show-label') || 'Show all';
-        }
-        return;
-      }
-
       var cancelId = target.getAttribute('data-cancel-download');
       if (cancelId) { App.models.cancelDownload(cancelId); return; }
 
@@ -719,7 +708,7 @@
     if (t.tagName !== 'IMG' || !t.classList.contains('provider-icon')) return;
     if (t.classList.contains('provider-avatar-icon')) {
       var av = t.parentNode;
-      if (av) av.textContent = 'AI';
+      if (av) av.textContent = (typeof I18n !== 'undefined') ? I18n.t('chat.avatar_ai') : 'AI';
     } else {
       t.style.display = 'none';
     }

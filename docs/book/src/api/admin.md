@@ -63,7 +63,7 @@ Resource schedule management.
 
 ## HuggingFace Integration
 
-### GET /api/admin/hf/search?q=...
+### GET /api/admin/hf/search?query=...
 Search HuggingFace for GGUF models. Returns results grouped by repository with quantization variants, recommended variant, and VRAM fitness indicator.
 
 Response format:

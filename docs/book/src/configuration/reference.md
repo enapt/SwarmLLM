@@ -91,7 +91,6 @@ Every configuration option, organized by section.
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `api_key` | string | none | Bearer token. Empty = auto-generated |
-| `expose_hidden_states` | boolean | `false` | Enable `/v1/internal/hidden-states` endpoint for research |
 | `rate_limit_rpm` | integer | `60` | Rate limit for `/v1/` endpoints (requests/min) |
 | `rate_limit_admin_rpm` | integer | `200` | Rate limit for `/api/admin/` endpoints (requests/min) |
 

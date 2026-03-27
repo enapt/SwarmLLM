@@ -6,7 +6,7 @@
 libp2p Swarm
 ├── Kademlia (DHT) — distributed hash table for peer/shard/model lookup
 ├── GossipSub — pub/sub for shard announcements, credits, identity, pools
-├── request_response — unified protocol (/swarmllm/1.0.0, 300s timeout)
+├── request_response — unified protocol (/swarmllm/1.0.0, 600s timeout)
 ├── mDNS — optional LAN peer discovery
 ├── connection_limits — max 1/peer (>1 causes rr round-robin to dead connections), 500 total
 ├── Identify — protocol identification

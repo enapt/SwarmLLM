@@ -95,7 +95,7 @@ The SplitModel loader reads `general.architecture` from GGUF metadata and applie
 - **Speculative Decoding** — Draft model proposes K tokens, target verifies in one pass
 - **Chunked Prefill** — Long prompts split into chunks to reduce peak memory
 - **Flash Attention** — CPU and GPU fast paths (GQA-native, no `repeat_kv`)
-- **PagedAttention** — Block-pool KV-cache allocation (CUDA-only, `paged-attn` feature)
+- **PagedAttention** — Deferred; `paged-attn` feature flag reserved for future use (module removed, never wired to production)
 - **Logprobs** — Per-token log probabilities via `sample_token_with_params_and_logprobs()`. When `logprobs: true` in the request, the sampling layer collects top-N token probabilities and returns them in the OpenAI-compatible response. Available on split model (candle) inference paths
 - **Pipeline Error Broadcast** — On distributed inference failure, `broadcast_pipeline_error()` notifies all participants so peers can update shard availability and route around failures
 - **Local Embedding Privacy** — When `local_embedding_privacy: true`, the requesting node performs token→embedding locally (~1ms) and sends pre-embedded hidden-state activations instead of raw token IDs to the first pipeline segment. Remote nodes never see the plaintext prompt. See [Security > Local Embedding Privacy](../architecture/security.md#local-embedding-privacy)
