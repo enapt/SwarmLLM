@@ -882,5 +882,7 @@
   "utils.unknown_model": "Unknown",
   "chat.model_unavailable_suffix": "(unavailable)",
   "actions.save": "Save",
-  "pool.main_device_fallback": "main device"
+  "pool.main_device_fallback": "main device",
+  "shard.hf_download_failed": "Download failed",
+  "chat.image_placeholder": "[Image]"
 }

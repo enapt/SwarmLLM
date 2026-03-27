@@ -147,7 +147,7 @@
               App.ui.showBanner('success', I18n.t('shard.downloading_hf', { idx: idx + 1 }));
               App.models.load();
             } else {
-              App.ui.showBanner('error', await U.getApiErrorMessage(hfResp, 'Download failed'));
+              App.ui.showBanner('error', await U.getApiErrorMessage(hfResp, I18n.t('shard.hf_download_failed')));
             }
           } else if (dlData.status === 'already_local') {
             App.ui.showBanner('info', I18n.t('shard.already_local', { idx: idx + 1 }));

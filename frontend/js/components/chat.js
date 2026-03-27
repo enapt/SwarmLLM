@@ -401,7 +401,7 @@
       clearPendingImages();
 
       var session = S.sessions[S.currentSessionId];
-      var displayText = text || (images.length > 0 ? '[Image]' : '');
+      var displayText = text || (images.length > 0 ? I18n.t('chat.image_placeholder') : '');
       var _sendModel = session.model || S.currentModel || '';
       var _sendModelData = _sendModel ? (App.data.cache.models || []).find(function(m) { return m.id === _sendModel; }) : null;
       var msgEncrypted = !!(_sendModelData && _sendModelData.encrypted_pipeline && _sendModelData.shard_count > 1);

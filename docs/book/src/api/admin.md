@@ -96,8 +96,30 @@ curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
 ```
 
+### GET /api/admin/downloads
+List the download queue with per-shard progress, speed, and source.
+
 ### POST /api/admin/downloads/:model_id/cancel
 Cancel an in-progress download.
+
+## Cloud Providers
+
+### GET /api/admin/providers
+List configured cloud providers (name + configured flag, no keys exposed).
+
+### PUT /api/admin/providers
+Update cloud provider API keys. Bearer auth required. Keys are encrypted at rest.
+
+## Updates
+
+### GET /api/admin/version
+Current binary version info.
+
+### POST /api/admin/update/check
+Check for available updates. Returns version info and changelog if update available.
+
+### POST /api/admin/update/apply
+Download and apply an update. Bearer auth required.
 
 ## Discovery
 

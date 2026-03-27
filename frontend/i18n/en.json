@@ -882,5 +882,7 @@
   "chat.default_image_prompt": "What is in this image?",
   "utils.unknown_model": "Unknown",
   "actions.save": "Save",
-  "pool.main_device_fallback": "main device"
+  "pool.main_device_fallback": "main device",
+  "shard.hf_download_failed": "Download failed",
+  "chat.image_placeholder": "[Image]"
 }
