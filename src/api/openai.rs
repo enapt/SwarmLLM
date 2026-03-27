@@ -1423,6 +1423,42 @@ pub async fn submit_stream_to_router(
     Ok((result_rx, token_rx))
 }
 
+/// Run non-streaming inference on a local split model.
+///
+/// Shared core for both OpenAI and Anthropic split_non_stream handlers.
+/// Resolves model metadata, builds the prompt, and runs generation via subprocess.
+pub async fn run_split_generate(
+    state: &AppState,
+    model_id: &crate::types::ModelId,
+    messages: &[ChatMessage],
+    params: SamplingParams,
+    request_id: &str,
+) -> Result<crate::inference::router::InferenceOutput, ApiError> {
+    let meta = get_split_model_meta(state, model_id)
+        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
+
+    let prompt = chat_template::build_prompt(
+        messages,
+        meta.chat_template.as_deref(),
+        &meta.bos_token,
+        &meta.eos_token_str,
+    );
+
+    tracing::debug!(
+        request_id = %request_id,
+        prompt_len = prompt.len(),
+        "DIAG: non-stream built prompt (subprocess)"
+    );
+
+    let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    state
+        .shared_state
+        .model_process_pool
+        .generate(model_id, meta.layer_range, prompt, params, rid, None, None)
+        .await
+        .map_err(ApiError)
+}
+
 /// Decode token IDs to text using the split model's tokenizer.
 ///
 /// Uses BPE tokenizer byte decoding for proper UTF-8 handling (GPT-2 byte
@@ -1901,44 +1937,8 @@ async fn split_non_stream_response(
     params: SamplingParams,
     model_id: crate::types::ModelId,
 ) -> Result<axum::response::Response, ApiError> {
-    // Get metadata from entry (no model lock needed)
-    let meta = get_split_model_meta(&state, &model_id)
-        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
-    let (chat_template, bos_token, eos_token_str, layer_range) = (
-        meta.chat_template,
-        meta.bos_token,
-        meta.eos_token_str,
-        meta.layer_range,
-    );
-
-    let prompt = chat_template::build_prompt(
-        &messages,
-        chat_template.as_deref(),
-        &bos_token,
-        &eos_token_str,
-    );
-
-    tracing::debug!(
-        request_id = %request_id,
-        prompt_len = prompt.len(),
-        "DIAG: non-stream built prompt (subprocess)"
-    );
-
-    let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-    let output = state
-        .shared_state
-        .model_process_pool
-        .generate(
-            &model_id,
-            layer_range,
-            prompt,
-            params.clone(),
-            rid,
-            None,
-            None,
-        )
-        .await
-        .map_err(ApiError)?;
+    let output =
+        run_split_generate(&state, &model_id, &messages, params.clone(), &request_id).await?;
 
     let response = ChatCompletionResponse {
         id: request_id,

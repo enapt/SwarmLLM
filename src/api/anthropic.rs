@@ -1031,32 +1031,14 @@ async fn anthropic_split_non_stream(
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
     let requested_mid = crate::types::ModelId(model.clone());
-    let meta = crate::api::openai::get_split_model_meta(state, &requested_mid)
-        .ok_or(ApiError(crate::error::SwarmError::NoModelLoaded))?;
-    let (chat_tmpl, bos, eos_str, layer_range) = (
-        meta.chat_template,
-        meta.bos_token,
-        meta.eos_token_str,
-        meta.layer_range,
-    );
-
-    let prompt = chat_template::build_prompt(messages, chat_tmpl.as_deref(), &bos, &eos_str);
-
-    let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-    let output = state
-        .shared_state
-        .model_process_pool
-        .generate(
-            &requested_mid,
-            layer_range,
-            prompt,
-            params.clone(),
-            rid,
-            None,
-            None,
-        )
-        .await
-        .map_err(ApiError)?;
+    let output = crate::api::openai::run_split_generate(
+        state,
+        &requested_mid,
+        messages,
+        params.clone(),
+        &request_id,
+    )
+    .await?;
 
     let stop_reason = if output.finish_reason == "stop" {
         "end_turn"

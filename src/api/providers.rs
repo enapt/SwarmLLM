@@ -38,6 +38,46 @@ pub async fn build_passthrough_response(
     }
 }
 
+/// Extract a friendly error message from a provider error response body.
+///
+/// Scrubs API keys, attempts to parse JSON and extract a human-readable message
+/// field (trying keys in the given priority order), then truncates.
+/// Returns the provider error as an `ApiError` with the original HTTP status.
+fn extract_provider_error(
+    raw_body: &str,
+    status: reqwest::StatusCode,
+    provider_label: &str,
+    key_priority: &[&[&str]],
+) -> ApiError {
+    let scrubbed = crate::crypto::scrub_api_keys(raw_body);
+    tracing::warn!(status = %status, body = %scrubbed, "{provider_label} returned error");
+    let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed)
+        .ok()
+        .and_then(|v| {
+            for keys in key_priority {
+                let mut node = Some(&v);
+                for &k in *keys {
+                    node = node.and_then(|n| n.get(k));
+                }
+                if let Some(msg) = node.and_then(|n| n.as_str()) {
+                    return Some(msg.to_string());
+                }
+            }
+            None
+        })
+        .unwrap_or(scrubbed);
+    let friendly = super::scrub_truncate_error(&friendly);
+    ApiError(crate::error::SwarmError::ProviderError {
+        status: status.as_u16(),
+        body: friendly,
+    })
+}
+
+/// JSON key priority for OpenAI-compatible provider error responses.
+const OPENAI_ERROR_KEYS: &[&[&str]] = &[&["detail"], &["error", "message"], &["message"]];
+/// JSON key priority for Anthropic provider error responses.
+const ANTHROPIC_ERROR_KEYS: &[&[&str]] = &[&["error", "message"], &["message"], &["detail"]];
+
 /// Known provider base URLs (OpenAI-compatible).
 pub fn provider_base_url(name: &str) -> Option<&'static str> {
     match name {
@@ -440,24 +480,12 @@ pub async fn proxy_openai_compatible(
     if !resp.status().is_success() {
         let status = resp.status();
         let raw_body = resp.text().await.unwrap_or_default();
-        let scrubbed_body = crate::crypto::scrub_api_keys(&raw_body);
-        tracing::warn!(status = %status, body = %scrubbed_body, "Provider returned error");
-        // SEC: Extract friendly message from scrubbed body (not raw) to prevent
-        // leaking API keys or internal details from upstream provider errors.
-        let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed_body)
-            .ok()
-            .and_then(|v| {
-                v.get("detail")
-                    .or_else(|| v.get("error").and_then(|e| e.get("message")))
-                    .or_else(|| v.get("message"))
-                    .and_then(|m| m.as_str().map(|s| s.to_string()))
-            })
-            .unwrap_or(scrubbed_body);
-        let friendly = super::scrub_truncate_error(&friendly);
-        return Err(ApiError(crate::error::SwarmError::ProviderError {
-            status: status.as_u16(),
-            body: friendly,
-        }));
+        return Err(extract_provider_error(
+            &raw_body,
+            status,
+            "Provider",
+            OPENAI_ERROR_KEYS,
+        ));
     }
 
     {
@@ -493,25 +521,12 @@ pub async fn proxy_to_anthropic(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let scrubbed_body = crate::crypto::scrub_api_keys(&body);
-        tracing::warn!(status = %status, body = %scrubbed_body, "Anthropic returned error");
-        // SEC: Extract friendly message and truncate, same as proxy_openai_compatible,
-        // to prevent leaking large upstream error bodies with internal details.
-        let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed_body)
-            .ok()
-            .and_then(|v| {
-                v.get("error")
-                    .and_then(|e| e.get("message"))
-                    .or_else(|| v.get("message"))
-                    .or_else(|| v.get("detail"))
-                    .and_then(|m| m.as_str().map(|s| s.to_string()))
-            })
-            .unwrap_or(scrubbed_body);
-        let friendly = super::scrub_truncate_error(&friendly);
-        return Err(ApiError(crate::error::SwarmError::ProviderError {
-            status: status.as_u16(),
-            body: friendly,
-        }));
+        return Err(extract_provider_error(
+            &body,
+            status,
+            "Anthropic",
+            ANTHROPIC_ERROR_KEYS,
+        ));
     }
 
     {
