@@ -1514,22 +1514,15 @@ async fn forward_to_peer(
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, url = %url, "Failed to forward to peer");
-            ApiError(crate::error::SwarmError::Internal(format!(
+            ApiError(crate::error::SwarmError::Network(format!(
                 "Peer forwarding failed: {e}"
             )))
         })?;
 
     if !peer_resp.status().is_success() {
         let status = peer_resp.status();
-        let body = peer_resp.text().await.unwrap_or_default();
-        let body = crate::crypto::scrub_api_keys(&body);
-        // Truncate to prevent large peer error bodies from being forwarded
-        let body = if body.len() > 500 {
-            let truncated: String = body.chars().take(500).collect();
-            format!("{truncated}...")
-        } else {
-            body
-        };
+        let raw_body = peer_resp.text().await.unwrap_or_default();
+        let body = super::scrub_truncate_error(&raw_body);
         tracing::warn!(status = %status, body = %body, "Peer returned error");
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),

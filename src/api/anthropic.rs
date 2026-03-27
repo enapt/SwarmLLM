@@ -1259,7 +1259,7 @@ async fn anthropic_to_openai_proxy(
         .send()
         .await
         .map_err(|e| {
-            ApiError(crate::error::SwarmError::Internal(format!(
+            ApiError(crate::error::SwarmError::Network(format!(
                 "Cloud provider proxy failed: {e}"
             )))
         })?;
@@ -1267,14 +1267,7 @@ async fn anthropic_to_openai_proxy(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        let scrubbed = crate::crypto::scrub_api_keys(&body);
-        // Truncate to prevent large error bodies from leaking to API callers
-        let truncated = if scrubbed.len() > 512 {
-            let safe_end: String = scrubbed.chars().take(500).collect();
-            format!("{safe_end}…[truncated]")
-        } else {
-            scrubbed
-        };
+        let truncated = super::scrub_truncate_error(&body);
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),
             body: truncated,

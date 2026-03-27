@@ -1,3 +1,17 @@
+/// Scrub API keys from an error body and truncate to 512 chars (char-boundary safe).
+pub(crate) fn scrub_truncate_error(body: &str) -> String {
+    let scrubbed = crate::crypto::scrub_api_keys(body);
+    if scrubbed.len() > 512 {
+        let mut idx = 512;
+        while !scrubbed.is_char_boundary(idx) {
+            idx -= 1;
+        }
+        format!("{}…[truncated]", &scrubbed[..idx])
+    } else {
+        scrubbed
+    }
+}
+
 pub mod admin;
 pub mod admin_hf;
 pub mod admin_models;

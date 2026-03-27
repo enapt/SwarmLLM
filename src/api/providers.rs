@@ -421,13 +421,7 @@ pub async fn proxy_openai_compatible(
                     .and_then(|m| m.as_str().map(|s| s.to_string()))
             })
             .unwrap_or(scrubbed_body);
-        // Truncate to prevent leaking large error bodies from upstream providers
-        let friendly = if friendly.len() > 500 {
-            let truncated: String = friendly.chars().take(500).collect();
-            format!("{truncated}...")
-        } else {
-            friendly
-        };
+        let friendly = super::scrub_truncate_error(&friendly);
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),
             body: friendly,
@@ -480,7 +474,7 @@ pub async fn proxy_to_anthropic(
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Anthropic proxy request failed");
-            ApiError(crate::error::SwarmError::Internal(format!(
+            ApiError(crate::error::SwarmError::Network(format!(
                 "Anthropic proxy failed: {e}"
             )))
         })?;
@@ -502,12 +496,7 @@ pub async fn proxy_to_anthropic(
                     .and_then(|m| m.as_str().map(|s| s.to_string()))
             })
             .unwrap_or(scrubbed_body);
-        let friendly = if friendly.len() > 500 {
-            let truncated: String = friendly.chars().take(500).collect();
-            format!("{truncated}...")
-        } else {
-            friendly
-        };
+        let friendly = super::scrub_truncate_error(&friendly);
         return Err(ApiError(crate::error::SwarmError::ProviderError {
             status: status.as_u16(),
             body: friendly,
