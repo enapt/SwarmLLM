@@ -539,13 +539,21 @@ pub async fn download_gguf_header(
         .await
         .map_err(|e| format!("Failed to read header bytes: {e}"))?;
 
-    std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+    let dd = dest_dir.to_path_buf();
+    let hb = header_bytes.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dd).map_err(|e| format!("Failed to create dir: {e}"))?;
+        let dest_path = dd.join("gguf_header.bin");
+        let tmp_path = dd.join("gguf_header.bin.tmp");
+        std::fs::write(&tmp_path, &hb)
+            .map_err(|e| format!("Failed to write gguf_header.bin.tmp: {e}"))?;
+        std::fs::rename(&tmp_path, &dest_path)
+            .map_err(|e| format!("Failed to rename gguf_header.bin: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
     let dest_path = dest_dir.join("gguf_header.bin");
-    let tmp_path = dest_dir.join("gguf_header.bin.tmp");
-    std::fs::write(&tmp_path, &header_bytes)
-        .map_err(|e| format!("Failed to write gguf_header.bin.tmp: {e}"))?;
-    std::fs::rename(&tmp_path, &dest_path)
-        .map_err(|e| format!("Failed to rename gguf_header.bin: {e}"))?;
 
     tracing::info!(
         size = header_bytes.len(),
@@ -618,13 +626,21 @@ pub async fn download_tied_output_weight(
         .await
         .map_err(|e| format!("Failed to read tied output weight bytes: {e}"))?;
 
-    std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+    let dd = dest_dir.to_path_buf();
+    let bytes = data.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&dd).map_err(|e| format!("Failed to create dir: {e}"))?;
+        let dest_path = dd.join("tied_output_weight.bin");
+        let tmp_path = dd.join("tied_output_weight.bin.tmp");
+        std::fs::write(&tmp_path, &bytes)
+            .map_err(|e| format!("Failed to write tied_output_weight.bin.tmp: {e}"))?;
+        std::fs::rename(&tmp_path, &dest_path)
+            .map_err(|e| format!("Failed to rename tied_output_weight.bin: {e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
     let dest_path = dest_dir.join("tied_output_weight.bin");
-    let tmp_path = dest_dir.join("tied_output_weight.bin.tmp");
-    std::fs::write(&tmp_path, &data)
-        .map_err(|e| format!("Failed to write tied_output_weight.bin.tmp: {e}"))?;
-    std::fs::rename(&tmp_path, &dest_path)
-        .map_err(|e| format!("Failed to rename tied_output_weight.bin: {e}"))?;
 
     tracing::info!(
         size = data.len(),

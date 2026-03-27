@@ -33,16 +33,18 @@ pub fn try_load_from_shards(
     // Reject legacy v1 manifests — they lack tensor entries, so ShardReader
     // would silently produce an empty tensor_map and fail at read time.
     if params.manifest.schema_version < 2 {
-        return Err(SwarmError::Internal(format!(
-            "Model {} has schema_version {} manifest — v2 required. Re-download shards.",
-            model_id, params.manifest.schema_version
+        return Err(SwarmError::ModelNotAvailable(crate::types::ModelId(
+            format!(
+                "{} (schema_version {} — v2 required, re-download shards)",
+                model_id, params.manifest.schema_version
+            ),
         )));
     }
 
     // Ensure GGUF header exists (extract from shard_000 if needed)
     if let Err(e) = crate::inference::split::ensure_gguf_header(model_dir) {
-        return Err(SwarmError::Internal(format!(
-            "Cannot load from shards: {e}"
+        return Err(SwarmError::ModelNotAvailable(crate::types::ModelId(
+            format!("Cannot load from shards: {e}"),
         )));
     }
 

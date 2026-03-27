@@ -107,7 +107,7 @@ pub fn load_adapter_from_dir(dir: &Path) -> Result<LoraAdapter, SwarmError> {
         })
         .map(|entry| entry.path())
         .ok_or_else(|| {
-            SwarmError::Internal("No .safetensors file found in adapter directory".into())
+            SwarmError::Validation("No .safetensors file found in adapter directory".into())
         })?;
 
     let device = Device::Cpu;
@@ -316,7 +316,7 @@ fn safetensor_to_candle(
         safetensors::Dtype::F16 => DType::F16,
         safetensors::Dtype::BF16 => DType::BF16,
         other => {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Unsupported LoRA tensor dtype: {other:?}"
             )))
         }
@@ -362,7 +362,7 @@ impl AdapterRegistry {
         device: &Device,
     ) -> Result<AdapterMetadata, SwarmError> {
         if self.adapters.contains_key(adapter_id) {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Adapter '{adapter_id}' already registered"
             )));
         }

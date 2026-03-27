@@ -292,7 +292,7 @@
       header.innerHTML =
         '<span class="chat-session-title" id="chat-header-title" title="' + U.escapeHtml(I18n.t('chat.rename_title')) + '">' + U.escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + U.escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable'))) + '</span>';
+        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable_suffix'))) + '</span>';
 
       if (encBanner) {
         var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;

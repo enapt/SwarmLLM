@@ -895,5 +895,6 @@
   "dashboard.cancel_label": "Cancel",
   "chat.rename_title": "Click to rename",
   "chat.default_image_prompt": "What is in this image?",
-  "utils.unknown_model": "Unknown"
+  "utils.unknown_model": "Unknown",
+  "chat.model_unavailable_suffix": "(unavailable)"
 }
