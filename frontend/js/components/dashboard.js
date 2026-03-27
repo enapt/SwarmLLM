@@ -1459,7 +1459,7 @@
         '<span class="text-muted">' + U.escapeHtml(I18n.t('dashboard.downloading_data')) + '</span>' +
         '<span style="display:flex;align-items:center;gap:8px">' +
           '<span class="mono dl-progress-text">' + U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
-          '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="Cancel download">&times; Cancel</button>' +
+          '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.cancel_label')) + '</button>' +
         '</span>' +
         '</div>' +
         '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>';

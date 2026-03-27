@@ -67,7 +67,7 @@
     images.forEach(function(img) {
       parts.push({ type: 'image_url', image_url: { url: img.data_url } });
     });
-    parts.push({ type: 'text', text: text || 'What is in this image?' });
+    parts.push({ type: 'text', text: text || I18n.t('chat.default_image_prompt') });
     return parts;
   }
 
@@ -290,9 +290,9 @@
       var safeModelId = U.escapeHtml(s.model || '');
       header.classList.add('visible');
       header.innerHTML =
-        '<span class="chat-session-title" id="chat-header-title" title="Click to rename">' + U.escapeHtml(s.title) + '</span>' +
+        '<span class="chat-session-title" id="chat-header-title" title="' + U.escapeHtml(I18n.t('chat.rename_title')) + '">' + U.escapeHtml(s.title) + '</span>' +
         '<span class="' + countClass + '">' + U.escapeHtml(countLabel) + '</span>' +
-        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' (unavailable)') + '</span>';
+        '<span class="' + badgeClass + '" title="' + U.escapeHtml(badgeTitle) + '">' + (hdrIconHtml ? hdrIconHtml + ' ' : '') + U.escapeHtml(modelName) + (available ? '' : ' ' + U.escapeHtml(I18n.t('chat.model_unavailable'))) + '</span>';
 
       if (encBanner) {
         var modelData = s.model ? (App.data.cache.models || []).find(function(m) { return m.id === s.model; }) : null;

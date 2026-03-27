@@ -66,7 +66,7 @@
           body: JSON.stringify({ code: code })
         }).then(function (r) { return r.json(); }).then(function (data) {
           if (data.error) {
-            if (status) { status.textContent = (data.error && data.error.message) || data.error || 'Join failed'; status.style.color = 'var(--red)'; }
+            if (status) { status.textContent = (data.error && data.error.message) || data.error || I18n.t('pool.join_failed'); status.style.color = 'var(--red)'; }
           } else {
             if (status) { status.textContent = I18n.t('pool.link_sent'); status.style.color = 'var(--green)'; }
             if (input) input.value = '';
@@ -125,7 +125,7 @@
 
       // Pool name
       var nameEl = document.getElementById('pool-name');
-      if (nameEl) nameEl.textContent = data.name || 'My Devices';
+      if (nameEl) nameEl.textContent = data.name || I18n.t('pool.default_name');
 
       // Role label
       var roleEl = document.getElementById('pool-role-label');
@@ -230,9 +230,9 @@
         // Per-device stats (if available)
         if (statsEl && m.stats) {
           var parts = [];
-          if (m.stats.vram_mb > 0) parts.push(U.formatMB(m.stats.vram_mb) + ' VRAM');
-          if (m.stats.shards_hosted > 0) parts.push(m.stats.shards_hosted + ' shards');
-          if (m.stats.forwards_served > 0) parts.push(m.stats.forwards_served + ' forwards');
+          if (m.stats.vram_mb > 0) parts.push(I18n.t('pool.stats_vram', { size: U.formatMB(m.stats.vram_mb) }));
+          if (m.stats.shards_hosted > 0) parts.push(I18n.t('pool.stats_shards', { n: m.stats.shards_hosted }));
+          if (m.stats.forwards_served > 0) parts.push(I18n.t('pool.stats_forwards', { n: m.stats.forwards_served }));
           if (m.stats.uptime_secs > 0) parts.push(U.formatUptime(m.stats.uptime_secs));
           statsEl.textContent = parts.join(' · ') || '';
           statsEl.style.display = parts.length > 0 ? '' : 'none';

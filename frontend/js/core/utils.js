@@ -113,7 +113,7 @@
 
   // Format a raw model ID into a friendly display name
   function formatModelDisplayName(id, opts) {
-    if (!id) return 'Unknown';
+    if (!id) return I18n.t('utils.unknown_model');
     var name = id;
     name = name.replace(/\.gguf$/i, '').replace(/-gguf$/i, '');
     var parts = name.split(/[_]/);

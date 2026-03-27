@@ -886,5 +886,14 @@
   "settings.toggle_password_aria": "Toggle password visibility",
   "downloads.prune_shard_label": "{model} shard {index}",
   "provider.not_available": "N/A",
-  "provider.err": "Err"
+  "provider.err": "Err",
+  "pool.stats_vram": "{size} VRAM",
+  "pool.stats_shards": "{n} shards",
+  "pool.stats_forwards": "{n} forwards",
+  "pool.default_name": "My Devices",
+  "pool.join_failed": "Join failed",
+  "dashboard.cancel_label": "Cancel",
+  "chat.rename_title": "Click to rename",
+  "chat.default_image_prompt": "What is in this image?",
+  "utils.unknown_model": "Unknown"
 }
