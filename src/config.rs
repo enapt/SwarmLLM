@@ -275,7 +275,6 @@ pub struct InferenceConfig {
     /// least-recently-used models are evicted. Default: None (unlimited).
     #[serde(default)]
     pub max_split_model_memory_mb: Option<u64>,
-    /// Maximum number of prefix cache entries for cross-request KV state sharing.
     /// When true, KV-cache multi-turn sessions do NOT persist the `cached_prompt`
     /// field to the database — prompts stay in-memory only and are lost on restart.
     /// This prevents user prompts from being written to disk. Default: false.

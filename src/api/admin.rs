@@ -207,11 +207,20 @@ pub async fn update_config(
     let toml_str = toml::to_string_pretty(&config)
         .map_err(|e| ApiError(crate::error::SwarmError::Validation(e.to_string())))?;
 
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&config_path, toml_str)
-        .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
+    let cp = config_path.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = cp.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&cp, toml_str)
+    })
+    .await
+    .map_err(|e| {
+        ApiError(crate::error::SwarmError::Internal(format!(
+            "spawn_blocking join: {e}"
+        )))
+    })?
+    .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
 
     tracing::info!(path = %config_path.display(), "Configuration saved");
 

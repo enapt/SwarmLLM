@@ -52,9 +52,9 @@ swarmllm/
 │   ├── main.rs, lib.rs, config.rs, error.rs, types.rs, update.rs
 │   ├── daemon/    (mod, state, manifest, shard_loader, dispatch)
 │   ├── network/   (manager, behaviour, discovery, protocol, transport, relay, peer_cache)
-│   ├── model/     (manifest, shard, distribution, registry, acquisition, governance, quantization, huggingface, auto_manage/, lora)
+│   ├── model/     (manifest, shard, distribution, registry, acquisition, huggingface, auto_manage/, lora)
 │   │   └── auto_manage/  (mod, manager, scoring, download, prune, scan, vram)
-│   ├── inference/ (router, pipeline, scheduler, executor, sampling, kv_cache, speculative, split/, layers, model_arch, tokenizer, tensor_util, shard_layout, vision, prefix_cache, allreduce, chat_template, paged_kv, local_embedder)
+│   ├── inference/ (router, pipeline, scheduler, executor, sampling, kv_cache, speculative, split/, layers, model_arch, tokenizer, tensor_util, shard_layout, vision, allreduce, chat_template, local_embedder, model_worker, process_pool, worker_ipc)
 │   │   └── split/        (mod, model, kv_cache, entry, gguf_meta, shard_reader, rope, tests)
 │   ├── credit/    (ledger, transaction, priority, anti_gaming, trust, escrow)
 │   ├── identity/  (keypair, keystore, nickname)
@@ -116,7 +116,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
   - `js/core/` — state.js (namespace + shared state + storage keys), utils.js (format helpers, DOM builders, handleApiError), data.js (data store + authFetch + dedup)
   - `js/components/` — ui.js, chat.js, dashboard.js, models.js, shard-menu.js, settings.js, setup.js, downloads.js, notifications.js, identity.js, network-map.js, compare.js, pool.js
   - `js/init.js` — event binding, initialization, public API export
-  - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js` — standalone utilities (loaded before App)
+  - `js/i18n.js`, `js/providers.js`, `js/neural-bg.js`, `js/topojson-client.min.js` — standalone utilities (loaded before App)
 - 13 HTML `<template>` elements for repeating UI structures (session items, chat messages, toasts, model cards, etc.)
 - All storage keys registered as named constants on `App` (e.g., `App.SESSIONS_KEY`, `App.MODEL_SORT_KEY`)
 - Dark/light/system theme toggle, CSS custom properties for theming

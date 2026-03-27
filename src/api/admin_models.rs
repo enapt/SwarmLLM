@@ -324,17 +324,22 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             .data_dir
             .join("models")
             .join(crate::types::slugify_model_name(&info.name));
-        let has_shard_files = loaded_model_dir.exists()
-            && std::fs::read_dir(&loaded_model_dir)
-                .ok()
-                .map(|rd| {
-                    rd.flatten().any(|e| {
-                        let name = e.file_name();
-                        let n = name.to_string_lossy();
-                        n.starts_with("shard_") && n.ends_with(".bin")
+        let dir_check = loaded_model_dir.clone();
+        let has_shard_files = tokio::task::spawn_blocking(move || {
+            dir_check.exists()
+                && std::fs::read_dir(&dir_check)
+                    .ok()
+                    .map(|rd| {
+                        rd.flatten().any(|e| {
+                            let name = e.file_name();
+                            let n = name.to_string_lossy();
+                            n.starts_with("shard_") && n.ends_with(".bin")
+                        })
                     })
-                })
-                .unwrap_or(false);
+                    .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
 
         // Only show loaded model if files exist OR if it was loaded via --model (no shards)
         if !has_shard_files && info.size_bytes > 0 {
@@ -768,7 +773,11 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
     }
 
     // Get actual disk usage of models dir
-    let disk_usage_bytes = dir_size(&models_dir).unwrap_or(0);
+    let models_dir_clone = models_dir.clone();
+    let disk_usage_bytes =
+        tokio::task::spawn_blocking(move || dir_size(&models_dir_clone).unwrap_or(0))
+            .await
+            .unwrap_or(0);
 
     // Compute global VRAM pool
     let pool_vram_mb = crate::model::auto_manage::global_pool_vram_mb(&state.shared_state);
@@ -827,30 +836,35 @@ pub async fn delete_model(
 
     let node_id = shared.identity.node_id().clone();
 
-    // Remove shard files from disk
+    // Remove shard files from disk (in spawn_blocking to avoid blocking Tokio)
     let model_dir = state
         .config
         .node
         .data_dir
         .join("models")
         .join(&safe_model_id);
-    let mut files_removed = 0u32;
-    if model_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&model_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        tracing::warn!(path = %path.display(), error = %e, "Failed to remove shard file");
-                    } else {
-                        files_removed += 1;
+    let model_dir_clone = model_dir.clone();
+    let files_removed = tokio::task::spawn_blocking(move || {
+        let mut count = 0u32;
+        if model_dir_clone.exists() {
+            if let Ok(entries) = std::fs::read_dir(&model_dir_clone) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            tracing::warn!(path = %path.display(), error = %e, "Failed to remove shard file");
+                        } else {
+                            count += 1;
+                        }
                     }
                 }
             }
+            let _ = std::fs::remove_dir(&model_dir_clone);
         }
-        // Remove the model directory itself
-        let _ = std::fs::remove_dir(&model_dir);
-    }
+        count
+    })
+    .await
+    .unwrap_or(0);
 
     // Remove manifest from DB
     let _ = shared.db.remove("model_meta", &model_id);
@@ -1290,7 +1304,15 @@ pub async fn delete_shard(
         .join(format!("shard_{:03}.bin", shard_index));
 
     if shard_path.exists() {
-        std::fs::remove_file(&shard_path).map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
+        let sp = shard_path.clone();
+        tokio::task::spawn_blocking(move || std::fs::remove_file(&sp))
+            .await
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "spawn_blocking join: {e}"
+                )))
+            })?
+            .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
     }
 
     // Remove self from shard_holders
