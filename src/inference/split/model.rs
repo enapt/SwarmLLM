@@ -3965,7 +3965,7 @@ impl SplitModel {
         &self.device
     }
 
-    /// Return the number of KV heads from the first layer (for paged KV pool sizing).
+    /// Return the number of KV heads from the first layer.
     pub fn n_kv_head(&self) -> usize {
         self.layers
             .first()
@@ -4000,19 +4000,6 @@ impl SplitModel {
             "Pre-split weights for tensor parallelism"
         );
         Ok(())
-    }
-
-    /// Return the head dimension from the first layer (for paged KV pool sizing).
-    pub fn head_dim(&self) -> usize {
-        self.layers
-            .first()
-            .map(|l| match l {
-                LayerVariant::Dense(w) => w.head_dim,
-                LayerVariant::DeepSeek { .. } => 128, // DeepSeek default
-                LayerVariant::Qwen35Attn { weights, .. } => weights.head_dim,
-                LayerVariant::Qwen35Ssm { .. } => 128,
-            })
-            .unwrap_or(128)
     }
 
     /// Return the EOS token IDs loaded from GGUF metadata.
@@ -4081,24 +4068,6 @@ impl SplitModel {
             .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
             .unsqueeze(0)
             .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))
-    }
-
-    /// Embed a single token ID into hidden states.
-    ///
-    /// Used by tensor-parallel execution for autoregressive decoding.
-    pub fn embed_token(&self, token_id: u32) -> Result<Tensor, SwarmError> {
-        let emb = self
-            .tok_embeddings
-            .as_ref()
-            .ok_or_else(|| SwarmError::Internal("No embedding table (not first segment)".into()))?;
-
-        let input = Tensor::new(&[token_id as i64][..], &self.device)
-            .map_err(|e| SwarmError::Internal(format!("Token tensor: {e}")))?
-            .unsqueeze(0)
-            .map_err(|e| SwarmError::Internal(format!("Unsqueeze: {e}")))?;
-
-        emb.forward(&input)
-            .map_err(|e| SwarmError::Internal(format!("Embedding forward: {e}")))
     }
 
     /// Estimate GPU memory usage in MB for this model segment.

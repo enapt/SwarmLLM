@@ -6,6 +6,38 @@ use crate::api::server::AppState;
 use crate::config::ProvidersConfig;
 use crate::error::ApiError;
 
+/// Build a passthrough response from a proxied reqwest response.
+///
+/// Streams SSE for streaming requests, returns JSON body for non-streaming.
+pub async fn build_passthrough_response(
+    resp: reqwest::Response,
+    stream: bool,
+) -> Result<axum::response::Response, ApiError> {
+    if stream {
+        let byte_stream = resp.bytes_stream();
+        let body = axum::body::Body::from_stream(byte_stream);
+        axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(body)
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to build response: {e}"
+                )))
+            })
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        axum::response::Response::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .map_err(|e| {
+                ApiError(crate::error::SwarmError::Internal(format!(
+                    "Failed to build response: {e}"
+                )))
+            })
+    }
+}
+
 /// Known provider base URLs (OpenAI-compatible).
 pub fn provider_base_url(name: &str) -> Option<&'static str> {
     match name {
@@ -428,29 +460,8 @@ pub async fn proxy_openai_compatible(
         }));
     }
 
-    if stream {
-        let byte_stream = resp.bytes_stream();
-        let body = axum::body::Body::from_stream(byte_stream);
-        let response = axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
-        Ok(response.into_response())
-    } else {
-        let body = resp.text().await.unwrap_or_default();
-        let response = axum::response::Response::builder()
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body))
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
+    {
+        let response = build_passthrough_response(resp, stream).await?;
         Ok(response.into_response())
     }
 }
@@ -503,29 +514,8 @@ pub async fn proxy_to_anthropic(
         }));
     }
 
-    if stream {
-        let byte_stream = resp.bytes_stream();
-        let body = axum::body::Body::from_stream(byte_stream);
-        let response = axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
-        Ok(response.into_response())
-    } else {
-        let body = resp.text().await.unwrap_or_default();
-        let response = axum::response::Response::builder()
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body))
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
+    {
+        let response = build_passthrough_response(resp, stream).await?;
         Ok(response.into_response())
     }
 }

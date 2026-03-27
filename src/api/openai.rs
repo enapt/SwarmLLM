@@ -1536,33 +1536,8 @@ async fn forward_to_peer(
         }));
     }
 
-    if stream {
-        // Forward the SSE stream from the peer
-        let byte_stream = peer_resp.bytes_stream();
-        let body = axum::body::Body::from_stream(byte_stream);
-        let response = axum::response::Response::builder()
-            .header("content-type", "text/event-stream")
-            .header("cache-control", "no-cache")
-            .body(body)
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
-        Ok(response.into_response())
-    } else {
-        // Forward JSON response
-        let body = peer_resp.text().await.unwrap_or_default();
-        let response = axum::response::Response::builder()
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body))
-            .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to build response: {e}"
-                )))
-            })?;
-        Ok(response.into_response())
-    }
+    let response = crate::api::providers::build_passthrough_response(peer_resp, stream).await?;
+    Ok(response.into_response())
 }
 
 /// Route inference through the InferenceRouter (non-streaming).

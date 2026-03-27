@@ -156,7 +156,7 @@ impl AntiGaming {
 
     /// Check if a node is in a clustered subnet (> SUBNET_CLUSTER_THRESHOLD nodes
     /// sharing the same /24). Returns true if the node should face elevated scrutiny.
-    pub fn is_subnet_clustered(&self, node_id: &NodeId) -> bool {
+    fn is_subnet_clustered(&self, node_id: &NodeId) -> bool {
         self.subnet_counts
             .values()
             .any(|nodes| nodes.len() > SUBNET_CLUSTER_THRESHOLD && nodes.contains(node_id))

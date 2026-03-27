@@ -1704,9 +1704,6 @@ impl PipelineExecutor {
         Ok(layer_result)
     }
 
-    /// Try to identify a prefix-cacheable system prompt in the request.
-    ///
-    /// Returns `Some((blake3_hash, prefix_token_count))` if the request has system
     /// Compute a reasonable timeout for a remote segment based on workload.
     ///
     /// Prefill (large activation = many input tokens) is much slower than decode
