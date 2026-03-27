@@ -47,12 +47,12 @@
         var resp = await App.authFetch('/api/admin/stats');
         var data = await resp.json();
         App.setup.hwData = data.hardware || {};
-        var gpuName = App.setup.hwData.gpu_name || 'No GPU (CPU mode)';
+        var gpuName = App.setup.hwData.gpu_name || I18n.t('setup.cpu_only');
         var vramMb = App.setup.hwData.gpu_vram_mb || 0;
         document.getElementById('hw-gpu').textContent = gpuName;
-        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' VRAM' : '';
-        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' RAM';
-        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' disk';
+        document.getElementById('hw-vram').textContent = vramMb ? U.formatMB(vramMb) + ' ' + I18n.t('setup.vram_suffix') : '';
+        document.getElementById('hw-ram').textContent = U.formatMB(App.setup.hwData.total_ram_mb || 0) + ' ' + I18n.t('setup.ram_suffix');
+        document.getElementById('hw-disk').textContent = U.formatMB(App.setup.hwData.available_disk_mb || 0) + ' ' + I18n.t('setup.disk_suffix');
         // Hardware-aware model recommendation
         var rec = document.getElementById('hw-recommendation');
         if (rec) {
@@ -189,11 +189,11 @@
           }),
         });
         if (!resp.ok) {
-          App.ui.showBanner('error', 'Setup failed \u2014 could not save configuration');
+          App.ui.showBanner('error', I18n.t('setup.failed_save'));
           return;
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Setup failed: ' + (e.message || 'network error'));
+        App.ui.showBanner('error', I18n.t('setup.failed_save_error', { error: e.message || 'network error' }));
         return;
       }
       var nick = (document.getElementById('setup-nickname').value || '').trim();

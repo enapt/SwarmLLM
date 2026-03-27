@@ -874,5 +874,17 @@
   "time.seconds_ago": "{n}s ago",
   "time.minutes_ago": "{n}m ago",
   "time.hours_minutes_ago": "{h}h {m}m ago",
-  "time.days_ago": "{n}d ago"
+  "time.days_ago": "{n}d ago",
+  "chat.enc_pipeline_tooltip": "Encrypted pipeline (end-to-end)",
+  "actions.retry": "Retry",
+  "setup.failed_save": "Setup failed — could not save configuration",
+  "setup.failed_save_error": "Setup failed: {error}",
+  "setup.vram_suffix": "VRAM",
+  "setup.ram_suffix": "RAM",
+  "setup.disk_suffix": "disk",
+  "settings.save_error": "Error: {error}",
+  "settings.toggle_password_aria": "Toggle password visibility",
+  "downloads.prune_shard_label": "{model} shard {index}",
+  "provider.not_available": "N/A",
+  "provider.err": "Err"
 }

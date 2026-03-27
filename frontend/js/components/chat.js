@@ -219,7 +219,7 @@
           badgeEl.className = 'session-model-badge session-source-' + source;
           var tooltipParts = [s.model];
           if (source !== 'local') tooltipParts.push(sourceLabel);
-          if (modelItem && modelItem.encrypted) tooltipParts.push('Encrypted pipeline (end-to-end)');
+          if (modelItem && modelItem.encrypted) tooltipParts.push(I18n.t('chat.enc_pipeline_tooltip'));
           badgeEl.title = tooltipParts.join(' \u2022 ');
           badgeEl.innerHTML = (sibIconHtml ? sibIconHtml + ' ' : '') + U.escapeHtml(U.formatModelDisplayName(s.model));
         }
@@ -474,7 +474,7 @@
               if (errJson.error.hint) hintHtml = '<div class="chat-error-hint">' + U.escapeHtml(errJson.error.hint) + '</div>';
             }
           } catch (e) {}
-          contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">Retry</button></div>';
+          contentEl.innerHTML = U.escapeHtml(friendlyMsg) + hintHtml + '<div class="chat-error-actions"><button class="btn btn-sm" data-retry-chat="1">' + U.escapeHtml(I18n.t('actions.retry')) + '</button></div>';
           contentEl.classList.add('chat-error');
           S.isStreaming = false;
           var _sb = document.getElementById('send-btn');

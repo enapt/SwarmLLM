@@ -202,7 +202,7 @@
   function buildPruneRow(e) {
     var tmpl = document.getElementById('tmpl-prune-row');
     var row = tmpl.content.cloneNode(true).firstElementChild;
-    row.querySelector('.prune-left').textContent = (e.model_name || e.model_id) + ' shard ' + e.shard_index;
+    row.querySelector('.prune-left').textContent = I18n.t('downloads.prune_shard_label', { model: e.model_name || e.model_id, index: e.shard_index });
     var freed = U.formatBytes(e.freed_bytes || 0);
     var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
     row.querySelector('.prune-right').textContent = freed + ' \u2022 ' + e.holder_count_before + '\u2192' + e.holder_count_after + ' \u2022 ' + ts;

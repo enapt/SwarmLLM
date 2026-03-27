@@ -49,7 +49,7 @@
         toggle.type = 'button';
         toggle.className = 'password-toggle';
         toggle.textContent = I18n.t('settings.show_password');
-        toggle.setAttribute('aria-label', 'Toggle password visibility');
+        toggle.setAttribute('aria-label', I18n.t('settings.toggle_password_aria'));
         toggle.addEventListener('click', function() {
           var isPass = input.type === 'password';
           input.type = isPass ? 'text' : 'password';
@@ -357,7 +357,7 @@
           App.ui.showBanner('error', errMsg);
         }
       } catch (e) {
-        App.ui.showBanner('error', 'Error: ' + e.message);
+        App.ui.showBanner('error', I18n.t('settings.save_error', { error: e.message }));
       }
 
       if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = I18n.t('actions.save_settings'); }

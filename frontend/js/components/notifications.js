@@ -597,9 +597,9 @@
       }
       if (s.status === 'timeout') return '<span class="model-status-badge health-slow" title="' + U.escapeHtml(I18n.t('provider.model_timeout')) + '">' + U.escapeHtml(I18n.t('provider.slow')) + '</span>';
       if (s.status === 'unavailable') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_unavailable')) + '">' + U.escapeHtml(I18n.t('provider.down')) + '</span>';
-      if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_not_found')) + '">N/A</span>';
+      if (s.status === 'not_found') return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.model_not_found')) + '">' + U.escapeHtml(I18n.t('provider.not_available')) + '</span>';
       if (s.status === 'rate_limited') return '<span class="model-status-badge health-warn" title="' + U.escapeHtml(I18n.t('provider.rate_limited')) + '">' + U.escapeHtml(I18n.t('provider.limited')) + '</span>';
-      return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.error')) + '">Err</span>';
+      return '<span class="model-status-badge health-down" title="' + U.escapeHtml(I18n.t('provider.error')) + '">' + U.escapeHtml(I18n.t('provider.err')) + '</span>';
     },
 
     updateModelBadges: function() {
