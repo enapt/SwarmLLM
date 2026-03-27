@@ -229,6 +229,89 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
         (effective, has_first, has_last)
     };
 
+    // Helper: build the common model JSON object shared by all 3 listing paths.
+    let build_model_json = |id: &str,
+                            name: &str,
+                            total_size_bytes: u64,
+                            shard_count: u32,
+                            hosted_shards: usize,
+                            global_available: usize,
+                            status: &str,
+                            mode: &str,
+                            source: &str,
+                            peers_hosting: usize,
+                            shards: Vec<serde_json::Value>|
+     -> serde_json::Value {
+        let enc_info = encrypted_pipeline_info(id);
+        let trust_level = state
+            .shared_state
+            .models
+            .model_trust
+            .get(&crate::types::ModelId(id.to_string()))
+            .map(|t| t.trust_level.to_string())
+            .unwrap_or_else(|| {
+                if hosted_shards > 0 {
+                    "pinned".to_string()
+                } else {
+                    "discovered".to_string()
+                }
+            });
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "total_size_bytes": total_size_bytes,
+            "shard_count": shard_count,
+            "hosted_shards": hosted_shards,
+            "global_available": global_available,
+            "healthy": global_available == shard_count as usize,
+            "status": status,
+            "mode": mode,
+            "source": source,
+            "local": hosted_shards > 0,
+            "peers_hosting": peers_hosting,
+            "shards": shards,
+            "trust_level": trust_level,
+            "encrypted_pipeline": enc_info.0,
+            "has_first_shard": enc_info.1,
+            "has_last_shard": enc_info.2,
+        })
+    };
+
+    // Helper: compute disk-level metadata (manifest, header, probed, mmproj) for a model.
+    let disk_metadata = |model_id: &str, model_display_name: &str| -> serde_json::Value {
+        let model_dir = state.config.node.data_dir.join("models").join(model_id);
+        let has_manifest = model_dir.join("manifest.json").exists();
+        let has_header = model_dir.join("gguf_header.bin").exists();
+        let mid_check = crate::types::ModelId(model_id.to_string());
+        let probed = has_header
+            || state
+                .shared_state
+                .models
+                .hf_sources
+                .contains_key(&mid_check)
+            || state
+                .shared_state
+                .models
+                .hf_probe_cache
+                .contains_key(&mid_check);
+        let mid_mmproj = crate::types::ModelId(model_display_name.to_string());
+        let holders = state
+            .shared_state
+            .model_registry
+            .mmproj_holders(&mid_mmproj);
+        let local_has = holders.contains(&local_node_id);
+        serde_json::json!({
+            "has_manifest": has_manifest,
+            "has_header": has_header,
+            "probed": probed,
+            "mmproj": {
+                "available": !holders.is_empty(),
+                "local": local_has,
+                "holders": holders.len(),
+            },
+        })
+    };
+
     // 1. Locally loaded model (full model via --model flag)
     // Even though it's locally loaded, get the real manifest to show shard info
     if let Some(info) = state.shared_state.loaded_model_info.read().await.as_ref() {
@@ -293,7 +376,6 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             if let Some(ref m) = manifest {
                 seen_ids.insert(m.id.0.clone());
             }
-            let local_node_id = &state.shared_state.identity.node_id().clone();
             let (shard_count, hosted_local, global_available, shard_detail) = match manifest {
                 Some(ref m) => {
                     let detail = build_shard_detail(m, &state);
@@ -314,69 +396,33 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 .as_ref()
                 .map(|m| m.id.0.clone())
                 .unwrap_or_else(|| slug.clone());
-            // Check for manifest.json and gguf_header.bin on disk
-            let model_dir = state.config.node.data_dir.join("models").join(&model_id);
-            let has_manifest = model_dir.join("manifest.json").exists();
-            let has_header = model_dir.join("gguf_header.bin").exists();
 
-            let probed = {
-                let mid_check = crate::types::ModelId(model_id.clone());
-                has_header
-                    || state
-                        .shared_state
-                        .models
-                        .hf_sources
-                        .contains_key(&mid_check)
-                    || state
-                        .shared_state
-                        .models
-                        .hf_probe_cache
-                        .contains_key(&mid_check)
+            let mode = if hosted_local == shard_count as usize {
+                "full"
+            } else {
+                "distributed"
             };
-            let mmproj_info = {
-                let mid_mmproj = crate::types::ModelId(info.name.clone());
-                let holders = state
-                    .shared_state
-                    .model_registry
-                    .mmproj_holders(&mid_mmproj);
-                let local_has = holders.contains(local_node_id);
-                serde_json::json!({
-                    "available": !holders.is_empty(),
-                    "local": local_has,
-                    "holders": holders.len(),
-                })
-            };
-            let trust_level = state
-                .shared_state
-                .models
-                .model_trust
-                .get(&crate::types::ModelId(model_id.clone()))
-                .map(|t| t.trust_level.to_string())
-                .unwrap_or_else(|| "pinned".to_string()); // loaded models are at least pinned
-            let enc_info = encrypted_pipeline_info(&model_id);
-            models.push(serde_json::json!({
-                "id": model_id,
-                "name": info.name,
-                "total_size_bytes": info.size_bytes,
-                "shard_count": shard_count,
-                "hosted_shards": hosted_local,
-                "global_available": global_available,
-                "healthy": all_covered,
-                "status": status,
-                "mode": if hosted_local == shard_count as usize { "full" } else { "distributed" },
-                "source": "local",
-                "local": true,
-                "peers_hosting": peer_count,
-                "shards": shard_detail,
-                "has_manifest": has_manifest,
-                "has_header": has_header,
-                "probed": probed,
-                "mmproj": mmproj_info,
-                "trust_level": trust_level,
-                "encrypted_pipeline": enc_info.0,
-                "has_first_shard": enc_info.1,
-                "has_last_shard": enc_info.2,
-            }));
+            let mut entry = build_model_json(
+                &model_id,
+                &info.name,
+                info.size_bytes,
+                shard_count,
+                hosted_local,
+                global_available,
+                status,
+                mode,
+                "local",
+                peer_count,
+                shard_detail,
+            );
+            // Merge disk metadata (manifest, header, probed, mmproj)
+            let dm = disk_metadata(&model_id, &info.name);
+            if let (Some(entry_obj), Some(dm_obj)) = (entry.as_object_mut(), dm.as_object()) {
+                for (k, v) in dm_obj {
+                    entry_obj.insert(k.clone(), v.clone());
+                }
+            }
+            models.push(entry);
         } // else: stale loaded model, files deleted
     }
 
@@ -466,57 +512,38 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
         let estimated_vram = crate::model::auto_manage::estimate_model_vram_mb(m.total_size_bytes);
 
-        // Check for manifest.json and gguf_header.bin on disk
-        let model_dir = state.config.node.data_dir.join("models").join(&m.id.0);
-        let has_manifest = model_dir.join("manifest.json").exists();
-        let has_header = model_dir.join("gguf_header.bin").exists();
-
-        let probed = has_header
-            || state.shared_state.models.hf_sources.contains_key(&m.id)
-            || state.shared_state.models.hf_probe_cache.contains_key(&m.id);
-        let mmproj_info_reg = {
-            let holders = state.shared_state.model_registry.mmproj_holders(&m.id);
-            let local_has = holders.contains(&local_node_id);
-            serde_json::json!({
-                "available": !holders.is_empty(),
-                "local": local_has,
-                "holders": holders.len(),
-            })
-        };
-        let trust_level = state
-            .shared_state
-            .models
-            .model_trust
-            .get(&m.id)
-            .map(|t| t.trust_level.to_string())
-            .unwrap_or_else(|| "discovered".to_string());
-        let enc_info_reg = encrypted_pipeline_info(&m.id.0);
-        models.push(serde_json::json!({
-            "id": m.id.0,
-            "name": m.name,
-            "total_size_bytes": m.total_size_bytes,
-            "shard_count": m.shard_count,
-            "hosted_shards": hosted_count,
-            "global_available": global_available,
-            "healthy": global_available == m.shard_count as usize,
-            "status": status,
-            "mode": mode,
-            "source": source,
-            "local": hosted_count > 0,
-            "peers_hosting": peer_count,
-            "shards": shard_detail,
-            "estimated_vram_mb": estimated_vram,
-            "has_manifest": has_manifest,
-            "has_header": has_header,
-            "probed": probed,
-            "acquisition": acq_state,
-            "acquisition_progress": acq_progress,
-            "mmproj": mmproj_info_reg,
-            "trust_level": trust_level,
-            "encrypted_pipeline": enc_info_reg.0,
-                "has_first_shard": enc_info_reg.1,
-                "has_last_shard": enc_info_reg.2,
-        }));
+        let mut entry = build_model_json(
+            &m.id.0,
+            &m.name,
+            m.total_size_bytes,
+            m.shard_count,
+            hosted_count,
+            global_available,
+            status,
+            mode,
+            source,
+            peer_count,
+            shard_detail,
+        );
+        // Merge disk metadata + registry-specific fields
+        let dm = disk_metadata(&m.id.0, &m.name);
+        if let Some(obj) = entry.as_object_mut() {
+            if let Some(dm_obj) = dm.as_object() {
+                for (k, v) in dm_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            obj.insert(
+                "estimated_vram_mb".to_string(),
+                serde_json::json!(estimated_vram),
+            );
+            obj.insert("acquisition".to_string(), serde_json::json!(acq_state));
+            obj.insert(
+                "acquisition_progress".to_string(),
+                serde_json::json!(acq_progress),
+            );
+        }
+        models.push(entry);
     }
 
     // 3. Models discovered from peer announcements (not in our registry or loaded)
@@ -525,32 +552,19 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             continue;
         }
         seen_ids.insert(model_name.clone());
-        let trust_level = state
-            .shared_state
-            .models
-            .model_trust
-            .get(&crate::types::ModelId(model_name.clone()))
-            .map(|t| t.trust_level.to_string())
-            .unwrap_or_else(|| "discovered".to_string());
-        let enc_info_net = encrypted_pipeline_info(model_name);
-        models.push(serde_json::json!({
-            "id": model_name,
-            "name": model_name,
-            "total_size_bytes": 0,
-            "shard_count": 0,
-            "hosted_shards": 0,
-            "healthy": true,
-            "status": "available",
-            "mode": "full",
-            "source": "network",
-            "local": false,
-            "peers_hosting": peers.len(),
-            "shards": [],
-            "trust_level": trust_level,
-            "encrypted_pipeline": enc_info_net.0,
-                "has_first_shard": enc_info_net.1,
-                "has_last_shard": enc_info_net.2,
-        }));
+        models.push(build_model_json(
+            model_name,
+            model_name,
+            0,
+            0,
+            0,
+            0,
+            "available",
+            "full",
+            "network",
+            peers.len(),
+            vec![],
+        ));
     }
 
     Json(models)
