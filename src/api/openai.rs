@@ -649,21 +649,26 @@ fn validate_chat_request(
     }
 
     if let Some(ref tools) = req.tools {
-        if tools.len() > 128 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Too many tools (max 128)".into(),
-            )));
+        if tools.len() > super::MAX_TOOLS {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Too many tools (max {})",
+                super::MAX_TOOLS
+            ))));
         }
         for t in tools {
-            if t.function.name.len() > 256 {
-                return Err(ApiError(crate::error::SwarmError::Validation(
-                    "Tool function name too long (max 256 chars)".into(),
-                )));
+            if t.function.name.len() > super::MAX_TOOL_NAME_LEN {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "Tool function name too long (max {} chars)",
+                    super::MAX_TOOL_NAME_LEN
+                ))));
             }
-            if t.function.description.as_deref().unwrap_or("").len() > 4096 {
-                return Err(ApiError(crate::error::SwarmError::Validation(
-                    "Tool function description too long (max 4096 chars)".into(),
-                )));
+            if t.function.description.as_deref().unwrap_or("").len()
+                > super::MAX_TOOL_DESCRIPTION_LEN
+            {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "Tool function description too long (max {} chars)",
+                    super::MAX_TOOL_DESCRIPTION_LEN
+                ))));
             }
             if let Some(ref params) = t.function.parameters {
                 if params.to_string().len() > 65536 {
@@ -689,10 +694,11 @@ fn validate_chat_request(
     }
 
     if let Some(crate::api::openai::StopSequence::Multiple(ref v)) = req.stop {
-        if v.len() > 16 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Too many stop sequences (max 16)".into(),
-            )));
+        if v.len() > super::MAX_STOP_SEQUENCES {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Too many stop sequences (max {})",
+                super::MAX_STOP_SEQUENCES
+            ))));
         }
         if v.iter().any(|s| s.is_empty() || s.len() > 256) {
             return Err(ApiError(crate::error::SwarmError::Validation(

@@ -319,10 +319,11 @@ pub async fn messages(
 
     // Validate stop sequences
     if let Some(ref stops) = req.stop_sequences {
-        if stops.len() > 16 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Too many stop sequences (max 16)".into(),
-            )));
+        if stops.len() > super::MAX_STOP_SEQUENCES {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Too many stop sequences (max {})",
+                super::MAX_STOP_SEQUENCES
+            ))));
         }
         if stops.iter().any(|s| s.is_empty() || s.len() > 256) {
             return Err(ApiError(crate::error::SwarmError::Validation(
@@ -333,17 +334,19 @@ pub async fn messages(
 
     // Limit tools array — count and per-tool field sizes
     if let Some(ref tools) = req.tools {
-        if tools.len() > 128 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Too many tools (max 128)".into(),
-            )));
+        if tools.len() > super::MAX_TOOLS {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "Too many tools (max {})",
+                super::MAX_TOOLS
+            ))));
         }
         for tool in tools {
             if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
-                if name.len() > 256 {
+                if name.len() > super::MAX_TOOL_NAME_LEN {
                     return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                        "Tool name too long: {} (max 256)",
-                        name.len()
+                        "Tool name too long: {} chars (max {})",
+                        name.len(),
+                        super::MAX_TOOL_NAME_LEN
                     ))));
                 }
             }

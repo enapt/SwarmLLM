@@ -12,6 +12,13 @@ pub(crate) fn scrub_truncate_error(body: &str) -> String {
     }
 }
 
+// Shared validation limits for API request parameters.
+// Used by both openai.rs and anthropic.rs handlers.
+pub(crate) const MAX_TOOLS: usize = 128;
+pub(crate) const MAX_TOOL_NAME_LEN: usize = 256;
+pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
+pub(crate) const MAX_STOP_SEQUENCES: usize = 16;
+
 pub mod admin;
 pub mod admin_hf;
 pub mod admin_models;
