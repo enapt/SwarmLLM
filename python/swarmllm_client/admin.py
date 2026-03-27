@@ -153,13 +153,6 @@ class AdminClient:
             params={"repo_id": repo_id, "filename": filename},
         )
 
-    def hf_download(self, repo_id: str, filename: str) -> dict[str, Any]:
-        """POST /api/admin/hf/download — Download full GGUF from HuggingFace."""
-        return self._p._post(
-            "/api/admin/hf/download",
-            json={"repo_id": repo_id, "filename": filename},
-        )
-
     def hf_download_shards(
         self,
         repo_id: str,
