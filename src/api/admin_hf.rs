@@ -1565,17 +1565,21 @@ pub async fn cancel_download(
     // Clean up partial .tmp files in the model directory
     let safe_id = crate::model::shard::sanitize_path_component(&model_id);
     let model_dir = state.config.node.data_dir.join("models").join(&safe_id);
-    if model_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&model_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    tracing::info!(path = %path.display(), "Removing partial download file");
-                    let _ = std::fs::remove_file(&path);
+    let md = model_dir.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if md.exists() {
+            if let Ok(entries) = std::fs::read_dir(&md) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                        tracing::info!(path = %path.display(), "Removing partial download file");
+                        let _ = std::fs::remove_file(&path);
+                    }
                 }
             }
         }
-    }
+    })
+    .await;
 
     tracing::info!(model = %model_id, "Download cancelled");
 
@@ -1681,14 +1685,13 @@ pub async fn hf_source(
                     .join(crate::model::shard::sanitize_path_component(&model_id));
                 if model_dir.is_dir() {
                     let hf_path = model_dir.join("hf_source.json");
-                    let _ = std::fs::write(
-                        &hf_path,
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "repo_id": hit.repo_id,
-                            "filename": hit.filename,
-                        }))
-                        .unwrap_or_default(),
-                    );
+                    let json_str = serde_json::to_string_pretty(&serde_json::json!({
+                        "repo_id": hit.repo_id,
+                        "filename": hit.filename,
+                    }))
+                    .unwrap_or_default();
+                    let _ = tokio::task::spawn_blocking(move || std::fs::write(&hf_path, json_str))
+                        .await;
                 }
 
                 tracing::info!(

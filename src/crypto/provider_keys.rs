@@ -65,19 +65,17 @@ fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, Swa
     let encoded = match stored.strip_prefix(ENC_PREFIX) {
         Some(e) => e,
         None => {
-            return Err(SwarmError::Internal(
-                "Stored API key is not encrypted — re-enter the key to encrypt it".into(),
-            ));
+            return Err(SwarmError::DecryptionFailed);
         }
     };
 
     use base64::Engine;
     let blob = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|e| SwarmError::Internal(format!("base64 decode: {e}")))?;
+        .map_err(|_| SwarmError::DecryptionFailed)?;
 
     if blob.len() < 12 {
-        return Err(SwarmError::Internal("encrypted key too short".to_string()));
+        return Err(SwarmError::DecryptionFailed);
     }
 
     let sym_key = derive_encryption_key(signing_key_bytes);
@@ -87,10 +85,9 @@ fn decrypt_key(stored: &str, signing_key_bytes: &[u8; 32]) -> Result<String, Swa
     let nonce = Nonce::from_slice(&blob[..12]);
     let plaintext = cipher
         .decrypt(nonce, &blob[12..])
-        .map_err(|_| SwarmError::Internal("failed to decrypt provider API key".to_string()))?;
+        .map_err(|_| SwarmError::DecryptionFailed)?;
 
-    String::from_utf8(plaintext)
-        .map_err(|e| SwarmError::Internal(format!("decrypted key not UTF-8: {e}")))
+    String::from_utf8(plaintext).map_err(|_| SwarmError::DecryptionFailed)
 }
 
 /// Encrypt all API keys in a ProvidersConfig before persisting to database.

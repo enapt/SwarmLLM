@@ -234,23 +234,23 @@ impl PoolManager {
     async fn handle_create_pool(&mut self, name: String) -> Result<PoolState, SwarmError> {
         // Validate pool name: 1-64 chars, printable ASCII, no control chars
         if name.is_empty() || name.len() > 64 {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Pool name must be 1-64 characters".into(),
             ));
         }
         if !name.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Pool name may only contain printable ASCII characters".into(),
             ));
         }
 
         // Check we're not already in a pool
         if self.shared_state.credits.pool_state.read().await.is_some() {
-            return Err(SwarmError::Internal("Already in a pool".into()));
+            return Err(SwarmError::Validation("Already in a pool".into()));
         }
 
         if !self.rate_limiter.check_and_record() {
-            return Err(SwarmError::Internal("Rate limit exceeded".into()));
+            return Err(SwarmError::Validation("Rate limit exceeded".into()));
         }
 
         let my_id = self.shared_state.identity.node_id().clone();
@@ -322,31 +322,33 @@ impl PoolManager {
             let guard = self.shared_state.credits.pool_state.read().await;
             let state = guard
                 .as_ref()
-                .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
 
             let my_id = self.shared_state.identity.node_id();
             if state.pool_id != *my_id {
-                return Err(SwarmError::Internal(
+                return Err(SwarmError::Validation(
                     "Only the pool owner can invite".into(),
                 ));
             }
 
             let max_size = self.shared_state.config.pool.max_pool_size;
             if state.members.len() >= max_size as usize {
-                return Err(SwarmError::Internal(format!(
+                return Err(SwarmError::Validation(format!(
                     "Pool is full (max {max_size} members)"
                 )));
             }
 
             if state.members.iter().any(|m| m.node_id == invitee) {
-                return Err(SwarmError::Internal("Node is already a pool member".into()));
+                return Err(SwarmError::Validation(
+                    "Node is already a pool member".into(),
+                ));
             }
 
             state.pool_id.clone()
         };
 
         if !self.rate_limiter.check_and_record() {
-            return Err(SwarmError::Internal("Rate limit exceeded".into()));
+            return Err(SwarmError::Validation("Rate limit exceeded".into()));
         }
 
         let ttl = self.shared_state.config.pool.invitation_ttl_hours;
@@ -383,29 +385,29 @@ impl PoolManager {
     ) -> Result<(), SwarmError> {
         // Check we're not already in a pool
         if self.shared_state.credits.pool_state.read().await.is_some() {
-            return Err(SwarmError::Internal("Already in a pool".into()));
+            return Err(SwarmError::Validation("Already in a pool".into()));
         }
 
         // Verify the invitation is for us
         let my_id = self.shared_state.identity.node_id();
         if invitation.invitee_node_id != *my_id {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Invitation is not for this node".into(),
             ));
         }
 
         // Check expiry
         if invitation.expires_at < chrono::Utc::now() {
-            return Err(SwarmError::Internal("Invitation has expired".into()));
+            return Err(SwarmError::Validation("Invitation has expired".into()));
         }
 
         // Verify owner signature (pool_id == owner's NodeId)
         let owner_key = ed25519_dalek::VerifyingKey::from_bytes(&invitation.pool_id.0)
-            .map_err(|_| SwarmError::Internal("Invalid pool owner key".into()))?;
+            .map_err(|_| SwarmError::Validation("Invalid pool owner key".into()))?;
         crypto::verify_invitation(&invitation, &owner_key)?;
 
         if !self.rate_limiter.check_and_record() {
-            return Err(SwarmError::Internal("Rate limit exceeded".into()));
+            return Err(SwarmError::Validation("Rate limit exceeded".into()));
         }
 
         // Create acceptance
@@ -471,24 +473,24 @@ impl PoolManager {
     async fn handle_remove_member(&mut self, node_id: NodeId) -> Result<(), SwarmError> {
         // Check rate limit before mutating state
         if !self.rate_limiter.check_and_record() {
-            return Err(SwarmError::Internal("Rate limit exceeded".into()));
+            return Err(SwarmError::Validation("Rate limit exceeded".into()));
         }
 
         let (removal, state_clone) = {
             let mut guard = self.shared_state.credits.pool_state.write().await;
             let ps = guard
                 .as_mut()
-                .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
 
             let my_id = self.shared_state.identity.node_id();
             if ps.pool_id != *my_id {
-                return Err(SwarmError::Internal(
+                return Err(SwarmError::Validation(
                     "Only the pool owner can remove members".into(),
                 ));
             }
 
             if node_id == *my_id {
-                return Err(SwarmError::Internal(
+                return Err(SwarmError::Validation(
                     "Owner cannot remove themselves".into(),
                 ));
             }
@@ -496,7 +498,7 @@ impl PoolManager {
             let before = ps.members.len();
             ps.members.retain(|m| m.node_id != node_id);
             if ps.members.len() == before {
-                return Err(SwarmError::Internal("Node is not a pool member".into()));
+                return Err(SwarmError::Validation("Node is not a pool member".into()));
             }
 
             let removal =
@@ -529,10 +531,10 @@ impl PoolManager {
             let guard = self.shared_state.credits.pool_state.read().await;
             let ps = guard
                 .as_ref()
-                .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
 
             if !self.rate_limiter.check_and_record() {
-                return Err(SwarmError::Internal("Rate limit exceeded".into()));
+                return Err(SwarmError::Validation("Rate limit exceeded".into()));
             }
 
             ps.pool_id.clone()
@@ -1151,7 +1153,7 @@ impl PoolManager {
     async fn handle_set_device_name(&mut self, name: String) -> Result<(), SwarmError> {
         let name = name.trim().to_string();
         if name.len() > 32 {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Device name must be 32 characters or less".into(),
             ));
         }
@@ -1159,7 +1161,7 @@ impl PoolManager {
         let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
-            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
         if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == my_id) {
             member.device_name = if name.is_empty() { None } else { Some(name) };
         }
@@ -1176,9 +1178,9 @@ impl PoolManager {
         let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
-            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
         if ps.pool_id != my_id {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Only the pool owner can change the credit split".into(),
             ));
         }
@@ -1201,9 +1203,9 @@ impl PoolManager {
         let mut ps = self.shared_state.credits.pool_state.write().await;
         let ps = ps
             .as_mut()
-            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
         if ps.pool_id != my_id {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Only the pool owner can set contribution levels".into(),
             ));
         }
@@ -1215,7 +1217,7 @@ impl PoolManager {
                 "Set device contribution level"
             );
         } else {
-            return Err(SwarmError::Internal("Device not found in pool".into()));
+            return Err(SwarmError::Validation("Device not found in pool".into()));
         }
         self.persist_pool_state(ps)?;
         Ok(())
@@ -1228,11 +1230,11 @@ impl PoolManager {
         let pool_state = self.shared_state.credits.pool_state.read().await;
         let ps = pool_state
             .as_ref()
-            .ok_or_else(|| SwarmError::Internal("Not in a pool".into()))?;
+            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
 
         // Only the owner can generate invite codes
         if ps.pool_id != *self.shared_state.identity.node_id() {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Only the pool owner can generate invite codes".into(),
             ));
         }
@@ -1240,14 +1242,14 @@ impl PoolManager {
         // Check pool isn't full
         let max_size = self.shared_state.config.pool.max_pool_size;
         if ps.members.len() as u32 >= max_size {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Pool is full ({max_size} members)"
             )));
         }
 
         // Rate limit
         if !self.rate_limiter.check_and_record() {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Rate limited — try again later".into(),
             ));
         }
@@ -1259,7 +1261,7 @@ impl PoolManager {
         // Limit active codes to prevent abuse (max 5 active at once)
         const MAX_ACTIVE_CODES: usize = 5;
         if self.invite_codes.len() >= MAX_ACTIVE_CODES {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Too many active invite codes ({MAX_ACTIVE_CODES}). Wait for existing codes to expire."
             )));
         }
@@ -1279,13 +1281,13 @@ impl PoolManager {
     async fn handle_join_with_code(&mut self, code: String) -> Result<(), SwarmError> {
         // Must not already be in a pool
         if self.shared_state.credits.pool_state.read().await.is_some() {
-            return Err(SwarmError::Internal("Already in a pool".into()));
+            return Err(SwarmError::Validation("Already in a pool".into()));
         }
 
         // Validate code format (8 uppercase alphanumeric)
         let code = code.trim().to_uppercase();
         if code.len() != 8 || !code.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(SwarmError::Internal(
+            return Err(SwarmError::Validation(
                 "Invalid invite code format (expected 8 characters)".into(),
             ));
         }
