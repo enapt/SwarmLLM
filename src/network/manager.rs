@@ -248,6 +248,27 @@ impl NetworkManager {
     }
 
     /// Start the network manager event loop.
+    /// Send an error LayerResult to the pipeline for a failed tensor forward.
+    fn fail_tensor_forward(
+        &mut self,
+        request_id: uuid::Uuid,
+        peer: &libp2p::PeerId,
+        reason: String,
+    ) {
+        let error_result = crate::types::LayerResult {
+            request_id,
+            token_ids: vec![],
+            finish_reason: Some(crate::types::NetworkFinishReason::Error(reason)),
+            activations: vec![],
+            sealed_token_ids: None,
+        };
+        if let Err(e) =
+            self.dispatch_authenticated(Some(peer), SwarmMessage::LayerResult(error_result))
+        {
+            tracing::warn!(error = %e, "Failed to send error LayerResult to pipeline");
+        }
+    }
+
     pub async fn run(mut self) -> Result<(), SwarmError> {
         let config = self.shared_state.config.clone();
         let port = config.node.listen_port;
@@ -455,21 +476,7 @@ impl NetworkManager {
                             );
                             self.pending_tensor_outbound.remove(&req_id);
                             stale_peers.insert(target_peer);
-                            let error_result = crate::types::LayerResult {
-                                request_id: uuid,
-                                token_ids: vec![],
-                                finish_reason: Some(crate::types::NetworkFinishReason::Error(
-                                    "Tensor forward timed out".to_string(),
-                                )),
-                                activations: vec![],
-                                sealed_token_ids: None,
-                            };
-                            if let Err(e) = self.dispatch_authenticated(
-                                Some(&target_peer),
-                                SwarmMessage::LayerResult(error_result),
-                            ) {
-                                tracing::warn!(error = %e, "Failed to send stale tensor error to pipeline");
-                            }
+                            self.fail_tensor_forward(uuid, &target_peer, "Tensor forward timed out".into());
                             // Also clean up the inbound response channel for this request
                             // to prevent unbounded memory leak on timed-out distributed inference
                             if self.pending_tensor_channels.remove(&uuid).is_some() {
@@ -725,21 +732,11 @@ impl NetworkManager {
                         "Tensor forward OutboundFailure — notifying pipeline"
                     );
                     // Send an error LayerResult so the pipeline can failover immediately
-                    let error_result = crate::types::LayerResult {
-                        request_id: inference_uuid,
-                        token_ids: vec![],
-                        finish_reason: Some(crate::types::NetworkFinishReason::Error(format!(
-                            "OutboundFailure: {error}"
-                        ))),
-                        activations: vec![],
-                        sealed_token_ids: None,
-                    };
-                    if let Err(e) = self.dispatch_authenticated(
-                        Some(&peer),
-                        SwarmMessage::LayerResult(error_result),
-                    ) {
-                        tracing::warn!(error = %e, "Failed to send OutboundFailure to pipeline");
-                    }
+                    self.fail_tensor_forward(
+                        inference_uuid,
+                        &peer,
+                        format!("OutboundFailure: {error}"),
+                    );
                 }
                 // Check if this was a pending shard download request
                 if let Some((_peer_id, shard_id)) = self.pending_shard_requests.remove(&request_id)
@@ -2740,20 +2737,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                 rr_is_connected,
                 "Peer not connected — failing tensor forward immediately"
             );
-            let error_result = crate::types::LayerResult {
-                request_id: forward.request_id,
-                token_ids: vec![],
-                finish_reason: Some(crate::types::NetworkFinishReason::Error(
-                    "Peer not connected".to_string(),
-                )),
-                activations: vec![],
-                sealed_token_ids: None,
-            };
-            if let Err(e) =
-                self.dispatch_authenticated(Some(&peer_id), SwarmMessage::LayerResult(error_result))
-            {
-                tracing::warn!(error = %e, "Failed to send not-connected error to pipeline");
-            }
+            self.fail_tensor_forward(forward.request_id, &peer_id, "Peer not connected".into());
             return;
         }
         let req = SwarmRequest::TensorPayload(payload);

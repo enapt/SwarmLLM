@@ -6,6 +6,33 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::model::manifest::ModelManifestExt;
 
+/// Spawn a background task that reads download progress events and updates acquisition_progress.
+fn spawn_progress_updater(
+    shared: std::sync::Arc<crate::daemon::state::SharedState>,
+    mid: crate::types::ModelId,
+    mut prx: tokio::sync::mpsc::Receiver<crate::model::huggingface::DownloadProgress>,
+) {
+    tokio::spawn(async move {
+        let mut last_bytes = 0u64;
+        let mut last_time = std::time::Instant::now();
+        while let Some(prog) = prx.recv().await {
+            if let Some(mut entry) = shared.models.acquisition_progress.get_mut(&mid) {
+                entry.downloaded_bytes = prog.downloaded_bytes;
+                entry.total_bytes = prog.total_bytes;
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(last_time).as_secs_f64();
+                if dt > 0.5 {
+                    let speed =
+                        (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
+                    entry.speed_bytes_per_sec = speed;
+                    last_bytes = prog.downloaded_bytes;
+                    last_time = now;
+                }
+            }
+        }
+    });
+}
+
 /// SEC: Validate HuggingFace repo_id format (owner/repo).
 /// Only allows alphanumeric, hyphens, dots, underscores in each segment.
 fn is_valid_hf_repo_id(repo_id: &str) -> bool {
@@ -316,38 +343,13 @@ pub async fn hf_download(
 
     tokio::spawn(async move {
         let mut shutdown_rx = shared.shutdown_rx();
-        let (ptx, mut prx) =
+        let (ptx, prx) =
             tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
 
         let download_mid = mid.clone();
         let download_shared = shared.clone();
 
-        // Spawn progress updater
-        let progress_mid = mid.clone();
-        let progress_shared = shared.clone();
-        tokio::spawn(async move {
-            let mut last_bytes = 0u64;
-            let mut last_time = std::time::Instant::now();
-            while let Some(prog) = prx.recv().await {
-                if let Some(mut entry) = progress_shared
-                    .models
-                    .acquisition_progress
-                    .get_mut(&progress_mid)
-                {
-                    entry.downloaded_bytes = prog.downloaded_bytes;
-                    entry.total_bytes = prog.total_bytes;
-                    let now = std::time::Instant::now();
-                    let dt = now.duration_since(last_time).as_secs_f64();
-                    if dt > 0.5 {
-                        let speed =
-                            (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
-                        entry.speed_bytes_per_sec = speed;
-                        last_bytes = prog.downloaded_bytes;
-                        last_time = now;
-                    }
-                }
-            }
-        });
+        spawn_progress_updater(shared.clone(), mid.clone(), prx);
 
         let download_result = tokio::select! {
             result = crate::model::huggingface::download_model(
@@ -1074,35 +1076,10 @@ pub async fn hf_download_shards(
 
         // ── Phase 2: Download shard data ────────────────────────────────
 
-        let (ptx, mut prx) =
+        let (ptx, prx) =
             tokio::sync::mpsc::channel::<crate::model::huggingface::DownloadProgress>(64);
 
-        // Spawn progress updater
-        let progress_mid = mid.clone();
-        let progress_shared = shared.clone();
-        tokio::spawn(async move {
-            let mut last_bytes = 0u64;
-            let mut last_time = std::time::Instant::now();
-            while let Some(prog) = prx.recv().await {
-                if let Some(mut entry) = progress_shared
-                    .models
-                    .acquisition_progress
-                    .get_mut(&progress_mid)
-                {
-                    entry.downloaded_bytes = prog.downloaded_bytes;
-                    entry.total_bytes = prog.total_bytes;
-                    let now = std::time::Instant::now();
-                    let dt = now.duration_since(last_time).as_secs_f64();
-                    if dt > 0.5 {
-                        let speed =
-                            (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
-                        entry.speed_bytes_per_sec = speed;
-                        last_bytes = prog.downloaded_bytes;
-                        last_time = now;
-                    }
-                }
-            }
-        });
+        spawn_progress_updater(shared.clone(), mid.clone(), prx);
 
         // Download individual v2 layer-aligned shards
         let total_shard_bytes: u64 = shard_indices

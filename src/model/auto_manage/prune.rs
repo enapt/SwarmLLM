@@ -366,14 +366,23 @@ impl AutoShardManager {
                 shard_store.shard_path(&candidate.model_id, candidate.shard_index)
             };
             if shard_path.exists() {
-                if let Err(e) = std::fs::remove_file(&shard_path) {
-                    tracing::warn!(
-                        model = %candidate.model_id,
-                        shard = candidate.shard_index,
-                        error = %e,
-                        "Failed to delete shard file during pruning"
-                    );
-                    continue;
+                let sp = shard_path.clone();
+                let result = tokio::task::spawn_blocking(move || std::fs::remove_file(&sp)).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            model = %candidate.model_id,
+                            shard = candidate.shard_index,
+                            error = %e,
+                            "Failed to delete shard file during pruning"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "spawn_blocking join error during prune");
+                        continue;
+                    }
                 }
             }
 

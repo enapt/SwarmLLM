@@ -26,16 +26,22 @@ pub async fn rescan_local_shards(
     let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
     let mut changed_models = Vec::new();
 
-    let entries = match std::fs::read_dir(&models_dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
+    let md = models_dir.to_path_buf();
+    let dir_entries: Vec<String> = tokio::task::spawn_blocking(move || {
+        let entries = match std::fs::read_dir(&md) {
+            Ok(e) => e,
+            Err(_) => return vec![],
+        };
+        entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
 
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let model_id_str = entry.file_name().to_string_lossy().to_string();
+    for model_id_str in dir_entries {
         let model_id = ModelId(model_id_str.clone());
 
         let manifest = match shared.model_registry.get_manifest(&model_id) {

@@ -1392,7 +1392,16 @@ impl PipelineExecutor {
                 if !tp_result.is_empty() && tp_result[0] == 0x01 {
                     // Last segment returned a sampled token ID
                     let token_id = if tp_result.len() >= 9 {
-                        i64::from_le_bytes(tp_result[1..9].try_into().unwrap()) as u32
+                        let raw = i64::from_le_bytes(tp_result[1..9].try_into().unwrap());
+                        if raw >= 0 && raw <= u32::MAX as i64 {
+                            raw as u32
+                        } else {
+                            tracing::warn!(
+                                raw_token = raw,
+                                "Out-of-range token ID from peer — clamping to 0"
+                            );
+                            0u32
+                        }
                     } else {
                         0u32
                     };

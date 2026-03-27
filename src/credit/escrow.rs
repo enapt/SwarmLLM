@@ -316,7 +316,13 @@ impl EscrowManager {
                         // Also revert escrow back to Pending so next cleanup retries the refund
                         if let Some(mut esc) = self.entries.get_mut(&id) {
                             esc.status = EscrowStatus::Pending;
-                            let _ = self.db.put_json(TREE_ESCROW, &id.to_string(), &*esc);
+                            if let Err(e2) = self.db.put_json(TREE_ESCROW, &id.to_string(), &*esc) {
+                                tracing::error!(
+                                    escrow_id = %id,
+                                    error = %e2,
+                                    "Failed to persist escrow revert to Pending — escrow state diverged from DB"
+                                );
+                            }
                         }
                         tracing::error!(
                             escrow_id = %id,
