@@ -2609,8 +2609,9 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
         }
     }
 
-    /// Send a tensor forward to a specific peer via the Cap'n Proto tensor protocol.
-    /// Encrypts activations when an encryption session exists, falls back to plaintext.
+    /// Send a tensor forward to a specific peer via the unified binary tensor protocol.
+    /// Uses WIRE_TAG_TENSOR (0x01) framing. Encrypts activations when an encryption
+    /// session exists, falls back to plaintext.
     fn handle_send_tensor(
         &mut self,
         target_peer_bytes: Vec<u8>,

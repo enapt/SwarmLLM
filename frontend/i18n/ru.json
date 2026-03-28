@@ -899,5 +899,10 @@
   "map.tooltip_models": "{count} model",
   "map.tooltip_models_plural": "{count} models",
   "map.tooltip_no_nodes": "No nodes",
-  "pool.name_placeholder": "My Devices"
+  "pool.name_placeholder": "My Devices",
+  "nav.node_id_title": "Node ID",
+  "setup.contribution_aria": "Resource contribution level",
+  "setup.steps_aria": "Setup steps",
+  "network.my_address_aria": "Your peer address",
+  "network.peer_address_aria": "Peer address"
 }

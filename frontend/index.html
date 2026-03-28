@@ -19,7 +19,7 @@
         <div id="setup-lang-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-bottom:4px">
           <button class="btn btn-sm" id="setup-lang-english" style="font-size:0.75rem;padding:2px 10px;display:none" data-i18n="setup.lang_english">Continue in English</button>
           <img id="setup-lang-flag" src="/static/flags/gb.svg" alt="" class="lang-flag-img" style="width:20px;height:15px">
-          <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" title="Language">
+          <select id="setup-language" style="font-size:0.8rem;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);cursor:pointer" data-i18n-title="settings.language_label" title="Language">
             <option value="en">English</option>
             <option value="es">Español</option>
             <option value="fr">Français</option>
@@ -46,7 +46,7 @@
         <h2 id="setup-title" data-i18n="setup.welcome">Welcome to SwarmLLM</h2>
         <span class="text-muted" data-i18n="setup.subtitle">Chat with AI using your own computer, or team up with others to run bigger models</span>
       </div>
-      <div class="wizard-steps" id="step-indicators" role="tablist" aria-label="Setup steps">
+      <div class="wizard-steps" id="step-indicators" role="tablist" data-i18n-aria-label="setup.steps_aria" aria-label="Setup steps">
         <button class="wizard-step active" data-step="1" role="tab" aria-selected="true" data-i18n-aria-label="setup.step1_aria" aria-label="Step 1: About You">1</button>
         <div class="wizard-connector"></div>
         <button class="wizard-step" data-step="2" role="tab" aria-selected="false" data-i18n-aria-label="setup.step2_aria" aria-label="Step 2: Connect">2</button>
@@ -81,7 +81,7 @@
             <span class="mono" id="contribution-label" data-i18n="setup.contrib_minimal">Minimal</span>
             <span><span data-i18n="setup.contrib_maximum">Maximum</span><span class="contribution-hint">75%+ CPU</span></span>
           </div>
-          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" aria-label="Resource contribution level">
+          <input type="range" id="contribution-slider" min="0" max="2" step="1" value="0" data-i18n-aria-label="setup.contribution_aria" aria-label="Resource contribution level">
         </div>
         <div class="text-muted" style="font-size:0.78rem" id="contribution-desc" data-i18n="setup.contrib_desc_minimal">Low impact: uses minimal resources. Best for shared or low-spec machines.</div>
         <div class="form-group mt-2" style="border-top:1px solid var(--border);padding-top:12px">
@@ -495,13 +495,13 @@
           <label style="font-weight:600;margin-bottom:6px" data-i18n="network.your_peer_address">Your Swarm Peer Address</label>
           <div class="text-muted" style="font-size:0.75rem;margin-bottom:6px" data-i18n="network.share_desc">Share with other SwarmLLM users so your nodes can discover each other on the network</div>
           <div style="display:flex;gap:0.5rem;margin-bottom:10px">
-            <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" aria-label="Your peer address">
+            <input type="text" id="my-network-code" readonly class="form-control mono" style="font-size:0.7rem;flex:1" data-i18n-aria-label="network.my_address_aria" aria-label="Your peer address">
             <button class="btn btn-sm" id="btn-copy-network-code" data-i18n-title="nav.copy_clipboard" title="Copy to clipboard" data-i18n="actions.copy">Copy</button>
           </div>
           <label style="font-weight:600;margin-bottom:4px" data-i18n="network.other_peer_address">Another User's Peer Address</label>
           <div class="text-muted" style="font-size:0.75rem;margin-bottom:4px" data-i18n="network.connect_desc">Paste an address from another user to connect your nodes</div>
           <div style="display:flex;gap:0.5rem">
-            <input type="text" id="join-code-input" class="form-control mono" placeholder="swarm://..." style="font-size:0.7rem;flex:1" aria-label="Peer address">
+            <input type="text" id="join-code-input" class="form-control mono" placeholder="swarm://..." style="font-size:0.7rem;flex:1" data-i18n-aria-label="network.peer_address_aria" aria-label="Peer address">
             <button class="btn btn-sm btn-primary" id="btn-join-network" data-i18n="network.connect">Connect</button>
           </div>
           <div class="text-muted" id="join-status" style="margin-top:4px"></div>
@@ -516,7 +516,7 @@
       <button class="btn btn-ghost btn-sm" id="btn-theme-toggle" data-i18n-title="nav.toggle_theme" title="Toggle light/dark theme" data-i18n-aria-label="nav.toggle_theme" aria-label="Toggle theme" style="font-size:1rem">&#9790;</button>
       <div class="node-info">
         <span class="pulse-dot"></span>
-        <span class="mono" id="node-id" title="Node ID">...</span>
+        <span class="mono" id="node-id" data-i18n-title="nav.node_id_title" title="Node ID">...</span>
         <span class="tier-badge silver" id="tier-badge">...</span>
       </div>
       <button class="btn btn-ghost btn-sm btn-shutdown" id="btn-shutdown" data-i18n-title="nav.shutdown" title="Stop SwarmLLM" data-i18n-aria-label="nav.shutdown" aria-label="Stop SwarmLLM">&#9211;</button>
