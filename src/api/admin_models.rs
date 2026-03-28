@@ -1349,6 +1349,11 @@ pub async fn delete_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if shard_index == u32::MAX {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Reserved shard index".into(),
+        )));
+    }
     let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
@@ -1521,6 +1526,11 @@ pub async fn download_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if shard_index == u32::MAX {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Reserved shard index".into(),
+        )));
+    }
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 

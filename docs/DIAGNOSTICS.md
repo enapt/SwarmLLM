@@ -664,7 +664,7 @@ All 61 files containing runtime decision/timing/error logic are instrumented. Th
 | Network (manager, behaviour, protocol, discovery, relay, peer_cache) | 6 | ~50 | Connection lifecycle, codec read/write, encryption, swarm events |
 | Inference (router, pipeline, scheduler, executor, split, sampling, speculative, vision, kv_cache, chat_template) | 10 | ~38 | Request dispatch, pipeline assembly, forward pass, token sampling |
 | API (server, openai, admin, websocket, middleware, providers, anthropic, identity, internal, metrics, pool) | 12 | ~55 | Server startup, SSE streaming, auth, Anthropic proxy, pool ops, metrics scrape |
-| Model (shard, manifest, huggingface, acquisition, auto_manage, registry, distribution, governance, lora) | 9 | ~25 | Shard verification, HF search/download, model loading, pruning |
+| Model (shard, manifest, huggingface, acquisition, auto_manage, registry, distribution, lora) | 8 | ~23 | Shard verification, HF search/download, model loading, pruning |
 | Credit (ledger, transaction, priority, anti_gaming, trust, escrow) | 6 | ~15 | Transaction verification, tier calculation, trust updates, escrow |
 | Crypto (session, key_rotation, gossip_seal, pipeline_seal) | 4 | ~10 | Key exchange, session management, encryption seal/open |
 | Daemon + Main (daemon/, main.rs) | 5 | ~11 | Daemon startup, LayerForward processing, result delivery |

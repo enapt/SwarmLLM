@@ -104,6 +104,6 @@ Models go through trust levels: Discovered → Pinned → DemandVerified → Net
 ## Still Stuck?
 
 - Run with full diagnostics: `./swarmllm run -vv 2>&1 | grep "DIAG:"`
-- See the [Diagnostics Guide](../DIAGNOSTICS.md) for detailed log instrumentation
+- See the [Diagnostics Guide](../../DIAGNOSTICS.md) for detailed log instrumentation
 - Check [GitHub Issues](https://github.com/enapt/SwarmLLM/issues)
 - Open a new issue with: OS, hardware, `./swarmllm version`, and logs from `-vv`

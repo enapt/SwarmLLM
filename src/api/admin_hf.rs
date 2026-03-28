@@ -1407,23 +1407,12 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
         .clone()
         .unwrap_or_else(|| params.filename.trim_end_matches(".gguf").to_string());
 
-    // Detect architecture from the GGUF header
-    let architecture = {
-        let header_bytes = std::fs::read(header_path).map_err(|e| e.to_string())?;
-        let mut cursor = std::io::Cursor::new(&header_bytes);
-        let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor)
-            .map_err(|e| format!("Failed to re-parse GGUF header: {e}"))?;
-        let arch_str = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "llama".to_string());
-        match arch_str.as_str() {
-            "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
-            "mistral" => crate::types::ModelArchitecture::Mistral,
-            "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
-            _ => crate::types::ModelArchitecture::Llama,
-        }
+    // Architecture already extracted by GgufTensorMeta above — no need to re-read the file
+    let architecture = match meta.architecture.as_str() {
+        "qwen2" | "qwen3" | "qwen2moe" => crate::types::ModelArchitecture::Qwen2,
+        "mistral" => crate::types::ModelArchitecture::Mistral,
+        "phi" | "phi3" => crate::types::ModelArchitecture::Phi,
+        _ => crate::types::ModelArchitecture::Llama,
     };
 
     let model_dir = header_path

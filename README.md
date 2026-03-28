@@ -269,7 +269,7 @@ Key source directories:
 - `src/network/` — libp2p networking, peer discovery, transport, relay, peer cache
 - `src/inference/` — router, pipeline, split inference, allreduce, KV-cache, speculative decoding, vision, chat templates
 - `src/api/` — Axum HTTP server, OpenAI/Anthropic/MCP endpoints, admin API, WebSocket, middleware
-- `src/model/` — manifests, shards, acquisition, auto-manage, HuggingFace integration, governance
+- `src/model/` — manifests, shards, acquisition, auto-manage, HuggingFace integration, LoRA
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
 - `src/pool/` — device pool management, crypto, credit forwarding
