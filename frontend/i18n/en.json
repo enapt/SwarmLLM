@@ -886,5 +886,18 @@
   "shard.hf_download_failed": "Download failed",
   "chat.image_placeholder": "[Image]",
   "model_browser.search_btn": "Search",
-  "model_browser.results_hint": "Results show whether a model is already on the swarm and whether your hardware can host or run it."
+  "model_browser.results_hint": "Results show whether a model is already on the swarm and whether your hardware can host or run it.",
+  "map.stats_nodes": "{count} node",
+  "map.stats_nodes_plural": "{count} nodes",
+  "map.stats_across": "across",
+  "map.stats_region": "{count} region",
+  "map.stats_regions": "{count} regions",
+  "map.stats_gaps": "{count} coverage gap",
+  "map.stats_gaps_plural": "{count} coverage gaps",
+  "map.stats_top_demand": "top demand: {model} ({rate} req/10m)",
+  "map.tooltip_more": "+{count} more",
+  "map.tooltip_models": "{count} model",
+  "map.tooltip_models_plural": "{count} models",
+  "map.tooltip_no_nodes": "No nodes",
+  "pool.name_placeholder": "My Devices"
 }

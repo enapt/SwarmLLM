@@ -257,7 +257,7 @@
       }
 
       var statsEl = document.getElementById('map-stats-text');
-      var statsText = totalNodes + (totalNodes === 1 ? ' node' : ' nodes') + ' across ' + totalRegions + (totalRegions === 1 ? ' region' : ' regions');
+      var statsText = I18n.t(totalNodes === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: totalNodes }) + ' ' + I18n.t('map.stats_across') + ' ' + I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
       if (statsEl) statsEl.textContent = statsText;
       document.getElementById('map-legend-max').textContent = maxCount;
 
@@ -269,11 +269,11 @@
         if (statsEl && statsEl.parentNode) statsEl.parentNode.appendChild(healthEl);
       }
       if (healthEl) {
-        var healthText = totalRegions + (totalRegions === 1 ? ' region' : ' regions');
-        if (totalGaps > 0) healthText += ' | ' + totalGaps + ' coverage gap' + (totalGaps !== 1 ? 's' : '');
+        var healthText = I18n.t(totalRegions === 1 ? 'map.stats_region' : 'map.stats_regions', { count: totalRegions });
+        if (totalGaps > 0) healthText += ' | ' + I18n.t(totalGaps === 1 ? 'map.stats_gaps' : 'map.stats_gaps_plural', { count: totalGaps });
         if (topDemandModel && topDemandRate > 0.1) {
           var shortName = topDemandModel.length > 20 ? topDemandModel.substring(0, 20) + '...' : topDemandModel;
-          healthText += ' | top demand: ' + shortName + ' (' + topDemandRate.toFixed(1) + ' req/10m)';
+          healthText += ' | ' + I18n.t('map.stats_top_demand', { model: shortName, rate: topDemandRate.toFixed(1) });
         }
         healthEl.textContent = healthText;
       }
@@ -358,7 +358,7 @@
       var countryName = App.networkMap.countryNames[code] || code;
       var html = '<strong>' + countryName + '</strong> <span class="text-muted" style="font-size:0.7rem">' + code + '</span>';
       if (info) {
-        html += '<span class="mono" style="margin-left:8px">' + info.total + ' node' + (info.total !== 1 ? 's' : '') + '</span>';
+        html += '<span class="mono" style="margin-left:8px">' + U.escapeHtml(I18n.t(info.total === 1 ? 'map.stats_nodes' : 'map.stats_nodes_plural', { count: info.total })) + '</span>';
         if (info.models) {
           var mids = Object.keys(info.models);
           if (mids.length > 0) {
@@ -372,15 +372,15 @@
               }
               html += '<div class="flex-between" style="gap:12px"><span class="text-muted">' + U.escapeHtml(mName) + '</span><span class="mono">' + U.escapeHtml(String(info.models[mids[i]])) + demandStr + '</span></div>';
             }
-            if (mids.length > 5) html += '<div class="text-muted">+' + (mids.length - 5) + ' more</div>';
+            if (mids.length > 5) html += '<div class="text-muted">' + U.escapeHtml(I18n.t('map.tooltip_more', { count: mids.length - 5 })) + '</div>';
             html += '</div>';
           }
         }
         if (info.coverage_gaps && info.coverage_gaps.length > 0) {
-          html += '<div class="mt-1" style="font-size:0.7rem;color:var(--color-warning)">' + I18n.t('map.coverage_gaps') + ': ' + info.coverage_gaps.length + ' model' + (info.coverage_gaps.length !== 1 ? 's' : '') + '</div>';
+          html += '<div class="mt-1" style="font-size:0.7rem;color:var(--color-warning)">' + I18n.t('map.coverage_gaps') + ': ' + U.escapeHtml(I18n.t(info.coverage_gaps.length === 1 ? 'map.tooltip_models' : 'map.tooltip_models_plural', { count: info.coverage_gaps.length })) + '</div>';
         }
       } else {
-        html += '<span class="text-muted" style="margin-left:8px">No nodes</span>';
+        html += '<span class="text-muted" style="margin-left:8px">' + U.escapeHtml(I18n.t('map.tooltip_no_nodes')) + '</span>';
       }
       tip.innerHTML = html;
       var mapContainer = document.getElementById('world-map-container');
