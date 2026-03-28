@@ -84,7 +84,6 @@ candle-core = { version = "0.9", default-features = false }
 candle-nn = { version = "0.9", default-features = false }
 candle-transformers = { version = "0.9", default-features = false }
 candle-flash-attn = { version = "0.9", optional = true }
-candle-paged-attention = { path = "vendor/candle-paged-attention", optional = true }
 
 # Database
 redb = "3"
@@ -138,10 +137,9 @@ dev = ["swarmllm-frontend/dev"]
 llama = ["llama-cpp-2", "encoding_rs"]
 candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 flash-attn = ["candle-cuda", "dep:candle-flash-attn"]
-paged-attn = ["candle-cuda", "dep:candle-paged-attention"]
 
-# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash/paged attention)
-cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn", "paged-attn"]
+# Linux/macOS: full CUDA (llama.cpp CUDA + candle CUDA + flash attention)
+cuda = ["llama", "llama-cpp-2/cuda", "candle-cuda", "flash-attn"]
 
 # llama.cpp with Vulkan backend — works on NVIDIA, AMD, and Intel GPUs without CUDA install.
 # Runtime requirement: vulkan-1.dll (bundled with standard GPU drivers — no user action needed).
@@ -168,8 +166,6 @@ windows-gpu = ["llama-vulkan", "candle-cuda-static"]
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
-curve25519-dalek = "4"
-reqwest = { version = "0.12", features = ["json", "stream"] }
 
 [[test]]
 name = "integration"

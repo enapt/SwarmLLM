@@ -565,11 +565,7 @@ pub struct CreditTransaction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TransactionReason {
     InferenceServed { request_id: uuid::Uuid, tokens: u32 },
-    ShardHosting { shard_id: ShardId, hours: f32 },
     ShardSeeding { shard_id: ShardId, bytes: u64 },
-    RelayService { duration_seconds: u64 },
-    InferenceConsumed { request_id: uuid::Uuid, tokens: u32 },
-    Penalty { reason: String },
 }
 
 // ---- Pipeline ----
@@ -1179,7 +1175,6 @@ impl ModelTrustInfo {
 /// Messages related to device pool management, sent over GossipSub.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PoolMessage {
-    Invitation(PoolInvitation),
     /// SEC-M18: Privacy-preserving blinded invitation broadcast.
     BlindedInvitation(BlindedPoolInvitation),
     Acceptance(PoolAcceptance),
@@ -1265,9 +1260,7 @@ pub enum NetworkCommand {
 /// Events that trigger shard rebalancing.
 #[derive(Clone, Debug)]
 pub enum RebalanceEvent {
-    PeerJoined(NodeId),
     PeerLeft(NodeId),
-    ManualTrigger,
 }
 
 // ---- Peer State ----

@@ -1296,7 +1296,7 @@ pub async fn hf_download_shards(
 
             // Regenerate manifest with correct BLAKE3 hashes now that shard files
             // exist on disk. The early manifest had [0u8; 32] placeholders.
-            let _ = generate_manifest_from_header(&ManifestGenParams {
+            if let Err(e) = generate_manifest_from_header(&ManifestGenParams {
                 header_path: &header_path,
                 model_id_str: &model_id_str,
                 filename: &filename,
@@ -1305,7 +1305,9 @@ pub async fn hf_download_shards(
                 shard_indices: &shard_indices,
                 shared: &download_shared,
                 precomputed_layouts: Some(&info.layouts),
-            });
+            }) {
+                tracing::error!(error = %e, model = %model_id_str, "Final manifest regeneration failed after shard download");
+            }
 
             if let Some(mut entry) = download_shared
                 .models

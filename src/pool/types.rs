@@ -115,10 +115,6 @@ pub enum PoolCommand {
     PoolStateGossip {
         state: PoolState,
     },
-    /// Received invitation from the network.
-    InboundInvitation {
-        invitation: PoolInvitation,
-    },
     /// Received blinded invitation from the network (SEC-M18).
     InboundBlindedInvitation {
         blinded: BlindedPoolInvitation,

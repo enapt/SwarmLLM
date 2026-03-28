@@ -101,35 +101,6 @@ impl ShardRebalancer {
                 self.pending_peer_left.push(departed_peer);
                 self.process_pending_departures().await;
             }
-            RebalanceEvent::PeerJoined(new_peer) => {
-                tracing::info!(
-                    peer = %new_peer,
-                    "New peer joined, re-announcing shards"
-                );
-                self.shared_state.emit_activity(
-                    crate::daemon::state::ActivityEvent::new(
-                        "network",
-                        "rebalance_peer_joined",
-                        format!(
-                            "Re-announcing shards: new peer {} joined",
-                            &format!("{}", new_peer)[..8]
-                        ),
-                    )
-                    .with_node(format!("{}", new_peer))
-                    .with_detail_str("peer_joined".to_string()),
-                );
-                self.handle_peer_joined().await;
-            }
-            RebalanceEvent::ManualTrigger => {
-                tracing::info!("Manual rebalance triggered");
-                self.shared_state
-                    .emit_activity(crate::daemon::state::ActivityEvent::new(
-                        "network",
-                        "rebalance_manual",
-                        "Manual shard rebalance triggered".to_string(),
-                    ));
-                self.check_all_shards().await;
-            }
         }
     }
 
@@ -199,96 +170,6 @@ impl ShardRebalancer {
                 self.last_rebalance_per_model
                     .insert(shard_id.model_id.clone(), now);
             }
-        }
-    }
-
-    async fn handle_peer_joined(&self) {
-        // Re-announce our own shard holdings to help the new peer
-        // discover what's available on the network.
-        let local_node_id = self.shared_state.identity.node_id().clone();
-        let our_shards = self
-            .shared_state
-            .model_registry
-            .shards_for_node(&local_node_id);
-
-        if !our_shards.is_empty() {
-            let announce = crate::types::ShardAnnounce {
-                node_id: local_node_id,
-                shards: our_shards,
-                timestamp: chrono::Utc::now(),
-            };
-
-            let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-            let _ = self.network_tx.send(msg).await;
-        }
-    }
-
-    async fn check_all_shards(&mut self) {
-        // Check all shards against MIN_REPLICATION without filtering by departed peer
-        let mut underreplicated = Vec::new();
-        for (shard_id, holders) in self.shared_state.model_registry.all_shard_entries() {
-            if holders.len() < MIN_REPLICATION {
-                underreplicated.push((shard_id, holders));
-            }
-        }
-
-        if underreplicated.is_empty() {
-            tracing::info!("All shards meet minimum replication");
-            return;
-        }
-
-        tracing::info!(
-            count = underreplicated.len(),
-            "Found under-replicated shards during full check"
-        );
-
-        let local_node_id = self.shared_state.identity.node_id().clone();
-        let now = Instant::now();
-
-        for (shard_id, holders) in &underreplicated {
-            if let Some(last) = self.last_rebalance_per_model.get(&shard_id.model_id) {
-                if last.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS {
-                    continue;
-                }
-            }
-
-            if holders.contains(&local_node_id) {
-                let announce = crate::types::ShardAnnounce {
-                    node_id: local_node_id.clone(),
-                    shards: vec![shard_id.clone()],
-                    timestamp: chrono::Utc::now(),
-                };
-                let msg = NetworkCommand::Broadcast(SwarmMessage::ShardAnnounce(announce));
-                let _ = self.network_tx.send(msg).await;
-            } else {
-                if self
-                    .acquisition_tx
-                    .try_send(AcquisitionCommand::Acquire {
-                        model_id: shard_id.model_id.clone(),
-                    })
-                    .is_err()
-                {
-                    self.shared_state
-                        .metrics
-                        .channel_metrics
-                        .acquisition
-                        .record_dropped();
-                } else {
-                    self.shared_state
-                        .metrics
-                        .channel_metrics
-                        .acquisition
-                        .record_sent();
-                }
-                tracing::info!(
-                    model = %shard_id.model_id,
-                    shard = shard_id.index,
-                    "Requesting acquisition of under-replicated shard"
-                );
-            }
-
-            self.last_rebalance_per_model
-                .insert(shard_id.model_id.clone(), now);
         }
     }
 

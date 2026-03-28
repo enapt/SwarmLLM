@@ -767,11 +767,6 @@ pub(crate) async fn dispatch_network_messages(
                                         }
                                         if let Some(ref tx) = *shared_state.credits.pool_tx.read().await {
                                             let cmd = match pool_msg {
-                                                crate::types::PoolMessage::Invitation(inv) => {
-                                                    Some(crate::pool::types::PoolCommand::InboundInvitation {
-                                                        invitation: inv,
-                                                    })
-                                                }
                                                 crate::types::PoolMessage::BlindedInvitation(blinded) => {
                                                     Some(crate::pool::types::PoolCommand::InboundBlindedInvitation {
                                                         blinded,

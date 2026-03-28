@@ -598,7 +598,7 @@ pub async fn download_tied_output_weight(
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(3600))
         .build()
         .map_err(|e| e.to_string())?;
 

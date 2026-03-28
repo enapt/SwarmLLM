@@ -157,9 +157,6 @@ impl PoolManager {
             PoolCommand::PoolStateGossip { state } => {
                 self.handle_pool_state_gossip(state).await;
             }
-            PoolCommand::InboundInvitation { invitation } => {
-                self.handle_inbound_invitation(invitation).await;
-            }
             PoolCommand::InboundBlindedInvitation { blinded } => {
                 self.handle_inbound_blinded_invitation(blinded).await;
             }
@@ -789,58 +786,6 @@ impl PoolManager {
             .credits
             .pool_registry
             .insert(state.pool_id.clone(), state);
-    }
-
-    async fn handle_inbound_invitation(&mut self, invitation: PoolInvitation) {
-        let my_id = self.shared_state.identity.node_id();
-        if invitation.invitee_node_id == *my_id {
-            // Verify owner signature before storing
-            let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&invitation.pool_id.0) {
-                Ok(k) => k,
-                Err(_) => {
-                    tracing::warn!("Invalid owner key in inbound invitation");
-                    return;
-                }
-            };
-            if crypto::verify_invitation(&invitation, &owner_key).is_err() {
-                tracing::warn!(pool_id = %invitation.pool_id, "Invalid owner signature on inbound invitation");
-                return;
-            }
-
-            // Check expiry
-            if invitation.expires_at < chrono::Utc::now() {
-                tracing::debug!(invitation_id = %invitation.id, "Ignoring expired invitation");
-                return;
-            }
-
-            // This invitation is for us — store as pending
-            self.pending_invitations
-                .insert(invitation.id, invitation.clone());
-            if let Err(e) = self.shared_state.db.put_json(
-                TREE_POOL_INVITATIONS,
-                &invitation.id.to_string(),
-                &invitation,
-            ) {
-                tracing::warn!(error = %e, "Failed to persist inbound invitation");
-            }
-            tracing::info!(
-                pool_id = %invitation.pool_id,
-                invitation_id = %invitation.id,
-                "Received pool invitation"
-            );
-
-            // Auto-accept only if this invitation matches the code we used to join
-            if self.auto_accept_code_hash.is_some() {
-                self.auto_accept_code_hash = None;
-                tracing::info!(
-                    invitation_id = %invitation.id,
-                    "Auto-accepting invitation (from invite code join)"
-                );
-                if let Err(e) = self.handle_accept_invitation(invitation).await {
-                    tracing::warn!(error = %e, "Auto-accept failed");
-                }
-            }
-        }
     }
 
     /// SEC-M18: Handle a blinded invitation broadcast.

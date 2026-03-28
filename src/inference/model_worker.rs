@@ -179,11 +179,11 @@ fn ensure_model_loaded(
 
     let model_dir = data_dir.join("models").join(&model_id.0);
     let manifest_path = model_dir.join("manifest.json");
-    let manifest: crate::types::ModelManifest =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).map_err(|e| {
-            SwarmError::Internal(format!("Read manifest {}: {e}", manifest_path.display()))
-        })?)
-        .map_err(|e| SwarmError::Internal(format!("Parse manifest: {e}")))?;
+    let manifest: crate::types::ModelManifest = serde_json::from_str(
+        &std::fs::read_to_string(&manifest_path)
+            .map_err(|e| SwarmError::Internal(format!("Read manifest: {e}")))?,
+    )
+    .map_err(|e| SwarmError::Internal(format!("Parse manifest: {e}")))?;
 
     let total_layers = manifest.num_layers as usize;
     // Determine which shards we have on disk
