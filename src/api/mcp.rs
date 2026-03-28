@@ -39,6 +39,90 @@ fn scrub_truncate_error(body: String) -> String {
     super::scrub_truncate_error(&body)
 }
 
+/// Result of a single model dispatch call used by MCP compare/research/batch tools.
+struct ModelCallResult {
+    pub content: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub elapsed_ms: u64,
+    /// None on success, Some(message) on error.
+    pub error: Option<String>,
+}
+
+/// Send a prompt to a model endpoint and return the parsed result.
+///
+/// Shared core for tool_compare, tool_research, and tool_batch_prompts.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_model_call(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    model_id: &str,
+    prompt: &str,
+    system: Option<&str>,
+    temperature: f32,
+    max_tokens: u32,
+) -> ModelCallResult {
+    let start = std::time::Instant::now();
+
+    let mut body = json!({
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+    });
+    if let Some(sys) = system {
+        body["system"] = json!(sys);
+    }
+
+    let result = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            let resp_body: serde_json::Value = resp
+                .json()
+                .await
+                .unwrap_or(json!({"error": "parse failed"}));
+            let (content, input_tokens, output_tokens) = extract_anthropic_response(&resp_body);
+            ModelCallResult {
+                content,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+                error: None,
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let truncated = scrub_truncate_error(body);
+            ModelCallResult {
+                content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                elapsed_ms,
+                error: Some(format!("HTTP {status}: {truncated}")),
+            }
+        }
+        Err(e) => ModelCallResult {
+            content: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            elapsed_ms,
+            error: Some(format!("{e}")),
+        },
+    }
+}
+
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const SERVER_NAME: &str = "swarmllm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -731,66 +815,32 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         let prompt = prompt.clone();
 
         let handle = tokio::spawn(async move {
-            let start = std::time::Instant::now();
-
-            let mut body = json!({
-                "model": model_id,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": false,
-            });
-            if let Some(sys) = system_val {
-                body["system"] = json!(sys);
-            }
-
-            let result = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {api_key}"))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await;
-
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value = resp
-                        .json()
-                        .await
-                        .unwrap_or(json!({"error": "parse failed"}));
-                    let (content, input_tokens, output_tokens) =
-                        extract_anthropic_response(&resp_body);
-
-                    json!({
-                        "model": model_id,
-                        "content": content,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "latency_ms": elapsed_ms,
-                        "status": "ok",
-                    })
-                }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    let truncated = scrub_truncate_error(body);
-                    json!({
-                        "model": model_id,
-                        "error": format!("HTTP {status}: {truncated}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
-                Err(e) => {
-                    json!({
-                        "model": model_id,
-                        "error": format!("{e}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
+            let r = dispatch_model_call(
+                &client,
+                &url,
+                &api_key,
+                &model_id,
+                &prompt,
+                system_val.as_deref(),
+                temperature,
+                max_tokens,
+            )
+            .await;
+            match r.error {
+                None => json!({
+                    "model": model_id,
+                    "content": r.content,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "ok",
+                }),
+                Some(err) => json!({
+                    "model": model_id,
+                    "error": err,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "error",
+                }),
             }
         });
         handles.push(handle);
@@ -901,66 +951,32 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         let question = question.clone();
 
         let handle = tokio::spawn(async move {
-            let start = std::time::Instant::now();
-
-            let mut body = json!({
-                "model": model_id,
-                "max_tokens": max_tokens,
-                "temperature": 0.7,
-                "messages": [{"role": "user", "content": question}],
-                "stream": false,
-            });
-            if let Some(sys) = system_val {
-                body["system"] = json!(sys);
-            }
-
-            let result = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {api_key}"))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await;
-
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value = resp
-                        .json()
-                        .await
-                        .unwrap_or(json!({"error": "parse failed"}));
-                    let (content, input_tokens, output_tokens) =
-                        extract_anthropic_response(&resp_body);
-
-                    json!({
-                        "model": model_id,
-                        "response": content,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "latency_ms": elapsed_ms,
-                        "status": "ok",
-                    })
-                }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    let truncated = scrub_truncate_error(body);
-                    json!({
-                        "model": model_id,
-                        "error": format!("HTTP {status}: {truncated}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
-                Err(e) => {
-                    json!({
-                        "model": model_id,
-                        "error": format!("{e}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
+            let r = dispatch_model_call(
+                &client,
+                &url,
+                &api_key,
+                &model_id,
+                &question,
+                system_val.as_deref(),
+                0.7,
+                max_tokens,
+            )
+            .await;
+            match r.error {
+                None => json!({
+                    "model": model_id,
+                    "response": r.content,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "ok",
+                }),
+                Some(err) => json!({
+                    "model": model_id,
+                    "error": err,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "error",
+                }),
             }
         });
         handles.push(handle);
@@ -1077,69 +1093,34 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
         let api_key = api_key.clone();
 
         let handle = tokio::spawn(async move {
-            let start = std::time::Instant::now();
-
-            let mut body = json!({
-                "model": model_id,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": false,
-            });
-            if let Some(sys) = system {
-                body["system"] = json!(sys);
-            }
-
-            let result = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {api_key}"))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await;
-
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-
-            match result {
-                Ok(resp) if resp.status().is_success() => {
-                    let resp_body: serde_json::Value = resp
-                        .json()
-                        .await
-                        .unwrap_or(json!({"error": "parse failed"}));
-                    let (content, input_tokens, output_tokens) =
-                        extract_anthropic_response(&resp_body);
-
-                    json!({
-                        "task_id": task_id,
-                        "model": model_id,
-                        "content": content,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "latency_ms": elapsed_ms,
-                        "status": "ok",
-                    })
-                }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    let truncated = scrub_truncate_error(body);
-                    json!({
-                        "task_id": task_id,
-                        "model": model_id,
-                        "error": format!("HTTP {status}: {truncated}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
-                Err(e) => {
-                    json!({
-                        "task_id": task_id,
-                        "model": model_id,
-                        "error": format!("{e}"),
-                        "latency_ms": elapsed_ms,
-                        "status": "error",
-                    })
-                }
+            let r = dispatch_model_call(
+                &client,
+                &url,
+                &api_key,
+                &model_id,
+                &prompt,
+                system.as_deref(),
+                temperature,
+                max_tokens,
+            )
+            .await;
+            match r.error {
+                None => json!({
+                    "task_id": task_id,
+                    "model": model_id,
+                    "content": r.content,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "ok",
+                }),
+                Some(err) => json!({
+                    "task_id": task_id,
+                    "model": model_id,
+                    "error": err,
+                    "latency_ms": r.elapsed_ms,
+                    "status": "error",
+                }),
             }
         });
         handles.push(handle);
