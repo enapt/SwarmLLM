@@ -884,5 +884,7 @@
   "actions.save": "Save",
   "pool.main_device_fallback": "main device",
   "shard.hf_download_failed": "Download failed",
-  "chat.image_placeholder": "[Image]"
+  "chat.image_placeholder": "[Image]",
+  "model_browser.search_btn": "Search",
+  "model_browser.results_hint": "Results show whether a model is already on the swarm and whether your hardware can host or run it."
 }
