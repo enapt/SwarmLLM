@@ -3,6 +3,76 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::api::server::AppState;
+
+/// Serialize an acquisition progress entry to JSON. Used by both REST download_queue
+/// and WebSocket build_stats_message. Caller can extend with extra fields.
+pub fn serialize_acquisition_to_json(
+    status: &crate::model::acquisition::AcquisitionStatus,
+    shared: &crate::daemon::state::SharedState,
+) -> serde_json::Value {
+    let model_id = &status.model_id;
+    let source = if shared.models.hf_sources.contains_key(model_id) {
+        "huggingface"
+    } else {
+        "network"
+    };
+    let eta_secs = if status.speed_bytes_per_sec > 0 && status.total_bytes > status.downloaded_bytes
+    {
+        Some((status.total_bytes - status.downloaded_bytes) / status.speed_bytes_per_sec)
+    } else {
+        None
+    };
+    let shard_details: Vec<serde_json::Value> = status
+        .shard_progress
+        .iter()
+        .map(|(idx, sp)| {
+            let pct = if sp.total_bytes > 0 {
+                ((sp.downloaded_bytes as f64 / sp.total_bytes as f64) * 100.0) as u32
+            } else {
+                0
+            };
+            serde_json::json!({
+                "index": idx,
+                "state": serde_json::to_value(&sp.state).unwrap_or_default(),
+                "progress_pct": pct,
+                "downloaded_bytes": sp.downloaded_bytes,
+                "total_bytes": sp.total_bytes,
+            })
+        })
+        .collect();
+    let overall_pct = if status.total_bytes > 0 {
+        ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
+    } else {
+        0
+    };
+    let model_name = shared
+        .model_registry
+        .get_manifest(model_id)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| model_id.0.clone());
+    let cancellable = matches!(
+        status.state,
+        crate::model::acquisition::AcquisitionState::Downloading
+            | crate::model::acquisition::AcquisitionState::AwaitingManifest
+    );
+    serde_json::json!({
+        "model_id": model_id.0,
+        "model_name": model_name,
+        "state": serde_json::to_value(&status.state).unwrap_or_default(),
+        "source": source,
+        "total_shards": status.total_shards,
+        "downloaded_shards": status.downloaded_shards,
+        "verified_shards": status.verified_shards,
+        "total_bytes": status.total_bytes,
+        "downloaded_bytes": status.downloaded_bytes,
+        "overall_pct": overall_pct,
+        "speed_bytes_per_sec": status.speed_bytes_per_sec,
+        "eta_secs": eta_secs,
+        "cancellable": cancellable,
+        "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
+        "shard_details": shard_details,
+    })
+}
 use crate::error::ApiError;
 
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
@@ -2019,78 +2089,16 @@ pub async fn download_queue(State(state): State<AppState>) -> Json<serde_json::V
 
     for entry in state.shared_state.models.acquisition_progress.iter() {
         let status = entry.value();
-        let model_id = &status.model_id;
-
-        let source = if state.shared_state.models.hf_sources.contains_key(model_id) {
-            "huggingface"
-        } else {
-            "network"
-        };
-
-        let eta_secs =
-            if status.speed_bytes_per_sec > 0 && status.total_bytes > status.downloaded_bytes {
-                Some((status.total_bytes - status.downloaded_bytes) / status.speed_bytes_per_sec)
-            } else {
-                None
-            };
-
-        let shard_details: Vec<serde_json::Value> = status
-            .shard_progress
-            .iter()
-            .map(|(idx, sp)| {
-                let pct = if sp.total_bytes > 0 {
-                    ((sp.downloaded_bytes as f64 / sp.total_bytes as f64) * 100.0) as u32
-                } else {
-                    0
-                };
-                serde_json::json!({
-                    "index": idx,
-                    "state": serde_json::to_value(&sp.state).unwrap_or_default(),
-                    "progress_pct": pct,
-                    "downloaded_bytes": sp.downloaded_bytes,
-                    "total_bytes": sp.total_bytes,
-                })
-            })
-            .collect();
-
-        let overall_pct = if status.total_bytes > 0 {
-            ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
-        } else {
-            0
-        };
-
-        let model_name = state
-            .shared_state
-            .model_registry
-            .get_manifest(model_id)
-            .map(|m| m.name.clone())
-            .unwrap_or_else(|| model_id.0.clone());
-
-        let cancellable = matches!(
-            status.state,
-            crate::model::acquisition::AcquisitionState::Downloading
-                | crate::model::acquisition::AcquisitionState::AwaitingManifest
-        );
-
-        downloads.push(serde_json::json!({
-            "model_id": model_id.0,
-            "model_name": model_name,
-            "state": serde_json::to_value(&status.state).unwrap_or_default(),
-            "source": source,
-            "total_shards": status.total_shards,
-            "downloaded_shards": status.downloaded_shards,
-            "verified_shards": status.verified_shards,
-            "failed_shards": status.failed_shards,
-            "total_bytes": status.total_bytes,
-            "downloaded_bytes": status.downloaded_bytes,
-            "overall_pct": overall_pct,
-            "speed_bytes_per_sec": status.speed_bytes_per_sec,
-            "eta_secs": eta_secs,
-            "started_at": status.started_at,
-            "shard_details": shard_details,
-            "cancellable": cancellable,
-            "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
-        }));
+        let mut obj = serialize_acquisition_to_json(status, &state.shared_state);
+        // REST-only fields
+        if let Some(o) = obj.as_object_mut() {
+            o.insert(
+                "failed_shards".into(),
+                serde_json::json!(status.failed_shards),
+            );
+            o.insert("started_at".into(), serde_json::json!(status.started_at));
+        }
+        downloads.push(obj);
     }
 
     // Sort: downloading first, then awaiting, then failed, then complete

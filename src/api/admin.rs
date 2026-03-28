@@ -2,6 +2,54 @@ use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 
+/// Serialize a peer registry entry to JSON. Used by both REST and WebSocket.
+///
+/// When `include_addresses` is true, includes `addresses` and `last_seen` fields
+/// (REST API returns these; WebSocket omits them for bandwidth).
+pub fn serialize_peer_to_json(
+    peer: &crate::types::PeerInfo,
+    state: &crate::daemon::state::SharedState,
+    include_addresses: bool,
+) -> serde_json::Value {
+    let timeout = chrono::Duration::seconds(90);
+    let now = chrono::Utc::now();
+    let healthy = now.signed_duration_since(peer.last_seen) < timeout;
+    let hosted_models: Vec<String> = peer
+        .capability
+        .as_ref()
+        .map(|c| {
+            c.hosted_shards
+                .iter()
+                .map(|s| s.model_id.0.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let nickname = state
+        .nickname_registry
+        .get(&peer.node_id)
+        .map(|r| r.nickname.clone());
+    let mut obj = serde_json::json!({
+        "node_id": format!("{}", peer.node_id),
+        "nickname": nickname,
+        "latency_ms": peer.latency_ms,
+        "trust_score": peer.trust_score,
+        "healthy": healthy,
+        "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
+        "hosted_models": hosted_models,
+        "is_lan_peer": peer.is_lan_peer,
+    });
+    if include_addresses {
+        if let Some(o) = obj.as_object_mut() {
+            o.insert("addresses".into(), serde_json::json!(peer.addresses));
+            o.insert(
+                "last_seen".into(),
+                serde_json::json!(peer.last_seen.to_rfc3339()),
+            );
+        }
+    }
+    obj
+}
+
 // Re-export sub-module handlers so server.rs routes continue to use `admin::handler_name`
 pub use super::admin_hf::*;
 pub use super::admin_models::*;
@@ -269,46 +317,11 @@ pub async fn reload_config(
 
 /// GET /api/admin/peers — List connected peers.
 pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
-    let timeout = chrono::Duration::seconds(90); // 3 missed pings
-    let now = chrono::Utc::now();
-
     let peers: Vec<serde_json::Value> = state
         .shared_state
         .peer_registry
         .iter()
-        .map(|entry| {
-            let peer = entry.value();
-            let healthy = now.signed_duration_since(peer.last_seen) < timeout;
-            let hosted_models: Vec<String> = peer
-                .capability
-                .as_ref()
-                .map(|c| {
-                    c.hosted_shards
-                        .iter()
-                        .map(|s| s.model_id.0.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let nickname = state
-                .shared_state
-                .nickname_registry
-                .get(&peer.node_id)
-                .map(|r| r.nickname.clone());
-
-            serde_json::json!({
-                "node_id": format!("{}", peer.node_id),
-                "nickname": nickname,
-                "addresses": peer.addresses,
-                "last_seen": peer.last_seen.to_rfc3339(),
-                "latency_ms": peer.latency_ms,
-                "trust_score": peer.trust_score,
-                "healthy": healthy,
-                "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
-                "hosted_models": hosted_models,
-                "is_lan_peer": peer.is_lan_peer,
-            })
-        })
+        .map(|entry| serialize_peer_to_json(entry.value(), &state.shared_state, true))
         .collect();
 
     Json(peers)

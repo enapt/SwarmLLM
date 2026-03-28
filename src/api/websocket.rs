@@ -9,7 +9,6 @@ use futures::{SinkExt, StreamExt};
 
 use crate::api::server::AppState;
 use crate::daemon::SharedState;
-use crate::model::acquisition::ShardState;
 
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 ///
@@ -233,40 +232,10 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
 /// Build a `peer_list` WS message with the current peer registry snapshot.
 /// Same data shape as GET /api/admin/peers so the frontend can share one render path.
 fn build_peer_list_message(state: &SharedState) -> serde_json::Value {
-    let timeout = chrono::Duration::seconds(90);
-    let now = chrono::Utc::now();
-
     let peers: Vec<serde_json::Value> = state
         .peer_registry
         .iter()
-        .map(|entry| {
-            let peer = entry.value();
-            let healthy = now.signed_duration_since(peer.last_seen) < timeout;
-            let hosted_models: Vec<String> = peer
-                .capability
-                .as_ref()
-                .map(|c| {
-                    c.hosted_shards
-                        .iter()
-                        .map(|s| s.model_id.0.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let nickname = state
-                .nickname_registry
-                .get(&peer.node_id)
-                .map(|r| r.nickname.clone());
-            serde_json::json!({
-                "node_id": format!("{}", peer.node_id),
-                "nickname": nickname,
-                "latency_ms": peer.latency_ms,
-                "trust_score": peer.trust_score,
-                "healthy": healthy,
-                "gpu": peer.capability.as_ref().and_then(|c| c.gpu.as_ref().map(|g| &g.name)),
-                "hosted_models": hosted_models,
-                "is_lan_peer": peer.is_lan_peer,
-            })
-        })
+        .map(|entry| crate::api::admin::serialize_peer_to_json(entry.value(), state, false))
         .collect();
 
     serde_json::json!({
@@ -296,79 +265,7 @@ async fn build_stats_message(
         .models
         .acquisition_progress
         .iter()
-        .map(|entry| {
-            let status = entry.value();
-            let shard_details: Vec<serde_json::Value> = status
-                .shard_progress
-                .iter()
-                .map(|(idx, sp)| {
-                    let pct = if sp.total_bytes > 0 {
-                        ((sp.downloaded_bytes as f64 / sp.total_bytes as f64) * 100.0) as u32
-                    } else {
-                        0
-                    };
-                    let state_str = match &sp.state {
-                        ShardState::Pending => "pending",
-                        ShardState::Downloading => "downloading",
-                        ShardState::Verifying => "verifying",
-                        ShardState::Complete => "complete",
-                        ShardState::Failed => "failed",
-                    };
-                    serde_json::json!({
-                        "index": idx,
-                        "state": state_str,
-                        "progress_pct": pct,
-                        "downloaded_bytes": sp.downloaded_bytes,
-                        "total_bytes": sp.total_bytes,
-                    })
-                })
-                .collect();
-
-            let model_name = state
-                .model_registry
-                .get_manifest(&status.model_id)
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| status.model_id.0.clone());
-            let source = if state.models.hf_sources.contains_key(&status.model_id) {
-                "huggingface"
-            } else {
-                "network"
-            };
-            let cancellable = matches!(
-                status.state,
-                crate::model::acquisition::AcquisitionState::Downloading
-                    | crate::model::acquisition::AcquisitionState::AwaitingManifest
-            );
-            let overall_pct = if status.total_bytes > 0 {
-                ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
-            } else {
-                0
-            };
-            let eta_secs = if status.speed_bytes_per_sec > 0
-                && status.total_bytes > status.downloaded_bytes
-            {
-                Some((status.total_bytes - status.downloaded_bytes) / status.speed_bytes_per_sec)
-            } else {
-                None
-            };
-            serde_json::json!({
-                "model_id": status.model_id.0,
-                "model_name": model_name,
-                "state": serde_json::to_value(&status.state).unwrap_or_default(),
-                "source": source,
-                "total_shards": status.total_shards,
-                "downloaded_shards": status.downloaded_shards,
-                "verified_shards": status.verified_shards,
-                "total_bytes": status.total_bytes,
-                "downloaded_bytes": status.downloaded_bytes,
-                "overall_pct": overall_pct,
-                "speed_bytes_per_sec": status.speed_bytes_per_sec,
-                "eta_secs": eta_secs,
-                "cancellable": cancellable,
-                "log": status.log.iter().rev().take(10).collect::<Vec<_>>(),
-                "shard_details": shard_details,
-            })
-        })
+        .map(|entry| crate::api::admin_models::serialize_acquisition_to_json(entry.value(), state))
         .collect();
 
     // Build shard registry snapshot — only include if changed from previous tick
