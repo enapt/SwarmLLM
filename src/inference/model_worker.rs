@@ -397,7 +397,7 @@ async fn handle_forward(
             match zstd::decode_all(std::io::Cursor::new(zstd_data)) {
                 Ok(raw_bytes) => {
                     const MAX_VISION_EMBEDDING_BYTES: usize = 50 * 1024 * 1024;
-                    if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES {
+                    if raw_bytes.len() > MAX_VISION_EMBEDDING_BYTES || raw_bytes.len() % 2 != 0 {
                         None
                     } else {
                         let f32_values: Vec<f32> = raw_bytes

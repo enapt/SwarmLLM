@@ -405,6 +405,12 @@ pub async fn ring_allreduce_network(
     // Decompress our partial tensor to f32
     let partial_bytes = zstd::decode_all(std::io::Cursor::new(&partial_data_compressed))
         .map_err(|e| SwarmError::Internal(format!("Decompress ring partial: {e}")))?;
+    if partial_bytes.len() % 4 != 0 {
+        return Err(SwarmError::Internal(format!(
+            "Ring partial data length {} not aligned to 4 bytes",
+            partial_bytes.len()
+        )));
+    }
     let num_elements = partial_bytes.len() / 4;
     let mut local_data: Vec<f32> = vec![0.0; num_elements];
     for (i, chunk) in partial_bytes.chunks_exact(4).enumerate() {
@@ -487,6 +493,12 @@ pub async fn ring_allreduce_network(
         // Decompress received chunk
         let recv_bytes = zstd::decode_all(std::io::Cursor::new(&received_data))
             .map_err(|e| SwarmError::Internal(format!("Decompress ring recv: {e}")))?;
+        if recv_bytes.len() % 4 != 0 {
+            return Err(SwarmError::Internal(format!(
+                "Ring recv data length {} not aligned to 4 bytes",
+                recv_bytes.len()
+            )));
+        }
         let recv_floats: Vec<f32> = recv_bytes
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))

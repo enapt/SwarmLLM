@@ -603,7 +603,8 @@ pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Valu
                     min_replicas
                 } else {
                     let log2_pool = (pool_size as f64).log2().ceil() as usize;
-                    log2_pool.clamp(min_replicas, pool_size / 3).max(1)
+                    let max_replicas = (pool_size / 3).max(1);
+                    log2_pool.clamp(min_replicas.min(max_replicas), max_replicas)
                 };
                 let demand_factor = match request_count {
                     0 => 1.0,
