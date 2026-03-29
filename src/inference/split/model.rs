@@ -1190,24 +1190,9 @@ impl SplitModel {
             }
         } else {
             // ── Standard dense architecture loading (Llama, Qwen2, Gemma, GLM-4, etc.) ──
-            // Parallel layer loading: each thread gets its own Cursor into byte data.
-            // When parallel_data is None (ShardReader), read all data into memory first
-            // so the same parallel code path works for both mmap and shard sources.
-            let owned_buf: Vec<u8>;
-            let mmap_ref: &[u8] = if let Some(par_data) = parallel_data {
-                par_data
-            } else {
-                file.seek(SeekFrom::Start(0))
-                    .map_err(|e| SwarmError::Internal(format!("seek to start: {e}")))?;
-                owned_buf = {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(file, &mut buf)
-                        .map_err(|e| SwarmError::Internal(format!("read shard data: {e}")))?;
-                    buf
-                };
-                &owned_buf
-            };
-            {
+            if let Some(mmap_ref) = parallel_data {
+                // Parallel layer loading: each thread gets its own Cursor into mmap'd data.
+                // ~N× speedup for N layers on NVMe/SSD.
                 let ct_ref = &ct;
                 let device_ref = &device;
                 let layer_results: Vec<Result<LayerVariant, SwarmError>> =
@@ -1529,6 +1514,237 @@ impl SplitModel {
                 for result in layer_results {
                     layers.push(result?);
                 }
+            } else {
+                // Sequential fallback for ShardReader (gaps between tensors prevent read_to_end).
+                // Same per-layer logic as the parallel path, using ct.tensor(file, ...) directly.
+                for layer_idx in layer_start..layer_end {
+                    let prefix = format!("blk.{layer_idx}");
+                    let has_fused_qkv = ct
+                        .tensor_infos
+                        .contains_key(&format!("{prefix}.attn_qkv.weight"));
+                    let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
+                        let fused_qt = ct
+                            .tensor(file, &format!("{prefix}.attn_qkv.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_qkv: {e}")))?;
+                        let q_dim = head_count * head_dim;
+                        let k_dim = head_count_kv * head_dim;
+                        let fused = QMatMul::make_fused(fused_qt)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                        (
+                            QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
+                            QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
+                            QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
+                        )
+                    } else {
+                        let wq = ct
+                            .tensor(file, &format!("{prefix}.attn_q.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q: {e}")))?;
+                        let wk = ct
+                            .tensor(file, &format!("{prefix}.attn_k.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
+                        let wv = ct
+                            .tensor(file, &format!("{prefix}.attn_v.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
+                        (
+                            QMatMul::from_qtensor(wq)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            QMatMul::from_qtensor(wk)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            QMatMul::from_qtensor(wv)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        )
+                    };
+                    let wo = ct
+                        .tensor(file, &format!("{prefix}.attn_output.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
+                    let attn_norm = ct
+                        .tensor(file, &format!("{prefix}.attn_norm.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
+                    let ffn_norm_t = ct
+                        .tensor(file, &format!("{prefix}.ffn_norm.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
+
+                    let bq = ct
+                        .tensor(file, &format!("{prefix}.attn_q.bias"), &device)
+                        .ok()
+                        .map(|t| t.dequantize(&device))
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("bq: {e}")))?;
+                    let bk = ct
+                        .tensor(file, &format!("{prefix}.attn_k.bias"), &device)
+                        .ok()
+                        .map(|t| t.dequantize(&device))
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("bk: {e}")))?;
+                    let bv = ct
+                        .tensor(file, &format!("{prefix}.attn_v.bias"), &device)
+                        .ok()
+                        .map(|t| t.dequantize(&device))
+                        .transpose()
+                        .map_err(|e| SwarmError::Internal(format!("bv: {e}")))?;
+
+                    let post_attn_norm = ct
+                        .tensor(
+                            file,
+                            &format!("{prefix}.post_attention_norm.weight"),
+                            &device,
+                        )
+                        .ok();
+                    let post_ffw_norm = ct
+                        .tensor(file, &format!("{prefix}.post_ffw_norm.weight"), &device)
+                        .ok();
+
+                    // FFN: try separate gate/up, fused gate_up, or MoE
+                    let has_ffn_gate = ct
+                        .tensor_infos
+                        .contains_key(&format!("{prefix}.ffn_gate.weight"));
+                    let ffn_down_qt = ct
+                        .tensor(file, &format!("{prefix}.ffn_down.weight"), &device)
+                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
+                    let ffn = if has_ffn_gate {
+                        let gate = ct
+                            .tensor(file, &format!("{prefix}.ffn_gate.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
+                        let up = ct
+                            .tensor(file, &format!("{prefix}.ffn_up.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
+                        let n_experts = ct
+                            .metadata
+                            .get(&format!("{arch_str}.expert_count"))
+                            .and_then(|v| v.to_u32().ok())
+                            .unwrap_or(0) as usize;
+                        if n_experts > 0 {
+                            let n_used = ct
+                                .metadata
+                                .get(&format!("{arch_str}.expert_used_count"))
+                                .and_then(|v| v.to_u32().ok())
+                                .unwrap_or(1) as usize;
+                            let gi = ct
+                                .tensor(file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let ge = ct
+                                .tensor(file, &format!("{prefix}.ffn_gate_exps.weight"), &device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let de = ct
+                                .tensor(file, &format!("{prefix}.ffn_down_exps.weight"), &device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let ue = ct
+                                .tensor(file, &format!("{prefix}.ffn_up_exps.weight"), &device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let gi_t = gi
+                                .dequantize(&device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let ge_t = ge
+                                .dequantize(&device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let de_t = de
+                                .dequantize(&device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let ue_t = ue
+                                .dequantize(&device)
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let sg = ct
+                                .tensor(file, &format!("{prefix}.ffn_gate_shexp.weight"), &device)
+                                .ok()
+                                .map(QMatMul::from_qtensor)
+                                .transpose()
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let sd = ct
+                                .tensor(file, &format!("{prefix}.ffn_down_shexp.weight"), &device)
+                                .ok()
+                                .map(QMatMul::from_qtensor)
+                                .transpose()
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            let su = ct
+                                .tensor(file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
+                                .ok()
+                                .map(QMatMul::from_qtensor)
+                                .transpose()
+                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
+                            FfnVariant::MoE(MoeFfn {
+                                gate: gi_t,
+                                gate_exps: ge_t,
+                                down_exps: de_t,
+                                up_exps: ue_t,
+                                shared_gate: sg,
+                                shared_down: sd,
+                                shared_up: su,
+                                n_experts_used: n_used,
+                            })
+                        } else {
+                            FfnVariant::Dense(Mlp {
+                                ffn_gate: Some(
+                                    QMatMul::from_qtensor(gate)
+                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                ),
+                                ffn_down: QMatMul::from_qtensor(ffn_down_qt)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                ffn_up: QMatMul::from_qtensor(up)
+                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                activation,
+                            })
+                        }
+                    } else {
+                        // Fused gate+up (Phi-3): ffn_up = gate || up combined
+                        let fused_qt = ct
+                            .tensor(file, &format!("{prefix}.ffn_up.weight"), &device)
+                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
+                        let fused_shape = fused_qt.shape();
+                        let half = fused_shape.dims()[0] / 2;
+                        let fused = QMatMul::make_fused(fused_qt)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                        FfnVariant::Dense(Mlp {
+                            ffn_gate: Some(QMatMul::from_fused_slice(fused.clone(), 0, half)),
+                            ffn_down: QMatMul::from_qtensor(ffn_down_qt)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_up: QMatMul::from_fused_slice(fused, half, half),
+                            activation,
+                        })
+                    };
+
+                    let attn_q_norm = ct
+                        .tensor(file, &format!("{prefix}.attn_q_norm.weight"), &device)
+                        .ok();
+                    let attn_k_norm = ct
+                        .tensor(file, &format!("{prefix}.attn_k_norm.weight"), &device)
+                        .ok();
+
+                    layers.push(LayerVariant::Dense(LayerWeights {
+                        attention_wq: qkv_q,
+                        attention_wk: qkv_k,
+                        attention_wv: qkv_v,
+                        attention_wo: QMatMul::from_qtensor(wo)
+                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                        attention_bq: bq,
+                        attention_bk: bk,
+                        attention_bv: bv,
+                        attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                        attn_q_norm: attn_q_norm
+                            .map(|t| make_norm(t, rms_norm_eps))
+                            .transpose()?,
+                        attn_k_norm: attn_k_norm
+                            .map(|t| make_norm(t, rms_norm_eps))
+                            .transpose()?,
+                        ffn,
+                        ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
+                        post_attention_norm: post_attn_norm
+                            .map(|t| make_norm(t, rms_norm_eps))
+                            .transpose()?,
+                        post_ffw_norm: post_ffw_norm
+                            .map(|t| make_norm(t, rms_norm_eps))
+                            .transpose()?,
+                        n_head: head_count,
+                        n_kv_head: head_count_kv,
+                        head_dim,
+                        cos: cos.clone(),
+                        sin: sin.clone(),
+                        neg_inf: neg_inf.clone(),
+                        use_rope_contiguous,
+                        attn_logit_softcap,
+                        rope_dim,
+                        skip_rope: false,
+                    }));
+                }
             }
         }
 
@@ -1736,16 +1952,7 @@ impl SplitModel {
         })
     }
 
-    /// Load a partial model from local shard files + GGUF header.
-    ///
-    /// This is the shard-only alternative to `load_from_gguf`. Instead of needing
-    /// the full GGUF file, it reads from:
-    /// - `gguf_header.bin`: the raw GGUF header (metadata + tensor info table)
-    /// - `shard_NNN.bin` files: layer-aligned shard files with packed tensor data
-    ///
-    /// The `ShardReader` uses the tensor entries to map virtual GGUF positions
-    /// to shard-local offsets, so candle's GGUF parser works unchanged.
-    /// Load from shards, forcing CPU device (used as OOM fallback).
+    /// Load from shards, forcing CPU device (used as GPU OOM fallback).
     #[allow(clippy::too_many_arguments)]
     pub fn load_from_shards_cpu(
         model_dir: &Path,
@@ -1770,6 +1977,15 @@ impl SplitModel {
         )
     }
 
+    /// Load a partial model from local shard files + GGUF header.
+    ///
+    /// This is the shard-only alternative to `load_from_gguf`. Instead of needing
+    /// the full GGUF file, it reads from:
+    /// - `gguf_header.bin`: the raw GGUF header (metadata + tensor info table)
+    /// - `shard_NNN.bin` files: layer-aligned shard files with packed tensor data
+    ///
+    /// The `ShardReader` uses the tensor entries to map virtual GGUF positions
+    /// to shard-local offsets, so candle's GGUF parser works unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn load_from_shards(
         model_dir: &Path,
@@ -1824,7 +2040,28 @@ impl SplitModel {
                 shard_path = %shard_path.display(),
                 "Single-shard model with no tensor entries — loading as full GGUF via mmap"
             );
-            return Self::load_from_gguf(shard_path, layer_start, layer_end, is_first, is_last);
+            // Respect force_cpu — don't delegate to load_from_gguf which always picks CUDA
+            let file = std::fs::File::open(shard_path).map_err(SwarmError::Io)?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| SwarmError::Internal(format!("Failed to mmap GGUF: {e}")))?;
+            let mut cursor = std::io::Cursor::new(mmap.as_ref());
+            let ct = gguf_file::Content::read(&mut cursor)
+                .map_err(|e| SwarmError::Internal(format!("Failed to read GGUF: {e}")))?;
+            let device = if force_cpu {
+                Device::Cpu
+            } else {
+                Device::cuda_if_available(0).unwrap_or(Device::Cpu)
+            };
+            return Self::load_model_from_content(
+                ct,
+                &mut cursor,
+                device,
+                layer_start,
+                layer_end,
+                is_first,
+                is_last,
+                Some(mmap.as_ref()),
+            );
         }
 
         // Read header to get tensor_data_offset

@@ -46,8 +46,6 @@ Single Rust binary, three simultaneous functions:
 │  │  watch::Sender<OperationalParams> — config reload    │  │
 │  │  DashMap<ModelId, AtomicU64>    — request counts     │  │
 │  │  RwLock<ResourceSchedule>       — resource schedule  │  │
-│  │  broadcast::Sender<PruneEvent>  — prune events       │  │
-│  │  broadcast::Sender<()>          — models changed      │  │
 │  │  RwLock<VecDeque<PruneEvent>>   — prune history      │  │
 │  │  DashMap<ShardId, bool>         — locked shards      │  │
 │  │  DashMap<Uuid, oneshot::Sender>  — pending vision    │  │
