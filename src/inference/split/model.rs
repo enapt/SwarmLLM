@@ -99,6 +99,36 @@ impl SplitModel {
             tracing::info!("Split model using CPU (no CUDA available)");
         }
 
+        Self::load_model_from_content(
+            ct,
+            &mut file,
+            device,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            Some(mmap.as_ref()),
+        )
+    }
+
+    /// Shared model loading body for both GGUF and shard paths.
+    ///
+    /// Parses GGUF metadata, loads tensors by architecture, extracts tokenizer/
+    /// vocabulary/chat template, and constructs the SplitModel.
+    ///
+    /// `parallel_data`: when Some, enables parallel dense layer loading via
+    /// per-thread Cursors (mmap path). When None, loads sequentially (ShardReader).
+    #[allow(clippy::too_many_arguments)]
+    fn load_model_from_content<R: std::io::Read + std::io::Seek>(
+        ct: gguf_file::Content,
+        mut file: &mut R,
+        device: Device,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+        parallel_data: Option<&[u8]>,
+    ) -> Result<Self, SwarmError> {
         // Detect architecture prefix from GGUF metadata
         let arch_str = ct
             .metadata
@@ -1160,304 +1190,345 @@ impl SplitModel {
             }
         } else {
             // ── Standard dense architecture loading (Llama, Qwen2, Gemma, GLM-4, etc.) ──
-            // Parallel layer loading: each thread gets its own Cursor into the mmap'd data,
-            // reads tensors for one layer independently. ~N× speedup for N layers on NVMe/SSD.
-            let mmap_ref = mmap.as_ref();
-            let ct_ref = &ct;
-            let device_ref = &device;
-            let layer_results: Vec<Result<LayerVariant, SwarmError>> = std::thread::scope(|s| {
-                let handles: Vec<_> = (layer_start..layer_end)
-                    .map(|layer_idx| {
-                        let cos = cos.clone();
-                        let sin = sin.clone();
-                        let neg_inf = neg_inf.clone();
-                        s.spawn(move || -> Result<LayerVariant, SwarmError> {
-                            let mut cursor = std::io::Cursor::new(mmap_ref);
-                            let prefix = format!("blk.{layer_idx}");
+            // Parallel layer loading: each thread gets its own Cursor into byte data.
+            // When parallel_data is None (ShardReader), read all data into memory first
+            // so the same parallel code path works for both mmap and shard sources.
+            let owned_buf: Vec<u8>;
+            let mmap_ref: &[u8] = if let Some(par_data) = parallel_data {
+                par_data
+            } else {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| SwarmError::Internal(format!("seek to start: {e}")))?;
+                owned_buf = {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(file, &mut buf)
+                        .map_err(|e| SwarmError::Internal(format!("read shard data: {e}")))?;
+                    buf
+                };
+                &owned_buf
+            };
+            {
+                let ct_ref = &ct;
+                let device_ref = &device;
+                let layer_results: Vec<Result<LayerVariant, SwarmError>> =
+                    std::thread::scope(|s| {
+                        let handles: Vec<_> = (layer_start..layer_end)
+                            .map(|layer_idx| {
+                                let cos = cos.clone();
+                                let sin = sin.clone();
+                                let neg_inf = neg_inf.clone();
+                                s.spawn(move || -> Result<LayerVariant, SwarmError> {
+                                    let mut cursor = std::io::Cursor::new(mmap_ref);
+                                    let prefix = format!("blk.{layer_idx}");
 
-                            // Try separate Q/K/V first; fall back to fused attn_qkv
-                            // (Phi-3 uses fused attn_qkv.weight instead of separate attn_q/k/v)
-                            let has_fused_qkv = ct_ref
-                                .tensor_infos
-                                .contains_key(&format!("{prefix}.attn_qkv.weight"));
-                            let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
-                                // Fused QKV: keep original quantized tensor, split output in forward
-                                let fused_qt = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.attn_qkv.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!("{prefix}.attn_qkv: {e}"))
-                                    })?;
-                                let q_dim = head_count * head_dim;
-                                let k_dim = head_count_kv * head_dim;
-                                let fused = QMatMul::make_fused(fused_qt)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                                (
-                                    QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
-                                    QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
-                                    QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
-                                )
-                            } else {
-                                let wq = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.attn_q.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.attn_q: {e}"
-                                        ))
-                                    })?;
-                                let wk = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.attn_k.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.attn_k: {e}"
-                                        ))
-                                    })?;
-                                let wv = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.attn_v.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.attn_v: {e}"
-                                        ))
-                                    })?;
-                                (
-                                    QMatMul::from_qtensor(wq)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_qtensor(wk)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_qtensor(wv)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                )
-                            };
-                            let attention_wo = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.attn_output.weight"),
-                                    device_ref,
-                                )
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!(
-                                        "Failed to load {prefix}.attn_output: {e}"
-                                    ))
-                                })?;
+                                    // Try separate Q/K/V first; fall back to fused attn_qkv
+                                    // (Phi-3 uses fused attn_qkv.weight instead of separate attn_q/k/v)
+                                    let has_fused_qkv = ct_ref
+                                        .tensor_infos
+                                        .contains_key(&format!("{prefix}.attn_qkv.weight"));
+                                    let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
+                                        // Fused QKV: keep original quantized tensor, split output in forward
+                                        let fused_qt = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.attn_qkv.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "{prefix}.attn_qkv: {e}"
+                                                ))
+                                            })?;
+                                        let q_dim = head_count * head_dim;
+                                        let k_dim = head_count_kv * head_dim;
+                                        let fused = QMatMul::make_fused(fused_qt)
+                                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                                        (
+                                            QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
+                                            QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
+                                            QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
+                                        )
+                                    } else {
+                                        let wq = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.attn_q.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.attn_q: {e}"
+                                                ))
+                                            })?;
+                                        let wk = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.attn_k.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.attn_k: {e}"
+                                                ))
+                                            })?;
+                                        let wv = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.attn_v.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.attn_v: {e}"
+                                                ))
+                                            })?;
+                                        (
+                                            QMatMul::from_qtensor(wq)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                            QMatMul::from_qtensor(wk)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                            QMatMul::from_qtensor(wv)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                        )
+                                    };
+                                    let attention_wo = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_output.weight"),
+                                            device_ref,
+                                        )
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "Failed to load {prefix}.attn_output: {e}"
+                                            ))
+                                        })?;
 
-                            let attention_bq = ct_ref
-                                .tensor(&mut cursor, &format!("{prefix}.attn_q.bias"), device_ref)
-                                .ok()
-                                .map(|t| t.dequantize(device_ref))
-                                .transpose()
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!("attn_q.bias dequant: {e}"))
-                                })?;
-                            let attention_bk = ct_ref
-                                .tensor(&mut cursor, &format!("{prefix}.attn_k.bias"), device_ref)
-                                .ok()
-                                .map(|t| t.dequantize(device_ref))
-                                .transpose()
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!("attn_k.bias dequant: {e}"))
-                                })?;
-                            let attention_bv = ct_ref
-                                .tensor(&mut cursor, &format!("{prefix}.attn_v.bias"), device_ref)
-                                .ok()
-                                .map(|t| t.dequantize(device_ref))
-                                .transpose()
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!("attn_v.bias dequant: {e}"))
-                                })?;
+                                    let attention_bq = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_q.bias"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| t.dequantize(device_ref))
+                                        .transpose()
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "attn_q.bias dequant: {e}"
+                                            ))
+                                        })?;
+                                    let attention_bk = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_k.bias"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| t.dequantize(device_ref))
+                                        .transpose()
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "attn_k.bias dequant: {e}"
+                                            ))
+                                        })?;
+                                    let attention_bv = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_v.bias"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| t.dequantize(device_ref))
+                                        .transpose()
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "attn_v.bias dequant: {e}"
+                                            ))
+                                        })?;
 
-                            // FFN: try separate gate/up first; fall back to fused gate_up
-                            // (Phi-3 uses combined ffn_up = gate || up, no separate ffn_gate)
-                            let has_ffn_gate = ct_ref
-                                .tensor_infos
-                                .contains_key(&format!("{prefix}.ffn_gate.weight"));
-                            let ffn_down_qt = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.ffn_down.weight"),
-                                    device_ref,
-                                )
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!(
-                                        "Failed to load {prefix}.ffn_down: {e}"
-                                    ))
-                                })?;
-                            let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
-                                let gate = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.ffn_gate.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.ffn_gate: {e}"
-                                        ))
-                                    })?;
-                                let up = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.ffn_up.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.ffn_up: {e}"
-                                        ))
-                                    })?;
-                                (
-                                    QMatMul::from_qtensor(gate)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_qtensor(ffn_down_qt)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_qtensor(up)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                )
-                            } else {
-                                // Fused gate+up: use FusedSlice to avoid re-quantization
-                                let fused_qt = ct_ref
-                                    .tensor(
-                                        &mut cursor,
-                                        &format!("{prefix}.ffn_up.weight"),
-                                        device_ref,
-                                    )
-                                    .map_err(|e| {
-                                        SwarmError::Internal(format!(
-                                            "Failed to load {prefix}.ffn_up: {e}"
-                                        ))
-                                    })?;
-                                let fused_shape = fused_qt.shape();
-                                let half = fused_shape.dims()[0] / 2;
-                                let fused = QMatMul::make_fused(fused_qt)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                                (
-                                    QMatMul::from_fused_slice(fused.clone(), 0, half),
-                                    QMatMul::from_qtensor(ffn_down_qt)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                    QMatMul::from_fused_slice(fused, half, half),
-                                )
-                            };
-                            let attn_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.attn_norm.weight"),
-                                    device_ref,
-                                )
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!(
-                                        "Failed to load {prefix}.attn_norm: {e}"
-                                    ))
-                                })?;
-                            let ffn_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.ffn_norm.weight"),
-                                    device_ref,
-                                )
-                                .map_err(|e| {
-                                    SwarmError::Internal(format!(
-                                        "Failed to load {prefix}.ffn_norm: {e}"
-                                    ))
-                                })?;
+                                    // FFN: try separate gate/up first; fall back to fused gate_up
+                                    // (Phi-3 uses combined ffn_up = gate || up, no separate ffn_gate)
+                                    let has_ffn_gate = ct_ref
+                                        .tensor_infos
+                                        .contains_key(&format!("{prefix}.ffn_gate.weight"));
+                                    let ffn_down_qt = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.ffn_down.weight"),
+                                            device_ref,
+                                        )
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "Failed to load {prefix}.ffn_down: {e}"
+                                            ))
+                                        })?;
+                                    let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
+                                        let gate = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.ffn_gate.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.ffn_gate: {e}"
+                                                ))
+                                            })?;
+                                        let up = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.ffn_up.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.ffn_up: {e}"
+                                                ))
+                                            })?;
+                                        (
+                                            QMatMul::from_qtensor(gate)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                            QMatMul::from_qtensor(ffn_down_qt)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                            QMatMul::from_qtensor(up)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                        )
+                                    } else {
+                                        // Fused gate+up: use FusedSlice to avoid re-quantization
+                                        let fused_qt = ct_ref
+                                            .tensor(
+                                                &mut cursor,
+                                                &format!("{prefix}.ffn_up.weight"),
+                                                device_ref,
+                                            )
+                                            .map_err(|e| {
+                                                SwarmError::Internal(format!(
+                                                    "Failed to load {prefix}.ffn_up: {e}"
+                                                ))
+                                            })?;
+                                        let fused_shape = fused_qt.shape();
+                                        let half = fused_shape.dims()[0] / 2;
+                                        let fused = QMatMul::make_fused(fused_qt)
+                                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
+                                        (
+                                            QMatMul::from_fused_slice(fused.clone(), 0, half),
+                                            QMatMul::from_qtensor(ffn_down_qt)
+                                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                            QMatMul::from_fused_slice(fused, half, half),
+                                        )
+                                    };
+                                    let attn_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "Failed to load {prefix}.attn_norm: {e}"
+                                            ))
+                                        })?;
+                                    let ffn_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.ffn_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!(
+                                                "Failed to load {prefix}.ffn_norm: {e}"
+                                            ))
+                                        })?;
 
-                            // Qwen3 QK normalization (optional)
-                            let attn_q_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.attn_q_norm.weight"),
-                                    device_ref,
-                                )
-                                .ok()
-                                .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
-                                .transpose()
-                                .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
-                            let attn_k_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.attn_k_norm.weight"),
-                                    device_ref,
-                                )
-                                .ok()
-                                .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
-                                .transpose()
-                                .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
+                                    // Qwen3 QK normalization (optional)
+                                    let attn_q_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_q_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                                        .transpose()
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!("attn_q_norm: {e}"))
+                                        })?;
+                                    let attn_k_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.attn_k_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
+                                        .transpose()
+                                        .map_err(|e| {
+                                            SwarmError::Internal(format!("attn_k_norm: {e}"))
+                                        })?;
 
-                            // Gemma 2 post-norms (optional)
-                            let post_attention_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.post_attention_norm.weight"),
-                                    device_ref,
-                                )
-                                .ok()
-                                .map(|t| make_norm(t, rms_norm_eps))
-                                .transpose()?;
-                            let post_ffw_norm = ct_ref
-                                .tensor(
-                                    &mut cursor,
-                                    &format!("{prefix}.post_ffw_norm.weight"),
-                                    device_ref,
-                                )
-                                .ok()
-                                .map(|t| make_norm(t, rms_norm_eps))
-                                .transpose()?;
+                                    // Gemma 2 post-norms (optional)
+                                    let post_attention_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.post_attention_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| make_norm(t, rms_norm_eps))
+                                        .transpose()?;
+                                    let post_ffw_norm = ct_ref
+                                        .tensor(
+                                            &mut cursor,
+                                            &format!("{prefix}.post_ffw_norm.weight"),
+                                            device_ref,
+                                        )
+                                        .ok()
+                                        .map(|t| make_norm(t, rms_norm_eps))
+                                        .transpose()?;
 
-                            Ok(LayerVariant::Dense(LayerWeights {
-                                attention_wq: qkv_q,
-                                attention_wk: qkv_k,
-                                attention_wv: qkv_v,
-                                attention_wo: QMatMul::from_qtensor(attention_wo)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                attention_bq,
-                                attention_bk,
-                                attention_bv,
-                                attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                                attn_q_norm,
-                                attn_k_norm,
-                                ffn: FfnVariant::Dense(Mlp {
-                                    ffn_gate: Some(ffn_gate_mm),
-                                    ffn_down: ffn_down_mm,
-                                    ffn_up: ffn_up_mm,
-                                    activation,
-                                }),
-                                ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
-                                post_attention_norm,
-                                post_ffw_norm,
-                                n_head: head_count,
-                                n_kv_head: head_count_kv,
-                                head_dim,
-                                cos: cos.clone(),
-                                sin: sin.clone(),
-                                neg_inf: neg_inf.clone(),
-                                use_rope_contiguous,
-                                attn_logit_softcap,
-                                rope_dim,
-                                skip_rope: false,
-                            }))
-                        })
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|h| h.join().expect("layer load thread panicked"))
-                    .collect()
-            });
-            for result in layer_results {
-                layers.push(result?);
+                                    Ok(LayerVariant::Dense(LayerWeights {
+                                        attention_wq: qkv_q,
+                                        attention_wk: qkv_k,
+                                        attention_wv: qkv_v,
+                                        attention_wo: QMatMul::from_qtensor(attention_wo)
+                                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                                        attention_bq,
+                                        attention_bk,
+                                        attention_bv,
+                                        attention_norm: make_norm(attn_norm, rms_norm_eps)?,
+                                        attn_q_norm,
+                                        attn_k_norm,
+                                        ffn: FfnVariant::Dense(Mlp {
+                                            ffn_gate: Some(ffn_gate_mm),
+                                            ffn_down: ffn_down_mm,
+                                            ffn_up: ffn_up_mm,
+                                            activation,
+                                        }),
+                                        ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
+                                        post_attention_norm,
+                                        post_ffw_norm,
+                                        n_head: head_count,
+                                        n_kv_head: head_count_kv,
+                                        head_dim,
+                                        cos: cos.clone(),
+                                        sin: sin.clone(),
+                                        neg_inf: neg_inf.clone(),
+                                        use_rope_contiguous,
+                                        attn_logit_softcap,
+                                        rope_dim,
+                                        skip_rope: false,
+                                    }))
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .map(|h| h.join().expect("layer load thread panicked"))
+                            .collect()
+                    });
+                for result in layer_results {
+                    layers.push(result?);
+                }
             }
         }
 
@@ -1827,7 +1898,6 @@ impl SplitModel {
             }
         }
 
-        // From here, the exact same logic as load_from_gguf
         let device = if force_cpu {
             Device::Cpu
         } else {
@@ -1841,1118 +1911,16 @@ impl SplitModel {
             tracing::info!("Split model using CPU (no CUDA available)");
         }
 
-        let arch_str = ct
-            .metadata
-            .get("general.architecture")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "llama".to_string());
-        let model_arch = ModelArch::from_gguf_arch(&arch_str);
-
-        tracing::info!(arch = %model_arch, "Detected model architecture");
-
-        if !model_arch.is_supported() {
-            return Err(SwarmError::Internal(format!(
-                "Unsupported model architecture '{}'. Supported architectures: {}",
-                arch_str,
-                ModelArch::supported_list().join(", ")
-            )));
-        }
-
-        let arch = &arch_str;
-        let md_get = |suffix: &str| {
-            let key = format!("{arch}.{suffix}");
-            ct.metadata
-                .get(&key)
-                .ok_or_else(|| SwarmError::Internal(format!("Missing GGUF metadata: {key}")))
-        };
-
-        let head_count = md_get("attention.head_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        if head_count == 0 {
-            return Err(SwarmError::Inference(
-                "GGUF metadata error: attention.head_count is zero".into(),
-            ));
-        }
-        let head_count_kv = md_get("attention.head_count_kv")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let block_count = md_get("block_count")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as usize;
-        let embedding_length = md_get("embedding_length")?
-            .to_u32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))?
-            as usize;
-        // head_dim: prefer attention.key_length from GGUF (Qwen3 uses 128 vs embed/heads=64)
-        let head_dim = ct
-            .metadata
-            .get(&format!("{arch}.attention.key_length"))
-            .and_then(|v| v.to_u32().ok())
-            .map(|v| v as usize)
-            .unwrap_or(embedding_length / head_count);
-        let rope_dim = md_get("rope.dimension_count")
-            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or(head_dim as u32) as usize;
-        let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")?
-            .to_f32()
-            .map_err(|e| SwarmError::Internal(e.to_string()))? as f64;
-        let rope_freq_base = ct
-            .metadata
-            .get(&format!("{arch}.rope.freq_base"))
-            .and_then(|v| v.to_f32().ok())
-            .unwrap_or(10000f32);
-        let context_length = md_get("context_length")
-            .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-            .unwrap_or(DEFAULT_MAX_SEQ_LEN as u32) as usize;
-
-        let attn_logit_softcap = ct
-            .metadata
-            .get(&format!("{arch}.attn_logit_softcapping"))
-            .and_then(|v| v.to_f32().ok())
-            .filter(|&v| v > 0.0);
-
-        let final_logit_softcap = ct
-            .metadata
-            .get(&format!("{arch}.final_logit_softcapping"))
-            .and_then(|v| v.to_f32().ok())
-            .filter(|&v| v > 0.0);
-
-        let use_rope_contiguous = model_arch.use_rope_contiguous();
-        let activation = model_arch.default_activation();
-
-        // Long RoPE (SuRoPE) for Phi-3.5 and similar extended-context models
-        let longrope = load_longrope_factors(&ct, &mut reader, arch, context_length);
-        let (cos, sin) = if let Some((ref factors, attn_factor)) = longrope {
-            tracing::info!(
-                factors_len = factors.len(),
-                attn_factor,
-                "Using Long RoPE (SuRoPE)"
-            );
-            precompute_freqs_cis_longrope(
-                rope_dim,
-                rope_freq_base,
-                context_length,
-                factors,
-                attn_factor,
-                &device,
-            )
-            .map_err(|e| SwarmError::Internal(e.to_string()))?
-        } else {
-            precompute_freqs_cis(rope_dim, rope_freq_base, context_length, &device)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?
-        };
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &device)
-            .map_err(|e| SwarmError::Internal(e.to_string()))?;
-        // Helper: create RmsNorm from GGUF weight tensor.
-        // Note: GGUF norm weights for Gemma models already include the +1 offset
-        // (added by convert_hf_to_gguf.py's modify_tensors), so we use them as-is.
-        let make_norm = |qtensor: QTensor, eps: f64| -> Result<RmsNorm, SwarmError> {
-            RmsNorm::from_qtensor(qtensor, eps).map_err(|e| SwarmError::Internal(e.to_string()))
-        };
-
-        let tok_embeddings = if is_first {
-            let tok_embd = ct
-                .tensor(&mut reader, "token_embd.weight", &device)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?;
-            let tok_embd = tok_embd
-                .dequantize(&device)
-                .map_err(|e| SwarmError::Internal(e.to_string()))?;
-            Some(Embedding::new(tok_embd, embedding_length))
-        } else {
-            None
-        };
-
-        let norm = if is_last {
-            let norm_tensor = ct
-                .tensor(&mut reader, "output_norm.weight", &device)
-                .map_err(|e| SwarmError::Internal(format!("Failed to load output_norm: {e}")))?;
-            Some(make_norm(norm_tensor, rms_norm_eps)?)
-        } else {
-            None
-        };
-
-        let output = if is_last {
-            let output_tensor = ct
-                .tensor(&mut reader, "output.weight", &device)
-                .or_else(|_| ct.tensor(&mut reader, "token_embd.weight", &device))
-                .or_else(|_| {
-                    // Weight-tied model fallback: load from tied_output_weight.bin
-                    // This file contains the raw tensor data for token_embd.weight,
-                    // downloaded separately so nodes without shard 0 can still
-                    // project logits in distributed inference.
-                    let tied_path = model_dir.join("tied_output_weight.bin");
-                    if tied_path.exists() {
-                        tracing::info!("Loading output head from tied_output_weight.bin");
-                        // Get tensor info from GGUF metadata
-                        let embd_info =
-                            ct.tensor_infos.get("token_embd.weight").ok_or_else(|| {
-                                candle_core::Error::Msg(
-                                    "token_embd.weight not in GGUF tensor info".into(),
-                                )
-                            })?;
-                        let raw_data = std::fs::read(&tied_path).map_err(|e| {
-                            candle_core::Error::Msg(format!(
-                                "Failed to read tied_output_weight.bin: {e}"
-                            ))
-                        })?;
-                        candle_core::quantized::ggml_file::qtensor_from_ggml(
-                            embd_info.ggml_dtype,
-                            &raw_data,
-                            embd_info.shape.dims().to_vec(),
-                            &device,
-                        )
-                    } else {
-                        Err(candle_core::Error::Msg(
-                            "No output.weight, no token_embd.weight in shards, \
-                             and no tied_output_weight.bin found"
-                                .into(),
-                        ))
-                    }
-                })
-                .map_err(|e| SwarmError::Internal(format!("Failed to load output head: {e}")))?;
-            Some(
-                QMatMul::from_qtensor(output_tensor)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-            )
-        } else {
-            None
-        };
-
-        let layer_end = layer_end.min(block_count);
-        let mut layers: Vec<LayerVariant> = Vec::with_capacity(layer_end - layer_start);
-
-        // Shard loading uses the same architecture dispatch as load_from_gguf.
-        // For DeepSeek, we detect per-layer MLA/MoE presence from tensor_infos.
-        // For all other architectures, we load standard dense layers.
-        if matches!(model_arch, ModelArch::DeepSeek2) {
-            let ds_meta = DeepSeekMeta {
-                n_experts: md_get("expert_count")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(0) as usize,
-                n_experts_used: md_get("expert_used_count")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(6) as usize,
-                n_shared_experts: md_get("expert_shared_count")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(0) as usize,
-                kv_lora_rank: md_get("attention.kv_lora_rank")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(512) as usize,
-                q_lora_rank: md_get("attention.q_lora_rank")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(0) as usize,
-                key_length: md_get("attention.key_length")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(head_dim as u32) as usize,
-                value_length: md_get("attention.value_length")
-                    .and_then(|v| v.to_u32().map_err(|e| SwarmError::Internal(e.to_string())))
-                    .unwrap_or(head_dim as u32) as usize,
-                rope_dim,
-            };
-
-            let mla_rope_dim = ds_meta.rope_dim;
-            let (mla_cos, mla_sin) =
-                precompute_freqs_cis(mla_rope_dim, rope_freq_base, context_length, &device)
-                    .map_err(|e| SwarmError::Internal(e.to_string()))?;
-
-            for layer_idx in layer_start..layer_end {
-                let prefix = format!("blk.{layer_idx}");
-                let has_mla = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.attn_q_a.weight"));
-                let has_moe = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.ffn_gate_exps.weight"));
-
-                let attn_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
-                let ffn_norm_t = ct
-                    .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
-
-                if has_mla {
-                    let q_a = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_q_a.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q_a: {e}")))?;
-                    let q_a_norm_t = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.attn_q_a_norm.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.attn_q_a_norm: {e}"))
-                        })?;
-                    let q_b = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_q_b.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q_b: {e}")))?;
-                    let kv_a = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_kv_a.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_kv_a: {e}")))?;
-                    let kv_a_norm_t = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.attn_kv_a_norm.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.attn_kv_a_norm: {e}"))
-                        })?;
-                    let kv_b = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_kv_b.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_kv_b: {e}")))?;
-                    let wo = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.attn_output.weight"),
-                            &device,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
-
-                    let attention = MlaWeights {
-                        q_a: QMatMul::from_qtensor(q_a)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        q_a_norm: RmsNorm::from_qtensor(q_a_norm_t, rms_norm_eps)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        q_b: QMatMul::from_qtensor(q_b)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        kv_a: QMatMul::from_qtensor(kv_a)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        kv_a_norm: RmsNorm::from_qtensor(kv_a_norm_t, rms_norm_eps)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        kv_b: QMatMul::from_qtensor(kv_b)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        output: QMatMul::from_qtensor(wo)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        n_head: head_count,
-                        key_length: ds_meta.key_length,
-                        value_length: ds_meta.value_length,
-                        kv_lora_rank: ds_meta.kv_lora_rank,
-                        rope_dim: mla_rope_dim,
-                        cos: mla_cos.clone(),
-                        sin: mla_sin.clone(),
-                        neg_inf: neg_inf.clone(),
-                    };
-
-                    let ffn = if has_moe {
-                        let gate_inp = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_gate_inp.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}"))
-                            })?;
-                        let gate_exps = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_gate_exps.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
-                            })?;
-                        let down_exps = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_down_exps.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
-                            })?;
-                        let up_exps = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_up_exps.weight"),
-                                &device,
-                            )
-                            .map_err(|e| {
-                                SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}"))
-                            })?;
-
-                        let gate_inp_t = gate_inp
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("gate_inp: {e}")))?;
-                        let gate_exps_t = gate_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("gate_exps: {e}")))?;
-                        let down_exps_t = down_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("down_exps: {e}")))?;
-                        let up_exps_t = up_exps
-                            .dequantize(&device)
-                            .map_err(|e| SwarmError::Internal(format!("up_exps: {e}")))?;
-
-                        let shared_gate = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_gate_shexp.weight"),
-                                &device,
-                            )
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                        let shared_down = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_down_shexp.weight"),
-                                &device,
-                            )
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                        let shared_up = ct
-                            .tensor(
-                                &mut reader,
-                                &format!("{prefix}.ffn_up_shexp.weight"),
-                                &device,
-                            )
-                            .ok()
-                            .map(QMatMul::from_qtensor)
-                            .transpose()
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?;
-
-                        FfnVariant::MoE(MoeFfn {
-                            gate: gate_inp_t,
-                            gate_exps: gate_exps_t,
-                            down_exps: down_exps_t,
-                            up_exps: up_exps_t,
-                            shared_gate,
-                            shared_down,
-                            shared_up,
-                            n_experts_used: ds_meta.n_experts_used,
-                        })
-                    } else {
-                        let ffn_gate = ct
-                            .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
-                        let ffn_down = ct
-                            .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
-                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
-                        let ffn_up = ct
-                            .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                            .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                        FfnVariant::Dense(Mlp {
-                            ffn_gate: Some(
-                                QMatMul::from_qtensor(ffn_gate)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            ),
-                            ffn_down: QMatMul::from_qtensor(ffn_down)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            ffn_up: QMatMul::from_qtensor(ffn_up)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            activation: Activation::SiLU,
-                        })
-                    };
-
-                    layers.push(LayerVariant::DeepSeek {
-                        attention,
-                        ffn,
-                        attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                        ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
-                    });
-                } else {
-                    // Dense attention layer
-                    let attention_wq = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q: {e}")))?;
-                    let attention_wk = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
-                    let attention_wv = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
-                    let attention_wo = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.attn_output.weight"),
-                            &device,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
-                    let attention_bq = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
-                        .ok()
-                        .map(|t| t.dequantize(&device))
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    let attention_bk = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_k.bias"), &device)
-                        .ok()
-                        .map(|t| t.dequantize(&device))
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    let attention_bv = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_v.bias"), &device)
-                        .ok()
-                        .map(|t| t.dequantize(&device))
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    let ffn_gate = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
-                    let ffn_down = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
-                    let ffn_up = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                    layers.push(LayerVariant::Dense(LayerWeights {
-                        attention_wq: QMatMul::from_qtensor(attention_wq)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        attention_wk: QMatMul::from_qtensor(attention_wk)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        attention_wv: QMatMul::from_qtensor(attention_wv)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        attention_wo: QMatMul::from_qtensor(attention_wo)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        attention_bq,
-                        attention_bk,
-                        attention_bv,
-                        attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                        attn_q_norm: None,
-                        attn_k_norm: None,
-                        ffn: FfnVariant::Dense(Mlp {
-                            ffn_gate: Some(
-                                QMatMul::from_qtensor(ffn_gate)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            ),
-                            ffn_down: QMatMul::from_qtensor(ffn_down)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            ffn_up: QMatMul::from_qtensor(ffn_up)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                            activation: Activation::SiLU,
-                        }),
-                        ffn_norm: make_norm(ffn_norm_t, rms_norm_eps)?,
-                        post_attention_norm: None,
-                        post_ffw_norm: None,
-                        n_head: head_count,
-                        n_kv_head: head_count_kv,
-                        head_dim,
-                        cos: cos.clone(),
-                        sin: sin.clone(),
-                        neg_inf: neg_inf.clone(),
-                        use_rope_contiguous,
-                        attn_logit_softcap,
-                        rope_dim,
-                        skip_rope: false,
-                    }));
-                }
-            }
-        } else if matches!(model_arch, ModelArch::Llama4) {
-            // ── Llama 4 Scout/Maverick shard loading: iRoPE + MoE ──
-            let n_experts = ct
-                .metadata
-                .get(&format!("{arch}.expert_count"))
-                .and_then(|v| v.to_u32().ok())
-                .unwrap_or(0) as usize;
-            let n_experts_used = ct
-                .metadata
-                .get(&format!("{arch}.expert_used_count"))
-                .and_then(|v| v.to_u32().ok())
-                .unwrap_or(1) as usize;
-
-            for layer_idx in layer_start..layer_end {
-                let prefix = format!("blk.{layer_idx}");
-                let is_nope = layer_idx % 4 == 3;
-
-                let attention_wq = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_q: {e}")))?;
-                let attention_wk = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_k: {e}")))?;
-                let attention_wv = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_v: {e}")))?;
-                let attention_wo = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.attn_output.weight"),
-                        &device,
-                    )
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
-                let attn_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_norm: {e}")))?;
-                let ffn_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
-                    .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_norm: {e}")))?;
-
-                let attention_bq = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_q.bias: {e}")))?;
-                let attention_bk = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_k.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_k.bias: {e}")))?;
-                let attention_bv = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_v.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_v.bias: {e}")))?;
-
-                let has_moe = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.ffn_gate_exps.weight"));
-
-                let ffn = if has_moe && n_experts > 0 {
-                    let gate_inp = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_gate_inp.weight"),
-                            &device,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate_inp: {e}")))?;
-                    let gate_exps = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_gate_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_gate_exps: {e}"))
-                        })?;
-                    let down_exps = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_down_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("{prefix}.ffn_down_exps: {e}"))
-                        })?;
-                    let up_exps = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_up_exps.weight"),
-                            &device,
-                        )
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up_exps: {e}")))?;
-
-                    let gate_inp_t = gate_inp
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("gate_inp dequant: {e}")))?;
-                    let gate_exps_t = gate_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("gate_exps dequant: {e}")))?;
-                    let down_exps_t = down_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("down_exps dequant: {e}")))?;
-                    let up_exps_t = up_exps
-                        .dequantize(&device)
-                        .map_err(|e| SwarmError::Internal(format!("up_exps dequant: {e}")))?;
-
-                    let shared_gate = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_gate_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared gate: {e}")))?;
-                    let shared_down = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_down_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared down: {e}")))?;
-                    let shared_up = ct
-                        .tensor(
-                            &mut reader,
-                            &format!("{prefix}.ffn_up_shexp.weight"),
-                            &device,
-                        )
-                        .ok()
-                        .map(QMatMul::from_qtensor)
-                        .transpose()
-                        .map_err(|e| SwarmError::Internal(format!("shared up: {e}")))?;
-
-                    FfnVariant::MoE(MoeFfn {
-                        gate: gate_inp_t,
-                        gate_exps: gate_exps_t,
-                        down_exps: down_exps_t,
-                        up_exps: up_exps_t,
-                        shared_gate,
-                        shared_down,
-                        shared_up,
-                        n_experts_used,
-                    })
-                } else {
-                    let ffn_gate = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_gate: {e}")))?;
-                    let ffn_down = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_down: {e}")))?;
-                    let ffn_up = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                    FfnVariant::Dense(Mlp {
-                        ffn_gate: Some(
-                            QMatMul::from_qtensor(ffn_gate)
-                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        ),
-                        ffn_down: QMatMul::from_qtensor(ffn_down)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        ffn_up: QMatMul::from_qtensor(ffn_up)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        activation: Activation::SiLU,
-                    })
-                };
-
-                layers.push(LayerVariant::Dense(LayerWeights {
-                    attention_wq: QMatMul::from_qtensor(attention_wq)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    attention_wk: QMatMul::from_qtensor(attention_wk)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    attention_wv: QMatMul::from_qtensor(attention_wv)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    attention_wo: QMatMul::from_qtensor(attention_wo)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    attention_bq,
-                    attention_bk,
-                    attention_bv,
-                    attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                    attn_q_norm: None,
-                    attn_k_norm: None,
-                    ffn,
-                    ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
-                    post_attention_norm: None,
-                    post_ffw_norm: None,
-                    n_head: head_count,
-                    n_kv_head: head_count_kv,
-                    head_dim,
-                    cos: cos.clone(),
-                    sin: sin.clone(),
-                    neg_inf: neg_inf.clone(),
-                    use_rope_contiguous,
-                    attn_logit_softcap,
-                    rope_dim,
-                    skip_rope: is_nope,
-                }));
-            }
-        } else {
-            for layer_idx in layer_start..layer_end {
-                let prefix = format!("blk.{layer_idx}");
-
-                // Try separate Q/K/V first; fall back to fused attn_qkv (Phi-3)
-                let has_fused_qkv = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.attn_qkv.weight"));
-                let (qkv_q, qkv_k, qkv_v) = if has_fused_qkv {
-                    // Fused QKV: keep original quantized tensor, split output in forward pass.
-                    // Re-quantizing split weights (even Q8_0) degrades quality catastrophically.
-                    let fused_qt = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_qkv.weight"), &device)
-                        .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_qkv: {e}")))?;
-                    let q_dim = head_count * head_dim;
-                    let k_dim = head_count_kv * head_dim;
-                    let fused = QMatMul::make_fused(fused_qt)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    (
-                        QMatMul::from_fused_slice(fused.clone(), 0, q_dim),
-                        QMatMul::from_fused_slice(fused.clone(), q_dim, k_dim),
-                        QMatMul::from_fused_slice(fused, q_dim + k_dim, k_dim),
-                    )
-                } else {
-                    let wq = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_q.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.attn_q: {e}"))
-                        })?;
-                    let wk = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_k.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.attn_k: {e}"))
-                        })?;
-                    let wv = ct
-                        .tensor(&mut reader, &format!("{prefix}.attn_v.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.attn_v: {e}"))
-                        })?;
-                    (
-                        QMatMul::from_qtensor(wq)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_qtensor(wk)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_qtensor(wv)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    )
-                };
-                let attention_wo = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.attn_output.weight"),
-                        &device,
-                    )
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("Failed to load {prefix}.attn_output: {e}"))
-                    })?;
-
-                let attention_bq = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_q.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_q.bias dequant: {e}")))?;
-                let attention_bk = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_k.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_k.bias dequant: {e}")))?;
-                let attention_bv = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_v.bias"), &device)
-                    .ok()
-                    .map(|t| t.dequantize(&device))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_v.bias dequant: {e}")))?;
-
-                // FFN: try separate gate/up; fall back to fused (Phi-3)
-                let has_ffn_gate = ct
-                    .tensor_infos
-                    .contains_key(&format!("{prefix}.ffn_gate.weight"));
-                let ffn_down_qt = ct
-                    .tensor(&mut reader, &format!("{prefix}.ffn_down.weight"), &device)
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("Failed to load {prefix}.ffn_down: {e}"))
-                    })?;
-                let (ffn_gate_mm, ffn_down_mm, ffn_up_mm) = if has_ffn_gate {
-                    let gate = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_gate.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_gate: {e}"))
-                        })?;
-                    let up = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
-                        })?;
-                    (
-                        QMatMul::from_qtensor(gate)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_qtensor(ffn_down_qt)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_qtensor(up)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    )
-                } else {
-                    // Fused gate+up: keep original quantized tensor, split output in forward.
-                    let fused_qt = ct
-                        .tensor(&mut reader, &format!("{prefix}.ffn_up.weight"), &device)
-                        .map_err(|e| {
-                            SwarmError::Internal(format!("Failed to load {prefix}.ffn_up: {e}"))
-                        })?;
-                    // Get ffn_hidden_dim from the fused tensor shape (total_rows / 2)
-                    let fused_shape = fused_qt.shape();
-                    let half = fused_shape.dims()[0] / 2;
-                    let fused = QMatMul::make_fused(fused_qt)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?;
-                    (
-                        QMatMul::from_fused_slice(fused.clone(), 0, half),
-                        QMatMul::from_qtensor(ffn_down_qt)
-                            .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                        QMatMul::from_fused_slice(fused, half, half),
-                    )
-                };
-                let attn_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.attn_norm.weight"), &device)
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("Failed to load {prefix}.attn_norm: {e}"))
-                    })?;
-                let ffn_norm = ct
-                    .tensor(&mut reader, &format!("{prefix}.ffn_norm.weight"), &device)
-                    .map_err(|e| {
-                        SwarmError::Internal(format!("Failed to load {prefix}.ffn_norm: {e}"))
-                    })?;
-
-                // Qwen3 QK normalization (optional)
-                let attn_q_norm = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.attn_q_norm.weight"),
-                        &device,
-                    )
-                    .ok()
-                    .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_q_norm: {e}")))?;
-                let attn_k_norm = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.attn_k_norm.weight"),
-                        &device,
-                    )
-                    .ok()
-                    .map(|t| RmsNorm::from_qtensor(t, rms_norm_eps))
-                    .transpose()
-                    .map_err(|e| SwarmError::Internal(format!("attn_k_norm: {e}")))?;
-
-                // Gemma 2 post-norms (optional)
-                let post_attention_norm = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.post_attention_norm.weight"),
-                        &device,
-                    )
-                    .ok()
-                    .map(|t| make_norm(t, rms_norm_eps))
-                    .transpose()?;
-                let post_ffw_norm = ct
-                    .tensor(
-                        &mut reader,
-                        &format!("{prefix}.post_ffw_norm.weight"),
-                        &device,
-                    )
-                    .ok()
-                    .map(|t| make_norm(t, rms_norm_eps))
-                    .transpose()?;
-
-                layers.push(LayerVariant::Dense(LayerWeights {
-                    attention_wq: qkv_q,
-                    attention_wk: qkv_k,
-                    attention_wv: qkv_v,
-                    attention_wo: QMatMul::from_qtensor(attention_wo)
-                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                    attention_bq,
-                    attention_bk,
-                    attention_bv,
-                    attention_norm: make_norm(attn_norm, rms_norm_eps)?,
-                    attn_q_norm,
-                    attn_k_norm,
-                    ffn: FfnVariant::Dense(Mlp {
-                        ffn_gate: Some(ffn_gate_mm),
-                        ffn_down: ffn_down_mm,
-                        ffn_up: ffn_up_mm,
-                        activation,
-                    }),
-                    ffn_norm: make_norm(ffn_norm, rms_norm_eps)?,
-                    post_attention_norm,
-                    post_ffw_norm,
-                    n_head: head_count,
-                    n_kv_head: head_count_kv,
-                    head_dim,
-                    cos: cos.clone(),
-                    sin: sin.clone(),
-                    neg_inf: neg_inf.clone(),
-                    use_rope_contiguous,
-                    attn_logit_softcap,
-                    rope_dim,
-                    skip_rope: false,
-                }));
-            }
-        }
-
-        let vocabulary = ct
-            .metadata
-            .get("tokenizer.ggml.tokens")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect::<Vec<String>>()
-            });
-
-        let tokenizer = if let Some(ref vocab) = vocabulary {
-            let merges_raw = ct
-                .metadata
-                .get("tokenizer.ggml.merges")
-                .and_then(|v| v.to_vec().ok())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.to_string().ok().cloned())
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default();
-            let pre_type = ct
-                .metadata
-                .get("tokenizer.ggml.pre")
-                .and_then(|v| v.to_string().ok().cloned())
-                .unwrap_or_else(|| "gpt2".to_string());
-            let tokenizer_model = ct
-                .metadata
-                .get("tokenizer.ggml.model")
-                .and_then(|v| v.to_string().ok().cloned())
-                .unwrap_or_else(|| "gpt2".to_string());
-            if !merges_raw.is_empty() {
-                tracing::info!(
-                    merges = merges_raw.len(),
-                    pre_type = %pre_type,
-                    tokenizer_model = %tokenizer_model,
-                    "Loaded BPE tokenizer from GGUF header"
-                );
-                Some(SplitTokenizer::from_bpe(
-                    vocab,
-                    &merges_raw,
-                    &pre_type,
-                    &tokenizer_model,
-                ))
-            } else if tokenizer_model == "llama" {
-                // Sentencepiece-based model from GGUF header
-                let scores: Vec<f32> = ct
-                    .metadata
-                    .get("tokenizer.ggml.scores")
-                    .and_then(|v| v.to_vec().ok())
-                    .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
-                    .unwrap_or_default();
-                let add_space_prefix = ct
-                    .metadata
-                    .get("tokenizer.ggml.add_space_prefix")
-                    .and_then(|v| v.to_bool().ok())
-                    .unwrap_or(true);
-                let add_bos_token = ct
-                    .metadata
-                    .get("tokenizer.ggml.add_bos_token")
-                    .and_then(|v| v.to_bool().ok())
-                    .unwrap_or(false);
-                if !scores.is_empty() {
-                    tracing::info!(
-                        vocab_size = vocab.len(),
-                        scores = scores.len(),
-                        add_space_prefix,
-                        add_bos_token,
-                        "Building SPM tokenizer from GGUF header sentencepiece data"
-                    );
-                    Some(SplitTokenizer::from_sentencepiece(
-                        vocab,
-                        &scores,
-                        add_space_prefix,
-                        add_bos_token,
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let mut eos_tokens = Vec::new();
-        if let Some(eos_id) = ct
-            .metadata
-            .get("tokenizer.ggml.eos_token_id")
-            .and_then(|v| v.to_u32().ok())
-        {
-            eos_tokens.push(eos_id);
-        }
-        match arch.as_str() {
-            "qwen2" => {
-                for &id in &[151643u32, 151645] {
-                    if !eos_tokens.contains(&id) {
-                        eos_tokens.push(id);
-                    }
-                }
-            }
-            "gemma" | "gemma2" => {
-                if !eos_tokens.contains(&107) {
-                    eos_tokens.push(107);
-                }
-            }
-            _ => {
-                if !eos_tokens.contains(&2) {
-                    eos_tokens.push(2);
-                }
-            }
-        }
-        if eos_tokens.is_empty() {
-            eos_tokens.push(2);
-        }
-
-        // Extract chat template from GGUF header metadata
-        let chat_template = ct
-            .metadata
-            .get("tokenizer.chat_template")
-            .and_then(|v| v.to_string().ok().cloned())
-            .filter(|s| !s.is_empty());
-
-        let bos_id = ct
-            .metadata
-            .get("tokenizer.ggml.bos_token_id")
-            .and_then(|v| v.to_u32().ok());
-        let eos_str_id = ct
-            .metadata
-            .get("tokenizer.ggml.eos_token_id")
-            .and_then(|v| v.to_u32().ok());
-        let vocab_ref = vocabulary.as_deref().unwrap_or(&[]);
-        let bos_token = bos_id
-            .and_then(|id| vocab_ref.get(id as usize).cloned())
-            .unwrap_or_default();
-        let eos_token = eos_str_id
-            .and_then(|id| vocab_ref.get(id as usize).cloned())
-            .unwrap_or_default();
-
-        if chat_template.is_some() {
-            tracing::info!(
-                bos = %bos_token,
-                eos = %eos_token,
-                "Loaded chat template from GGUF header"
-            );
-        }
-
-        let has_biases = layers
-            .first()
-            .is_some_and(|l| matches!(l, LayerVariant::Dense(lw) if lw.attention_bq.is_some()));
-        tracing::info!(
-            arch = %model_arch,
-            layers = format!("[{layer_start}..{layer_end})"),
-            total = block_count,
-            is_first,
-            is_last,
-            has_qkv_biases = has_biases,
-            rope = if use_rope_contiguous { "contiguous" } else { "interleaved" },
-            activation = ?activation,
-            context_length,
-            head_count,
-            head_count_kv,
-            head_dim,
-            rope_dim,
-            embedding_length,
-            has_post_norms = layers.iter().any(|l| matches!(l, LayerVariant::Dense(lw) if lw.post_attention_norm.is_some())),
-            "Loaded split model from shard files"
-        );
-
-        Ok(Self {
-            tok_embeddings,
-            layers,
-            norm,
-            output,
-            masks: None,
+        Self::load_model_from_content(
+            ct,
+            &mut reader,
+            device,
             layer_start,
             layer_end,
-            total_layers: block_count,
-            hidden_dim: embedding_length,
-            arch: model_arch,
-            device,
-            vocabulary,
-            tokenizer,
-            eos_tokens,
-            chat_template,
-            bos_token,
-            eos_token,
-            max_seq_len: context_length,
-            kv_model_key: format!("{layer_start}-{layer_end}-{block_count}"),
-            final_logit_softcap,
-        })
+            is_first,
+            is_last,
+            None, // ShardReader can't be shared across threads for parallel loading
+        )
     }
 
     /// Build a causal mask for the given sequence length.

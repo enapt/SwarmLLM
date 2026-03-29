@@ -1322,7 +1322,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 
 Items identified during audits but deferred for future implementation:
 
-- **Unify `load_from_gguf` / `load_from_shards_inner`** in `split/model.rs`: ~1100 lines of structurally similar (but not identical) model loading logic. The two paths use different layer struct types (`LayerWeights` vs `DenseLayerWeights`/`AttentionWeights`/`FfnWeights`), different parallelization strategies (parallel `thread::scope` with per-thread mmap cursors vs sequential `ShardReader`), and different architecture coverage (shard path includes Llama4). Unification requires first merging the layer type hierarchies. Low risk to leave as-is since both paths are independently tested and the self-documenting comment at line 1830 flags the relationship.
+No active deferred items — all resolved.
 
 Resolved items (removed from deferred):
 - **PEX aggregate rate limiter**: COMPLETE — sliding window (50 req/60s) on inbound PEX requests + per-peer address cap (8 addrs) + connection_addrs cap (1024)
