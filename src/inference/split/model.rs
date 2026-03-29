@@ -1594,7 +1594,8 @@ impl SplitModel {
                         .tensor(file, &format!("{prefix}.post_ffw_norm.weight"), &device)
                         .ok();
 
-                    // FFN: try separate gate/up, fused gate_up, or MoE
+                    // FFN: try separate gate/up first, fall back to fused gate_up (Phi-3)
+                    // (MoE models hit their architecture-specific branches above, not here)
                     let has_ffn_gate = ct
                         .tensor_infos
                         .contains_key(&format!("{prefix}.ffn_gate.weight"));
@@ -1608,82 +1609,17 @@ impl SplitModel {
                         let up = ct
                             .tensor(file, &format!("{prefix}.ffn_up.weight"), &device)
                             .map_err(|e| SwarmError::Internal(format!("{prefix}.ffn_up: {e}")))?;
-                        let n_experts = ct
-                            .metadata
-                            .get(&format!("{arch_str}.expert_count"))
-                            .and_then(|v| v.to_u32().ok())
-                            .unwrap_or(0) as usize;
-                        if n_experts > 0 {
-                            let n_used = ct
-                                .metadata
-                                .get(&format!("{arch_str}.expert_used_count"))
-                                .and_then(|v| v.to_u32().ok())
-                                .unwrap_or(1) as usize;
-                            let gi = ct
-                                .tensor(file, &format!("{prefix}.ffn_gate_inp.weight"), &device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let ge = ct
-                                .tensor(file, &format!("{prefix}.ffn_gate_exps.weight"), &device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let de = ct
-                                .tensor(file, &format!("{prefix}.ffn_down_exps.weight"), &device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let ue = ct
-                                .tensor(file, &format!("{prefix}.ffn_up_exps.weight"), &device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let gi_t = gi
-                                .dequantize(&device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let ge_t = ge
-                                .dequantize(&device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let de_t = de
-                                .dequantize(&device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let ue_t = ue
-                                .dequantize(&device)
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let sg = ct
-                                .tensor(file, &format!("{prefix}.ffn_gate_shexp.weight"), &device)
-                                .ok()
-                                .map(QMatMul::from_qtensor)
-                                .transpose()
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let sd = ct
-                                .tensor(file, &format!("{prefix}.ffn_down_shexp.weight"), &device)
-                                .ok()
-                                .map(QMatMul::from_qtensor)
-                                .transpose()
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            let su = ct
-                                .tensor(file, &format!("{prefix}.ffn_up_shexp.weight"), &device)
-                                .ok()
-                                .map(QMatMul::from_qtensor)
-                                .transpose()
-                                .map_err(|e| SwarmError::Internal(format!("{e}")))?;
-                            FfnVariant::MoE(MoeFfn {
-                                gate: gi_t,
-                                gate_exps: ge_t,
-                                down_exps: de_t,
-                                up_exps: ue_t,
-                                shared_gate: sg,
-                                shared_down: sd,
-                                shared_up: su,
-                                n_experts_used: n_used,
-                            })
-                        } else {
-                            FfnVariant::Dense(Mlp {
-                                ffn_gate: Some(
-                                    QMatMul::from_qtensor(gate)
-                                        .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                ),
-                                ffn_down: QMatMul::from_qtensor(ffn_down_qt)
+                        FfnVariant::Dense(Mlp {
+                            ffn_gate: Some(
+                                QMatMul::from_qtensor(gate)
                                     .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                ffn_up: QMatMul::from_qtensor(up)
-                                    .map_err(|e| SwarmError::Internal(e.to_string()))?,
-                                activation,
-                            })
-                        }
+                            ),
+                            ffn_down: QMatMul::from_qtensor(ffn_down_qt)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            ffn_up: QMatMul::from_qtensor(up)
+                                .map_err(|e| SwarmError::Internal(e.to_string()))?,
+                            activation,
+                        })
                     } else {
                         // Fused gate+up (Phi-3): ffn_up = gate || up combined
                         let fused_qt = ct
