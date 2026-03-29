@@ -28,7 +28,7 @@
   var NETWORK_KINDS = {
     'peer_connected': true, 'peer_disconnected': true,
     'shard_announced': true, 'lan_peer_discovered': true,
-    'rebalance_peer_left': true, 'rebalance_peer_joined': true, 'rebalance_manual': true,
+    'rebalance_peer_left': true,
   };
 
   function _persistActivity() {
@@ -58,8 +58,6 @@
     'pool_device_left': '\u26D4',         // ⛔
     'shard_scan_found': '\uD83D\uDD0D',  // 🔍
     'rebalance_peer_left': '\u2696\uFE0F', // ⚖️
-    'rebalance_peer_joined': '\u2696\uFE0F', // ⚖️
-    'rebalance_manual': '\u2696\uFE0F',   // ⚖️
     'inference_request': '\u2728',         // ✨
     'daemon_started': '\uD83D\uDE80',     // 🚀
     'shard_verified': '\u2705',           // ✅

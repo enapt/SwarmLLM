@@ -234,8 +234,6 @@
   "activity.pool_member_removed": "Device removed from pool",
   "activity.config_updated": "Configuration updated",
   "activity.rebalance_peer_left": "Rebalancing: peer departed",
-  "activity.rebalance_peer_joined": "Rebalancing: new peer",
-  "activity.rebalance_manual": "Manual rebalance triggered",
   "update.available": "Update available: v{from} → v{to}",
   "update.apply_restart": "Apply & Restart",
   "update.applying": "Applying...",
