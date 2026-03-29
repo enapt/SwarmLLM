@@ -1371,13 +1371,9 @@ pub async fn delete_shard(
     }
 
     // Delete shard file from disk
-    let shard_path = state
-        .config
-        .node
-        .data_dir
-        .join("models")
-        .join(&safe_model_id)
-        .join(format!("shard_{:03}.bin", shard_index));
+    let shard_store = crate::model::shard::ShardStore::new(&state.config.node.data_dir);
+    let shard_path =
+        shard_store.shard_path(&crate::types::ModelId(safe_model_id.clone()), shard_index);
 
     if shard_path.exists() {
         let sp = shard_path.clone();

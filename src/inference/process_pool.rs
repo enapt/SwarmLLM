@@ -16,6 +16,8 @@ use crate::inference::router::StreamingTokenEvent;
 use crate::inference::worker_ipc::*;
 use crate::types::{ModelId, SamplingParams};
 
+const WORKER_CONNECT_TIMEOUT_SECS: u64 = 30;
+
 /// A handle to a running model worker subprocess.
 struct WorkerHandle {
     /// The worker subprocess.
@@ -178,12 +180,15 @@ impl ModelProcessPool {
             .spawn()
             .map_err(|e| SwarmError::Internal(format!("spawn worker: {e}")))?;
 
-        // Wait for worker to connect (timeout 30s)
-        let conn = tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept())
-            .await
-            .map_err(|_| SwarmError::Internal("worker connect timeout".into()))?
-            .map_err(|e| SwarmError::Internal(format!("accept: {e}")))?
-            .0;
+        // Wait for worker to connect
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(WORKER_CONNECT_TIMEOUT_SECS),
+            listener.accept(),
+        )
+        .await
+        .map_err(|_| SwarmError::Internal("worker connect timeout".into()))?
+        .map_err(|e| SwarmError::Internal(format!("accept: {e}")))?
+        .0;
 
         let (mut read_half, write_half) = conn.into_split();
 

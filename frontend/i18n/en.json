@@ -903,5 +903,8 @@
   "setup.contribution_aria": "Resource contribution level",
   "setup.steps_aria": "Setup steps",
   "network.my_address_aria": "Your peer address",
-  "network.peer_address_aria": "Peer address"
+  "network.peer_address_aria": "Peer address",
+  "models.hf_score_pts": "{score} pts",
+  "models.context_abbr": "{n} ctx",
+  "models.context_k_abbr": "{n}k ctx"
 }

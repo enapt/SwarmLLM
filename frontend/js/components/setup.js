@@ -147,9 +147,9 @@
     populateSummary: function() {
       var nick = (document.getElementById('setup-nickname').value || '').trim();
       document.getElementById('summary-nickname').textContent = nick || I18n.t('setup.summary_anonymous');
-      var levels = ['minimal', 'moderate', 'maximum'];
+      var levels = [I18n.t('setup.contrib_minimal'), I18n.t('setup.contrib_moderate'), I18n.t('setup.contrib_maximum')];
       var val = parseInt(document.getElementById('contribution-slider').value, 10);
-      document.getElementById('summary-contribution').textContent = U.capitalize(levels[val]);
+      document.getElementById('summary-contribution').textContent = levels[val];
       var gpuName = App.setup.hwData && App.setup.hwData.gpu_name ? App.setup.hwData.gpu_name : I18n.t('setup.cpu_only');
       document.getElementById('summary-gpu').textContent = gpuName;
       var autoManage = document.getElementById('setup-auto-manage').checked;

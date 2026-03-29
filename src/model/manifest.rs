@@ -10,7 +10,6 @@ pub trait ModelManifestExt {
     fn verify_hash_strict(&self) -> Result<(), SwarmError>;
     fn compute_hash(&self) -> Blake3Hash;
     fn save_to_dir(&self, dir: &Path) -> Result<(), SwarmError>;
-    fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf;
 }
 
 impl ModelManifestExt for ModelManifest {
@@ -135,16 +134,6 @@ impl ModelManifestExt for ModelManifest {
         std::fs::write(&tmp_path, json).map_err(SwarmError::Io)?;
         std::fs::rename(&tmp_path, dir.join("manifest.json")).map_err(SwarmError::Io)?;
         Ok(())
-    }
-
-    /// Get the path to a specific shard file within the data directory.
-    /// Sanitizes model_id to prevent path traversal attacks.
-    fn shard_path(data_dir: &Path, model_id: &str, index: u32) -> std::path::PathBuf {
-        let safe_id = crate::model::shard::sanitize_path_component(model_id);
-        data_dir
-            .join("models")
-            .join(&safe_id)
-            .join(format!("shard_{index:03}.bin"))
     }
 }
 
@@ -274,7 +263,8 @@ mod tests {
 
     #[test]
     fn shard_path_format() {
-        let path = ModelManifest::shard_path(std::path::Path::new("/data"), "llama3-70b", 5);
+        let store = crate::model::shard::ShardStore::new(std::path::Path::new("/data"));
+        let path = store.shard_path(&crate::types::ModelId("llama3-70b".into()), 5);
         assert_eq!(
             path.to_string_lossy(),
             "/data/models/llama3-70b/shard_005.bin"

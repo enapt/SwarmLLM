@@ -22,6 +22,9 @@ use crate::network::relay::RelayServerConfig;
 use crate::network::transport;
 use crate::types::{NetworkCommand, PeerInfo, SwarmMessage};
 
+/// Maximum in-flight shard chunk requests before dropping new ones.
+const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
+
 /// Check if a multiaddr string contains a private/loopback/link-local/CGN IP.
 /// Used for PEX filtering to prevent leaking internal topology.
 fn is_non_public_addr(addr_str: &str) -> bool {
@@ -2234,7 +2237,6 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                     if new_offset < data.total_size {
                         // More chunks needed — re-register and request next chunk
                         // SEC: enforce cap even for continuation requests to prevent unbounded growth
-                        const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
                         if self.pending_shard_requests.len() >= MAX_PENDING_SHARD_REQUESTS {
                             tracing::warn!(
                                 %peer,
@@ -3130,7 +3132,6 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
 
         // SEC: Cap pending shard requests to prevent memory exhaustion from
         // malicious peers that send partial chunks in an infinite loop.
-        const MAX_PENDING_SHARD_REQUESTS: usize = 1024;
         if self.pending_shard_requests.len() >= MAX_PENDING_SHARD_REQUESTS {
             tracing::warn!(
                 count = self.pending_shard_requests.len(),

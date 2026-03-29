@@ -116,6 +116,7 @@ impl KvCacheStore {
     }
 
     /// Get the number of active cache entries.
+    #[cfg(test)]
     pub fn active_entries(&self) -> usize {
         self.caches.len()
     }

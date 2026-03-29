@@ -84,7 +84,7 @@
         document.getElementById('settings-storage-info').classList.toggle('hidden', !isOn);
         if (isOn) App.settings.loadStorageInfo();
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || 'network error'));
+        App.ui.showBanner('error', I18n.t('settings.load_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }
       App.settings._apiKeyPromise = App.settings.loadApiKey();
       App.settings.loadProviders();
@@ -256,7 +256,7 @@
         App.providerHealth.startHealthPolling();
         App.ui.showBanner('success', I18n.t('settings.providers_saved'));
       } catch (e) {
-        App.ui.showBanner('error', I18n.t('settings.providers_save_failed') + ': ' + (e.message || 'network error'));
+        App.ui.showBanner('error', I18n.t('settings.providers_save_failed') + ': ' + (e.message || I18n.t('common.request_failed')));
       }
     },
 

@@ -255,7 +255,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 // Decrement unconditionally — use the entry ref we already hold
                                                 // to avoid racing with concurrent DashMap removal
                                                 peer_count.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                                                tracing::warn!("LayerForward rejected — forward semaphore full");
+                                                tracing::warn!(sender = %peer_sender, "LayerForward rejected — forward semaphore full");
                                                 continue;
                                             }
                                         };

@@ -855,7 +855,7 @@ pub fn gemma_fallback(messages: &[ChatMessage]) -> String {
 }
 
 /// The `<image>` placeholder token used by LLaVA to mark where vision embeddings go.
-pub const IMAGE_PLACEHOLDER: &str = "<image>";
+const IMAGE_PLACEHOLDER: &str = "<image>";
 
 /// Build a Vicuna v1.1 formatted prompt (used by LLaVA and other Vicuna-based models).
 ///

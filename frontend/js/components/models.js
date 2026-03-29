@@ -97,7 +97,7 @@
           // Composite score badge
           if (repo.composite_score != null) {
             var scoreColor = repo.composite_score >= 60 ? 'var(--green)' : repo.composite_score >= 30 ? 'var(--yellow)' : 'var(--text-muted)';
-            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="' + U.escapeHtml(I18n.t('models.hf_score_breakdown', { quality: (repo.score_breakdown||{}).quality||0, fit: (repo.score_breakdown||{}).fit||0, demand: (repo.score_breakdown||{}).demand||0, size: (repo.score_breakdown||{}).size||0 })) + '">' + repo.composite_score + ' pts</span>';
+            statsHtml += '<span style="color:' + scoreColor + '; font-weight:600" title="' + U.escapeHtml(I18n.t('models.hf_score_breakdown', { quality: (repo.score_breakdown||{}).quality||0, fit: (repo.score_breakdown||{}).fit||0, demand: (repo.score_breakdown||{}).demand||0, size: (repo.score_breakdown||{}).size||0 })) + '">' + I18n.t('models.hf_score_pts', { score: repo.composite_score }) + '</span>';
           }
           card.querySelector('.hf-meta-stats').innerHTML = statsHtml;
 
@@ -326,7 +326,7 @@
             var metaParts = [];
             var m = item.meta;
             if (m.owned_by) metaParts.push(m.owned_by);
-            if (m.context_length || m.context_window) metaParts.push((m.context_length || m.context_window).toLocaleString() + ' ctx');
+            if (m.context_length || m.context_window) metaParts.push(I18n.t('models.context_abbr', { n: (m.context_length || m.context_window).toLocaleString() }));
             if (m.max_tokens) metaParts.push(m.max_tokens.toLocaleString() + ' max');
             if (m.pricing) {
               var p = m.pricing;

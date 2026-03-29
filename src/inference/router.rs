@@ -13,6 +13,9 @@ use crate::inference::pipeline::PipelineExecutor;
 use crate::inference::scheduler::PipelineScheduler;
 use crate::types::{InferenceRequest, NetworkCommand, NodeId, PipelineAssignment, SwarmMessage};
 
+const KV_CACHE_CLEANUP_INTERVAL_SECS: u64 = 30;
+const MODEL_LOAD_WAIT_SECS: u64 = 60;
+
 /// Result channel for returning inference output to API callers.
 pub type InferenceResultTx = oneshot::Sender<Result<InferenceOutput, SwarmError>>;
 
@@ -194,7 +197,9 @@ impl InferenceRouter {
         );
 
         // KV-cache cleanup interval
-        let mut cache_cleanup = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut cache_cleanup = tokio::time::interval(std::time::Duration::from_secs(
+            KV_CACHE_CLEANUP_INTERVAL_SECS,
+        ));
         cache_cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -1431,9 +1436,11 @@ async fn execute_request(
 
                 if let Some(notify) = maybe_notify {
                     // Another task is loading — wait for it
-                    let _ =
-                        tokio::time::timeout(std::time::Duration::from_secs(60), notify.notified())
-                            .await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(MODEL_LOAD_WAIT_SECS),
+                        notify.notified(),
+                    )
+                    .await;
                 } else {
                     // No one loading — trigger load (guard inside check_and_load_model)
                     let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state);

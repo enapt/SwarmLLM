@@ -383,7 +383,7 @@ async fn handle_forward(
         fwd.vision_embeddings
     {
         if compressed.len() < 8 {
-            tracing::warn!("Vision embedding too short ({} bytes)", compressed.len());
+            tracing::warn!(request_id = %fwd.request_id, bytes = compressed.len(), "Vision embedding too short — dropping vision tensor");
             None
         } else {
             // Read shape header

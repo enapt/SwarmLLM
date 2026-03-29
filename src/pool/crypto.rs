@@ -2,10 +2,9 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::error::SwarmError;
 use crate::identity::Identity;
-use crate::pool::types::{
-    BlindSignature, BlindedToken, BlindingFactor, PoolAcceptance, PoolCreditForward, PoolId,
-    PoolInvitation, PoolRemoval, UnblindedToken,
-};
+#[cfg(test)]
+use crate::pool::types::{BlindSignature, BlindedToken, BlindingFactor, UnblindedToken};
+use crate::pool::types::{PoolAcceptance, PoolCreditForward, PoolId, PoolInvitation, PoolRemoval};
 use crate::types::NodeId;
 
 // Domain-separated BLAKE3 prefixes per the plan.
@@ -13,6 +12,7 @@ const PREFIX_INVITATION: &[u8] = b"pool_invitation_v1";
 const PREFIX_ACCEPTANCE: &[u8] = b"pool_acceptance_v1";
 const PREFIX_REMOVAL: &[u8] = b"pool_removal_v1";
 const PREFIX_CREDIT_FORWARD: &[u8] = b"pool_credit_forward_v1";
+#[cfg(test)]
 const PREFIX_BLIND_INVITE: &[u8] = b"pool_blind_invite_v1";
 
 /// Create a pool invitation signed by the pool owner.
@@ -172,6 +172,7 @@ pub fn cosign_credit_forward(
 
 /// Step 1: Invitee generates a blinding factor and computes a blinded token.
 /// The blinded token is sent to the pool creator without revealing the invitee's identity.
+#[cfg(test)]
 pub fn blind_invite(
     pool_id: &PoolId,
     ttl_hours: u32,
@@ -193,6 +194,7 @@ pub fn blind_invite(
 /// Step 2: Pool creator signs the blinded token without seeing the real invitation identity.
 /// The signature now covers (commitment, pool_id, expires_at) — binding expiry cryptographically
 /// to prevent indefinite replay of blind invitation tokens.
+#[cfg(test)]
 pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindSignature {
     let payload = blind_token_payload(
         &blinded_token.commitment,
@@ -209,6 +211,7 @@ pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindS
 }
 
 /// Step 3: Invitee removes the blinding to produce a valid signed membership token.
+#[cfg(test)]
 pub fn unblind_token(
     invitation_id: uuid::Uuid,
     blinding_factor: BlindingFactor,
@@ -230,6 +233,7 @@ pub fn unblind_token(
 ///
 /// SEC: Legacy no-expiry fallback removed to prevent permanent blind tokens.
 /// Tokens signed under the old scheme must be re-issued by the pool owner.
+#[cfg(test)]
 pub fn verify_membership(
     token: &UnblindedToken,
     owner_key: &VerifyingKey,
@@ -240,6 +244,7 @@ pub fn verify_membership(
 }
 
 /// Compute the blind commitment: H(PREFIX || invitation_id || blinding_factor)
+#[cfg(test)]
 fn compute_blind_commitment(
     invitation_id: &uuid::Uuid,
     blinding_factor: &BlindingFactor,
@@ -251,6 +256,7 @@ fn compute_blind_commitment(
     *hasher.finalize().as_bytes()
 }
 
+#[cfg(test)]
 fn blind_token_payload(
     commitment: &[u8; 32],
     pool_id: &PoolId,

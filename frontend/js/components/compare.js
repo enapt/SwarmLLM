@@ -47,7 +47,7 @@
           chip.className = 'compare-model-chip type-' + m.type;
           chip.style.animationDelay = (idx * 30) + 'ms';
           var displayName = m.id.length > 35 ? m.id.substring(0, 35) + '...' : m.id;
-          var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + Math.round(m.context / 1000) + 'k ctx' : '';
+          var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + I18n.t('models.context_k_abbr', { n: Math.round(m.context / 1000) }) : '';
           chip.querySelector('input').value = m.id;
           chip.querySelector('.chip-name').textContent = displayName;
           chip.querySelector('.chip-type').textContent = m.type + ctxLabel;
