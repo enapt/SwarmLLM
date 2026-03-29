@@ -19,7 +19,7 @@ use crate::error::SwarmError;
 const ENC_PREFIX: &str = "$SWARM_ENC$";
 
 /// Maximum allowed length for an API key.
-pub const MAX_KEY_LENGTH: usize = 256;
+const MAX_KEY_LENGTH: usize = 256;
 
 /// Derive a 32-byte symmetric key from the node's Ed25519 signing key for provider key encryption.
 fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> [u8; 32] {

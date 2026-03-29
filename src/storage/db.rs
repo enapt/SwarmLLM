@@ -9,7 +9,7 @@ use crate::error::SwarmError;
 /// Current database schema version. Increment when making breaking changes.
 /// Version 2: migrated from sled to redb.
 /// Version 3: upgraded to redb 3.x (v3 file format).
-pub const DB_SCHEMA_VERSION: u32 = 3;
+const DB_SCHEMA_VERSION: u32 = 3;
 
 /// Critical trees to check during integrity verification.
 const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];

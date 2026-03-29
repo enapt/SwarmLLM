@@ -37,4 +37,4 @@ pub use self::gguf_meta::{
 pub use self::kv_cache::KvCacheStore;
 pub use self::model::SplitModel;
 
-pub const DEFAULT_MAX_SEQ_LEN: usize = 4096;
+pub(crate) const DEFAULT_MAX_SEQ_LEN: usize = 4096;

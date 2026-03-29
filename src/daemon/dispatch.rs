@@ -13,6 +13,7 @@ use super::state::{SharedState, TpAllReduceCollector};
 const MAX_CONCURRENT_FORWARDS: usize = 64;
 /// Maximum concurrent forwards per individual peer to prevent single-peer semaphore exhaustion.
 const MAX_FORWARDS_PER_PEER: usize = 8;
+const MAX_NICKNAME_REGISTRY: usize = 10_000;
 /// Zstd compression level for tensor wire payloads.
 const ZSTD_COMPRESS_LEVEL: i32 = 3;
 /// Maximum age (ms) for regional gossip messages before they're considered stale.
@@ -706,7 +707,7 @@ pub(crate) async fn dispatch_network_messages(
                                             // Hard cap as secondary defense.
                                             if !shared_state.peer_registry.contains_key(&record.node_id)
                                                 && !shared_state.nickname_registry.contains_key(&record.node_id)
-                                                && shared_state.nickname_registry.len() >= 10_000
+                                                && shared_state.nickname_registry.len() >= MAX_NICKNAME_REGISTRY
                                             {
                                                 tracing::debug!(
                                                     node_id = %record.node_id,

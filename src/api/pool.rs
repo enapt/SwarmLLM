@@ -4,9 +4,22 @@ use serde::Deserialize;
 
 use crate::api::server::AppState;
 use crate::config::CreditRateConfig;
-use crate::error::ApiError;
+use crate::error::{ApiError, SwarmError};
 use crate::pool::types::PoolCommand;
 use crate::types::NodeId;
+
+/// Await a oneshot reply from the pool manager, converting channel errors to ServiceUnavailable.
+async fn await_pool_reply<T>(
+    rx: tokio::sync::oneshot::Receiver<Result<T, SwarmError>>,
+) -> Result<T, ApiError> {
+    rx.await
+        .map_err(|_| {
+            ApiError(SwarmError::ServiceUnavailable(
+                "Pool manager unavailable".into(),
+            ))
+        })?
+        .map_err(ApiError)
+}
 
 /// GET /api/pool/state — Get current pool state.
 pub async fn pool_state(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -77,17 +90,12 @@ pub async fn pool_create(
     )
     .await?;
 
-    match rx.await {
-        Ok(Ok(ps)) => Ok(Json(serde_json::json!({
-            "status": "created",
-            "pool_id": hex::encode(ps.pool_id.0),
-            "name": ps.name,
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    let ps = await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({
+        "status": "created",
+        "pool_id": hex::encode(ps.pool_id.0),
+        "name": ps.name,
+    })))
 }
 
 /// POST /api/pool/invite — Invite a node to the pool.
@@ -108,17 +116,12 @@ pub async fn pool_invite(
     )
     .await?;
 
-    match rx.await {
-        Ok(Ok(inv)) => Ok(Json(serde_json::json!({
-            "status": "invited",
-            "invitation_id": inv.id.to_string(),
-            "expires_at": inv.expires_at.to_rfc3339(),
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    let inv = await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({
+        "status": "invited",
+        "invitation_id": inv.id.to_string(),
+        "expires_at": inv.expires_at.to_rfc3339(),
+    })))
 }
 
 /// POST /api/pool/accept — Accept a pool invitation.
@@ -169,15 +172,8 @@ pub async fn pool_accept(
     )
     .await?;
 
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({
-            "status": "accepted",
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({ "status": "accepted" })))
 }
 
 /// POST /api/pool/remove — Remove a member from the pool (owner only).
@@ -190,15 +186,8 @@ pub async fn pool_remove(
 
     send_pool_command(&state, PoolCommand::RemoveMember { node_id, reply: tx }).await?;
 
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({
-            "status": "removed",
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({ "status": "removed" })))
 }
 
 /// POST /api/pool/leave — Leave the current pool.
@@ -209,15 +198,8 @@ pub async fn pool_leave(
 
     send_pool_command(&state, PoolCommand::LeavePool { reply: tx }).await?;
 
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({
-            "status": "left",
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({ "status": "left" })))
 }
 
 /// GET /api/pool/invitations — List pending invitations for this node.
@@ -297,13 +279,8 @@ pub async fn pool_set_device_name(
         },
     )
     .await?;
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// PUT /api/pool/credit-split — Set credit split percentage (owner only).
@@ -325,13 +302,8 @@ pub async fn pool_set_credit_split(
         },
     )
     .await?;
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// PUT /api/pool/contribution — Set contribution level for a member device (owner only).
@@ -350,13 +322,8 @@ pub async fn pool_set_contribution(
         },
     )
     .await?;
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({"status": "ok"}))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// POST /api/pool/generate-code — Generate a short invite code (owner only).
@@ -367,16 +334,11 @@ pub async fn pool_generate_code(
 
     send_pool_command(&state, PoolCommand::GenerateInviteCode { reply: tx }).await?;
 
-    match rx.await {
-        Ok(Ok(code)) => Ok(Json(serde_json::json!({
-            "status": "ok",
-            "code": code,
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    let code = await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "code": code,
+    })))
 }
 
 /// POST /api/pool/join — Join a pool using an invite code.
@@ -395,16 +357,11 @@ pub async fn pool_join(
 
     send_pool_command(&state, PoolCommand::JoinWithCode { code, reply: tx }).await?;
 
-    match rx.await {
-        Ok(Ok(())) => Ok(Json(serde_json::json!({
-            "status": "ok",
-            "message": "Join request broadcast. You will be added to the pool once the owner's node processes the request.",
-        }))),
-        Ok(Err(e)) => Err(ApiError(e)),
-        Err(_) => Err(ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Pool manager unavailable".into(),
-        ))),
-    }
+    await_pool_reply(rx).await?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "message": "Join request broadcast. You will be added to the pool once the owner's node processes the request.",
+    })))
 }
 
 // ---- Helpers ----

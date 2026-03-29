@@ -391,6 +391,7 @@ impl KvCacheManager {
     }
 
     /// Get the number of active sessions.
+    #[cfg(test)]
     pub fn active_sessions(&self) -> usize {
         self.sessions.len()
     }

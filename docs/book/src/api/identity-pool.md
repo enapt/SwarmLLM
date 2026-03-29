@@ -83,7 +83,7 @@ Set this device's nickname. Body: `{"name": "Gaming PC"}`
 Set credit split percentage (owner only). Body: `{"pct": 20}` (0-50)
 
 #### PUT /api/pool/contribution
-Set per-member contribution level override. Body: `{"level": "full"}` (minimal/moderate/full)
+Set per-member contribution level override. Body: `{"node_id": "...", "level": 75}` (integer 0–100)
 
 #### GET /api/pool/invitations
 List pending invitations for this node.

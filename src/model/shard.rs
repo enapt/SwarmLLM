@@ -82,7 +82,7 @@ impl ShardStore {
     /// (placeholder from HF download before hashes are known) skip verification.
     /// This should ONLY be true for the local HF download path.
     /// Network-received shards must always have a real hash.
-    pub fn verify_shard_with_options(
+    fn verify_shard_with_options(
         &self,
         model_id: &ModelId,
         info: &ShardInfo,

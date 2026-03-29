@@ -1132,12 +1132,17 @@ When a requested model isn't available locally or on the swarm, requests can opt
 ### Pool API
 - `GET  /api/pool/state` — Current pool membership state
 - `POST /api/pool/create` — Create a new device pool
-- `POST /api/pool/invite` — Invite a node to the pool
+- `POST /api/pool/invite` — Invite a node to the pool (by node_id)
 - `POST /api/pool/accept` — Accept a pool invitation
 - `POST /api/pool/remove` — Remove a member from the pool
 - `POST /api/pool/leave` — Leave the current pool
 - `GET  /api/pool/invitations` — List pending invitations
 - `GET  /api/pool/leaderboard` — Pool member contribution rankings
+- `POST /api/pool/generate-code` — Generate an 8-char invite code (owner only)
+- `POST /api/pool/join` — Join a pool via invite code
+- `POST /api/pool/device-name` — Set this device's display name
+- `PUT  /api/pool/credit-split` — Set credit split percentage (owner only)
+- `PUT  /api/pool/contribution` — Set per-member contribution level (owner only, `{"node_id": "...", "level": 75}` where level is 0–100)
 
 ### Discovery
 - `GET    /api/admin/network-code` — Get shareable invite code, multiaddr, and network phase

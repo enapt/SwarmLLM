@@ -522,8 +522,6 @@
   "shard.tooltip_peer_downloading": "Peer downloading ({pct}%)",
   "shard.tooltip_unavailable": "Not available",
   "shard.tooltip_click": "Click to manage",
-  "setup.save_failed": "Setup failed — could not save configuration",
-  "setup.save_error": "Setup failed: {error}",
   "setup.connection_error": "Connection error: {error}",
   "settings.network_vram": "swarm network VRAM",
   "settings.your_gpu": "your GPU: ",

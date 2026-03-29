@@ -1032,6 +1032,11 @@ impl SplitModel {
                     } else {
                         (None, None, None)
                     };
+                    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
+                        return Err(SwarmError::Internal(format!(
+                            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
+                        )));
+                    }
 
                     let ssm_alpha = ct
                         .tensor(&mut file, &format!("{prefix}.ssm_alpha.weight"), &device)
@@ -1128,6 +1133,11 @@ impl SplitModel {
                     } else {
                         (None, None, None)
                     };
+                    if wqkv.is_none() && (wq.is_none() || wk.is_none() || wv.is_none()) {
+                        return Err(SwarmError::Internal(format!(
+                            "{prefix}: missing attn_qkv and individual attn_q/k/v weights"
+                        )));
+                    }
                     let wo = ct
                         .tensor(&mut file, &format!("{prefix}.attn_output.weight"), &device)
                         .map_err(|e| SwarmError::Internal(format!("{prefix}.attn_output: {e}")))?;
@@ -1812,7 +1822,7 @@ impl SplitModel {
             }
         }
         if eos_tokens.is_empty() {
-            tracing::warn!("No EOS token found in GGUF metadata, using default [2]");
+            tracing::warn!(arch = %arch, "No EOS token found in GGUF metadata, using default [2]");
             eos_tokens.push(2);
         } else {
             tracing::info!(eos_tokens = ?eos_tokens, "Loaded EOS tokens from GGUF");

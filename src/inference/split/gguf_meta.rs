@@ -297,11 +297,6 @@ impl GgufTokenizerMeta {
             .unwrap_or_default()
     }
 
-    /// Get vocab size.
-    pub fn vocab_size(&self) -> usize {
-        self.vocab.len()
-    }
-
     /// Get EOS token IDs with architecture-specific fallbacks.
     pub fn eos_tokens_with_arch_fallback(&self, arch: &str) -> Vec<u32> {
         let mut ids = self.eos_token_ids.clone();

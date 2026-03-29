@@ -50,7 +50,8 @@
           var ctxLabel = m.context && m.context > 0 ? ' \u00B7 ' + I18n.t('models.context_k_abbr', { n: Math.round(m.context / 1000) }) : '';
           chip.querySelector('input').value = m.id;
           chip.querySelector('.chip-name').textContent = displayName;
-          chip.querySelector('.chip-type').textContent = m.type + ctxLabel;
+          var typeLabel = m.type === 'local' ? I18n.t('compare.filter_local') : I18n.t('compare.filter_cloud');
+          chip.querySelector('.chip-type').textContent = typeLabel + ctxLabel;
           chip.title = m.id + (ctxLabel ? ' (' + m.context + ' tokens)' : '');
           chip.querySelector('input').addEventListener('change', function() {
             chip.classList.toggle('selected', this.checked);

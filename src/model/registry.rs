@@ -145,6 +145,7 @@ impl ModelRegistry {
 
     /// Get the cached holder count for a shard without allocating.
     /// This may undercount at scale — use DHT queries for accurate counts.
+    #[cfg(test)]
     pub fn shard_holder_count(&self, shard_id: &ShardId) -> usize {
         self.shard_holders
             .get(shard_id)
