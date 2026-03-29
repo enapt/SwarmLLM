@@ -66,7 +66,6 @@ Every configuration option, organized by section.
 | `speculative_gamma` | integer | `4` | Draft tokens per verification step |
 | `draft_model_path` | path | none | Path to draft model |
 | `max_split_model_memory_mb` | integer | none | Max GPU memory for split model cache |
-| `chunked_prefill_size` | integer | `512` | Chunk size for long-prompt prefill. `0` = disable |
 | `tp_max_latency_ms` | integer | `10` | Max peer latency (ms) for tensor parallelism groups |
 | `local_embedding_privacy` | boolean | `false` | Embed tokens locally before sending to first segment. Remote nodes never see raw token IDs |
 | `encrypted_pipeline` | boolean | `false` | Force first+last segment to local node (boomerang topology). No remote sees plaintext. Adds ~1 RTT/token. Per-model override via API. Requires shard 0 + final shard locally |
@@ -120,7 +119,7 @@ Every configuration option, organized by section.
 |---|---|---|---|
 | `max_pool_size` | integer | `10` | Max devices in a pool |
 | `invitation_ttl_hours` | integer | `24` | Invitation validity period |
-| `rate_limit_per_hour` | integer | `3` | Max pool operations per hour |
+| `rate_limit_per_hour` | integer | `10` | Max pool operations per hour |
 | `gossip_interval_secs` | integer | `600` | Pool state gossip interval |
 
 ## `[pool.credit_rates]` — Credit Rates
@@ -140,8 +139,6 @@ Every configuration option, organized by section.
 |---|---|---|---|
 | `auto_update` | string | `"stable"` | Policy: `"disabled"`, `"stable"`, `"all"` |
 | `check_interval_hours` | integer | `6` | Update check frequency |
-| `auto_restart` | boolean | `true` | Restart after updating |
-| `keep_versions` | integer | `3` | Old versions to keep |
 
 ## `[identity]` — Your Identity
 

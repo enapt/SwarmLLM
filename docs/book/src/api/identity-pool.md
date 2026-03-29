@@ -101,7 +101,7 @@ Per-pool credit rate overrides.
 - **Per-device stats**: VRAM, shards hosted, forwards served, uptime, models hosted
 - **Combined VRAM**: Aggregate GPU memory across all linked devices
 - **Credit split**: Owner configures what percentage (0-50%) members keep vs forward
-- **Max 20 devices** per pool, 10 pool operations per hour rate limit
+- **Max 10 devices** per pool (configurable), 10 pool operations per hour rate limit
 
 ## Pool Security
 

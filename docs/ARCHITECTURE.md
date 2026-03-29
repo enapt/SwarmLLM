@@ -632,7 +632,7 @@ Main Device (owner)                 Linked Device (member)
 - Per-device stats (VRAM, shards hosted, forwards served, uptime)
 - Combined VRAM display across all pool devices
 - Credit split configuration (0-50% kept by member, rest to owner)
-- Max 20 devices per pool, 10 operations/hour rate limit
+- Max 10 devices per pool (configurable), 10 operations/hour rate limit
 
 **Credit forwarding**: When a pool member earns credits, `forward_credits_to_owner()` in
 `pool/forward.rs` deducts the forward amount (respecting `member_credit_split_pct`) and sends a
@@ -987,7 +987,7 @@ shared key that any node can overwrite. Each node publishes only its own shard h
 - Credit forwarding: member inference earnings → `PoolCreditForward` (dual-signed) → `apply_credit_direct` to owner's balance
 - Pool leaderboard aggregates member contributions
 - Invitation expiry checked at API layer with clear error messages
-- Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=3
+- Config: max_pool_size=10, invitation_ttl_hours=24, rate_limit_per_hour=10
 
 **Pool join security hardening** (6-agent sweep):
 - Join request **signature verification is transport-authenticated**: the dispatch layer sets the requester `NodeId` from the verified Noise-authenticated sender, not from a self-reported field in the message body. Forgery of join origin is not possible.
@@ -1118,7 +1118,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `GET     /api/admin/download-queue` — Download queue with priorities and progress
 
 ### HuggingFace Integration
-- `GET  /api/admin/hf/search?q=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)
+- `GET  /api/admin/hf/search?query=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)
 - `GET  /api/admin/hf/probe?repo_id=...&filename=...` — Probe remote GGUF (size, shard layout)
 - `POST /api/admin/hf/download` — Download full GGUF model
 - `POST /api/admin/hf/download-shards` — Download specific shard indices (supports `peer_fair_share` for smart distribution)

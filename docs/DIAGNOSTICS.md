@@ -105,10 +105,8 @@ All three streaming paths are instrumented with timing and error reporting:
 
 | Level | What | Where |
 |-------|------|-------|
-| WARN  | `DIAG: split stream model not found` — model evicted during request | openai.rs |
-| ERROR | `DIAG: split stream tokenize/prefill/forward/sample failed` — compute error | openai.rs |
-| INFO  | `DIAG: split stream prefill complete` — `prefill_ms`, `prompt_tokens` | openai.rs |
-| INFO  | `DIAG: split stream decode loop complete` — `decode_ms`, `tok_per_sec`, `prefill_ms` | openai.rs |
+| DEBUG | `DIAG: split stream model not found` — model evicted during request | openai.rs |
+| DEBUG | `DIAG: split stream decode loop complete (subprocess)` — `decode_ms`, `tok_per_sec` | openai.rs |
 | WARN  | `DIAG: split stream client disconnected mid-decode` — `token_count`, `elapsed_ms` | openai.rs |
 | INFO  | `DIAG: split stream completed` — `elapsed_ms`, `token_count` | openai.rs |
 
