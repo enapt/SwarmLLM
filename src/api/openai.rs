@@ -1584,8 +1584,6 @@ async fn router_inference(
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
     let inference_req = InferenceRequest {
         id: uuid::Uuid::new_v4(),
         model_id: ModelId(req.model.clone()),
@@ -1599,23 +1597,7 @@ async fn router_inference(
         lora_adapter: req.lora_adapter.clone(),
     };
 
-    router_tx
-        .send(RouterCommand::Submit {
-            request: inference_req,
-            result_tx,
-        })
-        .await
-        .map_err(|_| {
-            ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router unavailable".into(),
-            ))
-        })?;
-
-    let output = result_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Router dropped the request".into(),
-        ))
-    })??;
+    let output = super::submit_to_router(&router_tx, inference_req).await?;
 
     let response = ChatCompletionResponse {
         id: request_id,

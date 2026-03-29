@@ -44,8 +44,8 @@
 
     detectHardware: async function() {
       try {
-        var resp = await App.authFetch('/api/admin/stats');
-        var data = await resp.json();
+        var result = await App.data.loadStats();
+        var data = (result && result.stats) ? result.stats : {};
         App.setup.hwData = data.hardware || {};
         var gpuName = App.setup.hwData.gpu_name || I18n.t('setup.cpu_only');
         var vramMb = App.setup.hwData.gpu_vram_mb || 0;

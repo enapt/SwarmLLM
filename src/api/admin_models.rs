@@ -961,8 +961,9 @@ pub async fn delete_model(
         }
     }
 
-    // Remove from acquisition_progress
+    // Remove from acquisition_progress and request counts
     shared.models.acquisition_progress.remove(&mid);
+    shared.models.model_request_counts.remove(&mid);
 
     // Remove from gguf_meta
     shared.gguf_meta.remove(&mid);

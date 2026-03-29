@@ -17,7 +17,7 @@ impl ModelManifestExt for ModelManifest {
     fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError> {
         let manifest_path = dir.join("manifest.json");
         if !manifest_path.exists() {
-            return Err(SwarmError::Config(format!(
+            return Err(SwarmError::Internal(format!(
                 "Manifest not found: {}",
                 manifest_path.display()
             )));
@@ -29,7 +29,7 @@ impl ModelManifestExt for ModelManifest {
 
         // Reject legacy manifests at load time — v2 tensor entries are required
         if let Err(e) = manifest.validate_version() {
-            return Err(SwarmError::Config(format!(
+            return Err(SwarmError::Internal(format!(
                 "Rejecting manifest {}: {e}. Delete and re-download shards.",
                 manifest_path.display()
             )));

@@ -16,6 +16,14 @@ use crate::types::{
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
 };
 
+// Timeout constants for remote operations
+const VISION_ENCODE_TIMEOUT_SECS: u64 = 120;
+const PREFILL_SECS_PER_LAYER: u64 = 15;
+const DECODE_SECS_PER_LAYER: u64 = 2;
+const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
+const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
+const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
+
 /// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
 /// Uses the centralized `GgufTokenizerMeta` extractor.
 pub fn template_from_header(
@@ -66,22 +74,12 @@ impl CachedDecoder {
     }
 
     fn decode_token_bytes(&self, token_str: &str) -> Vec<u8> {
-        if self.is_sentencepiece {
-            if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
-                if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
-                    return vec![byte];
-                }
-            }
-            if token_str.starts_with('<') && token_str.ends_with('>') {
-                return vec![];
-            }
-            token_str.replace('\u{2581}', " ").into_bytes()
-        } else {
-            token_str
-                .chars()
-                .filter_map(|c| self.byte_decoder.get(&c).copied())
-                .collect()
-        }
+        // Delegate to the shared decode logic in BpeTokenizer::decode_token_impl.
+        crate::inference::tokenizer::decode_token_impl(
+            token_str,
+            self.is_sentencepiece,
+            &self.byte_decoder,
+        )
     }
 }
 
@@ -334,7 +332,7 @@ impl PipelineExecutor {
         }
 
         // Wait for response with timeout
-        let timeout = std::time::Duration::from_secs(120);
+        let timeout = std::time::Duration::from_secs(VISION_ENCODE_TIMEOUT_SECS);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => {
                 self.shared_state
@@ -1716,14 +1714,16 @@ impl PipelineExecutor {
     /// Compute a reasonable timeout for a remote segment based on workload.
     ///
     /// Prefill (large activation = many input tokens) is much slower than decode
-    /// (single token). Budget 15s/layer for prefill, 2s/layer for decode, with
-    /// a 30s floor and 600s ceiling.
+    /// (single token). Budget per-layer time with a floor and ceiling.
     fn compute_segment_timeout(num_layers: u32, activation_bytes: usize) -> Duration {
-        // Heuristic: activation > 100KB means prefill, otherwise decode
-        let is_prefill = activation_bytes > 100_000;
-        let per_layer_secs: u64 = if is_prefill { 15 } else { 2 };
+        let is_prefill = activation_bytes > PREFILL_ACTIVATION_THRESHOLD_BYTES;
+        let per_layer_secs: u64 = if is_prefill {
+            PREFILL_SECS_PER_LAYER
+        } else {
+            DECODE_SECS_PER_LAYER
+        };
         let base = (num_layers as u64) * per_layer_secs;
-        let timeout = base.clamp(30, 600);
+        let timeout = base.clamp(SEGMENT_TIMEOUT_MIN_SECS, SEGMENT_TIMEOUT_MAX_SECS);
         Duration::from_secs(timeout)
     }
 
@@ -1854,12 +1854,19 @@ impl PipelineExecutor {
                     adapter_id: None,
                 };
 
+                // Use peer_id_map (persistent, survives disconnects) first,
+                // fall back to peer_registry — same as the normal forward path.
                 let target_peer_bytes = match self
                     .shared_state
-                    .peer_registry
+                    .peer_id_map
                     .get(&backup.node_id)
-                    .and_then(|p| p.peer_id_bytes.clone())
-                {
+                    .map(|r| r.value().clone())
+                    .or_else(|| {
+                        self.shared_state
+                            .peer_registry
+                            .get(&backup.node_id)
+                            .and_then(|p| p.peer_id_bytes.clone())
+                    }) {
                     Some(b) => b,
                     None => {
                         self.shared_state.pending_layer_results.remove(&request_id);

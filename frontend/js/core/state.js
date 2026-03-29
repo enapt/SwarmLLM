@@ -14,7 +14,7 @@ window.App = {
     pollTimers: [],
     creditHistory: [],
     activeAcquisitions: {},
-    _swarmModelSort: (function() { try { return localStorage.getItem('swarmllm_model_sort') || 'az'; } catch(e) { return 'az'; } })(),
+    _swarmModelSort: (function() { try { return localStorage.getItem('swarmllm_model_sort') || 'az'; } catch(e) { return 'az'; } })(), // raw string — MODEL_SORT_KEY not yet defined at object literal evaluation time
     isStreaming: false,
     currentModel: '',
     currentSessionId: null,

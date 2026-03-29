@@ -1,6 +1,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::error::SwarmError;
+#[cfg(test)]
 use crate::identity::Identity;
 use crate::types::{CreditTransaction, NodeId, TransactionReason};
 
@@ -9,6 +10,7 @@ use crate::types::{CreditTransaction, NodeId, TransactionReason};
 /// The serving node creates the transaction and signs it first.
 /// The resulting transaction has `signature_from` populated
 /// but `signature_to` empty (to be co-signed by the requesting node).
+#[cfg(test)]
 pub fn create_transaction(
     identity: &Identity,
     from: NodeId,
@@ -40,6 +42,7 @@ pub fn create_transaction(
 /// Co-sign a transaction as the requesting node.
 ///
 /// Verifies the serving node's signature first, then adds our own.
+#[cfg(test)]
 pub fn cosign_transaction(
     identity: &Identity,
     tx: &mut CreditTransaction,
@@ -65,6 +68,7 @@ pub fn cosign_transaction(
 
 /// Verify both signatures on a fully-signed transaction.
 /// Also checks for UUID replay: rejects transactions already recorded in the database.
+#[cfg(test)]
 pub fn verify_transaction(
     tx: &CreditTransaction,
     from_key: &VerifyingKey,

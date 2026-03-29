@@ -140,7 +140,7 @@ impl SplitModel {
         tracing::info!(arch = %model_arch, "Detected model architecture");
 
         if !model_arch.is_supported() {
-            return Err(SwarmError::Internal(format!(
+            return Err(SwarmError::Validation(format!(
                 "Unsupported model architecture '{}'. Supported architectures: {}",
                 arch_str,
                 ModelArch::supported_list().join(", ")
@@ -1508,7 +1508,11 @@ impl SplitModel {
                             .collect();
                         handles
                             .into_iter()
-                            .map(|h| h.join().expect("layer load thread panicked"))
+                            .map(|h| {
+                                h.join().unwrap_or_else(|_| {
+                                    Err(SwarmError::Internal("layer load thread panicked".into()))
+                                })
+                            })
                             .collect()
                     });
                 for result in layer_results {

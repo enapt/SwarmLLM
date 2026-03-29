@@ -94,17 +94,7 @@ impl NodeConfig {
 
     /// Path to a specific model's directory (data_dir/models/<model_id>).
     pub fn model_dir(&self, model_id: &str) -> PathBuf {
-        // Sanitize: only allow alphanumeric, dash, dot, underscore
-        let safe: String = model_id
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '.' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let safe = crate::model::shard::sanitize_path_component(model_id);
         self.data_dir.join("models").join(safe)
     }
 

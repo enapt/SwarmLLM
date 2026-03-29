@@ -252,26 +252,7 @@ impl BpeTokenizer {
     /// For GPT-2: reverses the GPT-2 unicode byte encoding.
     /// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.
     pub fn decode_token(&self, token_str: &str) -> Vec<u8> {
-        if self.is_sentencepiece {
-            // Handle byte fallback tokens like <0x0A> (newline)
-            if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
-                if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
-                    return vec![byte];
-                }
-            }
-            // Special tokens like <s>, </s>, <unk> → empty (don't emit)
-            if token_str.starts_with('<') && token_str.ends_with('>') {
-                return vec![];
-            }
-            // SentencePiece: ▁ (U+2581) → space, everything else is raw UTF-8
-            token_str.replace('\u{2581}', " ").into_bytes()
-        } else {
-            // GPT-2: reverse byte encoding
-            token_str
-                .chars()
-                .map(|ch| self.byte_decoder.get(&ch).copied().unwrap_or(b'?'))
-                .collect()
-        }
+        decode_token_impl(token_str, self.is_sentencepiece, &self.byte_decoder)
     }
 
     /// Return a reference to the byte decoder mapping (for caching outside the lock).
@@ -290,6 +271,36 @@ impl BpeTokenizer {
 pub enum SplitTokenizer {
     Bpe(Box<BpeTokenizer>),
     SentencePiece(SpmTokenizer),
+}
+
+/// Decode a BPE token string back to UTF-8 bytes (shared logic for BpeTokenizer and CachedDecoder).
+/// For GPT-2: reverses the GPT-2 unicode byte encoding.
+/// For SentencePiece: converts ▁ back to space, handles <0xNN> byte tokens.
+pub fn decode_token_impl(
+    token_str: &str,
+    is_sentencepiece: bool,
+    byte_decoder: &HashMap<char, u8>,
+) -> Vec<u8> {
+    if is_sentencepiece {
+        // Handle byte fallback tokens like <0x0A> (newline)
+        if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
+            if let Ok(byte) = u8::from_str_radix(&token_str[3..5], 16) {
+                return vec![byte];
+            }
+        }
+        // Special tokens like <s>, </s>, <unk> → empty (don't emit)
+        if token_str.starts_with('<') && token_str.ends_with('>') {
+            return vec![];
+        }
+        // SentencePiece: ▁ (U+2581) → space, everything else is raw UTF-8
+        token_str.replace('\u{2581}', " ").into_bytes()
+    } else {
+        // GPT-2: reverse byte encoding
+        token_str
+            .chars()
+            .map(|ch| byte_decoder.get(&ch).copied().unwrap_or(b'?'))
+            .collect()
+    }
 }
 
 /// SentencePiece merge-based tokenizer matching llama.cpp's SPM algorithm.

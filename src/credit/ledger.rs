@@ -82,7 +82,7 @@ impl CreditLedger {
                     );
                     *bal = restored_balance;
                 } else {
-                    tracing::error!("CRITICAL: Failed to restore credit balance — lock unavailable at startup. Balance may be zero.");
+                    tracing::error!(node_id = %node_id, "CRITICAL: Failed to restore credit balance — lock unavailable at startup. Balance may be zero.");
                 }
             }
         }

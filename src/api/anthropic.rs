@@ -370,8 +370,60 @@ pub async fn messages(
         }
     }
 
+    // Validate temperature range (Anthropic spec: 0.0 to 1.0, we allow up to 2.0)
+    if let Some(t) = req.temperature {
+        if !(0.0..=2.0).contains(&t) {
+            return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                "temperature must be between 0 and 2, got {}",
+                t
+            ))));
+        }
+    }
+
+    // SEC: Cap individual message content size and total prompt size
+    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
+    let mut total_content_bytes: usize = 0;
+    for msg in &req.messages {
+        let content_len = match &msg.content {
+            AnthropicContent::Text(s) => s.len(),
+            AnthropicContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::Image { source } => source.to_string().len(),
+                    ContentBlock::ToolUse {
+                        input, name, id, ..
+                    } => name.len() + id.len() + input.to_string().len(),
+                    ContentBlock::ToolResult { content, .. } => {
+                        content.as_ref().map(|c| c.to_string().len()).unwrap_or(0)
+                    }
+                    ContentBlock::Thinking { thinking } => thinking.len(),
+                    ContentBlock::RedactedThinking { data } => data.len(),
+                })
+                .sum(),
+        };
+        if content_len > MAX_MESSAGE_CONTENT_BYTES {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "Message content too large (max 2MB per message)".into(),
+            )));
+        }
+        total_content_bytes = total_content_bytes.saturating_add(content_len);
+    }
+    if total_content_bytes > MAX_TOTAL_PROMPT_BYTES {
+        return Err(ApiError(crate::error::SwarmError::Validation(format!(
+            "Total prompt content too large ({} bytes, max {}). Reduce your messages.",
+            total_content_bytes, MAX_TOTAL_PROMPT_BYTES
+        ))));
+    }
+
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     let model = resolve_model(&req.model).to_string();
+
+    // Track requests made by this node (parity with OpenAI handler)
+    if let Ok(mut stats) = state.shared_state.metrics.node_stats.try_write() {
+        stats.requests_made += 1;
+    }
 
     tracing::info!(
         request_id = %request_id,
@@ -739,8 +791,6 @@ async fn anthropic_non_stream(
     request_id: String,
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
     let inference_req = InferenceRequest {
         id: uuid::Uuid::new_v4(),
         model_id: ModelId(model.clone()),
@@ -754,23 +804,7 @@ async fn anthropic_non_stream(
         lora_adapter: None,
     };
 
-    router_tx
-        .send(RouterCommand::Submit {
-            request: inference_req,
-            result_tx,
-        })
-        .await
-        .map_err(|_| {
-            ApiError(crate::error::SwarmError::ServiceUnavailable(
-                "Router unavailable".into(),
-            ))
-        })?;
-
-    let output = result_rx.await.map_err(|_| {
-        ApiError(crate::error::SwarmError::ServiceUnavailable(
-            "Router dropped the request".into(),
-        ))
-    })??;
+    let output = super::submit_to_router(&router_tx, inference_req).await?;
 
     let response = MessagesResponse {
         id: request_id,

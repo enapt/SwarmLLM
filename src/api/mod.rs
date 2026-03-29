@@ -19,6 +19,33 @@ pub(crate) const MAX_TOOL_NAME_LEN: usize = 256;
 pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
 pub(crate) const MAX_STOP_SEQUENCES: usize = 16;
 
+/// Submit a non-streaming inference request to the router and await the result.
+pub(crate) async fn submit_to_router(
+    router_tx: &tokio::sync::mpsc::Sender<crate::inference::router::RouterCommand>,
+    inference_req: crate::types::InferenceRequest,
+) -> Result<crate::inference::router::InferenceOutput, crate::error::ApiError> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    router_tx
+        .send(crate::inference::router::RouterCommand::Submit {
+            request: inference_req,
+            result_tx,
+        })
+        .await
+        .map_err(|_| {
+            crate::error::ApiError(crate::error::SwarmError::ServiceUnavailable(
+                "Router unavailable".into(),
+            ))
+        })?;
+    result_rx
+        .await
+        .map_err(|_| {
+            crate::error::ApiError(crate::error::SwarmError::ServiceUnavailable(
+                "Router dropped the request".into(),
+            ))
+        })?
+        .map_err(crate::error::ApiError)
+}
+
 pub mod admin;
 pub mod admin_hf;
 pub mod admin_models;

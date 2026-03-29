@@ -375,7 +375,6 @@
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.credit_split_label": "{kept}% kept by member, {forwarded}% to owner",
   "pool.failed_generic": "Failed: {error}",
-  "pool.failed_unlink": "Failed to unlink: {error}",
   "chat.credit_activity_empty": "Credit activity will appear here",
   "chat.avatar_ai": "AI",
   "chat.encrypted_title": "Sent with E2E encryption",

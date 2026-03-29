@@ -623,7 +623,7 @@ impl PoolManager {
                     return;
                 }
             } else {
-                tracing::warn!("Credit forward received but no pool state — rejecting");
+                tracing::warn!(from = %forward.from_node_id, "Credit forward received but no pool state — rejecting");
                 return;
             }
         }
@@ -692,7 +692,7 @@ impl PoolManager {
         let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&state.pool_id.0) {
             Ok(k) => k,
             Err(_) => {
-                tracing::warn!("Invalid owner key in pool state gossip");
+                tracing::warn!(pool_id = %hex::encode(&state.pool_id.0[..8]), "Invalid owner key in pool state gossip");
                 return;
             }
         };
@@ -708,7 +708,7 @@ impl PoolManager {
         let sig_bytes: &[u8; 64] = match state.owner_signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => {
-                tracing::warn!("Pool state gossip has invalid signature length");
+                tracing::warn!(pool_id = %state.pool_id, "Pool state gossip has invalid signature length");
                 return;
             }
         };
@@ -813,7 +813,7 @@ impl PoolManager {
         let owner_key = match ed25519_dalek::VerifyingKey::from_bytes(&invitation.pool_id.0) {
             Ok(k) => k,
             Err(_) => {
-                tracing::warn!("Invalid owner key in blinded invitation");
+                tracing::warn!(pool_id = %hex::encode(&invitation.pool_id.0[..8]), "Invalid owner key in blinded invitation");
                 return;
             }
         };
@@ -871,7 +871,7 @@ impl PoolManager {
                 Err(_) => return,
             };
         if crypto::verify_acceptance(&acceptance, &invitee_key).is_err() {
-            tracing::warn!("Invalid acceptance signature");
+            tracing::warn!(invitee = %acceptance.invitee_node_id, "Invalid acceptance signature");
             return;
         }
 
@@ -880,7 +880,7 @@ impl PoolManager {
             .pending_invitations
             .contains_key(&acceptance.invitation_id)
         {
-            tracing::warn!("Acceptance for unknown invitation");
+            tracing::warn!(invitation_id = %acceptance.invitation_id, invitee = %acceptance.invitee_node_id, "Acceptance for unknown invitation");
             return;
         }
 
@@ -981,7 +981,7 @@ impl PoolManager {
                 Err(_) => return,
             };
             if crypto::verify_removal(&removal, &owner_key).is_err() {
-                tracing::warn!("Invalid removal signature");
+                tracing::warn!(pool_id = %removal.pool_id, "Invalid removal signature");
                 return;
             }
 
@@ -1032,7 +1032,7 @@ impl PoolManager {
         let sig_bytes: &[u8; 64] = match signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => {
-                tracing::warn!("Member-left notice has invalid signature length");
+                tracing::warn!(node = %node_id, "Member-left notice has invalid signature length");
                 return;
             }
         };

@@ -84,10 +84,9 @@
       try {
         // Get our node ID for owner detection
         if (!this._myNodeId) {
-          var statsResp = await App.authFetch('/api/admin/stats');
-          if (statsResp.ok) {
-            var stats = await statsResp.json();
-            this._myNodeId = stats.node_id || null;
+          var statsResult = await App.data.loadStats();
+          if (statsResult && statsResult.stats) {
+            this._myNodeId = statsResult.stats.node_id || null;
           }
         }
 
@@ -513,10 +512,9 @@
         // Delay slightly to let the API key load
         await new Promise(function (r) { setTimeout(r, 2000); });
         if (!this._myNodeId) {
-          var statsResp = await App.authFetch('/api/admin/stats');
-          if (statsResp.ok) {
-            var stats = await statsResp.json();
-            this._myNodeId = stats.node_id || null;
+          var statsResult = await App.data.loadStats();
+          if (statsResult && statsResult.stats) {
+            this._myNodeId = statsResult.stats.node_id || null;
           }
         }
         var resp = await App.authFetch('/api/pool/state');

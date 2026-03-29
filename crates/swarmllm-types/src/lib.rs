@@ -257,6 +257,7 @@ impl ModelManifest {
     }
 
     /// Set schema_version to the current version before serialization.
+    #[cfg(test)]
     pub fn stamp_version(&mut self) {
         self.schema_version = MANIFEST_SCHEMA_VERSION;
     }
@@ -707,7 +708,7 @@ pub enum SwarmMessage {
     // Credits — gossip
     CreditGossip(CreditGossip),
 
-    // Governance
+    // Governance (wire-compat only — governance module removed, see deferred items)
     ModelVote(ModelVote),
 
     // Identity

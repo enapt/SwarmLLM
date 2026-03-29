@@ -1267,6 +1267,13 @@ impl NetworkManager {
         self.shared_state
             .peer_registry
             .insert(node_id.clone(), peer_info);
+        // Restore persisted trust score from DB (survives restarts)
+        let persisted_trust = self.shared_state.credits.trust_manager.get_trust(&node_id);
+        if (persisted_trust - 0.5_f32).abs() > f32::EPSILON {
+            if let Some(mut peer) = self.shared_state.peer_registry.get_mut(&node_id) {
+                peer.trust_score = persisted_trust;
+            }
+        }
         let _ = self
             .shared_state
             .events
