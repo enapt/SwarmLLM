@@ -332,6 +332,7 @@ impl KvCacheManager {
     }
 
     /// Check if a session's pipeline is still valid (all nodes still reachable).
+    #[cfg(test)]
     pub fn validate_pipeline(
         &self,
         session_id: &SessionId,
@@ -528,6 +529,7 @@ pub struct PersistedSession {
 }
 
 /// Result of pipeline validation for a KV-cache session.
+#[cfg(test)]
 #[derive(Debug)]
 pub enum PipelineValidity {
     /// Pipeline is intact, KV-cache can be reused.

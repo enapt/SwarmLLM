@@ -398,7 +398,6 @@
   "models.tip_run_local": "本地运行",
   "models.tip_host_shards": "可托管分片",
   "models.tip_exceeds_vram": "超出 VRAM",
-  "models.badge_on_swarm": "Swarm 上 — {count} 个分片",
   "models.badge_new": "网络新成员",
   "models.demand_high": "高需求",
   "models.demand_medium": "中需求",
@@ -493,7 +492,6 @@
   "models.enc_ready": "Ready (has first + last shard)",
   "models.enc_missing_first": "Missing: first shard",
   "models.enc_missing_last": "Missing: last shard",
-  "models.enc_no_plaintext": "No remote node sees plaintext.",
   "chat.model_unavailable": "Model no longer available",
   "chat.count_new": "New",
   "chat.count_one": "1 message",
@@ -902,5 +900,8 @@
   "network.peer_address_aria": "Peer address",
   "models.hf_score_pts": "{score} pts",
   "models.context_abbr": "{n} ctx",
-  "models.context_k_abbr": "{n}k ctx"
+  "models.context_k_abbr": "{n}k ctx",
+  "models.max_tokens_label": "{n} max",
+  "models.pricing_in": "${price}/1K in",
+  "models.pricing_out": "${price}/1K out"
 }

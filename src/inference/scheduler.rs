@@ -724,7 +724,8 @@ impl PipelineScheduler {
         _manifest: &ModelManifest,
     ) -> Vec<TensorParallelGroup> {
         let local_id = self.shared_state.identity.node_id().clone();
-        let max_tp_size = 4; // Cap TP group size
+        const MAX_TP_GROUP_SIZE: usize = 4;
+        let max_tp_size = MAX_TP_GROUP_SIZE;
 
         let mut groups = Vec::new();
 

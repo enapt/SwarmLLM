@@ -327,11 +327,11 @@
             var m = item.meta;
             if (m.owned_by) metaParts.push(m.owned_by);
             if (m.context_length || m.context_window) metaParts.push(I18n.t('models.context_abbr', { n: (m.context_length || m.context_window).toLocaleString() }));
-            if (m.max_tokens) metaParts.push(m.max_tokens.toLocaleString() + ' max');
+            if (m.max_tokens) metaParts.push(I18n.t('models.max_tokens_label', { n: m.max_tokens.toLocaleString() }));
             if (m.pricing) {
               var p = m.pricing;
-              if (p.prompt !== undefined) metaParts.push('$' + p.prompt + '/1K in');
-              if (p.completion !== undefined) metaParts.push('$' + p.completion + '/1K out');
+              if (p.prompt !== undefined) metaParts.push(I18n.t('models.pricing_in', { price: p.prompt }));
+              if (p.completion !== undefined) metaParts.push(I18n.t('models.pricing_out', { price: p.completion }));
             }
             if (m.status && m.status !== 'available') metaParts.push(m.status);
             if (metaParts.length > 0) {

@@ -828,6 +828,11 @@ impl PoolManager {
             return;
         }
 
+        // Prune expired invitations before inserting to prevent unbounded growth
+        let now = chrono::Utc::now();
+        self.pending_invitations
+            .retain(|_, inv| inv.expires_at > now);
+
         // Store as pending
         self.pending_invitations
             .insert(invitation.id, invitation.clone());

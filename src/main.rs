@@ -419,15 +419,13 @@ async fn run_update_command(check_only: bool) -> anyhow::Result<()> {
 }
 
 async fn query_status(port: u16, data_dir: &std::path::Path) -> anyhow::Result<()> {
-    // Read the API key from the plain file written by the daemon
-    let key_path = data_dir.join("api_key");
-    let api_key = std::fs::read_to_string(&key_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let api_key = read_api_key(data_dir).unwrap_or_default();
 
     if api_key.is_empty() {
-        eprintln!("Warning: no API key found at {}", key_path.display());
+        eprintln!(
+            "Warning: no API key found at {}/api_key",
+            data_dir.display()
+        );
         eprintln!("         (is the daemon running with this data directory?)");
     }
 

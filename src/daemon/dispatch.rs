@@ -326,7 +326,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                tracing::warn!("VisionEncodeRequest rejected — forward semaphore full");
+                                                tracing::warn!(sender = %authenticated_sender.as_ref().unwrap(), "VisionEncodeRequest rejected — forward semaphore full");
                                                 continue;
                                             }
                                         };
@@ -493,7 +493,17 @@ pub(crate) async fn dispatch_network_messages(
                                         {
                                             let mut ag = shared_state.credits.anti_gaming.lock().await;
                                             match ag.check_and_record_transaction(&tx.from, &tx.to, tx.amount) {
-                                                Ok(_decision) => {}
+                                                Ok(decision) => {
+                                                    if decision == crate::credit::anti_gaming::SpotCheckDecision::RequiresVerification {
+                                                        tracing::info!(
+                                                            tx_id = %tx.id,
+                                                            from = %tx.from,
+                                                            to = %tx.to,
+                                                            amount = tx.amount,
+                                                            "Anti-gaming: spot check recommended for transaction"
+                                                        );
+                                                    }
+                                                }
                                                 Err(violation) => {
                                                     tracing::warn!(
                                                         tx_id = %tx.id,

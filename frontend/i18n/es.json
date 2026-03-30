@@ -398,7 +398,6 @@
   "models.tip_run_local": "Ejecutar localmente",
   "models.tip_host_shards": "Puede alojar fragmentos",
   "models.tip_exceeds_vram": "Excede VRAM",
-  "models.badge_on_swarm": "En Swarm — {count} fragmentos",
   "models.badge_new": "Nuevo en la red",
   "models.demand_high": "Alta demanda",
   "models.demand_medium": "Demanda media",
@@ -493,7 +492,6 @@
   "models.enc_ready": "Ready (has first + last shard)",
   "models.enc_missing_first": "Missing: first shard",
   "models.enc_missing_last": "Missing: last shard",
-  "models.enc_no_plaintext": "No remote node sees plaintext.",
   "chat.model_unavailable": "Model no longer available",
   "chat.count_new": "New",
   "chat.count_one": "1 message",
@@ -902,5 +900,8 @@
   "network.peer_address_aria": "Peer address",
   "models.hf_score_pts": "{score} pts",
   "models.context_abbr": "{n} ctx",
-  "models.context_k_abbr": "{n}k ctx"
+  "models.context_k_abbr": "{n}k ctx",
+  "models.max_tokens_label": "{n} max",
+  "models.pricing_in": "${price}/1K in",
+  "models.pricing_out": "${price}/1K out"
 }
