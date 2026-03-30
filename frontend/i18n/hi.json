@@ -142,8 +142,6 @@
   "settings.network_gpu_memory": "नेटवर्क GPU मेमोरी",
   "errors.server_unreachable": "SwarmLLM से संपर्क नहीं हो पा रहा — क्या यह चल रहा है?",
   "errors.connection_lost": "SwarmLLM से कनेक्शन टूट गया — फिर से जुड़ रहे हैं...",
-  "errors.model_download_unavailable": "मॉडल डाउनलोड उपलब्ध नहीं",
-  "errors.failed_to_load_models": "Failed to load model list",
   "errors.failed_toggle_enc": "Failed to toggle encrypted pipeline",
   "enc.running_locally": "Running locally — all shards on this device, prompts never leave",
   "enc.full_e2e": "Full E2E encryption — your device handles input & output, peers only process encrypted hidden states",

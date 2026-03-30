@@ -22,7 +22,7 @@
   })();
 
   // Kinds that go to the network ticker on model cards
-  var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1, 'rebalance_peer_joined': 1 };
+  var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1 };
 
   function _persistModelEvents() {
     try {

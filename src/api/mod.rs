@@ -18,6 +18,7 @@ pub(crate) const MAX_TOOLS: usize = 128;
 pub(crate) const MAX_TOOL_NAME_LEN: usize = 256;
 pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
 pub(crate) const MAX_STOP_SEQUENCES: usize = 16;
+pub(crate) const MAX_TOOL_SCHEMA_BYTES: usize = 65536;
 
 /// Submit a non-streaming inference request to the router and await the result.
 pub(crate) async fn submit_to_router(
@@ -179,7 +180,7 @@ pub(crate) fn validate_tools<T>(
             }
         }
         if let Some(size) = schema_size_fn(tool) {
-            if size > 65536 {
+            if size > MAX_TOOL_SCHEMA_BYTES {
                 return Err(crate::error::ApiError(
                     crate::error::SwarmError::Validation(
                         "Tool parameters/schema too large (max 64KB)".into(),

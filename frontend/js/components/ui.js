@@ -229,8 +229,7 @@
       }
       var providerData = null;
       try {
-        var resp2 = await App.authFetch('/api/admin/providers');
-        if (resp2.ok) providerData = await resp2.json();
+        providerData = await App.data.loadProviders();
         S._cachedProviderData = providerData;
       } catch (e) {}
       App.modeIndicator.update(statsData, providerData);

@@ -10,7 +10,7 @@ use crate::api::providers;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::inference::chat_template;
-use crate::inference::router::{RouterCommand, StreamingTokenEvent};
+use crate::inference::router::RouterCommand;
 use crate::types::{
     ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, Role, SamplingParams,
 };
@@ -992,11 +992,7 @@ async fn anthropic_split_non_stream(
     )
     .await?;
 
-    let stop_reason = if output.finish_reason == "stop" {
-        "end_turn"
-    } else {
-        "max_tokens"
-    };
+    let stop_reason = map_finish_reason(&output.finish_reason);
 
     let response = MessagesResponse {
         id: request_id,
@@ -1050,59 +1046,35 @@ async fn anthropic_split_stream(
             .await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
-        let (chat_tmpl, bos, eos_str, layer_range) =
-            match crate::api::openai::get_split_model_meta(&state, &requested_mid) {
-                Some(m) => (m.chat_template, m.bos_token, m.eos_token_str, m.layer_range),
-                None => {
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                        .await;
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::MessageDelta {
-                            stop_reason: "end_turn".into(),
-                            output_tokens: 0,
-                        })
-                        .await;
-                    let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
-                    return;
-                }
-            };
-
-        // Build prompt using cached metadata
-        let prompt = chat_template::build_prompt(&messages, chat_tmpl.as_deref(), &bos, &eos_str);
-
-        let gen_rid = uuid::Uuid::parse_str(&rid).unwrap_or_else(|_| uuid::Uuid::new_v4());
-
-        // Stream tokens via worker subprocess
-        let (token_tx, mut token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
-
-        let pool = state.shared_state.model_process_pool.clone();
-        let requested_mid = requested_mid.clone();
-        let params = params.clone();
-        tokio::spawn(async move {
-            let _ = pool
-                .generate(
-                    &requested_mid,
-                    layer_range,
-                    prompt,
-                    params,
-                    gen_rid,
-                    None,
-                    Some(token_tx),
-                )
-                .await;
-        });
+        let mut token_rx = match crate::api::openai::spawn_split_stream(
+            &state,
+            &requested_mid,
+            &messages,
+            params,
+            &rid,
+        ) {
+            Some(rx) => rx,
+            None => {
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+                    .await;
+                let _ = sse_tx
+                    .send(AnthropicSseEvent::MessageDelta {
+                        stop_reason: "end_turn".into(),
+                        output_tokens: 0,
+                    })
+                    .await;
+                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                return;
+            }
+        };
 
         let mut total_output_tokens = 0u32;
         let mut stop_reason = "max_tokens".to_string();
 
         while let Some(event) = token_rx.recv().await {
             if let Some(fr) = &event.finish_reason {
-                stop_reason = if fr == "stop" {
-                    "end_turn".to_string()
-                } else {
-                    fr.clone()
-                };
+                stop_reason = map_finish_reason(fr).to_string();
                 break;
             }
             total_output_tokens += 1;

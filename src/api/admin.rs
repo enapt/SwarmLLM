@@ -225,7 +225,7 @@ pub async fn update_config(
         );
     }
     if let Some(max_storage) = body.auto_manage_max_storage_mb {
-        config.auto_manage.max_storage_mb = max_storage;
+        config.auto_manage.max_storage_mb = max_storage.clamp(1, 10_000_000);
     }
     if let Some(shard_size) = body.shard_size_mb {
         if !(crate::config::SHARD_SIZE_MIN_MB..=crate::config::SHARD_SIZE_MAX_MB)
@@ -244,7 +244,7 @@ pub async fn update_config(
         config.inference.max_batch_size = batch_size.max(1);
     }
     if let Some(timeout) = body.batch_timeout_ms {
-        config.inference.batch_timeout_ms = timeout;
+        config.inference.batch_timeout_ms = timeout.clamp(1, 60_000);
     }
 
     // Write updated config to disk

@@ -188,8 +188,8 @@
 
     loadProviders: async function() {
       try {
-        var resp = await App.authFetch('/api/admin/providers');
-        var data = await resp.json();
+        var data = await App.data.loadProviders();
+        data = data || {};
         if (data.providers) {
           var anyConfigured = false;
           data.providers.forEach(function(p) {

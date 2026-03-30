@@ -142,8 +142,6 @@
   "settings.network_gpu_memory": "หน่วยความจำ GPU ของเครือข่าย",
   "errors.server_unreachable": "ไม่สามารถเชื่อมต่อ SwarmLLM ได้ — กำลังทำงานอยู่หรือไม่?",
   "errors.connection_lost": "การเชื่อมต่อกับ SwarmLLM ขาดหาย — กำลังเชื่อมต่อใหม่...",
-  "errors.model_download_unavailable": "ไม่สามารถดาวน์โหลดโมเดลได้",
-  "errors.failed_to_load_models": "Failed to load model list",
   "errors.failed_toggle_enc": "Failed to toggle encrypted pipeline",
   "enc.running_locally": "Running locally — all shards on this device, prompts never leave",
   "enc.full_e2e": "Full E2E encryption — your device handles input & output, peers only process encrypted hidden states",

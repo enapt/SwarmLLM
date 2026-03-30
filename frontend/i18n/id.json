@@ -142,8 +142,6 @@
   "settings.network_gpu_memory": "Memori GPU jaringan",
   "errors.server_unreachable": "Tidak bisa terhubung ke SwarmLLM — apakah sedang berjalan?",
   "errors.connection_lost": "Koneksi ke SwarmLLM terputus — menghubungkan kembali...",
-  "errors.model_download_unavailable": "Unduhan model tidak tersedia",
-  "errors.failed_to_load_models": "Failed to load model list",
   "errors.failed_toggle_enc": "Failed to toggle encrypted pipeline",
   "enc.running_locally": "Running locally — all shards on this device, prompts never leave",
   "enc.full_e2e": "Full E2E encryption — your device handles input & output, peers only process encrypted hidden states",

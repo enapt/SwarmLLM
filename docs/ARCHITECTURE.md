@@ -28,33 +28,28 @@ Single Rust binary, three simultaneous functions:
 │       │               │                 │                │
 │  ┌────┴───────────────┴─────────────────┴─────────────┐  │
 │  │              Shared State (Arc)                     │  │
-│  │  DashMap<NodeId, PeerInfo>      — peer registry     │  │
-│  │  ModelRegistry                  — models + shards   │  │
-│  │  DashMap<Uuid, PipelineAssignment> — pipelines      │  │
-│  │  Arc<RwLock<CreditBalance>>     — credit balance    │  │
-│  │  RwLock<NodeStats>              — node statistics    │  │
-│  │  SharedExecutor                 — candle model exec  │  │
-│  │  DashMap<NodeId, NicknameRecord>— nickname registry │  │
-│  │  DashMap<PoolId, PoolState>     — pool registry     │  │
-│  │  DashMap<String, AcqProgress>   — download progress │  │
-│  │  AtomicBool                     — model_loaded flag  │  │
-│  │  AtomicBool                     — is_ready flag      │  │
-│  │  AtomicU64                      — inference_requests  │  │
-│  │  Notify                         — queue drain signal │  │
-│  │  DashMap<ModelId, CancelFlag>   — download cancels   │  │
-│  │  TrustManager                   — peer trust scores  │  │
-│  │  watch::Sender<OperationalParams> — config reload    │  │
-│  │  DashMap<ModelId, AtomicU64>    — request counts     │  │
-│  │  RwLock<ResourceSchedule>       — resource schedule  │  │
-│  │  RwLock<VecDeque<PruneEvent>>   — prune history      │  │
-│  │  DashMap<ShardId, bool>         — locked shards      │  │
-│  │  DashMap<Uuid, oneshot::Sender>  — pending vision    │  │
-│  │  DashMap<ModelId, VisionModule>  — vision modules    │  │
-│  │  DashMap<ModelId, ModelTrustInfo> — model trust      │  │
-│  │  DashMap<ModelId, Notify>       — loading models    │  │
-│  │  DashMap<ModelId, bool>         — encrypted pipeline │  │
-│  │  mpsc::Sender<ModelId>          — DHT query (S5)    │  │
-│  │  broadcast::Sender<ActivityEvent> — activity events │  │
+│  │                                                     │  │
+│  │  ┌─ EventBus (state.events) ──────────────────────┐ │  │
+│  │  │  broadcast::Sender<ActivityEvent> (cap 256)    │ │  │
+│  │  │  broadcast::Sender<DashboardSignal> (cap 32)   │ │  │
+│  │  │  activity_history, update_state                │ │  │
+│  │  └────────────────────────────────────────────────┘ │  │
+│  │  ┌─ CreditPool (state.credits) ──────────────────┐ │  │
+│  │  │  credit_balance, pool_state, pool_registry     │ │  │
+│  │  │  trust_manager, escrow_manager, anti_gaming    │ │  │
+│  │  └────────────────────────────────────────────────┘ │  │
+│  │  ┌─ ModelMgmt (state.models) ────────────────────┐ │  │
+│  │  │  acquisition_progress, hf_sources              │ │  │
+│  │  │  auto_manage_*, model_trust, locked_shards     │ │  │
+│  │  │  prune_history, download_cancel_flags          │ │  │
+│  │  └────────────────────────────────────────────────┘ │  │
+│  │  ┌─ MetricsProviders (state.metrics) ────────────┐ │  │
+│  │  │  node_stats, inference_requests_total          │ │  │
+│  │  │  providers_config, provider_model_map          │ │  │
+│  │  └────────────────────────────────────────────────┘ │  │
+│  │                                                     │  │
+│  │  Root: peer_registry, model_registry, executor,     │  │
+│  │    identity, db, active_pipelines, config, ...      │  │
 │  └────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -67,14 +62,14 @@ Single Rust binary, three simultaneous functions:
                            │  (bootstrap) │
                            └──────┬───────┘
                                   │ spawns tokio tasks
-  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┐
-  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼
-┌──────┐┌─────┐┌─────┐┌──────┐┌──────┐┌──────┐┌────────┐┌────────┐┌──────┐┌────────┐
-│Netwrk││Infer││Crdit││Health││ API  ││Rebal-││Acquisi-││Message ││ Pool ││AutoShrd│
-│Mangr ││Routr││Ledgr││Mon.  ││Servr ││ancer ││tion Mgr││Dispatc ││Mangr ││Manager │
-└──┬───┘└──┬──┘└──┬──┘└──┬───┘└──┬───┘└──┬───┘└───┬────┘└───┬────┘└──┬───┘└───┬────┘
-   │       │      │      │       │       │         │         │        │        │
-   └───────┴──────┴──────┴───────┴───────┴─────────┴─────────┴────────┴────────┘
+  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼          ▼
+┌──────┐┌─────┐┌─────┐┌──────┐┌──────┐┌──────┐┌────────┐┌────────┐┌──────┐┌────────┐┌────────┐
+│Netwrk││Infer││Crdit││Health││ API  ││Rebal-││Acquisi-││Message ││ Pool ││AutoShrd││Update │
+│Mangr ││Routr││Ledgr││Mon.  ││Servr ││ancer ││tion Mgr││Dispatc ││Mangr ││Manager ││Checker│
+└──┬───┘└──┬──┘└──┬──┘└──┬───┘└──┬───┘└──┬───┘└───┬────┘└───┬────┘└──┬───┘└───┬────┘└───┬────┘
+   │       │      │      │       │       │         │         │        │        │         │
+   └───────┴──────┴──────┴───────┴───────┴─────────┴─────────┴────────┴────────┴─────────┘
                               mpsc channels between tasks
 ```
 

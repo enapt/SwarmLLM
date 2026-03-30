@@ -142,8 +142,6 @@
   "settings.network_gpu_memory": "ذاكرة GPU الشبكة",
   "errors.server_unreachable": "لا يمكن الوصول إلى SwarmLLM — هل هو قيد التشغيل؟",
   "errors.connection_lost": "فُقد الاتصال بـ SwarmLLM — جارٍ إعادة الاتصال...",
-  "errors.model_download_unavailable": "تنزيل النموذج غير متاح",
-  "errors.failed_to_load_models": "Failed to load model list",
   "errors.failed_toggle_enc": "Failed to toggle encrypted pipeline",
   "enc.running_locally": "Running locally — all shards on this device, prompts never leave",
   "enc.full_e2e": "Full E2E encryption — your device handles input & output, peers only process encrypted hidden states",

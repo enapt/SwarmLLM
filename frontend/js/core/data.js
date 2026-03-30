@@ -47,6 +47,7 @@
     stats: null,
     config: null,
     peers: [],
+    providers: null,
   };
 
   function dedupe(key, fn) {
@@ -110,11 +111,24 @@
     });
   }
 
+  function loadProviders() {
+    return dedupe('providers', async function() {
+      var providers = null;
+      try {
+        var r = await authFetch('/api/admin/providers');
+        if (r.ok) providers = await r.json();
+      } catch (e) {}
+      cache.providers = providers;
+      return providers;
+    });
+  }
+
   App.authFetch = authFetch;
   App.data = {
     loadModels: loadModels,
     loadStats: loadStats,
     loadPeers: loadPeers,
+    loadProviders: loadProviders,
     invalidateDedup: invalidateDedup,
     cache: cache,
   };

@@ -148,9 +148,14 @@ pub async fn update_providers(
     // Update key source mode if provided
     if let Some(ref ks) = body.key_source {
         new_config.key_source = match ks.as_str() {
+            "auto" => crate::config::ProviderKeySource::Auto,
             "env" => crate::config::ProviderKeySource::Env,
             "dashboard" => crate::config::ProviderKeySource::Dashboard,
-            _ => crate::config::ProviderKeySource::Auto,
+            _ => {
+                return Err(ApiError(crate::error::SwarmError::Validation(format!(
+                    "invalid key_source '{ks}': must be 'auto', 'env', or 'dashboard'"
+                ))));
+            }
         };
         // Re-apply env vars with the new mode
         new_config.fill_from_env();

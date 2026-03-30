@@ -5,29 +5,10 @@ use crate::types::{ModelManifest, ShardId};
 ///
 /// This implements the "rarest first" strategy similar to BitTorrent,
 /// prioritizing shards that have the fewest replicas in the network.
-///
-/// If `local_shards` is provided, already-held shard indices are excluded
-/// from the result so callers don't re-download shards they already have.
 pub fn select_rarest_shards(manifest: &ModelManifest, registry: &ModelRegistry) -> Vec<ShardId> {
-    select_rarest_shards_excluding(manifest, registry, None)
-}
-
-/// Select the rarest shards, optionally excluding already-held shard indices.
-fn select_rarest_shards_excluding(
-    manifest: &ModelManifest,
-    registry: &ModelRegistry,
-    local_shards: Option<&[u32]>,
-) -> Vec<ShardId> {
     let mut shard_counts: Vec<(ShardId, usize)> = manifest
         .shards
         .iter()
-        .filter(|shard| {
-            // Exclude shards we already hold locally
-            match local_shards {
-                Some(held) => !held.contains(&shard.index),
-                None => true,
-            }
-        })
         .map(|shard| {
             let shard_id = ShardId {
                 model_id: manifest.id.clone(),

@@ -1300,6 +1300,46 @@ pub fn get_split_model_meta(
         })
 }
 
+/// Spawn a split-model generation task and return the token receiver.
+///
+/// Resolves model metadata, builds the prompt, and spawns the worker subprocess.
+/// Returns None if the model is not loaded as a split model.
+pub fn spawn_split_stream(
+    state: &AppState,
+    model_id: &crate::types::ModelId,
+    messages: &[crate::types::ChatMessage],
+    params: crate::types::SamplingParams,
+    request_id: &str,
+) -> Option<tokio::sync::mpsc::Receiver<crate::inference::router::StreamingTokenEvent>> {
+    let meta = get_split_model_meta(state, model_id)?;
+    let prompt = crate::inference::chat_template::build_prompt(
+        messages,
+        meta.chat_template.as_deref(),
+        &meta.bos_token,
+        &meta.eos_token_str,
+    );
+    let rid = uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
+    let (token_tx, token_rx) =
+        tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
+    let pool = state.shared_state.model_process_pool.clone();
+    let model_id = model_id.clone();
+    let layer_range = meta.layer_range;
+    tokio::spawn(async move {
+        let _ = pool
+            .generate(
+                &model_id,
+                layer_range,
+                prompt,
+                params,
+                rid,
+                None,
+                Some(token_tx),
+            )
+            .await;
+    });
+    Some(token_rx)
+}
+
 /// Submit a streaming inference request to the router.
 ///
 /// Creates the InferenceRequest and sends StreamSubmit. Returns receivers for
@@ -1914,43 +1954,16 @@ async fn split_stream_response(
             return;
         }
 
-        // Get metadata from entry (no model lock needed)
-        let (chat_tmpl, bos, eos_str, layer_range) = match get_split_model_meta(&state, &model_id) {
-            Some(m) => (m.chat_template, m.bos_token, m.eos_token_str, m.layer_range),
-            None => {
-                tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
-                let _ = tx.send(StreamEvent::Done).await;
-                return;
-            }
-        };
-
-        // Build prompt using cached metadata
-        let prompt = chat_template::build_prompt(&messages, chat_tmpl.as_deref(), &bos, &eos_str);
-
-        let rid = uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-
-        // Use a streaming token channel to bridge worker tokens to SSE events
-        let (token_tx, mut token_rx) =
-            tokio::sync::mpsc::channel::<crate::inference::router::StreamingTokenEvent>(64);
-
-        let pool = state.shared_state.model_process_pool.clone();
-        {
-            let model_id = model_id.clone();
-            let params = params.clone();
-            tokio::spawn(async move {
-                let _ = pool
-                    .generate(
-                        &model_id,
-                        layer_range,
-                        prompt,
-                        params,
-                        rid,
-                        None,
-                        Some(token_tx),
-                    )
-                    .await;
-            });
-        }
+        // Spawn split-model generation and get token receiver
+        let mut token_rx =
+            match spawn_split_stream(&state, &model_id, &messages, params, &request_id) {
+                Some(rx) => rx,
+                None => {
+                    tracing::debug!(model_id = %model_id, "DIAG: split stream model not found");
+                    let _ = tx.send(StreamEvent::Done).await;
+                    return;
+                }
+            };
 
         // Forward streaming tokens from the worker to SSE events
         let mut finish = "length".to_string();
