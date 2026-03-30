@@ -26,8 +26,9 @@ const COLD_START_WAIT_SECS: u32 = 10;
 
 /// Maximum number of concurrent requests in the cold-start polling loop.
 /// Prevents unbounded task pile-up when many requests arrive for unavailable models.
+const MAX_COLD_START_SLOTS: usize = 5;
 static COLD_START_SEMAPHORE: std::sync::LazyLock<tokio::sync::Semaphore> =
-    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(5));
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_COLD_START_SLOTS));
 
 // ---- Request types ----
 
@@ -1158,7 +1159,8 @@ pub fn all_shards_available(state: &AppState, model_name: &str) -> bool {
 
     let result = all_shards_available_inner(state, model_name);
     // Evict stale entries instead of clearing entire cache (prevents thundering herd)
-    if CACHE.len() > 1000 {
+    const SHARD_AVAIL_CACHE_MAX: usize = 1_000;
+    if CACHE.len() > SHARD_AVAIL_CACHE_MAX {
         CACHE.retain(|_, (ts, _)| ts.elapsed() < std::time::Duration::from_millis(100));
     }
     CACHE.insert(model_name.to_string(), (std::time::Instant::now(), result));

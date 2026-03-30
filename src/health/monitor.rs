@@ -552,6 +552,25 @@ impl HealthMonitor {
                 self.shared_state.streaming_token_txs.remove(&key);
             }
         }
+
+        // active_relay_circuits: remove entries older than 1 hour (abnormally terminated)
+        const RELAY_CIRCUIT_TTL_SECS: u64 = 3600;
+        let stale_relay: Vec<_> = self
+            .shared_state
+            .active_relay_circuits
+            .iter()
+            .filter(|entry| entry.value().elapsed().as_secs() > RELAY_CIRCUIT_TTL_SECS)
+            .map(|entry| *entry.key())
+            .collect();
+        if !stale_relay.is_empty() {
+            tracing::debug!(
+                count = stale_relay.len(),
+                "DIAG: cleaning up stale active_relay_circuits"
+            );
+            for key in stale_relay {
+                self.shared_state.active_relay_circuits.remove(&key);
+            }
+        }
     }
 
     /// Clean stale peer_id_map entries for peers no longer in peer_registry.

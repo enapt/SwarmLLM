@@ -68,7 +68,7 @@ pub fn apply_top_k(logits: &mut [f32], k: u32) {
 }
 
 /// Apply top-k filtering using pre-allocated scratch buffers.
-pub fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContext) {
+fn apply_top_k_with_ctx(logits: &mut [f32], k: u32, ctx: &mut SamplingContext) {
     if k == 0 || k as usize >= logits.len() {
         return;
     }
@@ -175,7 +175,7 @@ pub fn sample_token(logits: &mut [f32], params: &SamplingParams) -> u32 {
 ///
 /// Same behavior as `sample_token` but reuses buffers from `SamplingContext`,
 /// eliminating ~700KB of allocations per call for typical vocab sizes (32K).
-pub fn sample_token_with_ctx(
+fn sample_token_with_ctx(
     logits: &mut [f32],
     params: &SamplingParams,
     ctx: &mut SamplingContext,

@@ -11,7 +11,8 @@ pub fn serialize_peer_to_json(
     state: &crate::daemon::state::SharedState,
     include_addresses: bool,
 ) -> serde_json::Value {
-    let timeout = chrono::Duration::seconds(90);
+    const PEER_HEALTHY_TIMEOUT_SECS: i64 = 90;
+    let timeout = chrono::Duration::seconds(PEER_HEALTHY_TIMEOUT_SECS);
     let now = chrono::Utc::now();
     let healthy = now.signed_duration_since(peer.last_seen) < timeout;
     let hosted_models: Vec<String> = peer

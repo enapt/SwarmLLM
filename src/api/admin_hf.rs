@@ -67,6 +67,42 @@ fn is_valid_hf_filename(filename: &str) -> bool {
         && !filename.contains("..")
 }
 
+/// Convert a GGUF filename to a model ID slug.
+/// Strips .gguf suffix, lowercases, replaces non-alphanumeric chars with hyphens,
+/// and collapses consecutive hyphens.
+fn gguf_filename_to_model_id(filename: &str) -> String {
+    filename
+        .trim_end_matches(".gguf")
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Validate HF repo_id and filename inputs, returning ApiError on failure.
+fn validate_hf_inputs(repo_id: &str, filename: &str) -> Result<(), ApiError> {
+    if repo_id.is_empty() || filename.is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "repo_id and filename are required".into(),
+        )));
+    }
+    if !is_valid_hf_repo_id(repo_id) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid repo_id format. Expected: owner/repo (alphanumeric, hyphens, dots, underscores)"
+                .into(),
+        )));
+    }
+    if !is_valid_hf_filename(filename) {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Invalid filename. Must be alphanumeric with hyphens, dots, underscores, ending in .gguf"
+                .into(),
+        )));
+    }
+    Ok(())
+}
+
 /// Extract EOS token IDs from a GGUF file, with architecture-specific fallbacks.
 fn extract_eos_token_ids(path: &std::path::Path, arch: &str) -> Vec<u32> {
     match crate::inference::split::GgufTokenizerMeta::from_gguf_file(path) {
@@ -274,26 +310,7 @@ pub async fn hf_download(
     let repo_id = body.repo_id;
     let filename = body.filename;
 
-    if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "repo_id and filename are required".into(),
-        )));
-    }
-
-    // SEC: Validate repo_id format (owner/repo) to prevent URL injection/SSRF.
-    if !is_valid_hf_repo_id(&repo_id) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid repo_id format. Expected: owner/repo (alphanumeric, hyphens, dots, underscores)"
-                .into(),
-        )));
-    }
-    // SEC: Validate filename to prevent URL metacharacter injection.
-    if !is_valid_hf_filename(&filename) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid filename. Must be alphanumeric with hyphens, dots, underscores, ending in .gguf"
-                .into(),
-        )));
-    }
+    validate_hf_inputs(&repo_id, &filename)?;
 
     // Sanitize repo_id to prevent path traversal — reject ".." and backslash
     let sanitized_repo = repo_id.replace(['/', '\\'], "_");
@@ -547,40 +564,13 @@ pub async fn hf_probe(
     let repo_id = params.repo_id.unwrap_or_default();
     let filename = params.filename.unwrap_or_default();
 
-    if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "repo_id and filename query params are required".into(),
-        )));
-    }
-
-    // SEC: Validate repo_id format (owner/repo) to prevent URL injection/SSRF.
-    if !is_valid_hf_repo_id(&repo_id) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid repo_id format. Expected: owner/repo (alphanumeric, hyphens, dots, underscores)"
-                .into(),
-        )));
-    }
-    // SEC: Validate filename to prevent URL metacharacter injection.
-    if !is_valid_hf_filename(&filename) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid filename. Must be alphanumeric with hyphens, dots, underscores, ending in .gguf"
-                .into(),
-        )));
-    }
+    validate_hf_inputs(&repo_id, &filename)?;
 
     let shard_size = state.config.model.shard_size_bytes();
     match crate::model::huggingface::probe_gguf_file(&repo_id, &filename, shard_size).await {
         Ok(info) => {
             // Cache probe result so the frontend can look up HF source later
-            let model_id_str = filename
-                .trim_end_matches(".gguf")
-                .to_lowercase()
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-                .split('-')
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("-");
-            let mid = crate::types::ModelId(model_id_str);
+            let mid = crate::types::ModelId(gguf_filename_to_model_id(&filename));
             let probe_info = crate::daemon::HfProbeInfo {
                 repo_id: repo_id.clone(),
                 filename: filename.clone(),
@@ -658,23 +648,7 @@ pub async fn hf_download_shards(
     let shard_indices = body.shards;
     let peer_fair_share = body.peer_fair_share;
 
-    if repo_id.is_empty() || filename.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "repo_id and filename are required".into(),
-        )));
-    }
-
-    // SEC: Validate repo_id and filename to prevent URL injection.
-    if !is_valid_hf_repo_id(&repo_id) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid repo_id format. Expected: owner/repo".into(),
-        )));
-    }
-    if !is_valid_hf_filename(&filename) {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid filename format. Must end in .gguf, no special characters".into(),
-        )));
-    }
+    validate_hf_inputs(&repo_id, &filename)?;
 
     if shard_indices.is_empty() && !peer_fair_share {
         return Err(ApiError(crate::error::SwarmError::Validation(
@@ -713,25 +687,10 @@ pub async fn hf_download_shards(
         if candidate_dir.exists() {
             sanitized
         } else {
-            // Fall back to filename-derived name
-            filename
-                .trim_end_matches(".gguf")
-                .to_lowercase()
-                .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-                .split('-')
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("-")
+            gguf_filename_to_model_id(&filename)
         }
     } else {
-        filename
-            .trim_end_matches(".gguf")
-            .to_lowercase()
-            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-            .split('-')
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("-")
+        gguf_filename_to_model_id(&filename)
     };
 
     let dest_dir = state.config.node.data_dir.join("models").join(&safe_name);
@@ -1618,18 +1577,10 @@ pub async fn hf_source(
     match crate::model::huggingface::search_gguf_models(&search_query).await {
         Ok(results) => {
             // Find the result whose filename slug matches our model_id
-            let slug_for = |filename: &str| -> String {
-                filename
-                    .trim_end_matches(".gguf")
-                    .to_lowercase()
-                    .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-                    .split('-')
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("-")
-            };
-
-            if let Some(hit) = results.iter().find(|r| slug_for(&r.filename) == model_id) {
+            if let Some(hit) = results
+                .iter()
+                .find(|r| gguf_filename_to_model_id(&r.filename) == model_id)
+            {
                 // Cache the discovered source for future lookups
                 let source = crate::daemon::HfSource {
                     repo_id: hit.repo_id.clone(),

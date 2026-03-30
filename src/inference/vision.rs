@@ -30,7 +30,7 @@ const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 /// 2. Convert to f32 [0, 1]
 /// 3. Normalize with CLIP mean/std
 /// 4. Return tensor of shape (3, H, W)
-pub fn preprocess_image(
+fn preprocess_image(
     image: &ImageData,
     target_size: u32,
     device: &Device,
@@ -401,7 +401,6 @@ impl VisionEncoder {
 pub struct MultimodalProjection {
     proj1: Linear,
     proj2: Linear,
-    /// The LLM hidden dimension this projects into.
     llm_hidden_dim: usize,
 }
 
@@ -431,6 +430,7 @@ impl MultimodalProjection {
             .map_err(|e| SwarmError::Inference(format!("mm_proj2: {e}")))
     }
 
+    /// LLM hidden dimension this projection targets.
     pub fn llm_hidden_dim(&self) -> usize {
         self.llm_hidden_dim
     }

@@ -599,13 +599,13 @@
         var saved = localStorage.getItem(App.SESSIONS_KEY);
         if (saved) S.sessions = JSON.parse(saved);
 
-        var oldHistory = localStorage.getItem('swarmllm_chat_history');
+        var oldHistory = localStorage.getItem(App.CHAT_HISTORY_KEY);
         if (oldHistory && Object.keys(S.sessions).length === 0) {
           var msgs = JSON.parse(oldHistory);
           if (msgs.length > 0) {
             var id = 'session_migrated';
             S.sessions[id] = { id: id, title: msgs[0].content.substring(0, 50), messages: msgs, created: Date.now() - 1000 };
-            localStorage.removeItem('swarmllm_chat_history');
+            localStorage.removeItem(App.CHAT_HISTORY_KEY);
           }
         }
 

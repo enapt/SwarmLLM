@@ -171,6 +171,31 @@ Execute multiple independent prompts in parallel, each targeting a specific mode
 }
 ```
 
+### `delegate`
+
+Offload a task to the most appropriate model based on a tier preference. Tiers: `fast` picks the lowest-latency local model, `cheap` picks a small/free model, `smart` picks the most capable available model (may use cloud). Saves subscription tokens by routing routine work to local/cheap models.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "delegate",
+    "arguments": {
+      "prompt": "Summarize this function in one sentence: ...",
+      "tier": "fast",
+      "max_tokens": 256
+    }
+  },
+  "id": 6
+}
+```
+
+**Tiers:**
+- `fast` — lowest-latency local model (default)
+- `cheap` — smallest/free model available
+- `smart` — most capable model (may use cloud provider)
+
 ### `node_info`
 
 Get detailed information about the SwarmLLM node: loaded models, connected peers, credit balance, available cloud providers, and network status.

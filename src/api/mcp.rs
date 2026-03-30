@@ -668,15 +668,13 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         lora_adapter: None,
     };
 
-    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let cmd = crate::inference::router::RouterCommand::Submit { request, result_tx };
-
-    if router_tx.send(cmd).await.is_err() {
-        return JsonRpcResponse::error(id, INTERNAL_ERROR, "Failed to send inference request");
-    }
-
-    match tokio::time::timeout(std::time::Duration::from_secs(120), result_rx).await {
-        Ok(Ok(Ok(response))) => JsonRpcResponse::success(
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        crate::api::submit_to_router(&router_tx, request),
+    )
+    .await
+    {
+        Ok(Ok(response)) => JsonRpcResponse::success(
             id,
             json!({
                 "content": [
@@ -687,10 +685,9 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
                 ]
             }),
         ),
-        Ok(Ok(Err(e))) => {
-            JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Inference error: {e}"))
+        Ok(Err(e)) => {
+            JsonRpcResponse::error(id, INTERNAL_ERROR, format!("Inference error: {}", e.0))
         }
-        Ok(Err(_)) => JsonRpcResponse::error(id, INTERNAL_ERROR, "Inference channel closed"),
         Err(_) => JsonRpcResponse::error(id, INTERNAL_ERROR, "Inference request timed out"),
     }
 }

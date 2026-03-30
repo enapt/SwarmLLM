@@ -92,7 +92,8 @@ impl PipelineScheduler {
     /// 6. If any layer range has no available node -> fail
     /// 7. Identify standby nodes for each segment
     /// 8. Return PipelineAssignment
-    pub fn assemble_pipeline(
+    #[cfg(test)]
+    pub(crate) fn assemble_pipeline(
         &self,
         model_id: &ModelId,
         local_node_id: &NodeId,

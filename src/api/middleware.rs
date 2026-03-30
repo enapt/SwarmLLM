@@ -152,7 +152,8 @@ impl RateLimiter {
             // Previous O(n) DashMap iteration was a DoS amplification vector:
             // attacker with >50K unique IPs would cause O(n^2) total work.
             tracing::warn!(
-                "Rate limiter at capacity ({MAX_RATE_BUCKETS} buckets) — denying new client"
+                capacity = MAX_RATE_BUCKETS,
+                "Rate limiter at capacity — denying new client"
             );
             return false;
         }
