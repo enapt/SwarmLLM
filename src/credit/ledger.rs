@@ -116,16 +116,7 @@ impl CreditLedger {
     /// Resolve effective credit rates: per-pool override > global config > compile-time defaults.
     fn credit_rates(&self) -> crate::config::CreditRateConfig {
         if let Some(ref ss) = self.shared_state {
-            // Check for a per-pool override first
-            if let Ok(pool_state) = ss.credits.pool_state.try_read() {
-                if let Some(ref ps) = *pool_state {
-                    if let Some(rates) = ss.credits.pool_credit_rates.get(&ps.pool_id) {
-                        return rates.value().clone();
-                    }
-                }
-            }
-            // Fall back to global config rates
-            ss.config.pool.credit_rates.clone()
+            resolve_credit_rates(ss)
         } else {
             crate::config::CreditRateConfig::default()
         }
@@ -532,6 +523,20 @@ impl CreditLedger {
 
 /// Apply credit operations directly on shared state (for use outside the CreditLedger task).
 ///
+/// Resolve effective credit rates from shared state: per-pool override > global config.
+pub(crate) fn resolve_credit_rates(
+    state: &crate::daemon::state::SharedState,
+) -> crate::config::CreditRateConfig {
+    if let Ok(pool_state) = state.credits.pool_state.try_read() {
+        if let Some(ref ps) = *pool_state {
+            if let Some(rates) = state.credits.pool_credit_rates.get(&ps.pool_id) {
+                return rates.value().clone();
+            }
+        }
+    }
+    state.config.pool.credit_rates.clone()
+}
+
 /// This replicates what `CreditLedger::apply_credit` + `persist_balance` do, so that
 /// callers like `InferenceRouter` and `PipelineExecutor` don't bypass persistence and
 /// proper accounting.

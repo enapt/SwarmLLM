@@ -1111,7 +1111,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `GET     /api/admin/shard-storage` — Per-model storage breakdown, disk/VRAM usage
 - `GET     /api/admin/api-key` — Retrieve API key (Bearer auth required)
 - `GET     /api/admin/ws` — WebSocket for live updates
-- `GET     /api/admin/download-queue` — Download queue with priorities and progress
+- `GET     /api/admin/downloads` — Download queue with priorities and progress
 
 ### HuggingFace Integration
 - `GET  /api/admin/hf/search?query=...` — Search HuggingFace for GGUF models (grouped by repo with quant variants)

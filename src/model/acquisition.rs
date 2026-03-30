@@ -41,6 +41,18 @@ pub struct AcquisitionStatus {
     pub trigger: String,
 }
 
+const MAX_ACQUISITION_LOG_ENTRIES: usize = 200;
+
+impl AcquisitionStatus {
+    /// Append a log line, capping total entries to prevent unbounded growth.
+    pub fn log_push(&mut self, msg: String) {
+        if self.log.len() >= MAX_ACQUISITION_LOG_ENTRIES {
+            self.log.remove(0);
+        }
+        self.log.push(msg);
+    }
+}
+
 /// Progress for a single shard.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ShardProgress {
@@ -486,7 +498,7 @@ impl AcquisitionManager {
                         shard_id.index
                     )
                 };
-                job.status.log.push(msg);
+                job.status.log_push(msg);
                 if success {
                     if let Some(sp) = job.status.shard_progress.get_mut(&shard_id.index) {
                         sp.state = ShardState::Downloading;
@@ -607,7 +619,7 @@ impl AcquisitionManager {
                     if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
                         sp.state = ShardState::Verifying;
                     }
-                    job.status.log.push(format!(
+                    job.status.log_push(format!(
                         "Shard {} complete ({}) — verifying BLAKE3 hash...",
                         shard_index,
                         format_bytes_short(total_size)
@@ -621,7 +633,7 @@ impl AcquisitionManager {
                             if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
                                 sp.state = ShardState::Complete;
                             }
-                            job.status.log.push(format!(
+                            job.status.log_push(format!(
                                 "Shard {} verified OK ({}/{})",
                                 shard_index, job.status.verified_shards, job.status.total_shards
                             ));
@@ -658,7 +670,7 @@ impl AcquisitionManager {
                     if let Some(sp) = job.status.shard_progress.get_mut(&shard_index) {
                         sp.state = ShardState::Failed;
                     }
-                    job.status.log.push(format!(
+                    job.status.log_push(format!(
                         "Shard {} not found in manifest — discarding",
                         shard_index
                     ));
@@ -688,7 +700,7 @@ impl AcquisitionManager {
                         .map(|s| (chrono::Utc::now() - s).num_seconds().max(1) as u64)
                         .unwrap_or(1);
                     let avg_speed = job.status.total_bytes / elapsed;
-                    job.status.log.push(format!(
+                    job.status.log_push(format!(
                         "Acquisition complete! {} in {}s (avg {})",
                         format_bytes_short(job.status.total_bytes),
                         elapsed,
@@ -703,7 +715,7 @@ impl AcquisitionManager {
                         "{} of {} shards failed verification",
                         job.status.failed_shards, job.status.total_shards
                     );
-                    job.status.log.push(format!("FAILED: {}", reason));
+                    job.status.log_push(format!("FAILED: {}", reason));
                     job.status.state = AcquisitionState::Failed { reason };
                     progress_map.insert(model_id.clone(), job.status.clone());
                 }

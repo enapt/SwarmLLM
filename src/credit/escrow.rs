@@ -182,6 +182,8 @@ impl EscrowManager {
         }
 
         drop(entry);
+        // Remove from in-memory map — entry is persisted to DB
+        self.entries.remove(&escrow_id);
 
         // Credit the serving node's perspective (in a real network this would
         // be sent to the serving node; locally we just log it).
@@ -228,6 +230,8 @@ impl EscrowManager {
             })?;
 
         drop(entry);
+        // Remove from in-memory map — entry is persisted to DB
+        self.entries.remove(&escrow_id);
 
         // Return credits to requester (lifetime_spent is monotonic — not decremented).
         // Persist immediately to prevent credit loss on crash after refund.
@@ -297,6 +301,8 @@ impl EscrowManager {
                     continue;
                 }
                 drop(entry);
+                // Remove from in-memory map — entry is persisted to DB
+                self.entries.remove(&id);
 
                 // Refund the expired amount (lifetime_spent is monotonic — not decremented).
                 // Persist balance inside the write lock to ensure crash-safety:
@@ -390,10 +396,8 @@ mod tests {
         // Balance stays the same (credits went to serving node)
         assert_eq!(balance.read().await.balance, 900);
 
-        // Entry should be Released
-        let entry = em.get_escrow(&escrow_id).unwrap();
-        assert_eq!(entry.status, EscrowStatus::Released);
-        assert_eq!(entry.to_node, Some(to));
+        // Entry should be removed from in-memory map after release (persisted to DB)
+        assert!(em.get_escrow(&escrow_id).is_none());
     }
 
     #[tokio::test]
@@ -414,8 +418,8 @@ mod tests {
         assert_eq!(refunded, 200);
         assert_eq!(balance.read().await.balance, 500);
 
-        let entry = em.get_escrow(&escrow_id).unwrap();
-        assert_eq!(entry.status, EscrowStatus::Refunded);
+        // Entry should be removed from in-memory map after refund (persisted to DB)
+        assert!(em.get_escrow(&escrow_id).is_none());
     }
 
     #[tokio::test]
@@ -432,6 +436,7 @@ mod tests {
             .unwrap();
 
         em.release_escrow(escrow_id, &to).await.unwrap();
+        // Entry removed from map after release — second release fails (not found)
         let result = em.release_escrow(escrow_id, &to).await;
         assert!(result.is_err());
     }
@@ -450,6 +455,7 @@ mod tests {
             .unwrap();
 
         em.release_escrow(escrow_id, &to).await.unwrap();
+        // Entry removed from map after release — refund fails (not found)
         let result = em.refund_escrow(escrow_id, &balance).await;
         assert!(result.is_err());
     }
@@ -477,8 +483,8 @@ mod tests {
         assert_eq!(expired, 1);
         assert_eq!(balance.read().await.balance, 1000);
 
-        let entry = em.get_escrow(&escrow_id).unwrap();
-        assert_eq!(entry.status, EscrowStatus::Expired);
+        // Entry should be removed from in-memory map after expiry (persisted to DB)
+        assert!(em.get_escrow(&escrow_id).is_none());
     }
 
     #[test]

@@ -56,8 +56,6 @@ pub enum SwarmError {
     // Identity
     #[error("Keystore error: {0}")]
     Keystore(String),
-    #[error("Wrong passphrase")]
-    WrongPassphrase,
     #[error("Invalid nickname: {0}")]
     InvalidNickname(String),
 

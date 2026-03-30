@@ -53,10 +53,8 @@ async fn test_escrow_create_and_release() {
     assert_eq!(balance.read().await.balance, 900); // Not refunded
     assert_eq!(em.pending_count(), 0);
 
-    // Entry should be Released with to_node set
-    let entry = em.get_escrow(&escrow_id).unwrap();
-    assert_eq!(entry.status, EscrowStatus::Released);
-    assert_eq!(entry.to_node, Some(to));
+    // Entry removed from in-memory map after release (persisted to DB)
+    assert!(em.get_escrow(&escrow_id).is_none());
 }
 
 /// Test the escrow dispute path: create → refund.
@@ -80,8 +78,8 @@ async fn test_escrow_dispute_refund() {
     assert_eq!(refunded, 200);
     assert_eq!(balance.read().await.balance, 500);
 
-    let entry = em.get_escrow(&escrow_id).unwrap();
-    assert_eq!(entry.status, EscrowStatus::Refunded);
+    // Entry removed from in-memory map after refund (persisted to DB)
+    assert!(em.get_escrow(&escrow_id).is_none());
 }
 
 /// Test that cleanup_expired correctly identifies non-expired escrows.

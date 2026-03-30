@@ -189,7 +189,7 @@ impl AutoShardManager {
                             downloaded_bytes: 0,
                             state: crate::model::acquisition::ShardState::Downloading,
                         });
-                    entry.log.push(format!(
+                    entry.log_push(format!(
                         "Auto-manage: downloading shard {} (score: {:.1})",
                         candidate.shard_index, candidate.score
                     ));
@@ -495,7 +495,7 @@ display
                                     sp.state = crate::model::acquisition::ShardState::Complete;
                                     sp.downloaded_bytes = sp.total_bytes;
                                 }
-                                entry.log.push("Shard downloaded and registered".into());
+                                entry.log_push("Shard downloaded and registered".into());
                             }
                             // Emit shard registered activity
                             {
@@ -623,7 +623,7 @@ e
                                 entry.state = crate::model::acquisition::AcquisitionState::Failed {
                                     reason: e,
                                 };
-                                entry.log.push("HF download failed".into());
+                                entry.log_push("HF download failed".into());
                             }
                             // Clean up failed entry after 10s
                             let cleanup_shared2 = shared.clone();
@@ -728,7 +728,7 @@ e
                                 downloaded_bytes: 0,
                                 state: crate::model::acquisition::ShardState::Downloading,
                             });
-                        entry.log.push(format!(
+                        entry.log_push(format!(
                             "P2P: downloading shard {} from peer",
                             crate::types::ShardId::display_index(candidate.shard_index)
                         ));

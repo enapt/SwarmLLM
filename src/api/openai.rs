@@ -1817,62 +1817,7 @@ async fn router_inference_stream(
         );
     });
 
-    let mut json_buf: Vec<u8> = Vec::with_capacity(512);
-    let stream =
-        tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| match event {
-            StreamEvent::Delta {
-                content,
-                role,
-                finish_reason,
-            } => {
-                let sid = if finish_reason.is_some() {
-                    stream_session_id.clone()
-                } else {
-                    None
-                };
-                let chunk = ChatCompletionChunk {
-                    id: rid.clone(),
-                    object: "chat.completion.chunk",
-                    created,
-                    model: model_name.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: Delta {
-                            role,
-                            content,
-                            tool_calls: None,
-                        },
-                        finish_reason,
-                        logprobs: None,
-                    }],
-                    session_id: sid,
-                };
-                // Reuse pre-allocated buffer to avoid per-token growth reallocations
-                json_buf.clear();
-                let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
-                    String::from_utf8(json_buf.clone()).unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                Ok::<_, Infallible>(Event::default().data(json))
-            }
-            StreamEvent::Error { message } => {
-                let error_json = serde_json::json!({
-                    "error": {
-                        "message": message,
-                        "type": "server_error"
-                    }
-                });
-                Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
-            }
-            StreamEvent::Done => Ok(Event::default().data("[DONE]")),
-        });
-
-    Ok(Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
-        )
-        .into_response())
+    Ok(stream_events_to_sse(sse_rx, rid, created, model_name, stream_session_id).into_response())
 }
 
 /// Direct split-model generation (non-streaming).
@@ -2023,57 +1968,7 @@ async fn split_stream_response(
         );
     });
 
-    // Convert channel to SSE stream (reuse existing stream mapping)
-    let mut json_buf2: Vec<u8> = Vec::with_capacity(512);
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
-        StreamEvent::Delta {
-            content,
-            role,
-            finish_reason,
-        } => {
-            let chunk = ChatCompletionChunk {
-                id: request_id.clone(),
-                object: "chat.completion.chunk",
-                created,
-                model: model_name.clone(),
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: Delta {
-                        role,
-                        content,
-                        tool_calls: None,
-                    },
-                    finish_reason,
-                    logprobs: None,
-                }],
-                session_id: None,
-            };
-            // Reuse pre-allocated buffer to avoid per-token growth reallocations
-            json_buf2.clear();
-            let json = if serde_json::to_writer(&mut json_buf2, &chunk).is_ok() {
-                String::from_utf8(json_buf2.clone()).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            Ok(Event::default().data(json))
-        }
-        StreamEvent::Error { message } => {
-            let error_json = serde_json::json!({
-                "error": {
-                    "message": message,
-                    "type": "server_error"
-                }
-            });
-            Ok(Event::default().data(serde_json::to_string(&error_json).unwrap_or_default()))
-        }
-        StreamEvent::Done => Ok(Event::default().data("[DONE]")),
-    });
-
-    Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text(""),
-    )
+    stream_events_to_sse(rx, request_id, created, model_name, None)
 }
 
 async fn stream_response(
@@ -2152,12 +2047,29 @@ async fn stream_response(
         );
     });
 
+    stream_events_to_sse(rx, request_id, created, model_name, None)
+}
+
+/// Convert a StreamEvent receiver into an SSE stream of OpenAI-format chat completion chunks.
+fn stream_events_to_sse(
+    rx: tokio::sync::mpsc::Receiver<StreamEvent>,
+    request_id: String,
+    created: i64,
+    model_name: String,
+    session_id: Option<String>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let mut json_buf = Vec::with_capacity(512);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| match event {
         StreamEvent::Delta {
             content,
             role,
             finish_reason,
         } => {
+            let sid = if finish_reason.is_some() {
+                session_id.clone()
+            } else {
+                None
+            };
             let chunk = ChatCompletionChunk {
                 id: request_id.clone(),
                 object: "chat.completion.chunk",
@@ -2173,10 +2085,15 @@ async fn stream_response(
                     finish_reason,
                     logprobs: None,
                 }],
-                session_id: None,
+                session_id: sid,
             };
-            let json = serde_json::to_string(&chunk).unwrap_or_default();
-            Ok(Event::default().data(json))
+            json_buf.clear();
+            let json = if serde_json::to_writer(&mut json_buf, &chunk).is_ok() {
+                String::from_utf8(json_buf.clone()).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            Ok::<_, Infallible>(Event::default().data(json))
         }
         StreamEvent::Error { message } => {
             let error_json = serde_json::json!({
@@ -2189,7 +2106,6 @@ async fn stream_response(
         }
         StreamEvent::Done => Ok(Event::default().data("[DONE]")),
     });
-
     Sse::new(stream).keep_alive(
         KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
     )

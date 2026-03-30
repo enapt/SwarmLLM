@@ -985,7 +985,8 @@ impl PipelineExecutor {
                 .iter()
                 .any(|s| s.node_id == *self.shared_state.identity.node_id());
             if has_local_segment {
-                let rate = self.shared_state.config.pool.credit_rates.inference_serve;
+                let rate =
+                    crate::credit::ledger::resolve_credit_rates(&self.shared_state).inference_serve;
                 let total_earned = rate.saturating_mul(total_tokens);
                 if let Err(e) = crate::credit::ledger::apply_credit_direct(
                     &self.shared_state.credits.credit_balance,
