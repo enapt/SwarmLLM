@@ -218,7 +218,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ### Operations
 - **Built-in Web UI** — Swarm-first dashboard with chat interface (image upload for VLM), model browser, shard visualization, first-run setup wizard, network map, leaderboard, model compare page, mobile-responsive layout. 21 languages (i18n), light/dark/system theme
-- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash for all 10 subsystems, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
+- **Fault Tolerant** — JoinSet-based task supervisor with restart-on-crash for all 11 subsystems, hot-standby failover, shard replication, automatic rebalancing, atomic shard writes, download retry with backoff
 - **Observability** — Prometheus `/metrics` endpoint, readiness probe `/health/ready`, structured tracing with request ID correlation, database integrity checks
 - **Config Hot-Reload** — Change operational parameters without restarting via SIGHUP or API (`/api/admin/config/reload`)
 - **Auto-Updater** — Checks GitHub releases for new versions, downloads and replaces binary with restart prompt
