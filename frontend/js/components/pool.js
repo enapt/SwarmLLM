@@ -532,7 +532,7 @@
       var banner = document.getElementById('slave-top-banner');
       if (!banner) return;
 
-      var isSlave = data && data.in_pool && data.pool_id !== this._myNodeId;
+      var isSlave = data && data.in_pool && this._myNodeId !== null && data.pool_id !== this._myNodeId;
       if (isSlave) {
         banner.classList.add('visible');
         // Update banner text with owner info

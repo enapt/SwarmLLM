@@ -1016,10 +1016,10 @@ pub async fn hf_download_shards(
             .db
             .put_json("hf_sources", &model_id_str, &hf_source);
         let hf_source_path = dest_dir.join("hf_source.json");
-        let _ = std::fs::write(
-            &hf_source_path,
-            serde_json::to_string_pretty(&hf_source).unwrap_or_default(),
-        );
+        let hf_source_json = serde_json::to_string_pretty(&hf_source).unwrap_or_default();
+        let _ =
+            tokio::task::spawn_blocking(move || std::fs::write(&hf_source_path, hf_source_json))
+                .await;
 
         // Broadcast HfSourceGossip + ModelManifest EARLY so peers can start
         // auto-acquiring shards immediately (before our shard data downloads finish).

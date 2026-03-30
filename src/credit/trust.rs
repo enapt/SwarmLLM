@@ -12,15 +12,15 @@ pub const DEFAULT_TRUST: f32 = 0.5;
 /// Trust score adjustments for various events.
 pub const TRUST_INFERENCE_SUCCESS: f32 = 0.01;
 pub const TRUST_SPOT_CHECK_FAIL: f32 = -0.1;
-pub const TRUST_INVALID_GOSSIP: f32 = -0.05;
-pub const TRUST_VALID_TRANSACTION: f32 = 0.02;
-pub const TRUST_SIGNATURE_VIOLATION: f32 = -0.2;
+const TRUST_INVALID_GOSSIP: f32 = -0.05;
+const TRUST_VALID_TRANSACTION: f32 = 0.02;
+const TRUST_SIGNATURE_VIOLATION: f32 = -0.2;
 /// Trust penalty for nodes sharing a /24 subnet with many other nodes (Sybil indicator).
-pub const TRUST_SUBNET_CLUSTERING: f32 = -0.03;
+const TRUST_SUBNET_CLUSTERING: f32 = -0.03;
 
 /// Decay rate toward the default trust per health ping cycle.
 /// Each ping, trust moves 1% toward DEFAULT_TRUST.
-pub const TRUST_DECAY_RATE: f32 = 0.01;
+const TRUST_DECAY_RATE: f32 = 0.01;
 
 /// Reason for a trust score update, for logging and auditing.
 #[derive(Debug, Clone, Copy)]

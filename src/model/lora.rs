@@ -130,7 +130,7 @@ pub fn load_adapter_from_dir(dir: &Path) -> Result<LoraAdapter, SwarmError> {
 ///
 /// We parse these into a normalized key format:
 ///   `blk.{N}.attn_q` (matching GGUF naming conventions)
-pub fn load_adapter(
+fn load_adapter(
     path: &Path,
     adapter_id: &str,
     name: &str,

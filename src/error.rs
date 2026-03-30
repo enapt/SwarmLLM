@@ -12,8 +12,6 @@ pub enum SwarmError {
     Network(String),
     #[error("Peer not found: {0}")]
     PeerNotFound(NodeId),
-    #[error("Connection failed to {peer}: {reason}")]
-    ConnectionFailed { peer: NodeId, reason: String },
 
     // Inference
     #[error("Model not available: {0}")]

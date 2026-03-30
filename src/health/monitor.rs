@@ -139,15 +139,8 @@ impl HealthMonitor {
     async fn broadcast_capabilities(&mut self) {
         let node_id = self.shared_state.identity.node_id().clone();
 
-        // Gather hosted shards from model_registry (which respects --shards range).
-        let mut hosted_shards = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for entry in self.shared_state.model_registry.all_shard_entries() {
-            let (shard_id, holders) = entry;
-            if holders.contains(&node_id) && seen.insert(shard_id.clone()) {
-                hosted_shards.push(shard_id);
-            }
-        }
+        // Gather hosted shards using the reverse-index for O(1) lookup.
+        let mut hosted_shards = self.shared_state.model_registry.shards_for_node(&node_id);
 
         // If no shards from registry but we have a loaded model (and no shard_range),
         // represent the full model as shard index 0 for backward compatibility.

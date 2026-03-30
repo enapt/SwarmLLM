@@ -119,8 +119,14 @@ impl ModelRegistry {
     /// Remove a node from shard holders (e.g., node went offline).
     /// Maintains reverse index.
     pub fn remove_shard_holder(&self, shard_id: &ShardId, node_id: &NodeId) {
+        let mut empty = false;
         if let Some(mut holders) = self.shard_holders.get_mut(shard_id) {
             holders.remove(node_id);
+            empty = holders.is_empty();
+        }
+        // Remove empty tombstones to prevent unbounded growth on peer churn
+        if empty {
+            self.shard_holders.remove(shard_id);
         }
         if let Some(mut shards) = self.node_shards.get_mut(node_id) {
             shards.remove(shard_id);
@@ -180,6 +186,7 @@ impl ModelRegistry {
     }
 
     /// Get the number of registered models.
+    #[cfg(test)]
     pub fn model_count(&self) -> usize {
         self.manifests.len()
     }

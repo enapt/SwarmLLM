@@ -657,7 +657,7 @@ pub async fn provider_model_status(
         let client = client.clone();
         async move {
             // SEC: Validate provider URL to prevent SSRF via custom providers
-            if let Err(e) = super::providers::validate_provider_url(&base_url) {
+            if let Err(e) = super::providers::validate_provider_url(&base_url).await {
                 return serde_json::json!({
                     "model": model_id,
                     "status": "error",

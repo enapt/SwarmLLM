@@ -1144,13 +1144,7 @@ impl Daemon {
                 let node_id = announce_state.identity.node_id().clone();
 
                 // Broadcast shard announcements
-                let mut hosted_shards = Vec::new();
-                for entry in announce_state.model_registry.all_shard_entries() {
-                    let (shard_id, holders) = entry;
-                    if holders.contains(&node_id) {
-                        hosted_shards.push(shard_id);
-                    }
-                }
+                let hosted_shards = announce_state.model_registry.shards_for_node(&node_id);
 
                 if !hosted_shards.is_empty() {
                     // S5: Register as DHT provider for local shards

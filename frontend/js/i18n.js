@@ -99,11 +99,17 @@ var I18n = (function() {
       return;
     }
     loadLang(lang, function(err, data) {
-      strings = data || {};
-      currentLang = lang;
-      try { localStorage.setItem(STORAGE_KEY, lang); } catch(e) {}
+      if (err) {
+        // Fall back to English — don't persist the broken language
+        strings = fallback;
+        currentLang = 'en';
+      } else {
+        strings = data || {};
+        currentLang = lang;
+        try { localStorage.setItem(STORAGE_KEY, lang); } catch(e) {}
+      }
       translatePage();
-      listeners.forEach(function(fn) { fn(lang); });
+      listeners.forEach(function(fn) { fn(currentLang); });
       if (cb) cb();
     });
   }

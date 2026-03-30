@@ -350,7 +350,7 @@ pub async fn try_proxy_openai(
 
 /// Validate that a provider base_url uses an allowed scheme and does not target
 /// private/internal IP ranges (SSRF prevention for custom providers).
-pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
+pub(crate) async fn validate_provider_url(base_url: &str) -> Result<(), crate::error::SwarmError> {
     if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
         return Err(crate::error::SwarmError::Validation(
             "Provider base_url must use http or https scheme".into(),
@@ -381,19 +381,23 @@ pub(crate) fn validate_provider_url(base_url: &str) -> Result<(), crate::error::
         }
     }
     // Resolve DNS hostnames and check resolved IP against private ranges
-    // to prevent DNS-based SSRF (e.g., attacker-controlled DNS resolving to 169.254.169.254)
+    // to prevent DNS-based SSRF (e.g., attacker-controlled DNS resolving to 169.254.169.254).
+    // DNS resolution is blocking — run in spawn_blocking to avoid stalling the Tokio executor.
     if host.parse::<std::net::IpAddr>().is_err() && !host.is_empty() {
-        // It's a hostname, try to resolve it
-        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
-            for addr in addrs {
-                if is_private_ip(addr.ip()) {
-                    return Err(crate::error::SwarmError::Validation(format!(
-                        "Provider base_url hostname '{}' resolves to private IP {}",
-                        host,
-                        addr.ip()
-                    )));
-                }
-            }
+        let host_owned = host.to_string();
+        let resolved = tokio::task::spawn_blocking(move || {
+            std::net::ToSocketAddrs::to_socket_addrs(&(&*host_owned, 80u16))
+                .ok()
+                .and_then(|addrs| addrs.into_iter().find(|a| is_private_ip(a.ip())))
+        })
+        .await
+        .unwrap_or(None);
+        if let Some(addr) = resolved {
+            return Err(crate::error::SwarmError::Validation(format!(
+                "Provider base_url hostname '{}' resolves to private IP {}",
+                host,
+                addr.ip()
+            )));
         }
     }
 
@@ -450,7 +454,7 @@ pub async fn proxy_openai_compatible(
     stream: bool,
 ) -> Result<axum::response::Response, ApiError> {
     // SEC: Validate base_url to prevent SSRF via custom provider configuration.
-    validate_provider_url(base_url).map_err(ApiError)?;
+    validate_provider_url(base_url).await.map_err(ApiError)?;
 
     let client = get_provider_client();
     let url = format!("{}/chat/completions", base_url);

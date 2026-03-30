@@ -285,6 +285,7 @@ impl CreditLedger {
         bucket_balance(bal.balance)
     }
 
+    #[cfg(test)]
     pub fn peer_balances(&self) -> &Arc<RwLock<Vec<i64>>> {
         &self.peer_balances
     }

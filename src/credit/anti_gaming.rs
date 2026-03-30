@@ -4,10 +4,10 @@ use std::time::{Duration, Instant};
 use crate::types::NodeId;
 
 /// Maximum number of nodes per /24 subnet before triggering elevated scrutiny.
-pub const SUBNET_CLUSTER_THRESHOLD: usize = 5;
+const SUBNET_CLUSTER_THRESHOLD: usize = 5;
 
 /// Elevated spot-check rate for nodes in clustered subnets.
-pub const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
+const SUBNET_CLUSTER_SPOT_CHECK_RATE: f64 = 0.25;
 
 /// Rate limiter and anti-gaming checks for the credit system.
 ///
