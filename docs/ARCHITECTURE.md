@@ -1219,7 +1219,7 @@ A lightweight cross-subsystem event bus for real-time dashboard observability.
 **Backend** (`src/daemon/state.rs`):
 - `ActivityEvent` struct with fields: `kind` (enum, 26 variants), `model_id` (optional), `message` (human-readable string), `timestamp` (Unix seconds)
 - `activity_tx: broadcast::Sender<ActivityEvent>` in `state.events` sub-struct (capacity 256, oldest events dropped on overflow)
-- All 10 subsystems emit events via `state.events.activity_tx.send()` — fire-and-forget (send errors ignored)
+- All 11 subsystems emit events via `state.events.activity_tx.send()` — fire-and-forget (send errors ignored)
 - Example event kinds: `ShardDownloaded`, `ShardPruned`, `InferenceRequest`, `InferenceComplete`, `PeerConnected`, `PeerDisconnected`, `CreditEarned`, `CreditSpent`, `ModelLoaded`, `ModelUnloaded`, `WorkerSpawned`, `WorkerKilled`, `PoolJoined`, `AutoManageCycle`, `HealthPing`, and more
 
 **WebSocket delivery** (`src/api/websocket.rs`):

@@ -311,31 +311,33 @@ impl UpdateChecker {
         }
 
         #[cfg(not(target_os = "windows"))]
-        let backup_path = self.binary_path.with_extension("old");
+        {
+            let backup_path = self.binary_path.with_extension("old");
 
-        // Step 1: Rename current binary to .old (backup)
-        if self.binary_path.exists() {
-            std::fs::rename(&self.binary_path, &backup_path).map_err(|e| {
-                SwarmError::Internal(format!("Failed to backup current binary: {e}"))
-            })?;
+            // Step 1: Rename current binary to .old (backup)
+            if self.binary_path.exists() {
+                std::fs::rename(&self.binary_path, &backup_path).map_err(|e| {
+                    SwarmError::Internal(format!("Failed to backup current binary: {e}"))
+                })?;
+            }
+
+            // Step 2: Rename .update.tmp to current binary path
+            if let Err(e) = std::fs::rename(tmp_path, &self.binary_path) {
+                // Rollback: restore backup
+                let _ = std::fs::rename(&backup_path, &self.binary_path);
+                return Err(SwarmError::Internal(format!(
+                    "Failed to install update (rolled back): {e}"
+                )));
+            }
+
+            tracing::info!(
+                new = %self.binary_path.display(),
+                backup = %backup_path.display(),
+                "Update applied — restart required to use new version"
+            );
+
+            Ok(())
         }
-
-        // Step 2: Rename .update.tmp to current binary path
-        if let Err(e) = std::fs::rename(tmp_path, &self.binary_path) {
-            // Rollback: restore backup
-            let _ = std::fs::rename(&backup_path, &self.binary_path);
-            return Err(SwarmError::Internal(format!(
-                "Failed to install update (rolled back): {e}"
-            )));
-        }
-
-        tracing::info!(
-            new = %self.binary_path.display(),
-            backup = %backup_path.display(),
-            "Update applied — restart required to use new version"
-        );
-
-        Ok(())
     }
 
     /// Background update loop — checks periodically and stores results in shared state.

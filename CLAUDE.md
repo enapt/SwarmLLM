@@ -13,7 +13,7 @@ SwarmLLM is a single Rust binary that functions as a peer-to-peer node in a dece
 
 ## Architecture
 
-The daemon spawns 10 subsystems as Tokio tasks wired together with `mpsc` channels:
+The daemon spawns 11 subsystems as Tokio tasks wired together with `mpsc` channels:
 
 - **NetworkManager** — libp2p swarm: Kademlia DHT + GossipSub + request_response
 - **InferenceRouter** — request queuing, pipeline assembly, execution coordination
@@ -25,6 +25,7 @@ The daemon spawns 10 subsystems as Tokio tasks wired together with `mpsc` channe
 - **ApiServer** — Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket
 - **PoolManager** — device pool management, credit forwarding, invitation protocol
 - **AutoShardManager** — VRAM-aware automatic shard acquisition + smart pruning of over-replicated shards
+- **UpdateChecker** — periodic GitHub release polling, SHA256-verified binary download, atomic apply
 
 Shared state lives in `Arc<SharedState>` with `DashMap` for concurrent access. SharedState is organized into 4 logical sub-structs:
 - `state.events` (`EventBus`) — `activity_tx`, `activity_history`, `dashboard_tx`, `update_state`
