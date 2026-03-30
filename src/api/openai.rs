@@ -597,34 +597,11 @@ fn validate_chat_request(
         *sid = format!("{}:{}", key_hash, sid);
     }
 
-    if req.model.len() > 256 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "model name too long (max 256 chars)".into(),
-        )));
-    }
-    if req.messages.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "messages array must not be empty".into(),
-        )));
-    }
-    if req.temperature < 0.0 || req.temperature > 2.0 {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "temperature must be between 0 and 2, got {}",
-            req.temperature
-        ))));
-    }
-    if req.messages.len() > 4096 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Too many messages (max 4096)".into(),
-        )));
-    }
+    super::validate_common_params(req.model.len(), req.messages.len(), req.temperature.into())?;
 
     // SEC: Cap individual message content size and total prompt size
-    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
-    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
-    let mut total_content_bytes: usize = 0;
-    for msg in &req.messages {
-        let content_len = match &msg.content {
+    super::validate_content_size(req.messages.iter().map(|msg| {
+        match &msg.content {
             MessageContent::Text(s) => s.len(),
             MessageContent::Parts(parts) => parts
                 .iter()
@@ -633,51 +610,16 @@ fn validate_chat_request(
                     ContentPart::ImageUrl { image_url } => image_url.url.len(),
                 })
                 .sum(),
-        };
-        if content_len > MAX_MESSAGE_CONTENT_BYTES {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Message content too large (max 2MB per message)".into(),
-            )));
         }
-        total_content_bytes = total_content_bytes.saturating_add(content_len);
-    }
-    if total_content_bytes > MAX_TOTAL_PROMPT_BYTES {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Total prompt content too large ({} bytes, max {}). Reduce your messages.",
-            total_content_bytes, MAX_TOTAL_PROMPT_BYTES
-        ))));
-    }
+    }))?;
 
     if let Some(ref tools) = req.tools {
-        if tools.len() > super::MAX_TOOLS {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "Too many tools (max {})",
-                super::MAX_TOOLS
-            ))));
-        }
-        for t in tools {
-            if t.function.name.len() > super::MAX_TOOL_NAME_LEN {
-                return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                    "Tool function name too long (max {} chars)",
-                    super::MAX_TOOL_NAME_LEN
-                ))));
-            }
-            if t.function.description.as_deref().unwrap_or("").len()
-                > super::MAX_TOOL_DESCRIPTION_LEN
-            {
-                return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                    "Tool function description too long (max {} chars)",
-                    super::MAX_TOOL_DESCRIPTION_LEN
-                ))));
-            }
-            if let Some(ref params) = t.function.parameters {
-                if params.to_string().len() > 65536 {
-                    return Err(ApiError(crate::error::SwarmError::Validation(
-                        "Tool parameters JSON too large (max 64KB)".into(),
-                    )));
-                }
-            }
-        }
+        super::validate_tools(
+            tools,
+            |t| Some(t.function.name.as_str()),
+            |t| t.function.description.as_deref(),
+            |t| t.function.parameters.as_ref().map(|p| p.to_string().len()),
+        )?;
     }
 
     if let Some(ref adapter) = req.lora_adapter {
@@ -693,25 +635,14 @@ fn validate_chat_request(
         }
     }
 
-    if let Some(crate::api::openai::StopSequence::Multiple(ref v)) = req.stop {
-        if v.len() > super::MAX_STOP_SEQUENCES {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "Too many stop sequences (max {})",
-                super::MAX_STOP_SEQUENCES
-            ))));
+    match &req.stop {
+        Some(crate::api::openai::StopSequence::Multiple(v)) => {
+            super::validate_stop_sequences(v)?;
         }
-        if v.iter().any(|s| s.is_empty() || s.len() > 256) {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequences must be 1–256 chars each".into(),
-            )));
+        Some(crate::api::openai::StopSequence::Single(s)) => {
+            super::validate_stop_sequences(std::slice::from_ref(s))?;
         }
-    }
-    if let Some(crate::api::openai::StopSequence::Single(ref s)) = req.stop {
-        if s.is_empty() || s.len() > 256 {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequence must be 1–256 chars".into(),
-            )));
-        }
+        None => {}
     }
 
     Ok(())
@@ -731,9 +662,7 @@ pub async fn chat_completions(
     let created = chrono::Utc::now().timestamp();
 
     // Track requests made by this node
-    if let Ok(mut stats) = state.shared_state.metrics.node_stats.try_write() {
-        stats.requests_made += 1;
-    }
+    super::increment_requests_made(&state.shared_state);
 
     // Emit activity event for inference request
     {

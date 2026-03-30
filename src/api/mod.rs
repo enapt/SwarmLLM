@@ -60,3 +60,142 @@ pub mod pool;
 pub mod providers;
 pub mod server;
 pub mod websocket;
+
+/// Increment the requests_made counter (best-effort, non-blocking).
+pub(crate) fn increment_requests_made(state: &crate::daemon::state::SharedState) {
+    if let Ok(mut stats) = state.metrics.node_stats.try_write() {
+        stats.requests_made += 1;
+    }
+}
+
+/// Validate common request parameters shared between OpenAI and Anthropic handlers.
+/// Checks model name length, message count, and temperature range.
+pub(crate) fn validate_common_params(
+    model_len: usize,
+    message_count: usize,
+    temperature: f64,
+) -> Result<(), crate::error::ApiError> {
+    if model_len > 256 {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation("model name too long (max 256 chars)".into()),
+        ));
+    }
+    if message_count == 0 {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation("messages array must not be empty".into()),
+        ));
+    }
+    if message_count > 4096 {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation("Too many messages (max 4096)".into()),
+        ));
+    }
+    if !(0.0..=2.0).contains(&temperature) {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation(format!(
+                "temperature must be between 0 and 2, got {temperature}"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate stop sequences (shared between OpenAI and Anthropic handlers).
+pub(crate) fn validate_stop_sequences(stops: &[String]) -> Result<(), crate::error::ApiError> {
+    if stops.len() > MAX_STOP_SEQUENCES {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation(format!(
+                "Too many stop sequences (max {MAX_STOP_SEQUENCES})"
+            )),
+        ));
+    }
+    if stops.iter().any(|s| s.is_empty() || s.len() > 256) {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation("Stop sequences must be 1–256 chars each".into()),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate total prompt content size against per-message and total limits.
+pub(crate) fn validate_content_size(
+    content_sizes: impl Iterator<Item = usize>,
+) -> Result<(), crate::error::ApiError> {
+    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
+    let mut total: usize = 0;
+    for size in content_sizes {
+        if size > MAX_MESSAGE_CONTENT_BYTES {
+            return Err(crate::error::ApiError(
+                crate::error::SwarmError::Validation(
+                    "Message content too large (max 2MB per message)".into(),
+                ),
+            ));
+        }
+        total = total.saturating_add(size);
+    }
+    if total > MAX_TOTAL_PROMPT_BYTES {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation(format!(
+                "Total prompt content too large ({total} bytes, max {MAX_TOTAL_PROMPT_BYTES}). Reduce your messages."
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate tools array — count and per-tool field sizes.
+/// `name_fn` and `desc_fn` and `schema_fn` extract fields from each tool.
+pub(crate) fn validate_tools<T>(
+    tools: &[T],
+    name_fn: impl Fn(&T) -> Option<&str>,
+    desc_fn: impl Fn(&T) -> Option<&str>,
+    schema_size_fn: impl Fn(&T) -> Option<usize>,
+) -> Result<(), crate::error::ApiError> {
+    if tools.len() > MAX_TOOLS {
+        return Err(crate::error::ApiError(
+            crate::error::SwarmError::Validation(format!("Too many tools (max {MAX_TOOLS})")),
+        ));
+    }
+    for tool in tools {
+        if let Some(name) = name_fn(tool) {
+            if name.len() > MAX_TOOL_NAME_LEN {
+                return Err(crate::error::ApiError(
+                    crate::error::SwarmError::Validation(format!(
+                        "Tool name too long: {} chars (max {MAX_TOOL_NAME_LEN})",
+                        name.len()
+                    )),
+                ));
+            }
+        }
+        if let Some(desc) = desc_fn(tool) {
+            if desc.len() > MAX_TOOL_DESCRIPTION_LEN {
+                return Err(crate::error::ApiError(
+                    crate::error::SwarmError::Validation(format!(
+                        "Tool description too long: {} chars (max {MAX_TOOL_DESCRIPTION_LEN})",
+                        desc.len()
+                    )),
+                ));
+            }
+        }
+        if let Some(size) = schema_size_fn(tool) {
+            if size > 65536 {
+                return Err(crate::error::ApiError(
+                    crate::error::SwarmError::Validation(
+                        "Tool parameters/schema too large (max 64KB)".into(),
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Build a credit balance summary JSON object.
+pub(crate) fn credit_summary_json(credit: &swarmllm_types::CreditBalance) -> serde_json::Value {
+    serde_json::json!({
+        "balance": credit.balance,
+        "lifetime_earned": credit.lifetime_earned,
+        "lifetime_spent": credit.lifetime_spent,
+    })
+}

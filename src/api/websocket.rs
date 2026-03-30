@@ -336,11 +336,7 @@ async fn build_stats_message(
     let mut data = serde_json::json!({
         "peers": peers_connected,
         "lan_peers": lan_peers,
-        "credits": {
-            "balance": credit.balance,
-            "lifetime_earned": credit.lifetime_earned,
-            "lifetime_spent": credit.lifetime_spent,
-        },
+        "credits": crate::api::credit_summary_json(&credit),
         "active_requests": state.active_pipelines.len(),
         "requests_served": stats.requests_served,
         "requests_made": stats.requests_made,

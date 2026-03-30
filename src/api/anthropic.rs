@@ -296,96 +296,28 @@ pub async fn messages(
     State(state): State<AppState>,
     crate::api::server::JsonBody(req): crate::api::server::JsonBody<MessagesRequest>,
 ) -> Result<axum::response::Response, ApiError> {
-    // Validate model field length to prevent DashMap memory exhaustion
-    if req.model.len() > 256 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "model name too long (max 256 chars)".into(),
-        )));
-    }
+    super::validate_common_params(
+        req.model.len(),
+        req.messages.len(),
+        req.temperature.unwrap_or(1.0).into(),
+    )?;
 
-    // Validate messages array is not empty
-    if req.messages.is_empty() {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "messages array must not be empty".into(),
-        )));
-    }
-
-    // Limit message count to prevent excessive prompt construction overhead
-    if req.messages.len() > 4096 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Too many messages (max 4096)".into(),
-        )));
-    }
-
-    // Validate stop sequences
     if let Some(ref stops) = req.stop_sequences {
-        if stops.len() > super::MAX_STOP_SEQUENCES {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "Too many stop sequences (max {})",
-                super::MAX_STOP_SEQUENCES
-            ))));
-        }
-        if stops.iter().any(|s| s.is_empty() || s.len() > 256) {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Stop sequences must be 1–256 chars each".into(),
-            )));
-        }
+        super::validate_stop_sequences(stops)?;
     }
 
-    // Limit tools array — count and per-tool field sizes
     if let Some(ref tools) = req.tools {
-        if tools.len() > super::MAX_TOOLS {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "Too many tools (max {})",
-                super::MAX_TOOLS
-            ))));
-        }
-        for tool in tools {
-            if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
-                if name.len() > super::MAX_TOOL_NAME_LEN {
-                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                        "Tool name too long: {} chars (max {})",
-                        name.len(),
-                        super::MAX_TOOL_NAME_LEN
-                    ))));
-                }
-            }
-            if let Some(desc) = tool.get("description").and_then(|v| v.as_str()) {
-                if desc.len() > 4096 {
-                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                        "Tool description too long: {} (max 4096)",
-                        desc.len()
-                    ))));
-                }
-            }
-            if let Some(schema) = tool.get("input_schema") {
-                let schema_size = schema.to_string().len();
-                if schema_size > 65536 {
-                    return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                        "Tool input_schema too large: {} bytes (max 64KB)",
-                        schema_size
-                    ))));
-                }
-            }
-        }
-    }
-
-    // Validate temperature range (Anthropic spec: 0.0 to 1.0, we allow up to 2.0)
-    if let Some(t) = req.temperature {
-        if !(0.0..=2.0).contains(&t) {
-            return Err(ApiError(crate::error::SwarmError::Validation(format!(
-                "temperature must be between 0 and 2, got {}",
-                t
-            ))));
-        }
+        super::validate_tools(
+            tools,
+            |t| t.get("name").and_then(|v| v.as_str()),
+            |t| t.get("description").and_then(|v| v.as_str()),
+            |t| t.get("input_schema").map(|s| s.to_string().len()),
+        )?;
     }
 
     // SEC: Cap individual message content size and total prompt size
-    const MAX_MESSAGE_CONTENT_BYTES: usize = 2 * 1024 * 1024;
-    const MAX_TOTAL_PROMPT_BYTES: usize = 4 * 1024 * 1024;
-    let mut total_content_bytes: usize = 0;
-    for msg in &req.messages {
-        let content_len = match &msg.content {
+    super::validate_content_size(req.messages.iter().map(|msg| {
+        match &msg.content {
             AnthropicContent::Text(s) => s.len(),
             AnthropicContent::Blocks(blocks) => blocks
                 .iter()
@@ -402,28 +334,14 @@ pub async fn messages(
                     ContentBlock::RedactedThinking { data } => data.len(),
                 })
                 .sum(),
-        };
-        if content_len > MAX_MESSAGE_CONTENT_BYTES {
-            return Err(ApiError(crate::error::SwarmError::Validation(
-                "Message content too large (max 2MB per message)".into(),
-            )));
         }
-        total_content_bytes = total_content_bytes.saturating_add(content_len);
-    }
-    if total_content_bytes > MAX_TOTAL_PROMPT_BYTES {
-        return Err(ApiError(crate::error::SwarmError::Validation(format!(
-            "Total prompt content too large ({} bytes, max {}). Reduce your messages.",
-            total_content_bytes, MAX_TOTAL_PROMPT_BYTES
-        ))));
-    }
+    }))?;
 
     let request_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     let model = resolve_model(&req.model).to_string();
 
-    // Track requests made by this node (parity with OpenAI handler)
-    if let Ok(mut stats) = state.shared_state.metrics.node_stats.try_write() {
-        stats.requests_made += 1;
-    }
+    // Track requests made by this node
+    super::increment_requests_made(&state.shared_state);
 
     tracing::info!(
         request_id = %request_id,

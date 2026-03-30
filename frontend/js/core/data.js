@@ -31,7 +31,7 @@
       } catch (e) {
         clearTimeout(timer);
         if (e.name === 'AbortError') {
-          throw new Error('Request timed out — server may be busy or unreachable');
+          throw new Error(typeof I18n !== 'undefined' ? I18n.t('errors.request_timeout') : 'Request timed out');
         }
         throw e;
       }
@@ -46,6 +46,7 @@
     cloudModels: [],
     stats: null,
     config: null,
+    peers: [],
   };
 
   function dedupe(key, fn) {
@@ -97,10 +98,23 @@
     });
   }
 
+  function loadPeers() {
+    return dedupe('peers', async function() {
+      var peers = [];
+      try {
+        var r = await authFetch('/api/admin/peers');
+        if (r.ok) peers = await r.json();
+      } catch (e) {}
+      cache.peers = peers;
+      return peers;
+    });
+  }
+
   App.authFetch = authFetch;
   App.data = {
     loadModels: loadModels,
     loadStats: loadStats,
+    loadPeers: loadPeers,
     invalidateDedup: invalidateDedup,
     cache: cache,
   };

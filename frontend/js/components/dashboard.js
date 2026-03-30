@@ -1326,9 +1326,7 @@
 
     loadNetworkData: async function() {
       try {
-        var resp = await App.authFetch('/api/admin/peers');
-        if (!resp.ok) throw new Error('fetch failed');
-        var peers = await resp.json();
+        var peers = await App.data.loadPeers();
         App.dashboard.renderPeers(peers);
       } catch (e) {
         var list = document.getElementById('peers-list');

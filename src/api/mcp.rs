@@ -1405,11 +1405,7 @@ async fn tool_node_info(state: &AppState, id: Option<Value>) -> JsonRpcResponse 
 
     // Credit balance
     let credit_balance = state.shared_state.credits.credit_balance.read().await;
-    let credits = json!({
-        "balance": credit_balance.balance,
-        "lifetime_earned": credit_balance.lifetime_earned,
-        "lifetime_spent": credit_balance.lifetime_spent,
-    });
+    let credits = crate::api::credit_summary_json(&credit_balance);
     drop(credit_balance);
 
     let node_info = json!({

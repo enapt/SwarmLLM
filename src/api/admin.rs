@@ -143,11 +143,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         "requests_made": stats.requests_made,
         "active_requests": state.shared_state.active_pipelines.len(),
         "hosted_shards": hosted_shards,
-        "credits": {
-            "balance": credit.balance,
-            "lifetime_earned": credit.lifetime_earned,
-            "lifetime_spent": credit.lifetime_spent,
-        },
+        "credits": super::credit_summary_json(&credit),
         "hardware": hardware,
         "inference": inference_perf,
     }))

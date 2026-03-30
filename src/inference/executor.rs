@@ -333,10 +333,8 @@ impl ModelExecutor {
             accumulated_text.push_str(&piece);
 
             // Check user-provided stop sequences
-            if !stop_sequences.is_empty()
-                && stop_sequences
-                    .iter()
-                    .any(|s| accumulated_text.contains(s.as_str()))
+            if crate::inference::sampling::find_stop_sequence(&accumulated_text, &stop_sequences)
+                .is_some()
             {
                 break;
             }

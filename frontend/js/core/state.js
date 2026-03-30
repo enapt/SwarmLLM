@@ -14,7 +14,7 @@ window.App = {
     pollTimers: [],
     creditHistory: [],
     activeAcquisitions: {},
-    _swarmModelSort: (function() { try { return localStorage.getItem('swarmllm_model_sort') || 'az'; } catch(e) { return 'az'; } })(), // raw string — MODEL_SORT_KEY not yet defined at object literal evaluation time
+    _swarmModelSort: 'az', // initialized below after App is defined, using App.MODEL_SORT_KEY
     isStreaming: false,
     currentModel: '',
     currentSessionId: null,
@@ -62,6 +62,11 @@ window.App = {
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,
   // compare, data, notifications, models, downloads, shardMenu, providerHealth
 };
+
+// Initialize _swarmModelSort using the constant now that App is defined
+try {
+  App.state._swarmModelSort = localStorage.getItem(App.MODEL_SORT_KEY) || 'az';
+} catch (e) {}
 
 // Initialize modelStatus from sessionStorage cache
 try {

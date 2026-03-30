@@ -165,12 +165,10 @@
       var idx = this.currentIndex;
       var newLocked = !this.currentLocked;
       this.hide();
+      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/lock';
+      var opts = { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locked: newLocked }) };
       try {
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/lock', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ locked: newLocked }),
-        });
+        var resp = await App.authFetch(url, opts);
         if (resp.ok) {
           App.ui.showBanner('success', I18n.t(newLocked ? 'shard.locked' : 'shard.unlocked', { idx: idx }));
           App.models.load();
@@ -182,45 +180,36 @@
       }
     },
 
+    _shardAction: async function(url, opts, successMsg, failedKey, errorKey) {
+      try {
+        var resp = await App.authFetch(url, opts);
+        if (resp.ok) {
+          App.notifications.showToast(successMsg, 'success');
+          App.models.load();
+        } else {
+          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t(failedKey)), 'error');
+        }
+      } catch (e) {
+        App.notifications.showToast(I18n.t(errorKey, { error: e.message }), 'error');
+      }
+    },
+
     loadShard: async function() {
       var modelId = this.currentModel;
       var idx = this.currentIndex;
       this.hide();
-
-      try {
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load', { method: 'POST' });
-        if (resp.ok) {
-          App.notifications.showToast(I18n.t('shard.loading', { idx: idx + 1 }), 'success');
-          App.models.load();
-        } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('shard.load_failed')), 'error');
-        }
-      } catch (e) {
-        App.notifications.showToast(I18n.t('shard.load_error', { error: e.message }), 'error');
-      }
+      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load';
+      await this._shardAction(url, { method: 'POST' }, I18n.t('shard.loading', { idx: idx + 1 }), 'shard.load_failed', 'shard.load_error');
     },
 
     unloadShard: async function() {
       var modelId = this.currentModel;
       var idx = this.currentIndex;
       this.hide();
-
       if (!confirm(I18n.t('shard.confirm_unload', { idx: idx + 1 }))) return;
-
-      try {
-        // Unload this specific shard — narrows the shard window and restarts the worker.
-        // The remaining shards stay loaded; only this one is freed.
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload', { method: 'POST' });
-        if (resp.ok) {
-          var name = U.formatModelDisplayName(modelId);
-          App.notifications.showToast(I18n.t('shard.unloaded', { idx: idx + 1, model: name }), 'success');
-          App.models.load();
-        } else {
-          App.notifications.showToast(await U.getApiErrorMessage(resp, I18n.t('shard.unload_failed')), 'error');
-        }
-      } catch (e) {
-        App.notifications.showToast(I18n.t('shard.unload_error', { error: e.message }), 'error');
-      }
+      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload';
+      var name = U.formatModelDisplayName(modelId);
+      await this._shardAction(url, { method: 'POST' }, I18n.t('shard.unloaded', { idx: idx + 1, model: name }), 'shard.unload_failed', 'shard.unload_error');
     }
   };
 })();

@@ -50,7 +50,7 @@ fn extract_provider_error(
     key_priority: &[&[&str]],
 ) -> ApiError {
     let scrubbed = crate::crypto::scrub_api_keys(raw_body);
-    tracing::warn!(status = %status, body = %scrubbed, "{provider_label} returned error");
+    tracing::warn!(status = %status, body = %scrubbed, provider = %provider_label, "Provider returned error");
     let friendly = serde_json::from_str::<serde_json::Value>(&scrubbed)
         .ok()
         .and_then(|v| {

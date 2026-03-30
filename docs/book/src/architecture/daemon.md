@@ -1,6 +1,6 @@
 # Daemon & Subsystems
 
-The daemon spawns 10 Tokio tasks wired together with `mpsc` channels:
+The daemon spawns 11 Tokio tasks wired together with `mpsc` channels:
 
 ```
                            ┌──────────────┐
@@ -8,10 +8,10 @@ The daemon spawns 10 Tokio tasks wired together with `mpsc` channels:
                            │  (bootstrap) │
                            └──────┬───────┘
                                   │ spawns tokio tasks
-  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┐
-  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼
-Network  Infer   Credit  Health   API    Rebal-   Acquisi-   Message    Pool     AutoShrd
-Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager  Manager
+  ┌───────┬───────┬───────┬───────┼───────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+  ▼       ▼       ▼       ▼       ▼       ▼          ▼          ▼          ▼          ▼          ▼
+Network  Infer   Credit  Health   API    Rebal-   Acquisi-   Message    Pool     AutoShrd   Update
+Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager  Manager   Checker
 ```
 
 ## Subsystem Responsibilities
@@ -28,6 +28,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 | **ApiServer** | `src/api/server.rs` | Axum HTTP: OpenAI + Anthropic APIs + MCP server + admin dashboard + WebSocket |
 | **PoolManager** | `src/pool/manager.rs` | Device pool management, credit forwarding |
 | **AutoShardManager** | `src/model/auto_manage/` | VRAM-aware shard acquisition + smart pruning (manager, scoring, download, prune, scan, vram) |
+| **UpdateChecker** | `src/update.rs` | Periodic GitHub release polling, SHA256-verified binary download, atomic apply |
 
 ## Channel Layout
 
@@ -65,7 +66,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 9. Build `Arc<SharedState>` (includes ModelRegistry from DB)
 10. Scan local shards, register in registries
 11. Create mpsc channels
-12. Spawn all 10 tasks
+12. Spawn all 11 tasks
 13. Open browser if configured
 14. `tokio::select!` on Ctrl+C or task exit
 15. Graceful shutdown: save peer cache, flush database

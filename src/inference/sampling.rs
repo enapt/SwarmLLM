@@ -345,6 +345,21 @@ fn simple_random() -> f32 {
     rand::random::<f32>()
 }
 
+/// Check if accumulated text contains any stop sequence.
+/// Returns the matching stop string (if any) for callers that need to truncate.
+pub(crate) fn find_stop_sequence<'a>(
+    accumulated_text: &str,
+    stop_sequences: &'a [String],
+) -> Option<&'a str> {
+    if stop_sequences.is_empty() {
+        return None;
+    }
+    stop_sequences
+        .iter()
+        .find(|s| accumulated_text.contains(s.as_str()))
+        .map(|s| s.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

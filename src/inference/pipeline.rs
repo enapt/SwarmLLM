@@ -22,7 +22,7 @@ const PREFILL_SECS_PER_LAYER: u64 = 15;
 const DECODE_SECS_PER_LAYER: u64 = 2;
 const SEGMENT_TIMEOUT_MIN_SECS: u64 = 30;
 const SEGMENT_TIMEOUT_MAX_SECS: u64 = 600;
-const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
+pub(crate) const PREFILL_ACTIVATION_THRESHOLD_BYTES: usize = 100_000;
 
 /// Extract chat template, BOS, and EOS strings from a GGUF header file on disk.
 /// Uses the centralized `GgufTokenizerMeta` extractor.
@@ -818,18 +818,18 @@ impl PipelineExecutor {
                             accumulated_text.push_str(&text);
 
                             // Check if accumulated text contains a stop string
-                            if let Some(stop) = stop_strings
-                                .iter()
-                                .find(|s| accumulated_text.contains(s.as_str()))
-                            {
+                            if let Some(stop) = crate::inference::sampling::find_stop_sequence(
+                                &accumulated_text,
+                                &stop_strings,
+                            ) {
                                 // Trim everything from the stop string onwards
-                                if let Some(pos) = accumulated_text.find(stop.as_str()) {
+                                if let Some(pos) = accumulated_text.find(stop) {
                                     accumulated_text.truncate(pos);
                                     if let Some(ref mut st) = streamed_text {
                                         // Remove the stop string from streamed text too
                                         // Use find (not rfind) to match the first occurrence,
                                         // consistent with accumulated_text truncation above.
-                                        if let Some(spos) = st.find(stop.as_str()) {
+                                        if let Some(spos) = st.find(stop) {
                                             st.truncate(spos);
                                         }
                                     }

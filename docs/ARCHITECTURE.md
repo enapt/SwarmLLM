@@ -112,9 +112,9 @@ The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that route
 10. Scan local shards → register in model_registry (with disk existence verification).
     Claims manifest publisher as our node_id + recomputes BLAKE3 hash (allows gossiping copied shards).
 11. Create mpsc channels (network, router, rebalance, acquisition, pool)
-12. Spawn all tasks (10 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
+12. Spawn all tasks (11 tasks: NetworkManager, InferenceRouter, MessageDispatcher,
     HealthMonitor, ShardRebalancer, CreditLedger, AcquisitionManager, ApiServer,
-    PoolManager, AutoShardManager)
+    PoolManager, AutoShardManager, UpdateChecker)
 13. Open browser if ui.open_browser_on_start is true (setup wizard or admin)
 14. tokio::select! on Ctrl+C signal or any task exit
 15. Signal graceful shutdown via watch channel, save peer cache, flush redb database
@@ -1336,7 +1336,7 @@ Resolved items (removed from deferred):
 - **TP FFN norm position**: COMPLETE — 2-phase IPC protocol (AttnOnly → AllReduce → FfnOnly → AllReduce) ensures FFN norm applied to full post-attention tensor
 - **LoRA inference wiring**: COMPLETE — adapter_id in LayerForward/IpcForward, model_worker loads from adapter_config.json + safetensors, forward_with_lora() called
 - **Paged attention pool wiring**: REMOVED — PagedKvPool/PagedKvStore module and SharedState fields deleted (never wired to any production path). Feature gated behind `paged-attn` which was never enabled
-- **Speculative decoding in subprocess**: COMPLETE — IPC protocol: SpeculativeDraft/SpeculativeVerify messages + DraftResult/VerifyResult with logit distributions
+- **Speculative decoding in subprocess**: DEFERRED — IPC scaffolding removed; speculative decoding works via legacy executor path only
 - **Ring AllReduce network wiring**: COMPLETE — TpRingChunk message type + SendRingChunk NetworkCommand + dispatcher handler. Star topology still default; ring activates at tp_size ≥ 4
 - **Torrent-style parallel P2P download**: COMPLETE — ParallelChunkTracker: 8 MB chunks, max 4 concurrent, round-robin peer assignment, fail/reassign support
 - **DHT-based shard holder resolution (S5)**: COMPLETE — Kademlia provider records + bounded cache (max 50/shard LRU). Two-tier resolution: sync cache for hot path, async DHT for cold lookups. Scales to 50K+ nodes.

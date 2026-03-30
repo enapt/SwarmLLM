@@ -903,5 +903,6 @@
   "models.context_k_abbr": "{n}k ctx",
   "models.max_tokens_label": "{n} max",
   "models.pricing_in": "${price}/1K in",
-  "models.pricing_out": "${price}/1K out"
+  "models.pricing_out": "${price}/1K out",
+  "errors.request_timeout": "अनुरोध का समय समाप्त — सर्वर व्यस्त या अनुपलब्ध हो सकता है"
 }

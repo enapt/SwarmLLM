@@ -114,7 +114,10 @@ pub async fn update_providers(
         }
     }
 
+    // Build updated config on a clone so in-memory state only changes after
+    // successful persist — prevents RAM/disk divergence on encryption failure.
     let mut config = state.shared_state.metrics.providers_config.write().await;
+    let mut new_config = config.clone();
 
     fn update_entry(entry: &mut Option<crate::config::ProviderEntry>, key: Option<String>) {
         if let Some(k) = key {
@@ -129,33 +132,33 @@ pub async fn update_providers(
         }
     }
 
-    update_entry(&mut config.anthropic, body.anthropic_key);
-    update_entry(&mut config.openai, body.openai_key);
-    update_entry(&mut config.deepseek, body.deepseek_key);
-    update_entry(&mut config.mistral, body.mistral_key);
-    update_entry(&mut config.groq, body.groq_key);
-    update_entry(&mut config.nvidia_nim, body.nvidia_nim_key);
-    update_entry(&mut config.cerebras, body.cerebras_key);
-    update_entry(&mut config.sambanova, body.sambanova_key);
-    update_entry(&mut config.fireworks, body.fireworks_key);
-    update_entry(&mut config.together, body.together_key);
-    update_entry(&mut config.deepinfra, body.deepinfra_key);
-    update_entry(&mut config.moonshot, body.moonshot_key);
+    update_entry(&mut new_config.anthropic, body.anthropic_key);
+    update_entry(&mut new_config.openai, body.openai_key);
+    update_entry(&mut new_config.deepseek, body.deepseek_key);
+    update_entry(&mut new_config.mistral, body.mistral_key);
+    update_entry(&mut new_config.groq, body.groq_key);
+    update_entry(&mut new_config.nvidia_nim, body.nvidia_nim_key);
+    update_entry(&mut new_config.cerebras, body.cerebras_key);
+    update_entry(&mut new_config.sambanova, body.sambanova_key);
+    update_entry(&mut new_config.fireworks, body.fireworks_key);
+    update_entry(&mut new_config.together, body.together_key);
+    update_entry(&mut new_config.deepinfra, body.deepinfra_key);
+    update_entry(&mut new_config.moonshot, body.moonshot_key);
 
     // Update key source mode if provided
     if let Some(ref ks) = body.key_source {
-        config.key_source = match ks.as_str() {
+        new_config.key_source = match ks.as_str() {
             "env" => crate::config::ProviderKeySource::Env,
             "dashboard" => crate::config::ProviderKeySource::Dashboard,
             _ => crate::config::ProviderKeySource::Auto,
         };
         // Re-apply env vars with the new mode
-        config.fill_from_env();
+        new_config.fill_from_env();
     }
 
-    // Encrypt keys before persisting to database
+    // Encrypt and persist BEFORE committing to in-memory state
     let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
-    match crate::crypto::encrypt_config(&config, &signing_key_bytes) {
+    match crate::crypto::encrypt_config(&new_config, &signing_key_bytes) {
         Ok(encrypted) => {
             let _ = state
                 .shared_state
@@ -169,6 +172,9 @@ pub async fn update_providers(
             )));
         }
     }
+
+    // Persist succeeded — commit to in-memory state
+    *config = new_config;
 
     tracing::info!(target: "swarmllm::api::admin_providers", "Cloud provider configuration updated");
 
@@ -413,6 +419,9 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
             });
 
     let results = futures::future::join_all(fetches).await;
+    // Clear stale entries before repopulating — prevents misdirecting requests
+    // to models removed from provider catalogs between refresh cycles.
+    state.shared_state.metrics.provider_model_map.clear();
     for (provider, provider_models) in &results {
         for m in provider_models {
             if let Some(id) = m.get("id").and_then(|v| v.as_str()) {

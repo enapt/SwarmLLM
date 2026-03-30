@@ -124,32 +124,6 @@ pub async fn run_worker(
                 models.remove(&(layer_start, layer_end));
                 tracing::info!(layer_start, layer_end, "model-worker: unloaded shard range");
             }
-            DaemonMsg::SpeculativeDraft(draft) => {
-                // Draft model generates N tokens with logit distributions
-                let request_id = draft.request_id;
-                let _ = send_worker(
-                    &mut writer,
-                    &WorkerMsg::Error {
-                        request_id,
-                        message: "Speculative draft not yet implemented in worker".into(),
-                    },
-                    &[],
-                )
-                .await;
-            }
-            DaemonMsg::SpeculativeVerify(verify) => {
-                // Target model verifies draft tokens
-                let request_id = verify.request_id;
-                let _ = send_worker(
-                    &mut writer,
-                    &WorkerMsg::Error {
-                        request_id,
-                        message: "Speculative verify not yet implemented in worker".into(),
-                    },
-                    &[],
-                )
-                .await;
-            }
             DaemonMsg::Shutdown => {
                 let _ = send_worker(&mut writer, &WorkerMsg::Bye, &[]).await;
                 break;
@@ -604,10 +578,8 @@ async fn handle_generate(
         accumulated_text.push_str(&text);
 
         // Check user-provided stop sequences
-        if !stop_sequences.is_empty()
-            && stop_sequences
-                .iter()
-                .any(|s| accumulated_text.contains(s.as_str()))
+        if crate::inference::sampling::find_stop_sequence(&accumulated_text, stop_sequences)
+            .is_some()
         {
             finish_reason = "stop".to_string();
             break;

@@ -445,7 +445,7 @@ impl NetworkManager {
                             let age = now.duration_since(*sent_at);
                             // Adaptive timeout: 15s/layer for prefill, 2s/layer for decode,
                             // clamped to [30s, 600s]. Matches pipeline.rs logic.
-                            let is_prefill = *activation_bytes > 100_000;
+                            let is_prefill = *activation_bytes > crate::inference::pipeline::PREFILL_ACTIVATION_THRESHOLD_BYTES;
                             let per_layer = if is_prefill { 15u64 } else { 2 };
                             let timeout_secs = ((*num_layers as u64) * per_layer).clamp(30, 600);
                             let is_rr_pending = self.swarm.behaviour()

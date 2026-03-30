@@ -12,22 +12,29 @@ fn spawn_progress_updater(
     mid: crate::types::ModelId,
     mut prx: tokio::sync::mpsc::Receiver<crate::model::huggingface::DownloadProgress>,
 ) {
+    let mut shutdown_rx = shared.shutdown_rx();
     tokio::spawn(async move {
         let mut last_bytes = 0u64;
         let mut last_time = std::time::Instant::now();
-        while let Some(prog) = prx.recv().await {
-            if let Some(mut entry) = shared.models.acquisition_progress.get_mut(&mid) {
-                entry.downloaded_bytes = prog.downloaded_bytes;
-                entry.total_bytes = prog.total_bytes;
-                let now = std::time::Instant::now();
-                let dt = now.duration_since(last_time).as_secs_f64();
-                if dt > 0.5 {
-                    let speed =
-                        (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
-                    entry.speed_bytes_per_sec = speed;
-                    last_bytes = prog.downloaded_bytes;
-                    last_time = now;
+        loop {
+            tokio::select! {
+                prog = prx.recv() => {
+                    let Some(prog) = prog else { break };
+                    if let Some(mut entry) = shared.models.acquisition_progress.get_mut(&mid) {
+                        entry.downloaded_bytes = prog.downloaded_bytes;
+                        entry.total_bytes = prog.total_bytes;
+                        let now = std::time::Instant::now();
+                        let dt = now.duration_since(last_time).as_secs_f64();
+                        if dt > 0.5 {
+                            let speed =
+                                (prog.downloaded_bytes.saturating_sub(last_bytes) as f64 / dt) as u64;
+                            entry.speed_bytes_per_sec = speed;
+                            last_bytes = prog.downloaded_bytes;
+                            last_time = now;
+                        }
+                    }
                 }
+                _ = shutdown_rx.changed() => break,
             }
         }
     });
