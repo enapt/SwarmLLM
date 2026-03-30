@@ -1511,6 +1511,7 @@ impl NetworkManager {
             for rid in &drained_ids {
                 if let Some((_, shard_id)) = self.pending_shard_requests.remove(rid) {
                     self.shard_download_progress.remove(&shard_id);
+                    self.shard_p2p_retries.remove(&shard_id);
                     tracing::debug!(
                         %peer_id,
                         model = %shard_id.model_id,
@@ -2245,6 +2246,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                                 "Shard download continuation dropped — pending_shard_requests at cap"
                             );
                             self.shard_download_progress.remove(&shard_id);
+                            self.shard_p2p_retries.remove(&shard_id);
                         } else {
                             self.shard_download_progress
                                 .insert(shard_id.clone(), new_offset);

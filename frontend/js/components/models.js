@@ -285,7 +285,7 @@
           list.innerHTML = '<div class="model-dropdown-empty">' +
             (I18n.t('models.discovering') || 'Discovering models...') +
             '<br><span style="font-size:0.72rem;color:var(--text-muted)">' +
-            (I18n.t('models.discovering_hint') || 'Connected to ' + peerCount + ' peers. Models will appear as the network syncs.') +
+            I18n.t('models.discovering_hint', { count: peerCount }) +
             '</span></div>';
         } else {
           list.innerHTML = '<div class="model-dropdown-empty">' +

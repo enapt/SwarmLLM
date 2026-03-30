@@ -332,7 +332,7 @@
         emptyState.innerHTML = '<div class="chat-empty-icon" style="font-size:2rem">' +
           '<div class="spinner" style="width:24px;height:24px;display:inline-block"></div></div>' +
           '<div class="chat-empty-title" style="font-size:1.1rem">' + (I18n.t('chat.discovering') || 'Discovering models on the network...') + '</div>' +
-          '<div class="chat-empty-hint" style="margin:8px 0">' + (I18n.t('chat.discovering_hint') || 'Connected to ' + peerCount + ' peer' + (peerCount !== 1 ? 's' : '') + '. Models will appear in the dropdown as they become available.') + '</div>';
+          '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.discovering_hint', { count: peerCount }) + '</div>';
       } else {
         // No peers, no models — need to connect or add cloud provider
         emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
