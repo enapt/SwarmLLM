@@ -116,7 +116,7 @@
       if (state === 'local') {
         if (!confirm(I18n.t('actions.confirm_remove_shard', { index: idx, model: modelId }))) return;
         try {
-          var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx, { method: 'DELETE' });
+          var resp = await App.authFetch(U.modelApiUrl(modelId, 'shards', idx), { method: 'DELETE' });
           if (resp.ok) {
             App.ui.showBanner('success', I18n.t('shard.removed', { idx: idx }));
             App.models.load();
@@ -131,7 +131,7 @@
       } else {
         // Single shard download — backend tries P2P first, falls back to HF
         try {
-          var dlResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/download', { method: 'POST' });
+          var dlResp = await App.authFetch(U.modelApiUrl(modelId, 'shards', idx) + '/download', { method: 'POST' });
           var dlData = await dlResp.json();
           if (dlData.status === 'downloading') {
             App.ui.showBanner('success', I18n.t('shard.downloading_from', { idx: idx + 1, source: dlData.source === 'p2p' ? 'peer ' + (dlData.peer || '') : 'peers' }));
@@ -165,7 +165,7 @@
       var idx = this.currentIndex;
       var newLocked = !this.currentLocked;
       this.hide();
-      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/lock';
+      var url = U.modelApiUrl(modelId, 'shards', idx) + '/lock';
       var opts = { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locked: newLocked }) };
       try {
         var resp = await App.authFetch(url, opts);
@@ -198,7 +198,7 @@
       var modelId = this.currentModel;
       var idx = this.currentIndex;
       this.hide();
-      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/load';
+      var url = U.modelApiUrl(modelId, 'shards', idx) + '/load';
       await this._shardAction(url, { method: 'POST' }, I18n.t('shard.loading', { idx: idx + 1 }), 'shard.load_failed', 'shard.load_error');
     },
 
@@ -207,7 +207,7 @@
       var idx = this.currentIndex;
       this.hide();
       if (!confirm(I18n.t('shard.confirm_unload', { idx: idx + 1 }))) return;
-      var url = '/api/admin/models/' + encodeURIComponent(modelId) + '/shards/' + idx + '/unload';
+      var url = U.modelApiUrl(modelId, 'shards', idx) + '/unload';
       var name = U.formatModelDisplayName(modelId);
       await this._shardAction(url, { method: 'POST' }, I18n.t('shard.unloaded', { idx: idx + 1, model: name }), 'shard.unload_failed', 'shard.unload_error');
     }

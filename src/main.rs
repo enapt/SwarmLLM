@@ -625,15 +625,11 @@ async fn run_chat(
 ) -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
 
-    let key_path = data_dir.join("api_key");
-    let api_key = std::fs::read_to_string(&key_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let api_key = read_api_key(data_dir).unwrap_or_default();
     if api_key.is_empty() {
         anyhow::bail!(
             "No API key at {} — is the daemon running?",
-            key_path.display()
+            data_dir.join("api_key").display()
         );
     }
 
@@ -721,13 +717,12 @@ async fn query_peers(
     data_dir: &std::path::Path,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    let key_path = data_dir.join("api_key");
-    let api_key = std::fs::read_to_string(&key_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let api_key = read_api_key(data_dir).unwrap_or_default();
     if api_key.is_empty() {
-        eprintln!("Warning: no API key found at {}", key_path.display());
+        eprintln!(
+            "Warning: no API key found at {}",
+            data_dir.join("api_key").display()
+        );
     }
 
     let url = format!("http://localhost:{port}/api/admin/peers");
@@ -819,15 +814,11 @@ async fn run_bench(
     json_output: bool,
 ) -> anyhow::Result<()> {
     // Read API key
-    let key_path = data_dir.join("api_key");
-    let api_key = std::fs::read_to_string(&key_path)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let api_key = read_api_key(data_dir).unwrap_or_default();
     if api_key.is_empty() {
         anyhow::bail!(
             "No API key at {} — is the daemon running?",
-            key_path.display()
+            data_dir.join("api_key").display()
         );
     }
 

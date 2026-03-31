@@ -472,7 +472,7 @@
         if (encReady) {
           var encModelData = (App.data.cache.models || []).find(function(m) { return m.id === encToggle; });
           var isActive = encModelData ? !!encModelData.encrypted_pipeline : (target.classList.contains('active') || target.closest('.active') != null);
-          App.authFetch('/api/admin/models/' + encodeURIComponent(encToggle) + '/encrypted-pipeline', {
+          App.authFetch(U.modelApiUrl(encToggle, 'encrypted-pipeline'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: !isActive }),

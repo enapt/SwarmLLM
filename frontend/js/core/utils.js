@@ -445,5 +445,10 @@
     updateChatDownloadProgress: updateChatDownloadProgress,
     handleApiError: handleApiError,
     getApiErrorMessage: getApiErrorMessage,
+    modelApiUrl: function(modelId) {
+      var parts = Array.prototype.slice.call(arguments, 1);
+      var base = '/api/admin/models/' + encodeURIComponent(modelId);
+      return parts.length ? base + '/' + parts.join('/') : base;
+    },
   };
 })();

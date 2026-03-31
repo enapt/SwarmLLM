@@ -458,7 +458,7 @@
 
     request: async function(modelId) {
       try {
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/add', { method: 'POST' });
+        var resp = await App.authFetch(U.modelApiUrl(modelId, 'add'), { method: 'POST' });
         var data = await resp.json();
         if (data.status === 'acquiring') {
           S.activeAcquisitions[modelId] = { started: Date.now() };
@@ -513,7 +513,7 @@
     remove: async function(modelId) {
       if (!confirm(I18n.t('actions.confirm_remove_model', { model: modelId }))) return;
       try {
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId), { method: 'DELETE' });
+        var resp = await App.authFetch(U.modelApiUrl(modelId), { method: 'DELETE' });
         if (resp.ok) {
           App.ui.showBanner('success', I18n.t('models.model_removed', { model: modelId }));
           var card = document.querySelector('[data-model-id="' + U.cssSafeAttr(modelId) + '"]');
@@ -529,7 +529,7 @@
 
     unload: async function(modelId) {
       try {
-        var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/unload', { method: 'POST' });
+        var resp = await App.authFetch(U.modelApiUrl(modelId, 'unload'), { method: 'POST' });
         if (resp.ok) {
           var result = await resp.json().catch(function() { return {}; });
           var freedMb = result.estimated_freed_mb || 0;
@@ -558,8 +558,8 @@
       var encStatus = { encrypted_pipeline: false, ready: false, has_first_shard: false, has_last_shard: false, shard_count: 0 };
       try {
         var results = await Promise.all([
-          App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage'),
-          App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline'),
+          App.authFetch(U.modelApiUrl(modelId, 'auto-manage')),
+          App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline')),
         ]);
         if (results[0].ok) policy = await results[0].json();
         if (results[1].ok) encStatus = await results[1].json();
@@ -612,7 +612,7 @@
       if (!enabledEl || !maxEl) return;
 
       try {
-        var amResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/auto-manage', {
+        var amResp = await App.authFetch(U.modelApiUrl(modelId, 'auto-manage'), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -624,7 +624,7 @@
 
         var encErr = null;
         if (encryptedEl && !encryptedEl.disabled) {
-          var encResp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/encrypted-pipeline', {
+          var encResp = await App.authFetch(U.modelApiUrl(modelId, 'encrypted-pipeline'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: encryptedEl.checked }),
@@ -664,7 +664,7 @@
       try {
         var data = S.metadataCache[modelId];
         if (!data) {
-          var resp = await App.authFetch('/api/admin/models/' + encodeURIComponent(modelId) + '/metadata');
+          var resp = await App.authFetch(U.modelApiUrl(modelId, 'metadata'));
           if (!resp.ok) throw new Error('Failed to load metadata');
           data = await resp.json();
           S.metadataCache[modelId] = data;
