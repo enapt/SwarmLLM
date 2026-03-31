@@ -49,6 +49,14 @@ pub fn sanitize_path_component(s: &str) -> String {
     sanitized
 }
 
+/// Get the directory path for a specific model under data_dir, with sanitization.
+/// Use this instead of manually joining `data_dir.join("models").join(id)`.
+pub fn model_dir(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
+    data_dir
+        .join("models")
+        .join(sanitize_path_component(model_id))
+}
+
 /// Manages shard files on disk — loading, verification, and storage.
 pub struct ShardStore {
     data_dir: PathBuf,
@@ -63,12 +71,13 @@ impl ShardStore {
 
     /// Get the path to a specific shard file.
     pub fn shard_path(&self, model_id: &ModelId, index: u32) -> PathBuf {
-        // SECURITY: Sanitize model_id to prevent path traversal
-        let safe_id = sanitize_path_component(&model_id.0);
-        self.data_dir
-            .join("models")
-            .join(&safe_id)
+        self.model_dir(model_id)
             .join(format!("shard_{index:03}.bin"))
+    }
+
+    /// Get the directory path for a specific model (sanitized).
+    pub fn model_dir(&self, model_id: &ModelId) -> PathBuf {
+        model_dir(&self.data_dir, &model_id.0)
     }
 
     /// Get the models directory path.

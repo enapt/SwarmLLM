@@ -349,7 +349,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
     // Helper: compute disk-level metadata (manifest, header, probed, mmproj) for a model.
     let disk_metadata = |model_id: &str, model_display_name: &str| -> serde_json::Value {
-        let model_dir = state.config.node.data_dir.join("models").join(model_id);
+        let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, model_id);
         let has_manifest = model_dir.join("manifest.json").exists();
         let has_header = model_dir.join("gguf_header.bin").exists();
         let mid_check = crate::types::ModelId(model_id.to_string());
@@ -895,7 +895,6 @@ pub async fn delete_model(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Sanitize model_id to prevent path traversal
-    let safe_model_id = crate::model::shard::sanitize_path_component(&model_id);
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -907,12 +906,7 @@ pub async fn delete_model(
     let node_id = shared.identity.node_id().clone();
 
     // Remove shard files from disk (in spawn_blocking to avoid blocking Tokio)
-    let model_dir = state
-        .config
-        .node
-        .data_dir
-        .join("models")
-        .join(&safe_model_id);
+    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
     let model_dir_clone = model_dir.clone();
     let files_removed = tokio::task::spawn_blocking(move || {
         let mut count = 0u32;
@@ -1940,8 +1934,7 @@ pub async fn model_metadata(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let safe_id = crate::model::shard::sanitize_path_component(&model_id);
-    let model_dir = state.config.node.data_dir.join("models").join(&safe_id);
+    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
     let header_path = model_dir.join("gguf_header.bin");
 
     if !header_path.exists() {

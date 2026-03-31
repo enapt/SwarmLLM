@@ -1009,15 +1009,11 @@ pub async fn chat_completions(
                 ),
                 None => {
                     // Try loading template from GGUF header on disk
-                    let safe_id = crate::model::shard::sanitize_path_component(&req.model);
-                    let header_path = state
-                        .shared_state
-                        .config
-                        .node
-                        .data_dir
-                        .join("models")
-                        .join(&safe_id)
-                        .join("gguf_header.bin");
+                    let header_path = crate::model::shard::model_dir(
+                        &state.shared_state.config.node.data_dir,
+                        &req.model,
+                    )
+                    .join("gguf_header.bin");
                     if header_path.exists() {
                         match crate::inference::pipeline::template_from_header(&header_path) {
                             Some((t, b, e)) => (t, b, e),
@@ -1025,14 +1021,11 @@ pub async fn chat_completions(
                         }
                     } else {
                         // No header on disk — try fetching from HuggingFace for remote models
-                        let mid = crate::types::ModelId(safe_id.clone());
-                        let model_dir = state
-                            .shared_state
-                            .config
-                            .node
-                            .data_dir
-                            .join("models")
-                            .join(&safe_id);
+                        let mid = crate::types::ModelId(req.model.clone());
+                        let model_dir = crate::model::shard::model_dir(
+                            &state.shared_state.config.node.data_dir,
+                            &req.model,
+                        );
                         if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
                             let shard_size = state.shared_state.config.model.shard_size_bytes();
                             if let Ok(info) = crate::model::huggingface::probe_gguf_file(

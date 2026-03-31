@@ -39,8 +39,9 @@ impl AutoShardManager {
         // - P2P downloads: shard_download_p2p (below in P2P path)
         // This avoids double-logging when a generic start + specific start both fire.
 
-        let model_dir = self.shared_state.config.node.data_dir.join("models").join(
-            crate::model::shard::sanitize_path_component(&candidate.model_id.0),
+        let model_dir = crate::model::shard::model_dir(
+            &self.shared_state.config.node.data_dir,
+            &candidate.model_id.0,
         );
 
         // -- T8: mmproj full-file download (not byte-range) --
@@ -457,12 +458,10 @@ display
                                         si.hash = hash;
                                     }
                                     manifest.manifest_hash = manifest.compute_hash();
-                                    let model_dir =
-                                        shared.config.node.data_dir.join("models").join(
-                                            crate::model::shard::sanitize_path_component(
-                                                &model_id.0,
-                                            ),
-                                        );
+                                    let model_dir = crate::model::shard::model_dir(
+                                        &shared.config.node.data_dir,
+                                        &model_id.0,
+                                    );
                                     if let Err(e) = manifest.save_to_dir(&model_dir) {
                                         tracing::warn!(
                                             model = %model_id,

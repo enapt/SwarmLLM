@@ -151,7 +151,7 @@ fn ensure_model_loaded(
         return Ok(());
     }
 
-    let model_dir = data_dir.join("models").join(&model_id.0);
+    let model_dir = crate::model::shard::model_dir(data_dir, &model_id.0);
     let manifest_path = model_dir.join("manifest.json");
     let manifest: crate::types::ModelManifest = serde_json::from_str(
         &std::fs::read_to_string(&manifest_path)

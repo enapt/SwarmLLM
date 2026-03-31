@@ -318,7 +318,7 @@ impl Daemon {
                     // Load GGUF metadata for the model if we have a source path
                     if !shared_state.gguf_meta.contains_key(&model_id) {
                         let shard_store_tmp = ShardStore::new(&self.config.node.data_dir);
-                        let model_dir = shard_store_tmp.models_dir().join(&model_id.0);
+                        let model_dir = shard_store_tmp.model_dir(&model_id);
                         let source_path_file = model_dir.join("source_path");
                         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
                             let path = std::path::PathBuf::from(path_str.trim());
@@ -424,7 +424,7 @@ impl Daemon {
                 for (model_id, shard_info) in &shards {
                     // Register the manifest if we haven't yet
                     if registered_manifests.insert(model_id.clone()) {
-                        let model_dir = shard_store.models_dir().join(&model_id.0);
+                        let model_dir = shard_store.model_dir(model_id);
 
                         // Ensure GGUF header exists (extract from shard_000 if available)
                         // and load GGUF metadata for split inference.

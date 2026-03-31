@@ -131,7 +131,7 @@ impl PipelineExecutor {
 
         let shard_store =
             crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
-        let model_dir = shard_store.models_dir().join(&model_id.0);
+        let model_dir = shard_store.model_dir(model_id);
         let manifest = self
             .shared_state
             .model_registry
@@ -222,13 +222,10 @@ impl PipelineExecutor {
             let vision_module = if let Some(vm) = self.shared_state.vision_modules.get(model_id) {
                 vm.value().clone()
             } else {
-                let model_dir = self
-                    .shared_state
-                    .config
-                    .node
-                    .data_dir
-                    .join("models")
-                    .join(&model_id.0);
+                let model_dir = crate::model::shard::model_dir(
+                    &self.shared_state.config.node.data_dir,
+                    &model_id.0,
+                );
                 let mmproj_path = model_dir.join("mmproj.gguf");
                 let vm = crate::inference::vision::load_from_mmproj_gguf(
                     &mmproj_path,
@@ -416,14 +413,9 @@ impl PipelineExecutor {
     /// Build chat prompt by reading GGUF header from disk (convenience wrapper).
     async fn build_prompt(&self) -> String {
         let model_id = &self.request.model_id;
-        let header_path = self
-            .shared_state
-            .config
-            .node
-            .data_dir
-            .join("models")
-            .join(&model_id.0)
-            .join("gguf_header.bin");
+        let header_path =
+            crate::model::shard::model_dir(&self.shared_state.config.node.data_dir, &model_id.0)
+                .join("gguf_header.bin");
         let header_data = template_from_header(&header_path);
         self.build_prompt_with_header(header_data.as_ref()).await
     }
@@ -604,14 +596,11 @@ impl PipelineExecutor {
         // Read GGUF header ONCE and cache for both prompt building and stop strings
         let header_data: Option<(Option<String>, String, String)> = {
             let model_id = &self.request.model_id;
-            let header_path = self
-                .shared_state
-                .config
-                .node
-                .data_dir
-                .join("models")
-                .join(&model_id.0)
-                .join("gguf_header.bin");
+            let header_path = crate::model::shard::model_dir(
+                &self.shared_state.config.node.data_dir,
+                &model_id.0,
+            )
+            .join("gguf_header.bin");
             template_from_header(&header_path)
         };
 
@@ -1077,14 +1066,11 @@ impl PipelineExecutor {
         } else {
             // No model loaded — try loading vocab from GGUF header on disk.
             // The header is always available from the probe/manifest exchange.
-            let header_path = self
-                .shared_state
-                .config
-                .node
-                .data_dir
-                .join("models")
-                .join(model_id.0.as_str())
-                .join("gguf_header.bin");
+            let header_path = crate::model::shard::model_dir(
+                &self.shared_state.config.node.data_dir,
+                &model_id.0,
+            )
+            .join("gguf_header.bin");
             if header_path.exists() {
                 match Self::decoder_from_header(&header_path) {
                     Some((eos, decoder, tokenizer_opt)) => {
@@ -1118,13 +1104,10 @@ impl PipelineExecutor {
             } else {
                 // No header on disk — try fetching from HuggingFace on-demand
                 if let Some(hf_source) = self.shared_state.models.hf_sources.get(model_id) {
-                    let model_dir = self
-                        .shared_state
-                        .config
-                        .node
-                        .data_dir
-                        .join("models")
-                        .join(&model_id.0);
+                    let model_dir = crate::model::shard::model_dir(
+                        &self.shared_state.config.node.data_dir,
+                        &model_id.0,
+                    );
                     tracing::info!(
                         model = %model_id,
                         repo = %hf_source.repo_id,

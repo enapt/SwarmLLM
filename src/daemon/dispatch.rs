@@ -903,9 +903,7 @@ pub(crate) async fn dispatch_network_messages(
                                             // Persist to DB
                                             let _ = shared_state.db.put_json("hf_sources", &mid.0, &source);
                                             // Also write hf_source.json to disk so discover_hf_sources finds it on restart
-                                            let model_dir = shared_state.config.node.data_dir.join("models").join(
-                                                crate::model::shard::sanitize_path_component(&mid.0),
-                                            );
+                                            let model_dir = crate::model::shard::model_dir(&shared_state.config.node.data_dir, &mid.0);
                                             {
                                                 let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
                                                 tokio::task::spawn_blocking(move || {
@@ -1458,9 +1456,7 @@ async fn handle_layer_forward(
     let split_key = (model_id.clone(), layer_start, layer_end);
     if !shared_state.split_models.contains_key(&split_key) {
         let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
-        let model_dir = shard_store
-            .models_dir()
-            .join(crate::model::shard::sanitize_path_component(&model_id.0));
+        let model_dir = shard_store.model_dir(&model_id);
 
         // Estimate VRAM from shard file sizes on disk (no model loading)
         let vram_estimate_mb =
@@ -1599,12 +1595,8 @@ async fn handle_vision_encode_request(
         entry.value().clone()
     } else {
         // Try to load mmproj on-demand
-        let model_dir = shared_state
-            .config
-            .node
-            .data_dir
-            .join("models")
-            .join(crate::model::shard::sanitize_path_component(&model_id.0));
+        let model_dir =
+            crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
         let mmproj_path = model_dir.join("mmproj.gguf");
         if !mmproj_path.exists() {
             tracing::warn!(

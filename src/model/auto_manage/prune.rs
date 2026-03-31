@@ -290,14 +290,11 @@ impl AutoShardManager {
                 };
                 let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
                 if mmproj_holders.contains(&local_node_id) {
-                    let mmproj_path = self
-                        .shared_state
-                        .config
-                        .node
-                        .data_dir
-                        .join("models")
-                        .join(crate::model::shard::sanitize_path_component(&manifest.id.0))
-                        .join("mmproj.gguf");
+                    let mmproj_path = crate::model::shard::model_dir(
+                        &self.shared_state.config.node.data_dir,
+                        &manifest.id.0,
+                    )
+                    .join("mmproj.gguf");
                     if mmproj_path.exists() {
                         // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
                         let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
@@ -359,15 +356,11 @@ impl AutoShardManager {
 
             // Actually delete the shard file (or mmproj.gguf for sentinel)
             let shard_path = if candidate.shard_index == crate::types::MMPROJ_SHARD_INDEX {
-                self.shared_state
-                    .config
-                    .node
-                    .data_dir
-                    .join("models")
-                    .join(crate::model::shard::sanitize_path_component(
-                        &candidate.model_id.0,
-                    ))
-                    .join("mmproj.gguf")
+                crate::model::shard::model_dir(
+                    &self.shared_state.config.node.data_dir,
+                    &candidate.model_id.0,
+                )
+                .join("mmproj.gguf")
             } else {
                 shard_store.shard_path(&candidate.model_id, candidate.shard_index)
             };

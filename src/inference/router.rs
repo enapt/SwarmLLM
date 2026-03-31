@@ -1408,12 +1408,8 @@ async fn execute_request(
             .iter()
             .any(|e| e.key().0 == *model_id);
         if !already_loaded {
-            let model_dir = shared_state
-                .config
-                .node
-                .data_dir
-                .join("models")
-                .join(&model_id.0);
+            let model_dir =
+                crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
             let has_shards_on_disk = model_dir.exists()
                 && (model_dir.join("shard_000.bin").exists()
                     || model_dir.join("model.gguf").exists());

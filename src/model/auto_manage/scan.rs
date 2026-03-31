@@ -214,7 +214,7 @@ pub async fn check_and_load_model(
     };
 
     let local_node_id = shared.identity.node_id().clone();
-    let model_dir = shared.config.node.data_dir.join("models").join(&model_id.0);
+    let model_dir = crate::model::shard::model_dir(&shared.config.node.data_dir, &model_id.0);
 
     // Find which shards we actually have on disk and are fully downloaded.
     // A shard is considered ready only when:

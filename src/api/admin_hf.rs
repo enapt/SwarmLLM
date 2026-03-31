@@ -683,8 +683,7 @@ pub async fn hf_download_shards(
     // Always sanitize to prevent path traversal.
     let safe_name = if let Some(ref mid) = body.model_id {
         let sanitized = crate::model::shard::sanitize_path_component(mid);
-        let candidate_dir = state.config.node.data_dir.join("models").join(&sanitized);
-        if candidate_dir.exists() {
+        if crate::model::shard::model_dir(&state.config.node.data_dir, &sanitized).exists() {
             sanitized
         } else {
             gguf_filename_to_model_id(&filename)
@@ -693,7 +692,7 @@ pub async fn hf_download_shards(
         gguf_filename_to_model_id(&filename)
     };
 
-    let dest_dir = state.config.node.data_dir.join("models").join(&safe_name);
+    let dest_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &safe_name);
 
     tracing::info!(
         repo = %repo_id,
@@ -1497,8 +1496,7 @@ pub async fn cancel_download(
     }
 
     // Clean up partial .tmp files in the model directory
-    let safe_id = crate::model::shard::sanitize_path_component(&model_id);
-    let model_dir = state.config.node.data_dir.join("models").join(&safe_id);
+    let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
     let md = model_dir.clone();
     let _ = tokio::task::spawn_blocking(move || {
         if md.exists() {
@@ -1603,12 +1601,8 @@ pub async fn hf_source(
                 );
 
                 // Also write hf_source.json to disk for future startups
-                let model_dir = state
-                    .config
-                    .node
-                    .data_dir
-                    .join("models")
-                    .join(crate::model::shard::sanitize_path_component(&model_id));
+                let model_dir =
+                    crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
                 if model_dir.is_dir() {
                     let hf_path = model_dir.join("hf_source.json");
                     let json_str = serde_json::to_string_pretty(&serde_json::json!({

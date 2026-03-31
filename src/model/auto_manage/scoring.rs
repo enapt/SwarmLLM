@@ -480,14 +480,11 @@ impl AutoShardManager {
                     index: crate::types::MMPROJ_SHARD_INDEX,
                 };
                 let mmproj_holders = registry.shard_holders(&mmproj_shard_id);
-                let mmproj_path = self
-                    .shared_state
-                    .config
-                    .node
-                    .data_dir
-                    .join("models")
-                    .join(crate::model::shard::sanitize_path_component(&manifest.id.0))
-                    .join("mmproj.gguf");
+                let mmproj_path = crate::model::shard::model_dir(
+                    &self.shared_state.config.node.data_dir,
+                    &manifest.id.0,
+                )
+                .join("mmproj.gguf");
 
                 if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
                     let holder_count = mmproj_holders.len();

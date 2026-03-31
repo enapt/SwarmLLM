@@ -96,9 +96,7 @@ pub fn generate_and_register_local_manifest(
 
                 // Build shard infos from layouts (handles hashing, tensor entries, layer ranges)
                 let model_dir =
-                    crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir)
-                        .models_dir()
-                        .join(&model_id.0);
+                    crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
                 let shards =
                     crate::model::manifest::build_shard_infos_from_layouts(&model_dir, &layouts);
 
@@ -144,7 +142,7 @@ pub fn generate_and_register_local_manifest(
     // Store the source GGUF path so the shard server can read byte ranges from it.
     // We write a small metadata file alongside the manifest.
     let shard_store = ShardStore::new(&shared_state.config.node.data_dir);
-    let model_dir = shard_store.models_dir().join(&model_id.0);
+    let model_dir = shard_store.model_dir(&model_id);
     let _ = std::fs::create_dir_all(&model_dir);
 
     // Write a source_path file so the shard server knows where the original GGUF lives

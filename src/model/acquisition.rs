@@ -265,9 +265,7 @@ impl AcquisitionManager {
         );
 
         // Save the verified manifest to disk
-        // SEC: Sanitize model_id to prevent path traversal from network-gossipped manifests.
-        let safe_id = crate::model::shard::sanitize_path_component(&model_id.0);
-        let model_dir = self.shard_store.models_dir().join(&safe_id);
+        let model_dir = self.shard_store.model_dir(&model_id);
         if let Err(e) = manifest.save_to_dir(&model_dir) {
             tracing::error!(model = %model_id, error = %e, "Failed to save manifest");
             return;
