@@ -17,7 +17,8 @@ pub async fn rescan_local_shards(
     shared: &Arc<SharedState>,
     network_tx: Option<&mpsc::Sender<NetworkCommand>>,
 ) -> Vec<ModelId> {
-    let models_dir = shared.config.node.data_dir.join("models");
+    let models_dir =
+        crate::model::shard::ShardStore::new(&shared.config.node.data_dir).models_dir();
     if !models_dir.is_dir() {
         return vec![];
     }
@@ -428,7 +429,7 @@ manifest.name, budget - total_after
 
         // Create metadata entry from GGUF header (no GPU loading in main process).
         // The worker subprocess will load the model on first inference request.
-        let header_path = model_dir.join("gguf_header.bin");
+        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
         let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
             &model_dir,
             layer_start,

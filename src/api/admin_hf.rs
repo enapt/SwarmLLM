@@ -312,20 +312,7 @@ pub async fn hf_download(
 
     validate_hf_inputs(&repo_id, &filename)?;
 
-    // Sanitize repo_id to prevent path traversal — reject ".." and backslash
-    let sanitized_repo = repo_id.replace(['/', '\\'], "_");
-    if sanitized_repo.contains("..") || sanitized_repo.starts_with('.') {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Invalid repo_id: path traversal detected".into(),
-        )));
-    }
-
-    let dest_dir = state
-        .config
-        .node
-        .data_dir
-        .join("models")
-        .join(&sanitized_repo);
+    let dest_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &repo_id);
 
     tracing::info!(repo = %repo_id, file = %filename, "Starting HuggingFace download");
 
@@ -943,7 +930,7 @@ pub async fn hf_download_shards(
 
         // Generate manifest from header BEFORE downloading shard data.
         // Pass empty shard_indices — no shards to register yet (they don't exist on disk).
-        let header_path = dest_dir.join("gguf_header.bin");
+        let header_path = dest_dir.join(crate::model::shard::HEADER_FILENAME);
         let manifest_result = generate_manifest_from_header(&ManifestGenParams {
             header_path: &header_path,
             model_id_str: &model_id_str,
@@ -980,7 +967,7 @@ pub async fn hf_download_shards(
         let _ = download_shared
             .db
             .put_json("hf_sources", &model_id_str, &hf_source);
-        let hf_source_path = dest_dir.join("hf_source.json");
+        let hf_source_path = dest_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
         let hf_source_json = serde_json::to_string_pretty(&hf_source).unwrap_or_default();
         let _ =
             tokio::task::spawn_blocking(move || std::fs::write(&hf_source_path, hf_source_json))
@@ -1604,7 +1591,7 @@ pub async fn hf_source(
                 let model_dir =
                     crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
                 if model_dir.is_dir() {
-                    let hf_path = model_dir.join("hf_source.json");
+                    let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
                     let json_str = serde_json::to_string_pretty(&serde_json::json!({
                         "repo_id": hit.repo_id,
                         "filename": hit.filename,

@@ -361,7 +361,7 @@ pub fn save_gguf_header(gguf_or_shard0_path: &Path, output_path: &Path) -> Resul
 /// Try to extract the GGUF header from shard_000.bin if it exists in the model directory.
 /// This enables shard-only operation without needing the full GGUF or a `source_path`.
 pub fn ensure_gguf_header(model_dir: &Path) -> Result<(), SwarmError> {
-    let header_path = model_dir.join("gguf_header.bin");
+    let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
     if header_path.exists() {
         return Ok(());
     }

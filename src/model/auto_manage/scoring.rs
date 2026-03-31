@@ -484,7 +484,7 @@ impl AutoShardManager {
                     &self.shared_state.config.node.data_dir,
                     &manifest.id.0,
                 )
-                .join("mmproj.gguf");
+                .join(crate::model::shard::MMPROJ_FILENAME);
 
                 if !mmproj_holders.contains(local_node_id) || !mmproj_path.exists() {
                     let holder_count = mmproj_holders.len();

@@ -160,7 +160,7 @@ impl PipelineExecutor {
         let is_first = layer_start == 0 && has_first;
         let is_last = layer_end >= total_layers && has_last;
 
-        let header_path = model_dir.join("gguf_header.bin");
+        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
         let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
             &model_dir,
             layer_start,
@@ -226,7 +226,7 @@ impl PipelineExecutor {
                     &self.shared_state.config.node.data_dir,
                     &model_id.0,
                 );
-                let mmproj_path = model_dir.join("mmproj.gguf");
+                let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
                 let vm = crate::inference::vision::load_from_mmproj_gguf(
                     &mmproj_path,
                     &candle_core::Device::Cpu,
@@ -415,7 +415,7 @@ impl PipelineExecutor {
         let model_id = &self.request.model_id;
         let header_path =
             crate::model::shard::model_dir(&self.shared_state.config.node.data_dir, &model_id.0)
-                .join("gguf_header.bin");
+                .join(crate::model::shard::HEADER_FILENAME);
         let header_data = template_from_header(&header_path);
         self.build_prompt_with_header(header_data.as_ref()).await
     }
@@ -600,7 +600,7 @@ impl PipelineExecutor {
                 &self.shared_state.config.node.data_dir,
                 &model_id.0,
             )
-            .join("gguf_header.bin");
+            .join(crate::model::shard::HEADER_FILENAME);
             template_from_header(&header_path)
         };
 
@@ -1070,7 +1070,7 @@ impl PipelineExecutor {
                 &self.shared_state.config.node.data_dir,
                 &model_id.0,
             )
-            .join("gguf_header.bin");
+            .join(crate::model::shard::HEADER_FILENAME);
             if header_path.exists() {
                 match Self::decoder_from_header(&header_path) {
                     Some((eos, decoder, tokenizer_opt)) => {

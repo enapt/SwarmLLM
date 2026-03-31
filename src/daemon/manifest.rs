@@ -155,7 +155,7 @@ pub fn generate_and_register_local_manifest(
 
     // Save GGUF header for shard-only operation.
     // This allows nodes without the full model file to use ShardReader.
-    let header_path = model_dir.join("gguf_header.bin");
+    let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
     if !header_path.exists() {
         if let Err(e) = crate::inference::split::save_gguf_header(path, &header_path) {
             tracing::warn!(error = %e, "Failed to save GGUF header (shard-only mode won't work)");
@@ -190,7 +190,7 @@ pub fn generate_and_register_local_manifest(
                             continue; // Different model — skip to prevent cross-contamination
                         }
                     }
-                    if !dir.join("manifest.json").exists() {
+                    if !dir.join(crate::model::shard::MANIFEST_FILENAME).exists() {
                         if let Err(e) = manifest.save_to_dir(&dir) {
                             tracing::warn!(error = %e, path = %dir.display(), "Failed to save manifest to shard dir");
                         } else {
@@ -201,7 +201,7 @@ pub fn generate_and_register_local_manifest(
                             );
                         }
                     }
-                    let alt_header = dir.join("gguf_header.bin");
+                    let alt_header = dir.join(crate::model::shard::HEADER_FILENAME);
                     if !alt_header.exists() {
                         if let Err(e) = crate::inference::split::save_gguf_header(path, &alt_header)
                         {

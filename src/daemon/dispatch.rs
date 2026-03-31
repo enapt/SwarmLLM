@@ -908,7 +908,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 let json_str = serde_json::to_string_pretty(&source).unwrap_or_default();
                                                 tokio::task::spawn_blocking(move || {
                                                     if model_dir.is_dir() {
-                                                        let hf_path = model_dir.join("hf_source.json");
+                                                        let hf_path = model_dir.join(crate::model::shard::HF_SOURCE_FILENAME);
                                                         if !hf_path.exists() {
                                                             let _ = std::fs::write(&hf_path, json_str);
                                                         }
@@ -1463,7 +1463,7 @@ async fn handle_layer_forward(
             estimate_vram_from_shard_dir(&model_dir, layer_start, layer_end, total_layers);
 
         // Read metadata from GGUF header file
-        let header_path = model_dir.join("gguf_header.bin");
+        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
         let entry = crate::inference::split::SplitModelEntry::from_header(
             &header_path,
             layer_start,
@@ -1597,7 +1597,7 @@ async fn handle_vision_encode_request(
         // Try to load mmproj on-demand
         let model_dir =
             crate::model::shard::model_dir(&shared_state.config.node.data_dir, &model_id.0);
-        let mmproj_path = model_dir.join("mmproj.gguf");
+        let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
         if !mmproj_path.exists() {
             tracing::warn!(
                 request_id = %req.request_id,

@@ -836,7 +836,7 @@ e
         model_dir: std::path::PathBuf,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) {
-        let mmproj_path = model_dir.join("mmproj.gguf");
+        let mmproj_path = model_dir.join(crate::model::shard::MMPROJ_FILENAME);
         if mmproj_path.exists() {
             // Already on disk -- just register the sentinel shard
             let node_id = self.shared_state.identity.node_id().clone();

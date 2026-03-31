@@ -373,8 +373,8 @@ impl Daemon {
                         if !model_dir.is_dir() {
                             continue;
                         }
-                        let manifest_path = model_dir.join("manifest.json");
-                        let header_path = model_dir.join("gguf_header.bin");
+                        let manifest_path = model_dir.join(crate::model::shard::MANIFEST_FILENAME);
+                        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
                         // If header is missing, try to extract it from shard_000.bin
                         if !header_path.exists() {
                             let _ = crate::inference::split::ensure_gguf_header(&model_dir);
@@ -432,7 +432,8 @@ impl Daemon {
                         if !shared_state.gguf_meta.contains_key(model_id) {
                             if let Ok(()) = crate::inference::split::ensure_gguf_header(&model_dir)
                             {
-                                let header_path = model_dir.join("gguf_header.bin");
+                                let header_path =
+                                    model_dir.join(crate::model::shard::HEADER_FILENAME);
                                 if let Ok(meta) =
                                     crate::inference::split::GgufTensorMeta::from_gguf_file(
                                         &header_path,
@@ -583,7 +584,7 @@ impl Daemon {
 
         // Register local mmproj files as sentinel shards.
         {
-            let models_dir = self.config.node.data_dir.join("models");
+            let models_dir = shard_store.models_dir();
             if models_dir.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(&models_dir) {
                     let node_id = shared_state.identity.node_id().clone();
@@ -591,7 +592,7 @@ impl Daemon {
                         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                             continue;
                         }
-                        let mmproj_path = entry.path().join("mmproj.gguf");
+                        let mmproj_path = entry.path().join(crate::model::shard::MMPROJ_FILENAME);
                         if mmproj_path.exists() {
                             let model_id_str = entry.file_name().to_string_lossy().to_string();
                             let model_id = crate::types::ModelId(model_id_str.clone());
@@ -613,7 +614,7 @@ impl Daemon {
         // Models always originate from HuggingFace, so this ensures the source
         // is known even after a DB wipe or fresh node with pre-seeded shards.
         {
-            let models_dir = self.config.node.data_dir.join("models");
+            let models_dir = shard_store.models_dir();
             if models_dir.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(&models_dir) {
                     for entry in entries.flatten() {
@@ -625,7 +626,7 @@ impl Daemon {
                         if shared_state.models.hf_sources.contains_key(&mid) {
                             continue;
                         }
-                        let hf_path = entry.path().join("hf_source.json");
+                        let hf_path = entry.path().join(crate::model::shard::HF_SOURCE_FILENAME);
                         if hf_path.exists() {
                             if let Ok(data) = std::fs::read_to_string(&hf_path) {
                                 if let Ok(source) = serde_json::from_str::<HfSource>(&data) {
@@ -652,7 +653,7 @@ impl Daemon {
         // If a model directory has shard files but no gguf_header.bin (and no shard_000
         // to extract it from), try to download the header using hf_source.json.
         {
-            let models_dir = self.config.node.data_dir.join("models");
+            let models_dir = shard_store.models_dir();
             if models_dir.is_dir() {
                 if let Ok(entries) = std::fs::read_dir(&models_dir) {
                     for entry in entries.flatten() {
@@ -660,7 +661,7 @@ impl Daemon {
                             continue;
                         }
                         let model_dir = entry.path();
-                        let header_path = model_dir.join("gguf_header.bin");
+                        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
                         if header_path.exists() {
                             continue; // Already have header
                         }
@@ -717,7 +718,8 @@ impl Daemon {
                                                 .gguf_meta
                                                 .insert(mid.clone(), meta.clone());
                                             // Regenerate manifest if missing
-                                            let manifest_path = model_dir.join("manifest.json");
+                                            let manifest_path = model_dir
+                                                .join(crate::model::shard::MANIFEST_FILENAME);
                                             if !manifest_path.exists() {
                                                 regenerate_manifest_from_header(
                                                     &mid,

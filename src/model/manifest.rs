@@ -14,7 +14,7 @@ pub trait ModelManifestExt {
 
 impl ModelManifestExt for ModelManifest {
     fn load_from_dir(dir: &Path) -> Result<ModelManifest, SwarmError> {
-        let manifest_path = dir.join("manifest.json");
+        let manifest_path = dir.join(crate::model::shard::MANIFEST_FILENAME);
         if !manifest_path.exists() {
             return Err(SwarmError::Internal(format!(
                 "Manifest not found: {}",
@@ -130,9 +130,10 @@ impl ModelManifestExt for ModelManifest {
         std::fs::create_dir_all(dir).map_err(SwarmError::Io)?;
         let json = serde_json::to_string_pretty(self).map_err(SwarmError::Serialization)?;
         // Atomic write: write to temp file then rename to prevent corruption on kill/crash
-        let tmp_path = dir.join("manifest.json.tmp");
+        let tmp_path = dir.join(format!("{}.tmp", crate::model::shard::MANIFEST_FILENAME));
         std::fs::write(&tmp_path, json).map_err(SwarmError::Io)?;
-        std::fs::rename(&tmp_path, dir.join("manifest.json")).map_err(SwarmError::Io)?;
+        std::fs::rename(&tmp_path, dir.join(crate::model::shard::MANIFEST_FILENAME))
+            .map_err(SwarmError::Io)?;
         Ok(())
     }
 }

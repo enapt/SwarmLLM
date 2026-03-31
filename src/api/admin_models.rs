@@ -350,8 +350,12 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
     // Helper: compute disk-level metadata (manifest, header, probed, mmproj) for a model.
     let disk_metadata = |model_id: &str, model_display_name: &str| -> serde_json::Value {
         let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, model_id);
-        let has_manifest = model_dir.join("manifest.json").exists();
-        let has_header = model_dir.join("gguf_header.bin").exists();
+        let has_manifest = model_dir
+            .join(crate::model::shard::MANIFEST_FILENAME)
+            .exists();
+        let has_header = model_dir
+            .join(crate::model::shard::HEADER_FILENAME)
+            .exists();
         let mid_check = crate::types::ModelId(model_id.to_string());
         let probed = has_header
             || state
@@ -713,7 +717,7 @@ pub async fn model_acquisition_status(
 /// plus a total storage summary. Used by the auto-manage UI.
 pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Value> {
     let local_node_id = state.shared_state.identity.node_id().clone();
-    let models_dir = state.config.node.data_dir.join("models");
+    let models_dir = crate::model::shard::ShardStore::new(&state.config.node.data_dir).models_dir();
 
     let mut model_storage: Vec<serde_json::Value> = Vec::new();
     let mut total_local_bytes: u64 = 0;
@@ -1935,7 +1939,7 @@ pub async fn model_metadata(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
-    let header_path = model_dir.join("gguf_header.bin");
+    let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
 
     if !header_path.exists() {
         return Err(ApiError(crate::error::SwarmError::Validation(format!(

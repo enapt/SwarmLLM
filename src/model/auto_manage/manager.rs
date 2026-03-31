@@ -369,7 +369,9 @@ impl AutoShardManager {
     /// This allows seeding HF source info by placing a small JSON file:
     /// `{ "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf" }`
     pub(super) fn discover_hf_sources(&self) {
-        let models_dir = self.shared_state.config.node.data_dir.join("models");
+        let models_dir =
+            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir)
+                .models_dir();
 
         if !models_dir.is_dir() {
             return;
@@ -388,7 +390,7 @@ impl AutoShardManager {
                     continue;
                 }
 
-                let hf_path = entry.path().join("hf_source.json");
+                let hf_path = entry.path().join(crate::model::shard::HF_SOURCE_FILENAME);
                 if hf_path.exists() {
                     if let Ok(data) = std::fs::read_to_string(&hf_path) {
                         if let Ok(source) = serde_json::from_str::<crate::daemon::HfSource>(&data) {

@@ -294,7 +294,7 @@ impl AutoShardManager {
                         &self.shared_state.config.node.data_dir,
                         &manifest.id.0,
                     )
-                    .join("mmproj.gguf");
+                    .join(crate::model::shard::MMPROJ_FILENAME);
                     if mmproj_path.exists() {
                         // Higher floor: at least 3 replicas (or pool_size, whichever is smaller)
                         let mmproj_min = (config.min_replicas + 1).min(pool_size as u32).max(3);
@@ -360,7 +360,7 @@ impl AutoShardManager {
                     &self.shared_state.config.node.data_dir,
                     &candidate.model_id.0,
                 )
-                .join("mmproj.gguf")
+                .join(crate::model::shard::MMPROJ_FILENAME)
             } else {
                 shard_store.shard_path(&candidate.model_id, candidate.shard_index)
             };

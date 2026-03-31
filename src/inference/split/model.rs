@@ -1972,7 +1972,7 @@ impl SplitModel {
         is_last: bool,
         force_cpu: bool,
     ) -> Result<Self, SwarmError> {
-        let header_path = model_dir.join("gguf_header.bin");
+        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
         if !header_path.exists() {
             return Err(SwarmError::Internal(format!(
                 "GGUF header not found at {}. The originating node must generate this file.",

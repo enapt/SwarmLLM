@@ -543,8 +543,8 @@ pub async fn download_gguf_header(
     let hb = header_bytes.to_vec();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&dd).map_err(|e| format!("Failed to create dir: {e}"))?;
-        let dest_path = dd.join("gguf_header.bin");
-        let tmp_path = dd.join("gguf_header.bin.tmp");
+        let dest_path = dd.join(crate::model::shard::HEADER_FILENAME);
+        let tmp_path = dd.join(format!("{}.tmp", crate::model::shard::HEADER_FILENAME));
         std::fs::write(&tmp_path, &hb)
             .map_err(|e| format!("Failed to write gguf_header.bin.tmp: {e}"))?;
         std::fs::rename(&tmp_path, &dest_path)
@@ -553,7 +553,7 @@ pub async fn download_gguf_header(
     })
     .await
     .map_err(|e| format!("spawn_blocking: {e}"))??;
-    let dest_path = dest_dir.join("gguf_header.bin");
+    let dest_path = dest_dir.join(crate::model::shard::HEADER_FILENAME);
 
     tracing::info!(
         size = header_bytes.len(),
@@ -766,8 +766,11 @@ pub async fn download_shard_v2(
     let shard_index = layout.index;
 
     std::fs::create_dir_all(dest_dir).map_err(|e| format!("Failed to create dir: {e}"))?;
-    let dest_path = dest_dir.join(format!("shard_{shard_index:03}.bin"));
-    let tmp_path = dest_dir.join(format!("shard_{shard_index:03}.bin.tmp"));
+    let dest_path = dest_dir.join(crate::model::shard::shard_filename(shard_index));
+    let tmp_path = dest_dir.join(format!(
+        "{}.tmp",
+        crate::model::shard::shard_filename(shard_index)
+    ));
 
     // Build byte ranges from tensor locations (gguf_offset, size)
     let tensor_ranges: Vec<(u64, u64)> = layout

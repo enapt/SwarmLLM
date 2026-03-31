@@ -49,12 +49,33 @@ pub fn sanitize_path_component(s: &str) -> String {
     sanitized
 }
 
+// Well-known filenames within a model directory.
+pub const HEADER_FILENAME: &str = "gguf_header.bin";
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+pub const MMPROJ_FILENAME: &str = "mmproj.gguf";
+pub const HF_SOURCE_FILENAME: &str = "hf_source.json";
+
+/// Shard filename for a given index (e.g. `shard_000.bin`).
+pub fn shard_filename(index: u32) -> String {
+    format!("shard_{index:03}.bin")
+}
+
 /// Get the directory path for a specific model under data_dir, with sanitization.
 /// Use this instead of manually joining `data_dir.join("models").join(id)`.
 pub fn model_dir(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
     data_dir
         .join("models")
         .join(sanitize_path_component(model_id))
+}
+
+/// Get the GGUF header path for a model (free function).
+pub fn header_path(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
+    model_dir(data_dir, model_id).join(HEADER_FILENAME)
+}
+
+/// Get the mmproj.gguf path for a model (free function).
+pub fn mmproj_path(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
+    model_dir(data_dir, model_id).join(MMPROJ_FILENAME)
 }
 
 /// Manages shard files on disk — loading, verification, and storage.
@@ -78,6 +99,26 @@ impl ShardStore {
     /// Get the directory path for a specific model (sanitized).
     pub fn model_dir(&self, model_id: &ModelId) -> PathBuf {
         model_dir(&self.data_dir, &model_id.0)
+    }
+
+    /// Get the GGUF header path for a model.
+    pub fn header_path(&self, model_id: &ModelId) -> PathBuf {
+        self.model_dir(model_id).join(HEADER_FILENAME)
+    }
+
+    /// Get the manifest.json path for a model.
+    pub fn manifest_path(&self, model_id: &ModelId) -> PathBuf {
+        self.model_dir(model_id).join(MANIFEST_FILENAME)
+    }
+
+    /// Get the mmproj.gguf path for a model.
+    pub fn mmproj_path(&self, model_id: &ModelId) -> PathBuf {
+        self.model_dir(model_id).join(MMPROJ_FILENAME)
+    }
+
+    /// Get the hf_source.json path for a model.
+    pub fn hf_source_path(&self, model_id: &ModelId) -> PathBuf {
+        self.model_dir(model_id).join(HF_SOURCE_FILENAME)
     }
 
     /// Get the models directory path.

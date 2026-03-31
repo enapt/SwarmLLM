@@ -1013,7 +1013,7 @@ pub async fn chat_completions(
                         &state.shared_state.config.node.data_dir,
                         &req.model,
                     )
-                    .join("gguf_header.bin");
+                    .join(crate::model::shard::HEADER_FILENAME);
                     if header_path.exists() {
                         match crate::inference::pipeline::template_from_header(&header_path) {
                             Some((t, b, e)) => (t, b, e),
