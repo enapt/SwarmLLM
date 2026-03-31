@@ -115,7 +115,8 @@ pub fn compute_ring_schedule(rank: usize, n: usize) -> Vec<RingAllReduceStep> {
 ///
 /// This simulates the full ring scatter-reduce + allgather algorithm.
 /// For actual distributed execution, each step would be a network send/recv pair.
-pub fn ring_allreduce_sum_local(partials: &[Vec<f32>]) -> Result<Vec<f32>, SwarmError> {
+#[cfg(test)]
+fn ring_allreduce_sum_local(partials: &[Vec<f32>]) -> Result<Vec<f32>, SwarmError> {
     let n = partials.len();
     if n == 0 {
         return Err(SwarmError::Internal("Ring allreduce: no partials".into()));

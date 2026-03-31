@@ -234,3 +234,18 @@ curl -N http://localhost:8800/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-coder-7b","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
 ```
+
+## POST /v1/embeddings
+
+Returns `503 Service Unavailable`. Text embeddings are not supported via the subprocess inference path. Use a dedicated embedding provider or the OpenAI embeddings API directly.
+
+## GET /v1/providers
+
+List configured cloud providers and their available models.
+
+```bash
+curl http://localhost:8800/v1/providers \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+Returns an array of `{ name, models: [...] }` objects for each configured provider.

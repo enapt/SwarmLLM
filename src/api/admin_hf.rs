@@ -40,19 +40,9 @@ fn spawn_progress_updater(
     });
 }
 
-/// SEC: Validate HuggingFace repo_id format (owner/repo).
-/// Only allows alphanumeric, hyphens, dots, underscores in each segment.
+/// SEC: Validate HuggingFace repo_id format — delegates to the canonical validator.
 fn is_valid_hf_repo_id(repo_id: &str) -> bool {
-    let parts: Vec<&str> = repo_id.split('/').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    parts.iter().all(|p| {
-        !p.is_empty()
-            && p.len() <= 96
-            && p.chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
-    })
+    crate::model::huggingface::validate_hf_repo_id(repo_id).is_ok()
 }
 
 /// SEC: Validate HuggingFace filename format.

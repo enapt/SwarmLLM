@@ -8,20 +8,26 @@ const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
 /// Gap tolerance for coalescing byte-range requests (4MB).
 const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
 
-/// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id
-/// from gossip (e.g., "../../internal-service"). Only allows `owner/repo-name`.
-fn validate_hf_repo_id(repo_id: &str) -> Result<(), String> {
-    let re_valid = |s: &str| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    };
+/// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id.
+/// Only allows `owner/repo-name` with alphanumeric, hyphens, dots, underscores.
+/// Includes length cap (96 chars per segment) and path traversal guard.
+pub(crate) fn validate_hf_repo_id(repo_id: &str) -> Result<(), String> {
     let parts: Vec<&str> = repo_id.split('/').collect();
-    if parts.len() != 2 || !re_valid(parts[0]) || !re_valid(parts[1]) {
+    if parts.len() != 2 {
         return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
     }
-    if parts[0] == ".." || parts[1] == ".." || parts[0] == "." || parts[1] == "." {
-        return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
+    for p in &parts {
+        if p.is_empty()
+            || p.len() > 96
+            || !p
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
+        }
+        if *p == ".." || *p == "." {
+            return Err(format!("Invalid HuggingFace repo ID: {repo_id}"));
+        }
     }
     Ok(())
 }

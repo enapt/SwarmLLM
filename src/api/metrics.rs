@@ -137,7 +137,7 @@ fn write_counter(buf: &mut String, name: &str, help: &str, value: f64) {
 
 /// Write a basic histogram for inference latency.
 ///
-/// Uses the latency samples stored in `SharedState::inference_latency_samples`.
+/// Uses the latency samples stored in `MetricsProviders::inference_latency_samples`.
 /// Bucket boundaries (in seconds): 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, +Inf
 fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState) {
     const BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];

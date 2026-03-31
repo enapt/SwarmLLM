@@ -146,7 +146,7 @@ fn load_adapter(
     // Reject adapters larger than 2 GB to prevent OOM from crafted files
     const MAX_ADAPTER_SIZE: u64 = 2 * 1024 * 1024 * 1024;
     if file_size > MAX_ADAPTER_SIZE {
-        return Err(SwarmError::Internal(format!(
+        return Err(SwarmError::Validation(format!(
             "Adapter file too large: {} bytes (max {} bytes)",
             file_size, MAX_ADAPTER_SIZE
         )));
