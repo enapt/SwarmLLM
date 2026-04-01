@@ -1131,27 +1131,19 @@ pub async fn hf_download_shards(
                         }
                     }
 
-                    // Register this shard locally so the node knows it has it
+                    // Register + announce the shard to the network
                     let shard_id = crate::types::ShardId {
                         model_id: crate::types::ModelId(model_id_str.clone()),
                         index: shard_idx,
                     };
-                    let node_id = download_shared.identity.node_id().clone();
-                    download_shared
-                        .model_registry
-                        .record_shard_holder(shard_id.clone(), node_id.clone());
-
-                    // Announce this individual shard to the network immediately
-                    // so peers see partial progress and can start acquiring
                     if let Some(ref ntx) = network_tx {
-                        let ann = crate::types::SwarmMessage::ShardAnnounce(
-                            crate::types::ShardAnnounce {
-                                node_id,
-                                shards: vec![shard_id],
-                                timestamp: chrono::Utc::now(),
-                            },
+                        download_shared.announce_shard_acquired(ntx, &shard_id);
+                    } else {
+                        // No network channel — just register locally
+                        download_shared.model_registry.record_shard_holder(
+                            shard_id,
+                            download_shared.identity.node_id().clone(),
                         );
-                        let _ = ntx.send(crate::types::NetworkCommand::Broadcast(ann)).await;
                     }
                 }
                 Err(e) => {

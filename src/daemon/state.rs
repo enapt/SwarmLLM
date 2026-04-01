@@ -898,6 +898,33 @@ impl SharedState {
         let _ = self.events.activity_tx.send(event);
     }
 
+    /// Register a shard as locally held and announce it to the network.
+    ///
+    /// Steps: record in model_registry, broadcast ShardAnnounce, start DHT providing,
+    /// signal dashboard ModelsChanged. Uses `try_send` on the network channel.
+    pub fn announce_shard_acquired(
+        &self,
+        net_tx: &mpsc::Sender<crate::types::NetworkCommand>,
+        shard_id: &crate::types::ShardId,
+    ) {
+        let node_id = self.identity.node_id().clone();
+        self.model_registry
+            .record_shard_holder(shard_id.clone(), node_id.clone());
+        let announce = crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
+            node_id,
+            shards: vec![shard_id.clone()],
+            timestamp: chrono::Utc::now(),
+        });
+        let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
+        let _ = net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![
+            shard_id.clone()
+        ]));
+        let _ = self
+            .events
+            .dashboard_tx
+            .send(DashboardSignal::ModelsChanged);
+    }
+
     /// Convenience accessor for a `ShardStore` rooted at this node's data dir.
     pub fn shard_store(&self) -> crate::model::shard::ShardStore {
         crate::model::shard::ShardStore::new(&self.config.node.data_dir)

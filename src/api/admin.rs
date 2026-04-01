@@ -86,7 +86,10 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         let samples = state.shared_state.metrics.inference_latency_samples.read();
         match samples {
             Err(_) => {
-                tracing::warn!("inference_latency_samples lock poisoned — skipping perf metrics");
+                tracing::warn!(
+                    module = "admin",
+                    "inference_latency_samples lock poisoned — skipping perf metrics"
+                );
                 serde_json::json!({
                     "total_requests": state.shared_state.metrics.inference_requests_total
                         .load(std::sync::atomic::Ordering::Relaxed),

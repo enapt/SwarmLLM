@@ -210,7 +210,7 @@ fn ring_allreduce_sum_local(partials: &[Vec<f32>]) -> Result<Vec<f32>, SwarmErro
 /// Input: one compressed f32 tensor per rank, all with the same shape.
 /// Output: compressed reduced tensor + shape.
 #[cfg(test)]
-pub fn ring_allreduce_sum_compressed(
+fn ring_allreduce_sum_compressed(
     compressed_partials: &[Vec<u8>],
     shape: &[u32],
 ) -> Result<(Vec<u8>, Vec<u32>), SwarmError> {

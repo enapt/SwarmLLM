@@ -13,8 +13,7 @@ use crate::inference::chat_template;
 use crate::inference::router::RouterCommand;
 use crate::types::{ChatMessage, InferenceRequest, ModelId, Role, SamplingParams};
 
-/// SSE keep-alive interval for streaming responses (seconds).
-const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
 // ---- Anthropic Messages API types ----
 
@@ -259,8 +258,8 @@ fn to_sampling_params(req: &MessagesRequest) -> SamplingParams {
     SamplingParams {
         temperature: req.temperature.unwrap_or(1.0).clamp(0.0, 2.0),
         top_p: req.top_p.unwrap_or(0.9).clamp(f32::EPSILON, 1.0),
-        top_k: req.top_k.unwrap_or(40),
-        max_tokens: req.max_tokens.clamp(1, 32768),
+        top_k: req.top_k.unwrap_or(DEFAULT_TOP_K),
+        max_tokens: req.max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
         stop: req.stop_sequences.clone().unwrap_or_default(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
@@ -753,18 +752,7 @@ async fn anthropic_stream(
     let model = model.clone();
 
     tokio::spawn(async move {
-        // message_start
-        let _ = sse_tx
-            .send(AnthropicSseEvent::MessageStart {
-                id: rid.clone(),
-                model: model.clone(),
-            })
-            .await;
-
-        // content_block_start
-        let _ = sse_tx
-            .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
-            .await;
+        send_sse_preamble(&sse_tx, &rid, &model).await;
 
         // Stream tokens — count events as a fallback estimate
         let mut got_finish = false;
@@ -783,9 +771,6 @@ async fn anthropic_stream(
                         .await;
                 }
                 finish_stop_reason = map_finish_reason(reason).into();
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
                 break;
             }
             if !event.text.is_empty() {
@@ -806,17 +791,11 @@ async fn anthropic_stream(
         // Get authoritative token count from the result when available
         let result = result_rx.await;
         if got_finish {
-            // Use completion_tokens from result if available, else fall back to event count
             let output_tokens = match &result {
                 Ok(Ok(output)) => output.completion_tokens,
                 _ => streamed_token_count,
             };
-            let _ = sse_tx
-                .send(AnthropicSseEvent::MessageDelta {
-                    stop_reason: finish_stop_reason,
-                    output_tokens,
-                })
-                .await;
+            send_sse_epilogue(&sse_tx, finish_stop_reason, output_tokens).await;
         } else {
             // Fallback: pipeline finished without streaming events
             match result {
@@ -829,42 +808,21 @@ async fn anthropic_stream(
                             })
                             .await;
                     }
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                        .await;
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::MessageDelta {
-                            stop_reason: map_finish_reason(&output.finish_reason).into(),
-                            output_tokens: output.completion_tokens,
-                        })
-                        .await;
+                    send_sse_epilogue(
+                        &sse_tx,
+                        map_finish_reason(&output.finish_reason).into(),
+                        output.completion_tokens,
+                    )
+                    .await;
                 }
                 _ => {
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                        .await;
-                    let _ = sse_tx
-                        .send(AnthropicSseEvent::MessageDelta {
-                            stop_reason: "end_turn".into(),
-                            output_tokens: streamed_token_count,
-                        })
-                        .await;
+                    send_sse_epilogue(&sse_tx, "end_turn".into(), streamed_token_count).await;
                 }
             }
         }
-        let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
-        let (event_type, data) = serialize_anthropic_event(&event);
-        Ok::<_, Infallible>(Event::default().event(event_type).data(data))
-    });
-
-    Ok(Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
-        )
-        .into_response())
+    Ok(build_anthropic_sse_response(sse_rx))
 }
 
 /// Internal SSE event types for Anthropic streaming.
@@ -955,6 +913,56 @@ fn serialize_anthropic_event(event: &AnthropicSseEvent) -> (&'static str, String
     }
 }
 
+/// Build an SSE response from an Anthropic event channel.
+fn build_anthropic_sse_response(
+    sse_rx: tokio::sync::mpsc::Receiver<AnthropicSseEvent>,
+) -> axum::response::Response {
+    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
+        let (event_type, data) = serialize_anthropic_event(&event);
+        Ok::<_, Infallible>(Event::default().event(event_type).data(data))
+    });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
+        )
+        .into_response()
+}
+
+/// Send SSE preamble: message_start + content_block_start.
+async fn send_sse_preamble(
+    sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
+    request_id: &str,
+    model: &str,
+) {
+    let _ = sse_tx
+        .send(AnthropicSseEvent::MessageStart {
+            id: request_id.to_string(),
+            model: model.to_string(),
+        })
+        .await;
+    let _ = sse_tx
+        .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
+        .await;
+}
+
+/// Send SSE epilogue: content_block_stop + message_delta + message_stop.
+async fn send_sse_epilogue(
+    sse_tx: &tokio::sync::mpsc::Sender<AnthropicSseEvent>,
+    stop_reason: String,
+    output_tokens: u32,
+) {
+    let _ = sse_tx
+        .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
+        .await;
+    let _ = sse_tx
+        .send(AnthropicSseEvent::MessageDelta {
+            stop_reason,
+            output_tokens,
+        })
+        .await;
+    let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+}
+
 /// Direct split-model non-streaming generation for Anthropic Messages API.
 ///
 /// Bypasses the distributed pipeline and generates tokens directly via
@@ -1016,18 +1024,7 @@ async fn anthropic_split_stream(
     let model = model.clone();
 
     tokio::spawn(async move {
-        // message_start
-        let _ = sse_tx
-            .send(AnthropicSseEvent::MessageStart {
-                id: rid.clone(),
-                model,
-            })
-            .await;
-
-        // content_block_start
-        let _ = sse_tx
-            .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
-            .await;
+        send_sse_preamble(&sse_tx, &rid, &model).await;
 
         let requested_mid = crate::types::ModelId(model_for_lookup);
         let mut token_rx = match crate::api::openai::spawn_split_stream(
@@ -1039,16 +1036,7 @@ async fn anthropic_split_stream(
         ) {
             Some(rx) => rx,
             None => {
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                    .await;
-                let _ = sse_tx
-                    .send(AnthropicSseEvent::MessageDelta {
-                        stop_reason: "end_turn".into(),
-                        output_tokens: 0,
-                    })
-                    .await;
-                let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+                send_sse_epilogue(&sse_tx, "end_turn".into(), 0).await;
                 return;
             }
         };
@@ -1074,29 +1062,10 @@ async fn anthropic_split_stream(
             }
         }
 
-        // content_block_stop + message_delta + message_stop
-        let _ = sse_tx
-            .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-            .await;
-        let _ = sse_tx
-            .send(AnthropicSseEvent::MessageDelta {
-                stop_reason,
-                output_tokens: total_output_tokens,
-            })
-            .await;
-        let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+        send_sse_epilogue(&sse_tx, stop_reason, total_output_tokens).await;
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
-        let (event_type, data) = serialize_anthropic_event(&event);
-        Ok::<_, Infallible>(Event::default().event(event_type).data(data))
-    });
-
-    Ok(Sse::new(stream)
-        .keep_alive(
-            KeepAlive::new().interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
-        )
-        .into_response())
+    Ok(build_anthropic_sse_response(sse_rx))
 }
 
 /// Translate an Anthropic Messages API request to OpenAI chat completions format
@@ -1180,15 +1149,8 @@ async fn anthropic_to_openai_proxy(
             let mut output_tokens: u32 = 0;
 
             // Send message_start
-            let _ = sse_tx
-                .send(AnthropicSseEvent::MessageStart {
-                    id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
-                    model: model_clone,
-                })
-                .await;
-            let _ = sse_tx
-                .send(AnthropicSseEvent::ContentBlockStart { index: 0 })
-                .await;
+            let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+            send_sse_preamble(&sse_tx, &msg_id, &model_clone).await;
 
             // Read the upstream response body in chunks
             let mut resp = resp;
@@ -1229,33 +1191,10 @@ async fn anthropic_to_openai_proxy(
                 }
             }
 
-            let _ = sse_tx
-                .send(AnthropicSseEvent::ContentBlockStop { index: 0 })
-                .await;
-            let _ = sse_tx
-                .send(AnthropicSseEvent::MessageDelta {
-                    stop_reason: "end_turn".to_string(),
-                    output_tokens,
-                })
-                .await;
-            let _ = sse_tx.send(AnthropicSseEvent::MessageStop).await;
+            send_sse_epilogue(&sse_tx, "end_turn".into(), output_tokens).await;
         });
 
-        let stream = tokio_stream::wrappers::ReceiverStream::new(sse_rx).map(move |event| {
-            let (event_type, data) = serialize_anthropic_event(&event);
-            Ok::<_, std::convert::Infallible>(
-                axum::response::sse::Event::default()
-                    .event(event_type)
-                    .data(data),
-            )
-        });
-
-        return Ok(axum::response::sse::Sse::new(stream)
-            .keep_alive(
-                axum::response::sse::KeepAlive::new()
-                    .interval(std::time::Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)),
-            )
-            .into_response());
+        return Ok(build_anthropic_sse_response(sse_rx));
     }
 
     // Non-streaming: read full JSON response

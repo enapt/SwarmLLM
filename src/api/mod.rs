@@ -24,6 +24,9 @@ pub(crate) const MAX_TOOL_NAME_LEN: usize = 256;
 pub(crate) const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
 pub(crate) const MAX_STOP_SEQUENCES: usize = 16;
 pub(crate) const MAX_TOOL_SCHEMA_BYTES: usize = 65536;
+pub(crate) const DEFAULT_TOP_K: u32 = 40;
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 32768;
+pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Submit a non-streaming inference request to the router and await the result.
 pub(crate) async fn submit_to_router(

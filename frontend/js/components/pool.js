@@ -10,7 +10,8 @@
 
   function _hasError(data) {
     if (data && data.error) {
-      App.notifications.showToast((data.error.message || data.error), 'error');
+      var msg = data.error.message || data.error;
+      App.notifications.showToast(I18n.t('pool.failed_generic', { error: msg }), 'error');
       return true;
     }
     return false;

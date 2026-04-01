@@ -68,7 +68,7 @@ pub struct LoraLayerWeights {
 pub fn load_adapter_from_dir(dir: &Path) -> Result<LoraAdapter, SwarmError> {
     let config_path = dir.join("adapter_config.json");
     let config_str = std::fs::read_to_string(&config_path)
-        .map_err(|e| SwarmError::Internal(format!("Cannot read adapter_config.json: {e}")))?;
+        .map_err(|e| SwarmError::Validation(format!("Cannot read adapter_config.json: {e}")))?;
 
     #[derive(Deserialize)]
     struct AdapterConfig {
@@ -85,7 +85,7 @@ pub fn load_adapter_from_dir(dir: &Path) -> Result<LoraAdapter, SwarmError> {
     }
 
     let config: AdapterConfig = serde_json::from_str(&config_str)
-        .map_err(|e| SwarmError::Internal(format!("Invalid adapter_config.json: {e}")))?;
+        .map_err(|e| SwarmError::Validation(format!("Invalid adapter_config.json: {e}")))?;
 
     let adapter_id = config
         .adapter_id
@@ -238,7 +238,7 @@ pub fn apply_lora(
     rank: usize,
 ) -> Result<Tensor, SwarmError> {
     if rank == 0 {
-        return Err(SwarmError::Internal("LoRA rank must be > 0".into()));
+        return Err(SwarmError::Validation("LoRA rank must be > 0".into()));
     }
     let scale = alpha / rank as f32;
 

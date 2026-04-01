@@ -465,15 +465,24 @@ display
                                 }
                             }
 
-                            // Register the shard
-                            let node_id = shared.identity.node_id().clone();
+                            // Register + announce the shard to the network
                             let sid = crate::types::ShardId {
                                 model_id: model_id.clone(),
                                 index: shard_idx,
                             };
-                            shared
-                                .model_registry
-                                .record_shard_holder(sid.clone(), node_id.clone());
+                            shared.announce_shard_acquired(&net_tx, &sid);
+
+                            // Broadcast download completion progress
+                            let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
+                                crate::types::ShardDownloadProgress {
+                                    node_id: shared.identity.node_id().clone(),
+                                    shard_id: sid,
+                                    progress_pct: 100,
+                                    state: crate::types::DownloadState::Complete,
+                                },
+                            );
+                            let _ = net_tx
+                                .try_send(crate::types::NetworkCommand::Broadcast(complete_msg));
 
                             // Update progress
                             if let Some(mut entry) =
@@ -506,43 +515,9 @@ display
                                 );
                             }
 
-                            // Broadcast completion to network
-                            let complete_msg = crate::types::SwarmMessage::ShardDownloadProgress(
-                                crate::types::ShardDownloadProgress {
-                                    node_id: node_id.clone(),
-                                    shard_id: sid.clone(),
-                                    progress_pct: 100,
-                                    state: crate::types::DownloadState::Complete,
-                                },
-                            );
-                            let _ = net_tx
-                                .try_send(crate::types::NetworkCommand::Broadcast(complete_msg));
-
-                            // Now that the shard is on disk, announce it to the network
-                            // so peers register us as a holder.
-                            // S5: Register as DHT provider for the new shard
-                            let _ = net_tx.try_send(crate::types::NetworkCommand::StartProviding(
-                                vec![sid.clone()],
-                            ));
-                            let announce = crate::types::SwarmMessage::ShardAnnounce(
-                                crate::types::ShardAnnounce {
-                                    node_id,
-                                    shards: vec![sid],
-                                    timestamp: chrono::Utc::now(),
-                                },
-                            );
-                            let _ =
-                                net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
-
                             // Load whatever shards are now available for inference
                             let vram_budget = compute_vram_budget(&shared);
                             check_and_load_model(&shared, &model_id, vram_budget).await;
-
-                            // Notify dashboard that models have changed
-                            let _ = shared
-                                .events
-                                .dashboard_tx
-                                .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
                             // Emit activity event for shard download complete
                             {
@@ -861,33 +836,12 @@ e
                         model = %model_id,
                         "AutoShardManager: mmproj downloaded from HF"
                     );
-                    // Register sentinel shard
-                    let node_id = shared.identity.node_id().clone();
+                    // Register + announce the mmproj sentinel shard
                     let sid = crate::types::ShardId {
                         model_id: model_id.clone(),
                         index: crate::types::MMPROJ_SHARD_INDEX,
                     };
-                    shared
-                        .model_registry
-                        .record_shard_holder(sid.clone(), node_id.clone());
-
-                    // Broadcast shard announce so peers know we hold mmproj
-                    let announce =
-                        crate::types::SwarmMessage::ShardAnnounce(crate::types::ShardAnnounce {
-                            node_id,
-                            shards: vec![sid.clone()],
-                            timestamp: chrono::Utc::now(),
-                        });
-                    let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(announce));
-                    // S5: Register as DHT provider
-                    let _ =
-                        net_tx.try_send(crate::types::NetworkCommand::StartProviding(vec![sid]));
-
-                    // Notify dashboard
-                    let _ = shared
-                        .events
-                        .dashboard_tx
-                        .send(crate::daemon::state::DashboardSignal::ModelsChanged);
+                    shared.announce_shard_acquired(&net_tx, &sid);
                 }
                 Err(e) => {
                     tracing::warn!(

@@ -16,6 +16,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
 use crate::api::server::AppState;
 
 /// Extract text content and token usage from an Anthropic Messages API response body.
@@ -623,7 +624,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(512)
-        .min(32768) as u32;
+        .min(DEFAULT_MAX_TOKENS as u64) as u32;
 
     let chat_messages: Vec<crate::types::ChatMessage> = messages
         .iter()
@@ -655,7 +656,7 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         crate::types::SamplingParams {
             temperature,
             top_p: 0.9,
-            top_k: 40,
+            top_k: DEFAULT_TOP_K,
             max_tokens,
             stop: vec![],
             frequency_penalty: 0.0,
@@ -788,7 +789,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(1024)
-        .min(32768) as u32;
+        .min(DEFAULT_MAX_TOKENS as u64) as u32;
 
     // Build the Anthropic Messages API request body for each model
     let mut messages = Vec::new();
@@ -898,7 +899,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(2048)
-        .min(32768) as u32;
+        .min(DEFAULT_MAX_TOKENS as u64) as u32;
     let system = args
         .get("system")
         .and_then(|v| v.as_str())
@@ -1098,7 +1099,7 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(1024)
-            .min(32768) as u32;
+            .min(DEFAULT_MAX_TOKENS as u64) as u32;
         let temperature = task
             .get("temperature")
             .and_then(|v| v.as_f64())
@@ -1200,7 +1201,7 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(1024)
-        .min(32768) as u32;
+        .min(DEFAULT_MAX_TOKENS as u64) as u32;
 
     // Collect available models with metadata for tier selection
     let mut candidates: Vec<(String, &str, u64)> = Vec::new(); // (model_id, source, size_hint)

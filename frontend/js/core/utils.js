@@ -387,25 +387,6 @@
       '<span class="chat-dl-text">' + escapeHtml(text) + '</span>';
   }
 
-  // --- Unified API error handler ---
-  // Extracts error message from response body and shows a toast.
-  // Usage: var ok = await App.utils.handleApiError(resp, 'Action failed');
-  // Returns true if response was ok, false if error was shown.
-  async function handleApiError(resp, fallbackMsg) {
-    if (resp && resp.ok) return true;
-    var msg = fallbackMsg || I18n.t('common.request_failed');
-    try {
-      var body = await resp.json();
-      if (body && body.error) {
-        msg = body.error.message || body.error || msg;
-      }
-    } catch (e) {}
-    if (App.notifications && App.notifications.showToast) {
-      App.notifications.showToast(msg, 'error', 6000);
-    }
-    return false;
-  }
-
   // --- Extract error message string from a failed response ---
   // Parses the JSON body and returns the error message string, or fallback.
   // Usage: var msg = await App.utils.getApiErrorMessage(resp, 'Action failed');
@@ -442,7 +423,6 @@
     updateTokenCounter: updateTokenCounter,
     updateChatAvailability: updateChatAvailability,
     updateChatDownloadProgress: updateChatDownloadProgress,
-    handleApiError: handleApiError,
     getApiErrorMessage: getApiErrorMessage,
     modelApiUrl: function(modelId) {
       var parts = Array.prototype.slice.call(arguments, 1);

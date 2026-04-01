@@ -16,8 +16,7 @@ use crate::types::{ChatMessage, ImageData, InferenceRequest, ModelId, SamplingPa
 /// Timeout for peer-forwarded inference requests (seconds).
 const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
 
-/// SSE keep-alive interval for streaming responses (seconds).
-const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K, SSE_KEEPALIVE_INTERVAL_SECS};
 
 /// Maximum cold-start wait time before returning 503 (seconds).
 const COLD_START_WAIT_SECS: u32 = 10;
@@ -437,9 +436,8 @@ impl ChatCompletionRequest {
             temperature: self.temperature.clamp(0.0, 2.0),
             // Clamp top_p to (0.0, 1.0]
             top_p: self.top_p.clamp(f32::EPSILON, 1.0),
-            top_k: 40,
-            // Clamp max_tokens to [1, 32768] — 0 is not valid per OpenAI spec
-            max_tokens: self.max_tokens.clamp(1, 32768),
+            top_k: DEFAULT_TOP_K,
+            max_tokens: self.max_tokens.clamp(1, DEFAULT_MAX_TOKENS),
             stop,
             frequency_penalty: self.frequency_penalty.clamp(-2.0, 2.0),
             presence_penalty: self.presence_penalty.clamp(-2.0, 2.0),

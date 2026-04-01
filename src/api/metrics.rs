@@ -146,7 +146,10 @@ fn write_latency_histogram(buf: &mut String, shared: &crate::daemon::SharedState
     let samples_guard = match shared.metrics.inference_latency_samples.read() {
         Ok(g) => g,
         Err(_) => {
-            tracing::warn!("inference_latency_samples lock poisoned — skipping histogram");
+            tracing::warn!(
+                module = "metrics",
+                "inference_latency_samples lock poisoned — skipping histogram"
+            );
             return;
         }
     };

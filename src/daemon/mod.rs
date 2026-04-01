@@ -1390,7 +1390,7 @@ impl Daemon {
                     match result {
                         None => {
                             // All tasks finished — shouldn't happen during normal operation
-                            tracing::error!("All subsystem tasks have exited");
+                            tracing::error!(subsystem_count = subsystems.len(), "all subsystem tasks have exited unexpectedly");
                             break;
                         }
                         Some(Ok((name, criticality, task_result))) => {

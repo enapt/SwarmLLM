@@ -173,10 +173,7 @@ pub fn cosign_credit_forward(
 /// Step 1: Invitee generates a blinding factor and computes a blinded token.
 /// The blinded token is sent to the pool creator without revealing the invitee's identity.
 #[cfg(test)]
-pub fn blind_invite(
-    pool_id: &PoolId,
-    ttl_hours: u32,
-) -> (uuid::Uuid, BlindingFactor, BlindedToken) {
+fn blind_invite(pool_id: &PoolId, ttl_hours: u32) -> (uuid::Uuid, BlindingFactor, BlindedToken) {
     let invitation_id = uuid::Uuid::new_v4();
     let blinding_factor = BlindingFactor(rand::random::<[u8; 32]>());
     let commitment = compute_blind_commitment(&invitation_id, &blinding_factor);
@@ -195,7 +192,7 @@ pub fn blind_invite(
 /// The signature now covers (commitment, pool_id, expires_at) — binding expiry cryptographically
 /// to prevent indefinite replay of blind invitation tokens.
 #[cfg(test)]
-pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindSignature {
+fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindSignature {
     let payload = blind_token_payload(
         &blinded_token.commitment,
         &blinded_token.pool_id,
@@ -212,7 +209,7 @@ pub fn sign_blinded(identity: &Identity, blinded_token: &BlindedToken) -> BlindS
 
 /// Step 3: Invitee removes the blinding to produce a valid signed membership token.
 #[cfg(test)]
-pub fn unblind_token(
+fn unblind_token(
     invitation_id: uuid::Uuid,
     blinding_factor: BlindingFactor,
     blind_signature: BlindSignature,
@@ -234,10 +231,7 @@ pub fn unblind_token(
 /// SEC: Legacy no-expiry fallback removed to prevent permanent blind tokens.
 /// Tokens signed under the old scheme must be re-issued by the pool owner.
 #[cfg(test)]
-pub fn verify_membership(
-    token: &UnblindedToken,
-    owner_key: &VerifyingKey,
-) -> Result<(), SwarmError> {
+fn verify_membership(token: &UnblindedToken, owner_key: &VerifyingKey) -> Result<(), SwarmError> {
     let commitment = compute_blind_commitment(&token.invitation_id, &token.blinding_factor);
     let payload = blind_token_payload(&commitment, &token.pool_id, token.expires_at);
     verify_sig(&token.signature, &payload, owner_key)

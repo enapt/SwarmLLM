@@ -167,7 +167,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let sender = match authenticated_sender {
                                             Some(ref s) => s,
                                             None => {
-                                                tracing::warn!("LayerResult from unauthenticated peer — dropping");
+                                                tracing::warn!(msg_type = "LayerResult", "message from unauthenticated peer — dropping");
                                                 continue;
                                             }
                                         };
@@ -223,7 +223,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         } else {
-                                            tracing::warn!("LayerForward without authenticated sender — dropping");
+                                            tracing::warn!(msg_type = "LayerForward", "message without authenticated sender — dropping");
                                             continue;
                                         }
                                         tracing::info!(
@@ -282,7 +282,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let sender = match authenticated_sender {
                                             Some(ref s) => s,
                                             None => {
-                                                tracing::warn!("StreamingToken from unauthenticated peer — dropping");
+                                                tracing::warn!(msg_type = "StreamingToken", "message from unauthenticated peer — dropping");
                                                 continue;
                                             }
                                         };
@@ -320,7 +320,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         } else {
-                                            tracing::warn!("VisionEncodeRequest without authenticated sender — dropping");
+                                            tracing::warn!(msg_type = "VisionEncodeRequest", "message without authenticated sender — dropping");
                                             continue;
                                         }
                                         let permit = match forward_semaphore.clone().try_acquire_owned() {
@@ -389,7 +389,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 continue;
                                             }
                                         } else {
-                                            tracing::warn!("Inference message without authenticated sender — dropping");
+                                            tracing::warn!(msg_type = "Inference", "message without authenticated sender — dropping");
                                             continue;
                                         }
                                         if let Err(e) = router_tx
@@ -479,7 +479,7 @@ pub(crate) async fn dispatch_network_messages(
                                                     continue;
                                                 }
                                             };
-                                            // verify_transaction also checks replay, but we already checked above
+                                            // verify_single_signatures checks both signatures; replay already checked above
                                             if let Err(e) = crate::credit::transaction::verify_single_signatures(&tx, &from_key, &to_key) {
                                                 tracing::warn!(
                                                     tx_id = %tx.id,
@@ -757,7 +757,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let sender = match authenticated_sender {
                                             Some(ref s) => s,
                                             None => {
-                                                tracing::warn!("PoolMessage without authenticated sender — dropping");
+                                                tracing::warn!(msg_type = "PoolMessage", "message without authenticated sender — dropping");
                                                 continue;
                                             }
                                         };
@@ -1124,7 +1124,7 @@ pub(crate) async fn dispatch_network_messages(
                                         if !ss.pending_tp_partials.contains_key(&key)
                                             && ss.pending_tp_partials.len() >= MAX_PENDING_TP_PARTIALS
                                         {
-                                            tracing::warn!("pending_tp_partials full ({MAX_PENDING_TP_PARTIALS}) — dropping TpAllReduceRequest");
+                                            tracing::warn!(capacity = MAX_PENDING_TP_PARTIALS, "pending_tp_partials full — dropping TpAllReduceRequest");
                                             continue;
                                         }
 
@@ -1181,7 +1181,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             }
                                             None => {
-                                                tracing::warn!("TpAllReduceResponse from unauthenticated peer — dropping");
+                                                tracing::warn!(msg_type = "TpAllReduceResponse", "message from unauthenticated peer — dropping");
                                                 continue;
                                             }
                                         }
@@ -1204,7 +1204,7 @@ pub(crate) async fn dispatch_network_messages(
                                                 }
                                             }
                                             None => {
-                                                tracing::warn!("TpRingChunk from unauthenticated peer — dropping");
+                                                tracing::warn!(msg_type = "TpRingChunk", "message from unauthenticated peer — dropping");
                                                 continue;
                                             }
                                         }

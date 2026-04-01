@@ -69,11 +69,17 @@ pub async fn forward_credits_to_owner(
             .await
             .is_err()
         {
-            tracing::warn!("Pool forward channel unavailable — keeping credits locally");
+            tracing::warn!(
+                subsystem = "pool",
+                "forward channel unavailable — keeping credits locally"
+            );
             return Ok(false);
         }
     } else {
-        tracing::warn!("Pool manager not running — keeping credits locally");
+        tracing::warn!(
+            subsystem = "pool",
+            "pool manager not running — keeping credits locally"
+        );
         return Ok(false);
     }
 

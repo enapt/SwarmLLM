@@ -64,7 +64,7 @@ swarmllm/
 │   ├── api/       (server, openai, anthropic, mcp, admin, admin_hf, admin_models, admin_providers, websocket, middleware, identity, pool, metrics, providers)
 │   ├── storage/   (db)
 │   └── health/    (monitor, rebalancer)
-├── frontend/      (index.html + 13 HTML templates, css/, js/{core/3,components/13,init.js,i18n.js,providers.js}, i18n/)
+├── frontend/      (index.html + 13 HTML templates, css/, js/{core/3,components/13,init.js,i18n.js,providers.js,neural-bg.js,topojson-client.min.js}, i18n/)
 ├── python/        (swarmllm-client SDK)
 ├── monitoring/    (Grafana + Prometheus + docker-compose)
 ├── docs/book/     (mdBook documentation site)
