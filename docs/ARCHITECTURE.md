@@ -1168,6 +1168,9 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `POST   /api/admin/update/apply` — Download and apply update
 - `GET    /api/admin/network-map` — Network topology heatmap data
 - `GET    /api/admin/models/:id/metadata` — GGUF metadata (context length, quantization, layers)
+- `GET/PUT /api/admin/models/:id/encrypted-pipeline` — Per-model encrypted pipeline policy
+- `POST   /api/admin/rescan-shards` — Hot-reload shard files from disk without restart
+- `GET/PUT /api/admin/pools/:id/rates` — Get/set credit rate configuration for a pool
 - `GET    /metrics` — Prometheus/OpenMetrics endpoint (no auth)
 - `GET    /health/ready` — Readiness probe with subsystem status (no auth)
 
