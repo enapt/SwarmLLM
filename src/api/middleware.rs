@@ -145,20 +145,21 @@ impl RateLimiter {
         let key = (ip, kind);
 
         // Cap total tracked buckets to prevent memory exhaustion from IP spoofing.
-        // Use entry() API to avoid TOCTOU between contains_key and insert.
+        // Check len() BEFORE entry() to avoid deadlock — DashMap::len() reads all
+        // shards, but entry() holds a write lock on one shard. Calling len() while
+        // holding an entry write lock deadlocks when len() tries to read the same shard.
         const MAX_RATE_BUCKETS: usize = 50_000;
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
+            tracing::warn!(
+                capacity = MAX_RATE_BUCKETS,
+                "Rate limiter at capacity — denying new client"
+            );
+            return false;
+        }
+
         let mut entry = match self.buckets.entry(key) {
             dashmap::mapref::entry::Entry::Occupied(e) => e.into_ref(),
-            dashmap::mapref::entry::Entry::Vacant(v) => {
-                if self.buckets.len() >= MAX_RATE_BUCKETS {
-                    tracing::warn!(
-                        capacity = MAX_RATE_BUCKETS,
-                        "Rate limiter at capacity — denying new client"
-                    );
-                    return false;
-                }
-                v.insert((limit, now))
-            }
+            dashmap::mapref::entry::Entry::Vacant(v) => v.insert((limit, now)),
         };
         let (ref mut tokens, ref mut last_refill) = *entry;
 
