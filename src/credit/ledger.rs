@@ -7,8 +7,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 use crate::error::SwarmError;
 use crate::storage::db::Database;
 use crate::types::{
-    CreditBalance, CreditGossip, CreditTransaction, NetworkCommand, NodeId, PriorityTier, ShardId,
-    SwarmMessage,
+    CreditBalance, CreditGossip, NetworkCommand, NodeId, PriorityTier, ShardId, SwarmMessage,
 };
 
 /// Earning/spending rates (credits per unit).
@@ -233,34 +232,6 @@ impl CreditLedger {
             self.persist_balance().await?;
         }
         Ok(amount)
-    }
-
-    /// Apply a penalty (e.g., for serve failure/timeout).
-    pub async fn apply_penalty(&self, reason: &str) -> Result<(), SwarmError> {
-        let rates = self.credit_rates();
-        self.apply_credit(-rates.penalty_serve_failure, false)
-            .await?;
-        self.persist_balance().await?;
-
-        tracing::warn!(
-            penalty = rates.penalty_serve_failure,
-            reason,
-            "Applied credit penalty"
-        );
-
-        Ok(())
-    }
-
-    /// Record a completed transaction to the database.
-    pub fn record_transaction(&self, tx: &CreditTransaction) -> Result<(), SwarmError> {
-        tracing::info!(
-            tx_id = %tx.id,
-            credit_delta = tx.amount,
-            "DIAG: record_transaction"
-        );
-        self.db
-            .put_json(TREE_TRANSACTIONS, &tx.id.to_string(), tx)?;
-        Ok(())
     }
 
     /// Calculate the current priority tier based on balance and network percentile.
@@ -812,36 +783,6 @@ mod tests {
         let bal = balance.read().await;
         assert_eq!(bal.balance, 950); // 1000 - 50
         assert_eq!(bal.lifetime_spent, 50);
-    }
-
-    #[tokio::test]
-    async fn apply_penalty_reduces_balance() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(dir.path()).unwrap();
-        let node_id = NodeId([3u8; 32]);
-        let balance = Arc::new(RwLock::new(CreditBalance {
-            node_id: node_id.clone(),
-            balance: 100,
-            lifetime_earned: 100,
-            lifetime_spent: 0,
-            last_updated: chrono::Utc::now(),
-        }));
-        let (network_tx, _rx) = mpsc::channel(16);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let ledger = CreditLedger::new(
-            node_id,
-            balance.clone(),
-            db,
-            network_tx,
-            shutdown_rx,
-            Arc::new(RwLock::new(Vec::new())),
-        );
-
-        ledger.apply_penalty("test timeout").await.unwrap();
-
-        let bal = balance.read().await;
-        assert_eq!(bal.balance, 50); // 100 - 50 penalty
     }
 
     #[tokio::test]
