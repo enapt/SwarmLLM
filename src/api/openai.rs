@@ -11,9 +11,7 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::inference::chat_template;
 use crate::inference::router::{RouterCommand, StreamingTokenEvent};
-use crate::types::{
-    ChatMessage, ImageData, InferenceRequest, ModelId, NodeId, PriorityTier, SamplingParams,
-};
+use crate::types::{ChatMessage, ImageData, InferenceRequest, ModelId, SamplingParams};
 
 /// Timeout for peer-forwarded inference requests (seconds).
 const INFERENCE_FORWARD_TIMEOUT_SECS: u64 = 120;
@@ -1358,18 +1356,14 @@ pub async fn submit_stream_to_router(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let (token_tx, token_rx) = tokio::sync::mpsc::channel::<StreamingTokenEvent>(64);
 
-    let inference_req = InferenceRequest {
-        id: uuid::Uuid::new_v4(),
+    let inference_req = InferenceRequest::local(
         model_id,
         messages,
         sampling_params,
-        stream: true,
-        requester: NodeId([0u8; 32]),
-        priority: PriorityTier::Silver,
-        created_at: chrono::Utc::now(),
+        true,
         session_id,
         lora_adapter,
-    };
+    );
 
     router_tx
         .send(RouterCommand::StreamSubmit {
@@ -1548,18 +1542,14 @@ async fn router_inference(
     request_id: String,
     created: i64,
 ) -> Result<axum::response::Response, ApiError> {
-    let inference_req = InferenceRequest {
-        id: uuid::Uuid::new_v4(),
-        model_id: ModelId(req.model.clone()),
+    let inference_req = InferenceRequest::local(
+        ModelId(req.model.clone()),
         messages,
-        sampling_params: req.to_sampling_params(),
-        stream: false,
-        requester: NodeId([0u8; 32]), // Local API request
-        priority: PriorityTier::Silver,
-        created_at: chrono::Utc::now(),
-        session_id: req.session_id.clone(),
-        lora_adapter: req.lora_adapter.clone(),
-    };
+        req.to_sampling_params(),
+        false,
+        req.session_id.clone(),
+        req.lora_adapter.clone(),
+    );
 
     let output = super::submit_to_router(&router_tx, inference_req).await?;
 

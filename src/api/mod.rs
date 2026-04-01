@@ -12,6 +12,11 @@ pub(crate) fn scrub_truncate_error(body: &str) -> String {
     }
 }
 
+/// Strip `provider:` prefix from a model name, returning the bare model name.
+pub(crate) fn strip_provider_prefix(model: &str) -> &str {
+    model.split_once(':').map_or(model, |(_, name)| name)
+}
+
 // Shared validation limits for API request parameters.
 // Used by both openai.rs and anthropic.rs handlers.
 pub(crate) const MAX_TOOLS: usize = 128;

@@ -11,9 +11,7 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::inference::chat_template;
 use crate::inference::router::RouterCommand;
-use crate::types::{
-    ChatMessage, InferenceRequest, ModelId, NodeId, PriorityTier, Role, SamplingParams,
-};
+use crate::types::{ChatMessage, InferenceRequest, ModelId, Role, SamplingParams};
 
 /// SSE keep-alive interval for streaming responses (seconds).
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
@@ -282,11 +280,7 @@ fn map_finish_reason(reason: &str) -> &'static str {
 
 /// Resolve model name: strip `provider:` prefix if present.
 fn resolve_model(model: &str) -> &str {
-    if let Some((_provider, model_name)) = model.split_once(':') {
-        model_name
-    } else {
-        model
-    }
+    super::strip_provider_prefix(model)
 }
 
 // ---- Handler ----
@@ -709,18 +703,8 @@ async fn anthropic_non_stream(
     request_id: String,
     model: String,
 ) -> Result<axum::response::Response, ApiError> {
-    let inference_req = InferenceRequest {
-        id: uuid::Uuid::new_v4(),
-        model_id: ModelId(model.clone()),
-        messages,
-        sampling_params: params,
-        stream: false,
-        requester: NodeId([0u8; 32]),
-        priority: PriorityTier::Silver,
-        created_at: chrono::Utc::now(),
-        session_id: None,
-        lora_adapter: None,
-    };
+    let inference_req =
+        InferenceRequest::local(ModelId(model.clone()), messages, params, false, None, None);
 
     let output = super::submit_to_router(&router_tx, inference_req).await?;
 

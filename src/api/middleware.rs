@@ -145,20 +145,21 @@ impl RateLimiter {
         let key = (ip, kind);
 
         // Cap total tracked buckets to prevent memory exhaustion from IP spoofing.
-        // When full, evict the oldest entry (LRU) instead of denying new clients.
+        // Use entry() API to avoid TOCTOU between contains_key and insert.
         const MAX_RATE_BUCKETS: usize = 50_000;
-        if !self.buckets.contains_key(&key) && self.buckets.len() >= MAX_RATE_BUCKETS {
-            // SEC: Deny new clients when at capacity instead of O(n) LRU scan.
-            // Previous O(n) DashMap iteration was a DoS amplification vector:
-            // attacker with >50K unique IPs would cause O(n^2) total work.
-            tracing::warn!(
-                capacity = MAX_RATE_BUCKETS,
-                "Rate limiter at capacity — denying new client"
-            );
-            return false;
-        }
-
-        let mut entry = self.buckets.entry(key).or_insert((limit, now));
+        let mut entry = match self.buckets.entry(key) {
+            dashmap::mapref::entry::Entry::Occupied(e) => e.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                if self.buckets.len() >= MAX_RATE_BUCKETS {
+                    tracing::warn!(
+                        capacity = MAX_RATE_BUCKETS,
+                        "Rate limiter at capacity — denying new client"
+                    );
+                    return false;
+                }
+                v.insert((limit, now))
+            }
+        };
         let (ref mut tokens, ref mut last_refill) = *entry;
 
         // Refill tokens based on elapsed time

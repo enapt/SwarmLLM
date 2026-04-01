@@ -2566,7 +2566,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
             | SwarmMessage::ShardDownloadProgress(_)
             | SwarmMessage::HfSourceGossip(_) => TOPIC_MODELS,
             SwarmMessage::CreditGossip(_) => crate::network::protocol::TOPIC_CREDITS,
-            SwarmMessage::ModelVote(_) => TOPIC_MODELS, // governance removed — route to models topic
+            SwarmMessage::ModelVote(_) => TOPIC_MODELS, // wire-compat: retained for older peers, payload discarded on receive
             SwarmMessage::HealthPing { .. } | SwarmMessage::HealthPong { .. } => {
                 crate::network::protocol::TOPIC_HEALTH
             }
@@ -2878,7 +2878,7 @@ mname.as_deref().unwrap_or(&shard_id.model_id.0),
                 }
             }
         } else {
-            // No stored channel — send as new request (legacy fallback)
+            // No stored ResponseChannel — peer may have reconnected or sent a result for a different substream
             tracing::debug!(
                 %peer_id,
                 request_id = %result.request_id,

@@ -469,6 +469,31 @@ pub struct InferenceRequest {
     pub lora_adapter: Option<String>,
 }
 
+impl InferenceRequest {
+    /// Create an inference request originating from the local API (not a network peer).
+    pub fn local(
+        model_id: ModelId,
+        messages: Vec<ChatMessage>,
+        sampling_params: SamplingParams,
+        stream: bool,
+        session_id: Option<String>,
+        lora_adapter: Option<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            model_id,
+            messages,
+            sampling_params,
+            stream,
+            requester: NodeId([0u8; 32]),
+            priority: PriorityTier::Silver,
+            created_at: chrono::Utc::now(),
+            session_id,
+            lora_adapter,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,

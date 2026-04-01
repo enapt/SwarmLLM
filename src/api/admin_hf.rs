@@ -6,6 +6,22 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::model::manifest::ModelManifestExt;
 
+/// Count unique peers holding shards of the given model IDs.
+fn count_unique_shard_holders(
+    registry: &crate::model::registry::ModelRegistry,
+    model_ids: &[crate::types::ModelId],
+) -> usize {
+    let mut unique = std::collections::HashSet::new();
+    for (shard_id, holders) in registry.all_shard_entries() {
+        if model_ids.contains(&shard_id.model_id) {
+            for h in &holders {
+                unique.insert(h.clone());
+            }
+        }
+    }
+    unique.len()
+}
+
 /// Spawn a background task that reads download progress events and updates acquisition_progress.
 fn spawn_progress_updater(
     shared: std::sync::Arc<crate::daemon::state::SharedState>,
@@ -206,30 +222,23 @@ pub async fn hf_search(
             let fits_vram = fits_full || fits_boomerang || fits_shard;
 
             // Network replication: count unique peers holding shards of any variant of this repo
-            let network_replicas = {
-                let mut unique_peers = std::collections::HashSet::new();
-                for f in &files {
-                    let model_id_str = f
-                        .filename
-                        .trim_end_matches(".gguf")
-                        .to_lowercase()
-                        .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-                        .split('-')
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("-");
-                    let mid = crate::types::ModelId(model_id_str);
-                    for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries()
-                    {
-                        if shard_id.model_id == mid {
-                            for h in &holders {
-                                unique_peers.insert(h.clone());
-                            }
-                        }
-                    }
-                }
-                unique_peers.len()
-            };
+            let variant_ids: Vec<crate::types::ModelId> = files
+                .iter()
+                .map(|f| {
+                    crate::types::ModelId(
+                        f.filename
+                            .trim_end_matches(".gguf")
+                            .to_lowercase()
+                            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
+                            .split('-')
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("-"),
+                    )
+                })
+                .collect();
+            let network_replicas =
+                count_unique_shard_holders(&state.shared_state.model_registry, &variant_ids);
 
             // Composite score: surfaces small, popular, scarce, VRAM-fitting models
             let quality = (downloads as f64 + 10.0).log10() / 7.0; // 0-1 popularity proxy
@@ -556,30 +565,27 @@ pub async fn hf_probe(
                 probed_at: chrono::Utc::now(),
             };
             // Count unique peers hosting shards of this model
-            let network_replicas = {
-                let mut unique_peers = std::collections::HashSet::new();
-                for (shard_id, holders) in state.shared_state.model_registry.all_shard_entries() {
-                    if shard_id.model_id == mid {
-                        for h in &holders {
-                            unique_peers.insert(h.clone());
-                        }
-                    }
-                }
-                unique_peers.len()
-            };
+            let network_replicas = count_unique_shard_holders(
+                &state.shared_state.model_registry,
+                std::slice::from_ref(&mid),
+            );
 
-            // Cap probe cache at 1000 entries — evict oldest by probed_at
+            // Cap probe cache at 1000 entries — evict oldest by probed_at.
+            // Note: len() check + insert is not atomic, so under concurrent admin
+            // requests the cache may briefly exceed MAX_PROBE_CACHE. This is bounded
+            // by the number of concurrent hf_probe requests (admin-only, typically 1).
             const MAX_PROBE_CACHE: usize = 1_000;
             if state.shared_state.models.hf_probe_cache.len() >= MAX_PROBE_CACHE {
-                if let Some(oldest) = state
+                // Clone key before remove to avoid holding DashMap Ref across remove()
+                let oldest = state
                     .shared_state
                     .models
                     .hf_probe_cache
                     .iter()
                     .min_by_key(|entry| entry.value().probed_at)
-                    .map(|entry| entry.key().clone())
-                {
-                    state.shared_state.models.hf_probe_cache.remove(&oldest);
+                    .map(|entry| entry.key().clone());
+                if let Some(key) = oldest {
+                    state.shared_state.models.hf_probe_cache.remove(&key);
                 }
             }
             state

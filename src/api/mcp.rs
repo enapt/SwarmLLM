@@ -649,11 +649,10 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
         return JsonRpcResponse::error(id, INVALID_PARAMS, "No valid messages provided");
     }
 
-    let request = crate::types::InferenceRequest {
-        id: uuid::Uuid::new_v4(),
-        model_id: crate::types::ModelId(model),
-        messages: chat_messages,
-        sampling_params: crate::types::SamplingParams {
+    let request = crate::types::InferenceRequest::local(
+        crate::types::ModelId(model),
+        chat_messages,
+        crate::types::SamplingParams {
             temperature,
             top_p: 0.9,
             top_k: 40,
@@ -664,13 +663,10 @@ async fn tool_chat(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcR
             logprobs: false,
             top_logprobs: 0,
         },
-        stream: false,
-        priority: crate::types::PriorityTier::Silver,
-        requester: crate::types::NodeId([0u8; 32]),
-        created_at: chrono::Utc::now(),
-        session_id: None,
-        lora_adapter: None,
-    };
+        false,
+        None,
+        None,
+    );
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),

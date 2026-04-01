@@ -3,6 +3,17 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::api::server::AppState;
+use crate::error::ApiError;
+
+/// Validate that a model ID from a URL path param is within length bounds.
+fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
+    if model_id.len() > 256 {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Model ID must be 256 characters or fewer".into(),
+        )));
+    }
+    Ok(())
+}
 
 /// Serialize an acquisition progress entry to JSON. Used by both REST download_queue
 /// and WebSocket build_stats_message. Caller can extend with extra fields.
@@ -73,7 +84,6 @@ pub fn serialize_acquisition_to_json(
         "shard_details": shard_details,
     })
 }
-use crate::error::ApiError;
 
 pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::Value>> {
     let mut models: Vec<serde_json::Value> = Vec::new();
@@ -654,11 +664,7 @@ pub async fn add_model_interest(
     State(state): State<AppState>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if model_id.len() > 256 {
-        return Err(ApiError(crate::error::SwarmError::Validation(
-            "Model ID must be 256 characters or fewer".into(),
-        )));
-    }
+    validate_model_id(&model_id)?;
     tracing::info!(model_id = %model_id, "Model acquisition requested");
 
     let mid = crate::types::ModelId(model_id.clone());
@@ -695,6 +701,7 @@ pub async fn model_acquisition_status(
     State(state): State<AppState>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
     // Fast path: read from shared state (no channel round-trip)
@@ -898,7 +905,7 @@ pub async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Sanitize model_id to prevent path traversal
+    validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1012,6 +1019,7 @@ pub async fn unload_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1736,6 +1744,7 @@ pub async fn set_model_auto_manage(
     Path(model_id): Path<String>,
     Json(body): Json<ModelAutoManageUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
     let policy = crate::config::ModelAutoManagePolicy {
@@ -1843,6 +1852,7 @@ pub async fn set_model_encrypted_pipeline(
     Path(model_id): Path<String>,
     Json(body): Json<EncryptedPipelineUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
     // Validate: check if the local node has the required shards
@@ -1938,6 +1948,7 @@ pub async fn model_metadata(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let model_dir = crate::model::shard::model_dir(&state.config.node.data_dir, &model_id);
     let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
 

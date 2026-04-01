@@ -73,16 +73,7 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let tier = crate::credit::priority::PriorityCalculator::tier_name(credit.balance);
 
     // Count only shards held locally (not all tracked shards network-wide)
-    let hosted_shards = {
-        let local_nid = state.shared_state.identity.node_id();
-        state
-            .shared_state
-            .model_registry
-            .all_shard_entries()
-            .iter()
-            .filter(|(_, holders)| holders.contains(local_nid))
-            .count()
-    };
+    let hosted_shards = crate::api::metrics::count_local_shards(&state.shared_state);
 
     // Hardware detection — sysinfo does blocking filesystem reads (/proc/*)
     let ss = state.shared_state.clone();
@@ -94,6 +85,15 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
     let inference_perf = {
         let samples = state.shared_state.metrics.inference_latency_samples.read();
         match samples {
+            Err(_) => {
+                tracing::warn!("inference_latency_samples lock poisoned — skipping perf metrics");
+                serde_json::json!({
+                    "total_requests": state.shared_state.metrics.inference_requests_total
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "avg_latency_ms": null,
+                    "samples": 0,
+                })
+            }
             Ok(s) if !s.is_empty() => {
                 let count = s.len();
                 let sum: f64 = s.iter().sum();
@@ -812,7 +812,16 @@ pub async fn update_schedule(
         schedule.reduced_hours_end = end;
     }
     if let Some(ref contribution) = body.reduced_contribution {
-        schedule.reduced_contribution = contribution.clone();
+        match contribution.as_str() {
+            "minimal" | "moderate" | "maximum" => {
+                schedule.reduced_contribution = contribution.clone();
+            }
+            _ => {
+                return Err(ApiError(crate::error::SwarmError::Validation(
+                    "reduced_contribution must be 'minimal', 'moderate', or 'maximum'".to_string(),
+                )));
+            }
+        }
     }
     if let Some(ref aggressiveness) = body.prune_aggressiveness {
         match aggressiveness.as_str() {

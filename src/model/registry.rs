@@ -45,6 +45,7 @@ impl ModelRegistry {
 
     /// Create a registry with a known local node ID.
     /// The local node is never evicted from bounded holder sets.
+    #[cfg(test)]
     pub fn with_local_node(local_node_id: NodeId) -> Self {
         Self {
             manifests: DashMap::new(),
@@ -238,27 +239,6 @@ impl ModelRegistry {
             .get(node_id)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default()
-    }
-
-    /// Get sorted shard indices held locally for a model.
-    /// Convenience method that eliminates the common pattern of iterating manifest shards,
-    /// checking shard_holders().contains(&local_node_id), and collecting indices.
-    pub fn local_shard_indices(&self, model_id: &ModelId, node_id: &NodeId) -> Vec<u32> {
-        let manifest = match self.get_manifest(model_id) {
-            Some(m) => m,
-            None => return Vec::new(),
-        };
-        let mut indices: Vec<u32> = (0..manifest.shard_count)
-            .filter(|&idx| {
-                let sid = crate::types::ShardId {
-                    model_id: model_id.clone(),
-                    index: idx,
-                };
-                self.shard_holders(&sid).contains(node_id)
-            })
-            .collect();
-        indices.sort_unstable();
-        indices
     }
 
     /// Iterate over all tracked shard entries (shard_id, holders).

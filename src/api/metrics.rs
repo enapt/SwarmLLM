@@ -112,7 +112,7 @@ pub async fn health_ready(State(state): State<AppState>) -> Response {
 }
 
 /// Count shards held by this node across all models.
-fn count_local_shards(shared: &crate::daemon::SharedState) -> usize {
+pub(crate) fn count_local_shards(shared: &crate::daemon::SharedState) -> usize {
     let node_id = shared.identity.node_id();
     let mut count = 0;
     for entry in shared.model_registry.all_shard_entries() {
