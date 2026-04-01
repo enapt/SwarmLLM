@@ -69,9 +69,9 @@
 
     load: async function() {
       try {
-        var resp = await App.authFetch('/api/admin/config');
-        if (!resp.ok) return;
-        var data = await resp.json();
+        var result = await App.data.loadStats();
+        var data = result && result.config;
+        if (!data) return;
         document.getElementById('settings-contribution').value = data.contribution || 'minimal';
         document.getElementById('settings-max-requests').value = data.max_concurrent_requests || 10;
         document.getElementById('settings-bandwidth').value = data.max_bandwidth_mbps || 0;

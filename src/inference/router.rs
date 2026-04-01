@@ -137,6 +137,7 @@ pub struct InferenceRouter {
     batch_timeout: std::time::Duration,
     /// Sender for spawned tasks to send commands back to the router (e.g., KV-cache updates).
     self_tx: mpsc::Sender<RouterCommand>,
+    config_watch_rx: watch::Receiver<crate::config::OperationalParams>,
 }
 
 impl InferenceRouter {
@@ -171,6 +172,7 @@ impl InferenceRouter {
             _ => {}
         }
 
+        let config_watch_rx = shared_state.config_watch_rx();
         Self {
             shared_state: shared_state.clone(),
             command_rx,
@@ -185,6 +187,7 @@ impl InferenceRouter {
             max_batch_size,
             batch_timeout,
             self_tx: command_tx,
+            config_watch_rx,
         }
     }
 
@@ -252,6 +255,22 @@ impl InferenceRouter {
                 }
                 _ = self.queue_notify.notified() => {
                     self.drain_queue().await;
+                }
+                _ = self.config_watch_rx.changed() => {
+                    let params = self.config_watch_rx.borrow().clone();
+                    let new_max = params.max_concurrent_requests as usize;
+                    let new_batch = (params.max_batch_size as usize).max(1);
+                    if new_max != self.max_concurrent || new_batch != self.max_batch_size {
+                        tracing::info!(
+                            old_max_concurrent = self.max_concurrent,
+                            new_max_concurrent = new_max,
+                            old_max_batch = self.max_batch_size,
+                            new_max_batch = new_batch,
+                            "Hot-reloaded inference router config"
+                        );
+                        self.max_concurrent = new_max;
+                        self.max_batch_size = new_batch;
+                    }
                 }
                 _ = cache_cleanup.tick() => {
                     let expired = self.kv_cache.cleanup_expired();

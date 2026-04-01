@@ -138,7 +138,7 @@ impl AcquisitionManager {
         command_rx: mpsc::Receiver<AcquisitionCommand>,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
-        let shard_store = ShardStore::new(&shared_state.config.node.data_dir);
+        let shard_store = shared_state.shard_store();
         Self {
             shared_state,
             shard_store,
@@ -379,7 +379,7 @@ impl AcquisitionManager {
         // Request each needed shard from the network with retry logic
         for shard_id in &needed {
             let mut failed_peers: Vec<NodeId> = Vec::new();
-            let retry_delays = [5u64, 30, 120]; // exponential backoff: 5s, 30s, 120s
+            let retry_delays = crate::config::NETWORK_RETRY_DELAYS;
             let mut success = false;
 
             for attempt in 0..3u32 {

@@ -182,6 +182,7 @@ impl SessionManager {
     }
 
     /// Get this node's X25519 public key.
+    #[cfg(test)]
     pub fn local_public_key(&self) -> &PublicKey {
         &self.local_public
     }

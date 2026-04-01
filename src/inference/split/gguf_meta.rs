@@ -5,6 +5,7 @@ use std::path::Path;
 use candle_core::quantized::gguf_file;
 
 use crate::error::SwarmError;
+use crate::inference::tokenizer::SplitTokenizer;
 
 /// Metadata extracted from GGUF header, stored in manifest for all nodes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -311,7 +312,35 @@ impl GgufTokenizerMeta {
                 }
             }
         }
+        // Gemma uses token 107 (<end_of_turn>) as EOS
+        if (arch == "gemma" || arch == "gemma2") && !ids.contains(&107) {
+            ids.push(107);
+        }
         ids
+    }
+
+    /// Build a `SplitTokenizer` from extracted metadata, or `None` if vocab is empty.
+    pub fn build_tokenizer(&self) -> Option<SplitTokenizer> {
+        if self.vocab.is_empty() {
+            return None;
+        }
+        if !self.merges.is_empty() {
+            Some(SplitTokenizer::from_bpe(
+                &self.vocab,
+                &self.merges,
+                &self.pre_tokenizer,
+                &self.tokenizer_model,
+            ))
+        } else if self.tokenizer_model == "llama" && !self.scores.is_empty() {
+            Some(SplitTokenizer::from_sentencepiece(
+                &self.vocab,
+                &self.scores,
+                self.add_space_prefix,
+                self.add_bos_token,
+            ))
+        } else {
+            None
+        }
     }
 }
 

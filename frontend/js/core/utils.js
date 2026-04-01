@@ -89,7 +89,7 @@
     var container = document.getElementById(containerId);
     if (!container || !data || data.length === 0) return;
     var hasActivity = data.some(function(v) { return v !== 0; });
-    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">' + U.escapeHtml(I18n.t('chat.credit_activity_empty')) + '</span>'; return; }
+    if (!hasActivity) { container.innerHTML = '<span class="text-muted" style="font-size:0.7rem">' + escapeHtml(I18n.t('chat.credit_activity_empty')) + '</span>'; return; }
     var min = Math.min.apply(null, data);
     var max = Math.max.apply(null, data);
     var range = (max - min) || 1;
@@ -431,7 +431,6 @@
     formatSpeed: formatSpeed,
     formatEta: formatEta,
     timeAgo: timeAgo,
-    capitalize: capitalize,
     setTierBadge: setTierBadge,
     renderSparkline: renderSparkline,
     getModelSource: getModelSource,

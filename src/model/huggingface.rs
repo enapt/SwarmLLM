@@ -7,6 +7,14 @@ use std::time::SystemTime;
 const GGUF_HEADER_PROBE_SIZE: u64 = 16 * 1024 * 1024;
 /// Gap tolerance for coalescing byte-range requests (4MB).
 const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
+/// HTTP connect timeout for HuggingFace API/download requests.
+const HF_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// HTTP total timeout for metadata/probe requests.
+const HF_METADATA_TIMEOUT_SECS: u64 = 120;
+/// HTTP total timeout for medium downloads (shard lists, configs).
+const HF_MEDIUM_TIMEOUT_SECS: u64 = 300;
+/// HTTP total timeout for large shard downloads (up to 1 hour).
+const HF_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
 /// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id.
 /// Only allows `owner/repo-name` with alphanumeric, hyphens, dots, underscores.
@@ -95,7 +103,7 @@ pub fn extract_quant_tag(filename: &str) -> Option<String> {
 /// Returns a flat list of downloadable GGUF files with repo + filename.
 pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -213,7 +221,7 @@ pub async fn download_model(
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
+        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -324,8 +332,8 @@ pub async fn probe_gguf_file(
     shard_size: u64,
 ) -> Result<GgufFileInfo, String> {
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HF_METADATA_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -519,8 +527,8 @@ pub async fn download_gguf_header(
     header_size: u64,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HF_MEDIUM_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -603,8 +611,8 @@ pub async fn download_tied_output_weight(
     );
 
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(3600))
+        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -764,7 +772,7 @@ pub async fn download_shard_v2(
     cancel_flag: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3600))
+        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -875,7 +883,7 @@ pub async fn download_shard_v2(
         if range_idx < ranges_to_skip {
             continue;
         }
-        let http_retry_delays = [5u64, 30, 120];
+        let http_retry_delays = crate::config::NETWORK_RETRY_DELAYS;
         let mut resp = None;
 
         for attempt in 0..=3u32 {

@@ -47,7 +47,7 @@ impl GossipSealer {
 
     /// Seal a gossip message (without Ed25519 signature — use `seal_signed` for authenticated gossip).
     /// Output format: `[4B epoch_tag][12B nonce][ciphertext+tag]`
-    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SwarmError> {
+    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SwarmError> {
         let epoch = Self::current_epoch();
         tracing::debug!(epoch, plaintext_len = plaintext.len(), "DIAG: gossip seal");
         let key = self.derive_epoch_key(epoch);
@@ -72,7 +72,7 @@ impl GossipSealer {
 
     /// Open a sealed gossip message.
     /// Tries the epoch from the message tag, then the previous epoch for clock skew tolerance.
-    pub fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, SwarmError> {
+    fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, SwarmError> {
         if sealed.len() < 16 {
             return Err(SwarmError::DecryptionFailed);
         }

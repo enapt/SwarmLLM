@@ -11,7 +11,6 @@ use crate::identity::Identity;
 use crate::inference::router::{InferenceRouter, RouterCommand};
 use crate::model::acquisition::{AcquisitionCommand, AcquisitionManager};
 use crate::model::manifest::ModelManifestExt;
-use crate::model::shard::ShardStore;
 use crate::network::manager::NetworkManager;
 use crate::storage::db::Database;
 use crate::types::{AuthenticatedMessage, NetworkCommand, RebalanceEvent, ShardId, SwarmMessage};
@@ -285,7 +284,7 @@ impl Daemon {
                         );
                     }
                     // Register ourselves as holder of our shard range
-                    let shard_store_reg = ShardStore::new(&self.config.node.data_dir);
+                    let shard_store_reg = shared_state.shard_store();
                     for shard_info in &manifest.shards {
                         let in_range = match shard_range {
                             Some((start, end)) => {
@@ -317,7 +316,7 @@ impl Daemon {
                     }
                     // Load GGUF metadata for the model if we have a source path
                     if !shared_state.gguf_meta.contains_key(&model_id) {
-                        let shard_store_tmp = ShardStore::new(&self.config.node.data_dir);
+                        let shard_store_tmp = shared_state.shard_store();
                         let model_dir = shard_store_tmp.model_dir(&model_id);
                         let source_path_file = model_dir.join("source_path");
                         if let Ok(path_str) = std::fs::read_to_string(&source_path_file) {
@@ -363,7 +362,7 @@ impl Daemon {
         // Pre-pass: regenerate any missing manifests from GGUF headers + shard files.
         // load_all_local() requires a manifest to exist (security check), so we must
         // create one first if gguf_header.bin + shard files are present.
-        let shard_store = ShardStore::new(&self.config.node.data_dir);
+        let shard_store = shared_state.shard_store();
         {
             let models_dir = shard_store.models_dir();
             if models_dir.exists() {

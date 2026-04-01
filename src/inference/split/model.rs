@@ -1698,142 +1698,30 @@ impl SplitModel {
             }
         }
 
-        // Load vocabulary from GGUF metadata for token decoding
-        let vocabulary = ct
-            .metadata
-            .get("tokenizer.ggml.tokens")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect::<Vec<String>>()
-            });
-        if let Some(ref v) = vocabulary {
-            tracing::info!(vocab_size = v.len(), "Loaded GGUF vocabulary");
-        }
-
-        // Load BPE merges, pre-tokenizer type, and build tokenizer
-        let tokenizer = if let Some(ref vocab) = vocabulary {
-            let merges_raw = ct
-                .metadata
-                .get("tokenizer.ggml.merges")
-                .and_then(|v| v.to_vec().ok())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.to_string().ok().cloned())
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default();
-            let pre_type = ct
-                .metadata
-                .get("tokenizer.ggml.pre")
-                .and_then(|v| v.to_string().ok().cloned())
-                .unwrap_or_else(|| "gpt2".to_string());
-            let tokenizer_model = ct
-                .metadata
-                .get("tokenizer.ggml.model")
-                .and_then(|v| v.to_string().ok().cloned())
-                .unwrap_or_else(|| "gpt2".to_string());
-            if !merges_raw.is_empty() {
-                tracing::info!(
-                    merges = merges_raw.len(),
-                    pre_type = %pre_type,
-                    tokenizer_model = %tokenizer_model,
-                    "Loaded BPE tokenizer from GGUF"
-                );
-                Some(SplitTokenizer::from_bpe(
-                    vocab,
-                    &merges_raw,
-                    &pre_type,
-                    &tokenizer_model,
-                ))
-            } else if tokenizer_model == "llama" {
-                // Sentencepiece-based model (LLaMA family without BPE merges).
-                let scores: Vec<f32> = ct
-                    .metadata
-                    .get("tokenizer.ggml.scores")
-                    .and_then(|v| v.to_vec().ok())
-                    .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
-                    .unwrap_or_default();
-                let add_space_prefix = ct
-                    .metadata
-                    .get("tokenizer.ggml.add_space_prefix")
-                    .and_then(|v| v.to_bool().ok())
-                    .unwrap_or(true);
-                let add_bos_token = ct
-                    .metadata
-                    .get("tokenizer.ggml.add_bos_token")
-                    .and_then(|v| v.to_bool().ok())
-                    .unwrap_or(false);
-                if !scores.is_empty() {
-                    tracing::info!(
-                        vocab_size = vocab.len(),
-                        scores = scores.len(),
-                        add_space_prefix,
-                        add_bos_token,
-                        "Building SPM tokenizer from GGUF sentencepiece data"
-                    );
-                    Some(SplitTokenizer::from_sentencepiece(
-                        vocab,
-                        &scores,
-                        add_space_prefix,
-                        add_bos_token,
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
+        // Extract tokenizer metadata via centralized GgufTokenizerMeta
+        let tok_meta = super::gguf_meta::GgufTokenizerMeta::from_content(&ct);
+        let vocabulary = if tok_meta.vocab.is_empty() {
             None
+        } else {
+            tracing::info!(vocab_size = tok_meta.vocab.len(), "Loaded GGUF vocabulary");
+            Some(tok_meta.vocab.clone())
         };
 
-        // Extract EOS token IDs from GGUF metadata
-        let mut eos_tokens = Vec::new();
-        if let Some(eos_id) = ct
-            .metadata
-            .get("tokenizer.ggml.eos_token_id")
-            .and_then(|v| v.to_u32().ok())
-        {
-            eos_tokens.push(eos_id);
-        }
-        // Some models define additional EOS tokens; add architecture-specific defaults
-        match arch.as_str() {
-            "qwen2" => {
-                // Qwen2 uses 151643 (<|endoftext|>) and 151645 (<|im_end|>)
-                for &id in &[151643u32, 151645] {
-                    if !eos_tokens.contains(&id) {
-                        eos_tokens.push(id);
-                    }
-                }
-            }
-            "gemma" | "gemma2" => {
-                // Gemma uses token 107 (<end_of_turn>) as EOS
-                if !eos_tokens.contains(&107) {
-                    eos_tokens.push(107);
-                }
-            }
-            _ => {
-                // Common fallback EOS token for LLaMA-family models
-                if !eos_tokens.contains(&2) {
-                    eos_tokens.push(2);
-                }
-            }
-        }
-        if eos_tokens.is_empty() {
-            tracing::warn!(arch = %arch, "No EOS token found in GGUF metadata, using default [2]");
-            eos_tokens.push(2);
-        } else {
-            tracing::info!(eos_tokens = ?eos_tokens, "Loaded EOS tokens from GGUF");
+        let tokenizer = tok_meta.build_tokenizer();
+        if tokenizer.is_some() {
+            tracing::info!(
+                tokenizer_model = %tok_meta.tokenizer_model,
+                pre_type = %tok_meta.pre_tokenizer,
+                "Built tokenizer from GGUF metadata"
+            );
         }
 
-        // Extract chat template from GGUF metadata
-        let chat_template = ct
-            .metadata
-            .get("tokenizer.chat_template")
-            .and_then(|v| v.to_string().ok().cloned())
-            .filter(|s| !s.is_empty());
+        // EOS tokens with architecture-specific fallbacks
+        let eos_tokens = tok_meta.eos_tokens_with_arch_fallback(arch);
+        tracing::info!(eos_tokens = ?eos_tokens, "Loaded EOS tokens from GGUF");
+
+        // Chat template from GGUF metadata
+        let chat_template = tok_meta.chat_template.filter(|s| !s.is_empty());
 
         // Resolve BOS/EOS token strings from their IDs + vocabulary
         let bos_id = ct

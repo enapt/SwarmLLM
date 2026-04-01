@@ -63,7 +63,8 @@ where
                     "error": {
                         "message": message,
                         "type": "invalid_request_error",
-                        "code": 400
+                        "param": null,
+                        "code": "invalid_request_error"
                     }
                 });
                 Err((axum::http::StatusCode::BAD_REQUEST, axum::Json(body)).into_response())

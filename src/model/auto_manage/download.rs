@@ -82,8 +82,7 @@ impl AutoShardManager {
             }
 
             // Verify shard integrity: try BLAKE3 hash if available, fall back to size check
-            let shard_store =
-                crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+            let shard_store = self.shared_state.shard_store();
             let file_ok = if let Some(manifest) = self
                 .shared_state
                 .model_registry

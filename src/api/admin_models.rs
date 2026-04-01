@@ -717,7 +717,7 @@ pub async fn model_acquisition_status(
 /// plus a total storage summary. Used by the auto-manage UI.
 pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Value> {
     let local_node_id = state.shared_state.identity.node_id().clone();
-    let models_dir = crate::model::shard::ShardStore::new(&state.config.node.data_dir).models_dir();
+    let models_dir = state.shared_state.shard_store().models_dir();
 
     let mut model_storage: Vec<serde_json::Value> = Vec::new();
     let mut total_local_bytes: u64 = 0;
@@ -1369,7 +1369,7 @@ pub async fn delete_shard(
     }
 
     // Delete shard file from disk
-    let shard_store = crate::model::shard::ShardStore::new(&state.config.node.data_dir);
+    let shard_store = state.shared_state.shard_store();
     let shard_path =
         shard_store.shard_path(&crate::types::ModelId(safe_model_id.clone()), shard_index);
 

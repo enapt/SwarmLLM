@@ -149,81 +149,8 @@ impl LocalEmbedder {
 
     /// Build a tokenizer from GGUF metadata.
     fn build_tokenizer(ct: &candle_core::quantized::gguf_file::Content) -> Option<SplitTokenizer> {
-        let vocabulary: Option<Vec<String>> = ct
-            .metadata
-            .get("tokenizer.ggml.tokens")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect()
-            });
-
-        let vocab = vocabulary.as_ref()?;
-
-        let merges_raw: Vec<String> = ct
-            .metadata
-            .get("tokenizer.ggml.merges")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let pre_type = ct
-            .metadata
-            .get("tokenizer.ggml.pre")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "gpt2".to_string());
-
-        let tokenizer_model = ct
-            .metadata
-            .get("tokenizer.ggml.model")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "gpt2".to_string());
-
-        if !merges_raw.is_empty() {
-            Some(SplitTokenizer::from_bpe(
-                vocab,
-                &merges_raw,
-                &pre_type,
-                &tokenizer_model,
-            ))
-        } else if tokenizer_model == "llama" {
-            let scores: Vec<f32> = ct
-                .metadata
-                .get("tokenizer.ggml.scores")
-                .and_then(|v| v.to_vec().ok())
-                .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
-                .unwrap_or_default();
-
-            let add_space_prefix = ct
-                .metadata
-                .get("tokenizer.ggml.add_space_prefix")
-                .and_then(|v| v.to_bool().ok())
-                .unwrap_or(true);
-
-            let add_bos_token = ct
-                .metadata
-                .get("tokenizer.ggml.add_bos_token")
-                .and_then(|v| v.to_bool().ok())
-                .unwrap_or(false);
-
-            if !scores.is_empty() {
-                Some(SplitTokenizer::from_sentencepiece(
-                    vocab,
-                    &scores,
-                    add_space_prefix,
-                    add_bos_token,
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        use crate::inference::split::GgufTokenizerMeta;
+        GgufTokenizerMeta::from_content(ct).build_tokenizer()
     }
 }
 

@@ -197,6 +197,10 @@ const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
+/// Application-level error: resource unavailable (no models loaded).
+const RESOURCE_UNAVAILABLE: i64 = -32000;
+/// Maximum prompt/question length for MCP tool inputs (4 MB, matches HTTP validation).
+const MCP_MAX_PROMPT_BYTES: usize = 4 * 1024 * 1024;
 
 // ---- MCP handlers ----
 
@@ -749,7 +753,10 @@ async fn tool_models(state: &AppState, id: Option<Value>) -> JsonRpcResponse {
 /// Compare tool: sends the same prompt to multiple models concurrently.
 async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
+        Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
+        Some(_) => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "prompt exceeds maximum length");
+        }
         None => {
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
         }
@@ -877,7 +884,10 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
 /// If no models specified, auto-selects available models (local first, then cloud).
 async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let question = match args.get("question").and_then(|v| v.as_str()) {
-        Some(q) => q.to_string(),
+        Some(q) if q.len() <= MCP_MAX_PROMPT_BYTES => q.to_string(),
+        Some(_) => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "question exceeds maximum length");
+        }
         None => {
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: question");
         }
@@ -926,7 +936,11 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
     };
 
     if models.is_empty() {
-        return JsonRpcResponse::error(id, INTERNAL_ERROR, "No models available for research");
+        return JsonRpcResponse::error(
+            id,
+            RESOURCE_UNAVAILABLE,
+            "No models available for research",
+        );
     }
     if models.len() > 20 {
         return JsonRpcResponse::error(id, INVALID_PARAMS, "Maximum 20 models per research query");
@@ -1058,7 +1072,17 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
             }
         };
         let prompt = match task.get("prompt").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
+            Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
+            Some(_) => {
+                handles.push(tokio::spawn(async move {
+                    json!({
+                        "task_id": task_id,
+                        "error": "prompt exceeds maximum length",
+                        "status": "error",
+                    })
+                }));
+                continue;
+            }
             None => {
                 handles.push(tokio::spawn(async move {
                     json!({
@@ -1158,7 +1182,10 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
 /// Tiers: fast (lowest latency local), cheap (smallest/free), smart (most capable).
 async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> JsonRpcResponse {
     let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
+        Some(p) if p.len() <= MCP_MAX_PROMPT_BYTES => p.to_string(),
+        Some(_) => {
+            return JsonRpcResponse::error(id, INVALID_PARAMS, "prompt exceeds maximum length");
+        }
         None => {
             return JsonRpcResponse::error(id, INVALID_PARAMS, "Missing required field: prompt");
         }
@@ -1212,7 +1239,11 @@ async fn tool_delegate(state: &AppState, id: Option<Value>, args: Value) -> Json
     }
 
     if candidates.is_empty() {
-        return JsonRpcResponse::error(id, INTERNAL_ERROR, "No models available for delegation");
+        return JsonRpcResponse::error(
+            id,
+            RESOURCE_UNAVAILABLE,
+            "No models available for delegation",
+        );
     }
 
     // Select based on tier

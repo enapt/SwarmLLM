@@ -126,6 +126,32 @@ impl ActivityEvent {
         self.toast_duration_ms = Some(duration_ms);
         self
     }
+
+    pub fn with_shard_index(mut self, idx: u32) -> Self {
+        self.shard_index = Some(idx);
+        self
+    }
+
+    pub fn with_freed_bytes(mut self, bytes: u64) -> Self {
+        self.freed_bytes = Some(bytes);
+        self
+    }
+
+    pub fn with_holders(mut self, before: usize, after: usize) -> Self {
+        self.holder_count_before = Some(before);
+        self.holder_count_after = Some(after);
+        self
+    }
+
+    pub fn with_remaining_local(mut self, n: u32) -> Self {
+        self.remaining_local_shards = Some(n);
+        self
+    }
+
+    pub fn with_timestamp(mut self, ts: impl Into<String>) -> Self {
+        self.timestamp = Some(ts.into());
+        self
+    }
 }
 
 /// Signal enum for dashboard-targeted WS pushes.
@@ -886,5 +912,10 @@ impl SharedState {
             }
         }
         let _ = self.events.activity_tx.send(event);
+    }
+
+    /// Convenience accessor for a `ShardStore` rooted at this node's data dir.
+    pub fn shard_store(&self) -> crate::model::shard::ShardStore {
+        crate::model::shard::ShardStore::new(&self.config.node.data_dir)
     }
 }

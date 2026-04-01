@@ -46,7 +46,7 @@ pub enum AllReduceStrategy {
 }
 
 /// Choose strategy based on group size and tensor size.
-pub fn choose_allreduce_strategy(tp_size: u32, tensor_elements: usize) -> AllReduceStrategy {
+fn choose_allreduce_strategy(tp_size: u32, tensor_elements: usize) -> AllReduceStrategy {
     if tp_size >= RING_MIN_TP_SIZE && tensor_elements >= RING_MIN_TENSOR_ELEMENTS {
         AllReduceStrategy::Ring
     } else {
@@ -80,7 +80,7 @@ pub struct RingAllReduceStep {
 
 /// Compute the full ring schedule for a given rank in a group of `n` ranks.
 /// Returns `2*(n-1)` steps: first `n-1` scatter-reduce, then `n-1` allgather.
-pub fn compute_ring_schedule(rank: usize, n: usize) -> Vec<RingAllReduceStep> {
+fn compute_ring_schedule(rank: usize, n: usize) -> Vec<RingAllReduceStep> {
     if n <= 1 {
         return vec![];
     }

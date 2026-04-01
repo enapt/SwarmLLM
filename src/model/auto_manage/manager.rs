@@ -99,7 +99,7 @@ impl AutoShardManager {
         }
 
         // Use interval_seconds if set, else fall back to interval_minutes * 60
-        let interval_secs = config
+        let mut interval_secs = config
             .interval_seconds
             .unwrap_or_else(|| config.interval_minutes.max(1) as u64 * 60)
             .max(10); // minimum 10 seconds
@@ -124,6 +124,8 @@ impl AutoShardManager {
         // Prevents cascading re-evaluations when peers broadcast shard progress.
         let mut last_notify_eval = std::time::Instant::now() - Duration::from_secs(120);
         let notify_cooldown = Duration::from_secs(60);
+
+        let mut config_watch_rx = self.shared_state.config_watch_rx();
 
         loop {
             tokio::select! {
@@ -174,6 +176,21 @@ impl AutoShardManager {
                 _ = request_reset_interval.tick() => {
                     self.decay_request_counts();
                     self.update_model_trust();
+                }
+                _ = config_watch_rx.changed() => {
+                    let params = config_watch_rx.borrow().clone();
+                    let new_secs = (params.auto_manage_interval_minutes.max(1) as u64) * 60;
+                    let new_secs = new_secs.max(10);
+                    if new_secs != interval_secs {
+                        tracing::info!(
+                            old_interval_secs = interval_secs,
+                            new_interval_secs = new_secs,
+                            "Hot-reloaded auto-manage interval"
+                        );
+                        interval_secs = new_secs;
+                        interval = tokio::time::interval(Duration::from_secs(new_secs));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    }
                 }
             }
         }
@@ -369,9 +386,7 @@ impl AutoShardManager {
     /// This allows seeding HF source info by placing a small JSON file:
     /// `{ "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf" }`
     pub(super) fn discover_hf_sources(&self) {
-        let models_dir =
-            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir)
-                .models_dir();
+        let models_dir = self.shared_state.shard_store().models_dir();
 
         if !models_dir.is_dir() {
             return;

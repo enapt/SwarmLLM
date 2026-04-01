@@ -8,6 +8,14 @@
   var S = App.state;
   var U = App.utils;
 
+  function _hasError(data) {
+    if (data && data.error) {
+      App.notifications.showToast((data.error.message || data.error), 'error');
+      return true;
+    }
+    return false;
+  }
+
   App.pool = {
     _poolState: null,
     _isOwner: false,
@@ -292,12 +300,9 @@
           body: JSON.stringify({ name: name })
         });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.created_success'), 'success');
-          this.load();
-        }
+        if (_hasError(data)) return;
+        App.notifications.showToast(I18n.t('pool.created_success'), 'success');
+        this.load();
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
@@ -317,14 +322,11 @@
           body: JSON.stringify({ code: code })
         });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
-          if (input) input.value = '';
-          setTimeout(function () { App.pool.load(); }, 5000);
-          setTimeout(function () { App.pool.load(); }, 15000);
-        }
+        if (_hasError(data)) return;
+        App.notifications.showToast(I18n.t('pool.join_sent'), 'success');
+        if (input) input.value = '';
+        setTimeout(function () { App.pool.load(); }, 5000);
+        setTimeout(function () { App.pool.load(); }, 15000);
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
@@ -334,10 +336,7 @@
       try {
         var resp = await App.authFetch('/api/pool/generate-code', { method: 'POST' });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-          return;
-        }
+        if (_hasError(data)) return;
         var code = data.code;
         var display = document.getElementById('pool-invite-code-display');
         var codeVal = document.getElementById('pool-invite-code-value');
@@ -443,12 +442,9 @@
           body: JSON.stringify({ name: name })
         });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.name_saved'), 'success');
-          this.load();
-        }
+        if (_hasError(data)) return;
+        App.notifications.showToast(I18n.t('pool.name_saved'), 'success');
+        this.load();
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
@@ -459,12 +455,9 @@
       try {
         var resp = await App.authFetch('/api/pool/leave', { method: 'POST' });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.left'), 'success');
-          this.load();
-        }
+        if (_hasError(data)) return;
+        App.notifications.showToast(I18n.t('pool.left'), 'success');
+        this.load();
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
@@ -479,12 +472,9 @@
           body: JSON.stringify({ node_id: nodeId })
         });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        } else {
-          App.notifications.showToast(I18n.t('pool.member_removed'), 'success');
-          this.load();
-        }
+        if (_hasError(data)) return;
+        App.notifications.showToast(I18n.t('pool.member_removed'), 'success');
+        this.load();
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }
@@ -498,9 +488,7 @@
           body: JSON.stringify({ node_id: nodeId, level: level })
         });
         var data = await resp.json();
-        if (data.error) {
-          App.notifications.showToast((data.error.message || data.error), 'error');
-        }
+        _hasError(data);
       } catch (e) {
         App.notifications.showToast(I18n.t('pool.failed_generic', { error: e.message }), 'error');
       }

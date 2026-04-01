@@ -575,6 +575,9 @@ fn default_shard_size_mb() -> u64 {
     512
 }
 
+/// Network retry backoff delays in seconds (3 attempts: 5s, 30s, 120s).
+pub const NETWORK_RETRY_DELAYS: [u64; 3] = [5, 30, 120];
+
 /// Minimum allowed shard size in MB.
 pub const SHARD_SIZE_MIN_MB: u64 = 64;
 /// Maximum allowed shard size in MB.

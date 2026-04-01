@@ -17,8 +17,7 @@ impl AutoShardManager {
 
         let local_node_id = self.shared_state.identity.node_id().clone();
         let registry = &self.shared_state.model_registry;
-        let shard_store =
-            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+        let shard_store = self.shared_state.shard_store();
 
         // Pre-fetch VRAM usage off the Tokio thread (nvidia-smi is blocking I/O)
         let live_vram_used = tokio::task::spawn_blocking(query_gpu_vram_used)
@@ -464,30 +463,28 @@ impl AutoShardManager {
                 .events
                 .dashboard_tx
                 .send(crate::daemon::state::DashboardSignal::ModelsChanged);
-            self.shared_state
-                .emit_activity(crate::daemon::state::ActivityEvent {
-                    category: "auto_manage",
-                    kind: "shard_pruned",
-                    message: format!(
+            self.shared_state.emit_activity(
+                crate::daemon::state::ActivityEvent::new(
+                    "auto_manage",
+                    "shard_pruned",
+                    format!(
                         "Pruned {} of {} — {} holders remain",
                         ShardId::display_index(event.shard_index),
                         event.model_name,
                         event.holder_count_after
                     ),
-                    model_id: Some(event.model_id.0.clone()),
-                    model_name: Some(event.model_name.clone()),
-                    node_id: None,
-                    detail_num: Some(event.freed_bytes as i64),
-                    detail_str: Some(event.reason.clone()),
-                    toast_level: Some("info"),
-                    toast_duration_ms: Some(6000),
-                    shard_index: Some(event.shard_index),
-                    freed_bytes: Some(event.freed_bytes),
-                    holder_count_before: Some(event.holder_count_before),
-                    holder_count_after: Some(event.holder_count_after),
-                    remaining_local_shards: Some(remaining_local),
-                    timestamp: Some(event.timestamp.to_rfc3339()),
-                });
+                )
+                .with_model(&event.model_id.0)
+                .with_model_name(&event.model_name)
+                .with_detail_num(event.freed_bytes as i64)
+                .with_detail_str(&event.reason)
+                .with_toast("info", 6000)
+                .with_shard_index(event.shard_index)
+                .with_freed_bytes(event.freed_bytes)
+                .with_holders(event.holder_count_before, event.holder_count_after)
+                .with_remaining_local(remaining_local)
+                .with_timestamp(event.timestamp.to_rfc3339()),
+            );
 
             // Add to history
             {

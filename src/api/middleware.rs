@@ -427,6 +427,7 @@ pub async fn auth_middleware(
                 "error": {
                     "message": "Invalid or missing API key. Provide a valid Bearer token in the Authorization header.",
                     "type": "authentication_error",
+                    "param": null,
                     "code": "authentication_error"
                 }
             });

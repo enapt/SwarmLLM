@@ -1455,7 +1455,7 @@ async fn handle_layer_forward(
     // Re-check after computation to avoid overwriting a concurrent insert.
     let split_key = (model_id.clone(), layer_start, layer_end);
     if !shared_state.split_models.contains_key(&split_key) {
-        let shard_store = crate::model::shard::ShardStore::new(&shared_state.config.node.data_dir);
+        let shard_store = shared_state.shard_store();
         let model_dir = shard_store.model_dir(&model_id);
 
         // Estimate VRAM from shard file sizes on disk (no model loading)

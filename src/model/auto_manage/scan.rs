@@ -17,14 +17,13 @@ pub async fn rescan_local_shards(
     shared: &Arc<SharedState>,
     network_tx: Option<&mpsc::Sender<NetworkCommand>>,
 ) -> Vec<ModelId> {
-    let models_dir =
-        crate::model::shard::ShardStore::new(&shared.config.node.data_dir).models_dir();
+    let models_dir = shared.shard_store().models_dir();
     if !models_dir.is_dir() {
         return vec![];
     }
 
     let local_node_id = shared.identity.node_id().clone();
-    let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+    let shard_store = shared.shard_store();
     let mut changed_models = Vec::new();
 
     let md = models_dir.to_path_buf();
@@ -223,7 +222,7 @@ pub async fn check_and_load_model(
     //  2. The file exists on disk
     //  3. Its size is at least 90% of the manifest's expected size (handles last-shard)
     //  4. There's no active download in progress for it
-    let shard_store = crate::model::shard::ShardStore::new(&shared.config.node.data_dir);
+    let shard_store = shared.shard_store();
     let mut local_shard_indices: Vec<u32> = manifest
         .shards
         .iter()

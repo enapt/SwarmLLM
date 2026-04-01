@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::model::manifest::ModelManifestExt;
-use crate::model::shard::ShardStore;
 
 use super::map_gguf_architecture;
 use super::state::{LoadedModelInfo, SharedState};
@@ -141,7 +140,7 @@ pub fn generate_and_register_local_manifest(
 
     // Store the source GGUF path so the shard server can read byte ranges from it.
     // We write a small metadata file alongside the manifest.
-    let shard_store = ShardStore::new(&shared_state.config.node.data_dir);
+    let shard_store = shared_state.shard_store();
     let model_dir = shard_store.model_dir(&model_id);
     let _ = std::fs::create_dir_all(&model_dir);
 
@@ -222,7 +221,7 @@ pub fn generate_and_register_local_manifest(
     // If --shards range is set, only claim those indices; otherwise claim all.
     // Only register shards that actually exist on disk.
     let shard_range = shared_state.config.inference.shard_range;
-    let shard_store_check = ShardStore::new(&shared_state.config.node.data_dir);
+    let shard_store_check = shared_state.shard_store();
     for shard_info in &manifest.shards {
         let in_range = match shard_range {
             Some((start, end)) => shard_info.index >= start && shard_info.index <= end,

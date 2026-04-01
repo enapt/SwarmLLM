@@ -71,8 +71,7 @@ impl AutoShardManager {
     ) -> Vec<ShardCandidate> {
         let mut candidates = Vec::new();
         let registry = &self.shared_state.model_registry;
-        let shard_store =
-            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+        let shard_store = self.shared_state.shard_store();
         let configured_range = self.shared_state.config.inference.shard_range;
         let default_cap = self
             .shared_state

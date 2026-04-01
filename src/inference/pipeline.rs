@@ -129,8 +129,7 @@ impl PipelineExecutor {
             return Ok(split_key);
         }
 
-        let shard_store =
-            crate::model::shard::ShardStore::new(&self.shared_state.config.node.data_dir);
+        let shard_store = self.shared_state.shard_store();
         let model_dir = shard_store.model_dir(model_id);
         let manifest = self
             .shared_state
@@ -1165,104 +1164,36 @@ impl PipelineExecutor {
         CachedDecoder,
         Option<crate::inference::split::SplitTokenizer>,
     )> {
+        use crate::inference::split::GgufTokenizerMeta;
         use candle_core::quantized::gguf_file;
 
         let header_bytes = std::fs::read(header_path).ok()?;
         let mut cursor = std::io::Cursor::new(&header_bytes);
         let ct = gguf_file::Content::read(&mut cursor).ok()?;
 
-        // Extract vocabulary
-        let vocab: Vec<String> = ct
-            .metadata
-            .get("tokenizer.ggml.tokens")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect()
-            })?;
-
-        // Extract EOS tokens
-        let mut eos_tokens = Vec::new();
-        if let Some(eos_id) = ct
-            .metadata
-            .get("tokenizer.ggml.eos_token_id")
-            .and_then(|v| v.to_u32().ok())
-        {
-            eos_tokens.push(eos_id);
+        let meta = GgufTokenizerMeta::from_content(&ct);
+        if meta.vocab.is_empty() {
+            return None;
         }
 
-        // Build BPE tokenizer if merges available
-        let merges_raw = ct
+        let arch = ct
             .metadata
-            .get("tokenizer.ggml.merges")
-            .and_then(|v| v.to_vec().ok())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.to_string().ok().cloned())
-                    .collect::<Vec<String>>()
-            })
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok().cloned())
             .unwrap_or_default();
-        let pre_type = ct
-            .metadata
-            .get("tokenizer.ggml.pre")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "gpt2".to_string());
-        let tokenizer_model = ct
-            .metadata
-            .get("tokenizer.ggml.model")
-            .and_then(|v| v.to_string().ok().cloned())
-            .unwrap_or_else(|| "gpt2".to_string());
-
-        let tokenizer = if !merges_raw.is_empty() {
-            Some(crate::inference::split::SplitTokenizer::from_bpe(
-                &vocab,
-                &merges_raw,
-                &pre_type,
-                &tokenizer_model,
-            ))
-        } else if tokenizer_model == "llama" {
-            // Sentencepiece model — build HF Unigram tokenizer from scores
-            let scores: Vec<f32> = ct
-                .metadata
-                .get("tokenizer.ggml.scores")
-                .and_then(|v| v.to_vec().ok())
-                .map(|arr| arr.iter().filter_map(|v| v.to_f32().ok()).collect())
-                .unwrap_or_default();
-            let add_space_prefix = ct
-                .metadata
-                .get("tokenizer.ggml.add_space_prefix")
-                .and_then(|v| v.to_bool().ok())
-                .unwrap_or(true);
-            let add_bos_token = ct
-                .metadata
-                .get("tokenizer.ggml.add_bos_token")
-                .and_then(|v| v.to_bool().ok())
-                .unwrap_or(false);
-            if !scores.is_empty() {
-                Some(crate::inference::split::SplitTokenizer::from_sentencepiece(
-                    &vocab,
-                    &scores,
-                    add_space_prefix,
-                    add_bos_token,
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let eos_tokens = meta.eos_tokens_with_arch_fallback(&arch);
+        let tokenizer = meta.build_tokenizer();
 
         let decoder = if let Some(ref tok) = tokenizer {
             CachedDecoder {
-                vocab: vocab.clone(),
+                vocab: meta.vocab,
                 byte_decoder: tok.byte_decoder(),
                 is_sentencepiece: tok.is_sentencepiece(),
                 has_tokenizer: true,
             }
         } else {
             CachedDecoder {
-                vocab,
+                vocab: meta.vocab,
                 byte_decoder: HashMap::new(),
                 is_sentencepiece: false,
                 has_tokenizer: false,

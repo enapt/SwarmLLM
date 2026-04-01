@@ -1043,7 +1043,7 @@ impl NetworkManager {
                                     count,
                                     if count == 1 { "" } else { "s" }
                                 );
-                                tracing::info!(lan_peers = count, "{}", msg);
+                                tracing::info!(lan_peers = count, message = %msg, "LAN peer discovery update");
                                 self.shared_state.emit_activity(
                                     crate::daemon::state::ActivityEvent::new(
                                         "network",
@@ -1925,7 +1925,7 @@ impl NetworkManager {
                                         count,
                                         if count == 1 { "" } else { "s" }
                                     );
-                                    tracing::info!(%peer, rtt_ms, lan_peers = count, "{}", msg);
+                                    tracing::info!(%peer, rtt_ms, lan_peers = count, message = %msg, "LAN peer discovery update");
                                     self.shared_state.emit_activity(
                                         crate::daemon::state::ActivityEvent::new(
                                             "network",
