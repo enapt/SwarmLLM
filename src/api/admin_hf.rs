@@ -224,18 +224,7 @@ pub async fn hf_search(
             // Network replication: count unique peers holding shards of any variant of this repo
             let variant_ids: Vec<crate::types::ModelId> = files
                 .iter()
-                .map(|f| {
-                    crate::types::ModelId(
-                        f.filename
-                            .trim_end_matches(".gguf")
-                            .to_lowercase()
-                            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '.', "-")
-                            .split('-')
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("-"),
-                    )
-                })
+                .map(|f| crate::types::ModelId(gguf_filename_to_model_id(&f.filename)))
                 .collect();
             let network_replicas =
                 count_unique_shard_holders(&state.shared_state.model_registry, &variant_ids);
@@ -323,22 +312,14 @@ pub async fn hf_download(
     let mid = crate::types::ModelId(model_id_str.clone());
 
     // Create initial acquisition progress entry
-    let status = crate::model::acquisition::AcquisitionStatus {
-        model_id: mid.clone(),
-        state: crate::model::acquisition::AcquisitionState::Downloading,
-        total_shards: 1,
-        downloaded_shards: 0,
-        verified_shards: 0,
-        failed_shards: 0,
-        total_bytes: 0,
-        downloaded_bytes: 0,
-        shard_progress: std::collections::HashMap::new(),
-        speed_bytes_per_sec: 0,
-        started_at: Some(chrono::Utc::now()),
-        log: vec![format!("Downloading {} from HuggingFace...", filename)],
-        source: "huggingface".to_string(),
-        trigger: "user".to_string(),
-    };
+    let status = crate::model::acquisition::AcquisitionStatus::new_downloading(
+        mid.clone(),
+        1,
+        0,
+        "huggingface",
+        "user",
+        format!("Downloading {} from HuggingFace...", filename),
+    );
     shared
         .models
         .acquisition_progress
@@ -488,15 +469,7 @@ pub async fn hf_download(
 
         // Clean up acquisition_progress after a delay so the frontend sees
         // the final state and triggers a re-render before we remove it.
-        let cleanup_shared = download_shared.clone();
-        let cleanup_mid = download_mid.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            cleanup_shared
-                .models
-                .acquisition_progress
-                .remove(&cleanup_mid);
-        });
+        download_shared.schedule_acquisition_cleanup(download_mid.clone());
     });
 
     Ok(Json(serde_json::json!({
@@ -758,22 +731,15 @@ pub async fn hf_download_shards(
             },
         );
     }
-    let status = crate::model::acquisition::AcquisitionStatus {
-        model_id: mid.clone(),
-        state: crate::model::acquisition::AcquisitionState::Downloading,
-        total_shards: shard_indices.len() as u32,
-        downloaded_shards: 0,
-        verified_shards: 0,
-        failed_shards: 0,
-        total_bytes: 0,
-        downloaded_bytes: 0,
-        shard_progress: initial_shard_progress,
-        speed_bytes_per_sec: 0,
-        started_at: Some(chrono::Utc::now()),
-        log: vec![log_msg],
-        source: "huggingface".to_string(),
-        trigger: "user".to_string(),
-    };
+    let mut status = crate::model::acquisition::AcquisitionStatus::new_downloading(
+        mid.clone(),
+        shard_indices.len() as u32,
+        0,
+        "huggingface",
+        "user",
+        log_msg,
+    );
+    status.shard_progress = initial_shard_progress;
     let shared = state.shared_state.clone();
     shared
         .models
@@ -1301,15 +1267,7 @@ pub async fn hf_download_shards(
 
             // Clean up acquisition_progress after a delay so the frontend sees
             // the "complete" state and triggers a re-render before we remove it.
-            let cleanup_shared = download_shared.clone();
-            let cleanup_mid = download_mid.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                cleanup_shared
-                    .models
-                    .acquisition_progress
-                    .remove(&cleanup_mid);
-            });
+            download_shared.schedule_acquisition_cleanup(download_mid.clone());
         }
     });
 

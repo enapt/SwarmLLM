@@ -116,11 +116,6 @@ impl ShardStore {
         self.model_dir(model_id).join(MMPROJ_FILENAME)
     }
 
-    /// Get the hf_source.json path for a model.
-    pub fn hf_source_path(&self, model_id: &ModelId) -> PathBuf {
-        self.model_dir(model_id).join(HF_SOURCE_FILENAME)
-    }
-
     /// Get the models directory path.
     pub fn models_dir(&self) -> PathBuf {
         self.data_dir.join("models")

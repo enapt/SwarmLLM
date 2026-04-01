@@ -902,4 +902,34 @@ impl SharedState {
     pub fn shard_store(&self) -> crate::model::shard::ShardStore {
         crate::model::shard::ShardStore::new(&self.config.node.data_dir)
     }
+
+    /// Select the best peer from a set of holders based on LAN proximity, latency, and trust.
+    /// Returns the first holder as fallback if no peers are in the registry.
+    pub fn select_best_peer(&self, holders: &[crate::types::NodeId]) -> crate::types::NodeId {
+        let mut scored: Vec<_> = holders
+            .iter()
+            .filter_map(|nid| {
+                self.peer_registry.get(nid).map(|p| {
+                    let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
+                    let latency = p.latency_ms.unwrap_or(9999) as u64;
+                    let trust = (10000.0 - p.trust_score * 100.0) as u64;
+                    (nid.clone(), is_lan * 100_000 + latency * 100 + trust)
+                })
+            })
+            .collect();
+        scored.sort_by_key(|(_, score)| *score);
+        scored
+            .first()
+            .map(|(nid, _)| nid.clone())
+            .unwrap_or_else(|| holders[0].clone())
+    }
+
+    /// Schedule deferred removal of an acquisition_progress entry after 5 seconds.
+    pub fn schedule_acquisition_cleanup(self: &std::sync::Arc<Self>, mid: crate::types::ModelId) {
+        let shared = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            shared.models.acquisition_progress.remove(&mid);
+        });
+    }
 }

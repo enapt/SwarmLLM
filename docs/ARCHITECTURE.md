@@ -1153,6 +1153,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `DELETE /api/admin/models/:id/shards/:index` — Delete a single shard
 - `GET/PUT /api/admin/models/:id/auto-manage` — Per-model auto-manage policy (incl. prune toggle)
 - `PUT    /api/admin/models/:id/shards/:index/lock` — Lock/unlock a shard (prevent auto-pruning)
+- `POST   /api/admin/models/:id/shards/:index/download` — Download a single shard from P2P network
 - `POST   /api/admin/models/:id/shards/:index/load` — Load a shard into memory (expands shard window, restarts worker)
 - `POST   /api/admin/models/:id/shards/:index/unload` — Unload a shard from memory (narrows shard window, restarts worker, frees RAM/VRAM)
 - `GET/PUT /api/admin/schedule` — Resource schedule management
@@ -1180,7 +1181,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - `/setup` — First-run wizard
 - `/static/*path` — Embedded static assets (CSS, JS, i18n JSON)
 - `/static/i18n/{lang}.json` — Translation files (21 languages)
-- `/health` — Health check endpoint
+- `/health` — Liveness probe (`{"status": "ok"}`, no auth)
 - `/` → redirect to `/admin`
 
 ### Frontend Architecture

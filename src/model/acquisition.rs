@@ -44,6 +44,33 @@ pub struct AcquisitionStatus {
 const MAX_ACQUISITION_LOG_ENTRIES: usize = 200;
 
 impl AcquisitionStatus {
+    /// Create a new "Downloading" status with zeroed counters.
+    pub fn new_downloading(
+        model_id: ModelId,
+        total_shards: u32,
+        total_bytes: u64,
+        source: impl Into<String>,
+        trigger: impl Into<String>,
+        initial_log: impl Into<String>,
+    ) -> Self {
+        Self {
+            model_id,
+            state: AcquisitionState::Downloading,
+            total_shards,
+            downloaded_shards: 0,
+            verified_shards: 0,
+            failed_shards: 0,
+            total_bytes,
+            downloaded_bytes: 0,
+            shard_progress: HashMap::new(),
+            speed_bytes_per_sec: 0,
+            started_at: Some(chrono::Utc::now()),
+            log: vec![initial_log.into()],
+            source: source.into(),
+            trigger: trigger.into(),
+        }
+    }
+
     /// Append a log line, capping total entries to prevent unbounded growth.
     pub fn log_push(&mut self, msg: String) {
         if self.log.len() >= MAX_ACQUISITION_LOG_ENTRIES {
@@ -321,26 +348,23 @@ impl AcquisitionManager {
             .map(|s| s.size_bytes)
             .sum();
 
-        let status = AcquisitionStatus {
-            model_id: model_id.clone(),
-            state: AcquisitionState::Downloading,
+        let already_done = total_shards.saturating_sub(needed.len() as u32);
+        let mut status = AcquisitionStatus::new_downloading(
+            model_id.clone(),
             total_shards,
-            downloaded_shards: total_shards.saturating_sub(needed.len() as u32),
-            verified_shards: total_shards.saturating_sub(needed.len() as u32),
-            failed_shards: 0,
             total_bytes,
-            downloaded_bytes: already_bytes,
-            shard_progress: shard_prog,
-            speed_bytes_per_sec: 0,
-            started_at: Some(chrono::Utc::now()),
-            log: vec![format!(
+            "peers",
+            "user",
+            format!(
                 "Starting acquisition: {} shards to download ({} total)",
                 needed.len(),
                 format_bytes_short(total_bytes)
-            )],
-            source: "peers".to_string(),
-            trigger: "user".to_string(),
-        };
+            ),
+        );
+        status.downloaded_shards = already_done;
+        status.verified_shards = already_done;
+        status.downloaded_bytes = already_bytes;
+        status.shard_progress = shard_prog;
         self.publish_progress(&model_id, &status);
 
         self.jobs.insert(

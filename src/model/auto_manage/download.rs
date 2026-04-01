@@ -200,25 +200,18 @@ impl AutoShardManager {
                         .get_manifest(&mid)
                         .map(|m| m.shard_count)
                         .unwrap_or(1);
-                    let status = crate::model::acquisition::AcquisitionStatus {
-                        model_id: mid.clone(),
-                        state: crate::model::acquisition::AcquisitionState::Downloading,
+                    let mut status = crate::model::acquisition::AcquisitionStatus::new_downloading(
+                        mid.clone(),
                         total_shards,
-                        downloaded_shards: 0,
-                        verified_shards: 0,
-                        failed_shards: 0,
-                        total_bytes: candidate.shard_size_bytes,
-                        downloaded_bytes: 0,
-                        shard_progress,
-                        speed_bytes_per_sec: 0,
-                        started_at: Some(chrono::Utc::now()),
-                        log: vec![format!(
+                        candidate.shard_size_bytes,
+                        "peers",
+                        "auto_manage",
+                        format!(
                             "Auto-manage: downloading shard {} of {} (score: {:.1})",
                             candidate.shard_index, candidate.model_name, candidate.score
-                        )],
-                        source: "peers".to_string(),
-                        trigger: "auto_manage".to_string(),
-                    };
+                        ),
+                    );
+                    status.shard_progress = shard_progress;
                     self.shared_state
                         .models
                         .acquisition_progress
@@ -576,15 +569,7 @@ display
 
                             // Clean up acquisition_progress after a delay so the
                             // frontend sees "complete" before we remove it.
-                            let cleanup_shared = shared.clone();
-                            let cleanup_mid = model_id.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                cleanup_shared
-                                    .models
-                                    .acquisition_progress
-                                    .remove(&cleanup_mid);
-                            });
+                            shared.schedule_acquisition_cleanup(model_id.clone());
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -677,24 +662,7 @@ e
                 }
             } else {
                 // Pick the best holder: LAN first, lowest latency, highest trust
-                let target = {
-                    let mut scored: Vec<_> = holders
-                        .iter()
-                        .filter_map(|nid| {
-                            self.shared_state.peer_registry.get(nid).map(|p| {
-                                let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
-                                let latency = p.latency_ms.unwrap_or(9999) as u64;
-                                let trust = (10000.0 - p.trust_score * 100.0) as u64;
-                                (nid.clone(), is_lan * 100_000 + latency * 100 + trust)
-                            })
-                        })
-                        .collect();
-                    scored.sort_by_key(|(_, score)| *score);
-                    scored
-                        .first()
-                        .map(|(nid, _)| nid.clone())
-                        .unwrap_or_else(|| holders[0].clone())
-                };
+                let target = self.shared_state.select_best_peer(&holders);
 
                 let peer_id_bytes = self
                     .shared_state
@@ -741,28 +709,23 @@ e
                                 state: crate::model::acquisition::ShardState::Downloading,
                             },
                         );
-                        self.shared_state.models.acquisition_progress.insert(
-                            candidate.model_id.clone(),
-                            crate::model::acquisition::AcquisitionStatus {
-                                model_id: candidate.model_id.clone(),
-                                state: crate::model::acquisition::AcquisitionState::Downloading,
-                                total_shards: 1,
-                                downloaded_shards: 0,
-                                verified_shards: 0,
-                                failed_shards: 0,
-                                total_bytes: shard_bytes,
-                                downloaded_bytes: 0,
-                                shard_progress,
-                                speed_bytes_per_sec: 0,
-                                started_at: Some(chrono::Utc::now()),
-                                log: vec![format!(
+                        let mut p2p_status =
+                            crate::model::acquisition::AcquisitionStatus::new_downloading(
+                                candidate.model_id.clone(),
+                                1,
+                                shard_bytes,
+                                "peers",
+                                "auto_manage",
+                                format!(
                                     "P2P: downloading shard {} from peer",
                                     crate::types::ShardId::display_index(candidate.shard_index)
-                                )],
-                                source: "peers".to_string(),
-                                trigger: "auto_manage".to_string(),
-                            },
-                        );
+                                ),
+                            );
+                        p2p_status.shard_progress = shard_progress;
+                        self.shared_state
+                            .models
+                            .acquisition_progress
+                            .insert(candidate.model_id.clone(), p2p_status);
                     }
 
                     let request = crate::types::ShardRequest {

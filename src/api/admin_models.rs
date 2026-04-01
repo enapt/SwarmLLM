@@ -1578,24 +1578,7 @@ pub async fn download_shard(
 
     if !holders.is_empty() {
         // Pick the best peer: LAN first, then lowest latency, then highest trust
-        let target = {
-            let mut scored: Vec<_> = holders
-                .iter()
-                .filter_map(|nid| {
-                    shared.peer_registry.get(nid).map(|p| {
-                        let is_lan = if p.is_lan_peer { 0u64 } else { 1 };
-                        let latency = p.latency_ms.unwrap_or(9999) as u64;
-                        let trust = (10000.0 - p.trust_score * 100.0) as u64;
-                        (nid.clone(), is_lan * 100_000 + latency * 100 + trust)
-                    })
-                })
-                .collect();
-            scored.sort_by_key(|(_, score)| *score);
-            scored
-                .first()
-                .map(|(nid, _)| nid.clone())
-                .unwrap_or_else(|| holders[0].clone())
-        };
+        let target = shared.select_best_peer(&holders);
 
         let peer_id_bytes = shared
             .peer_registry
@@ -1614,25 +1597,19 @@ pub async fn download_shard(
                     state: crate::model::acquisition::ShardState::Downloading,
                 },
             );
-            shared.models.acquisition_progress.insert(
+            let mut dl_status = crate::model::acquisition::AcquisitionStatus::new_downloading(
                 mid.clone(),
-                crate::model::acquisition::AcquisitionStatus {
-                    model_id: mid.clone(),
-                    state: crate::model::acquisition::AcquisitionState::Downloading,
-                    total_shards: 1,
-                    downloaded_shards: 0,
-                    verified_shards: 0,
-                    failed_shards: 0,
-                    total_bytes: shard_size,
-                    downloaded_bytes: 0,
-                    shard_progress,
-                    speed_bytes_per_sec: 0,
-                    started_at: Some(chrono::Utc::now()),
-                    log: vec![format!("Downloading shard {} from peer", shard_index + 1)],
-                    source: "peers".to_string(),
-                    trigger: "user".to_string(),
-                },
+                1,
+                shard_size,
+                "peers",
+                "user",
+                format!("Downloading shard {} from peer", shard_index + 1),
             );
+            dl_status.shard_progress = shard_progress;
+            shared
+                .models
+                .acquisition_progress
+                .insert(mid.clone(), dl_status);
 
             let request = crate::types::ShardRequest {
                 shard_id,
