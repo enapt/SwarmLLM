@@ -19,10 +19,14 @@ pub fn serialize_peer_to_json(
         .capability
         .as_ref()
         .map(|c| {
-            c.hosted_shards
+            let mut models: Vec<String> = c
+                .hosted_shards
                 .iter()
                 .map(|s| s.model_id.0.clone())
-                .collect()
+                .collect();
+            models.sort_unstable();
+            models.dedup();
+            models
         })
         .unwrap_or_default();
     let nickname = state

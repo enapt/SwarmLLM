@@ -131,7 +131,7 @@ libp2p 0.55 (pin to 0.55.x), axum 0.7, candle-core/candle-transformers (CUDA), e
 
 ## Testing
 
-- 675 tests total, all passing, clippy clean
+- 649 tests total, all passing, clippy clean
 - Unit tests: in-module `#[cfg(test)]` blocks
 - Integration tests: `tests/integration/` — multi-node simulations with `--test-threads=1`
 - Test model: `tests/fixtures/tiny_model/` — 2-layer, 128 hidden dim, ~1MB, 2 shards
@@ -221,7 +221,7 @@ Agent teams enabled (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, `teammateMode: "t
 
 ## Status
 
-All 20 build phases complete. All subsystems wired — no stubs. 675 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
+All 20 build phases complete. All subsystems wired — no stubs. 649 tests passing. Deferred items in `docs/ARCHITECTURE.md` § "Deferred Items".
 
 ## Common Commands
 
