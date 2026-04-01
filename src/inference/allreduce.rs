@@ -389,7 +389,7 @@ impl RingChunkRegistry {
 ///
 /// After completion, all nodes have the fully-reduced tensor.
 #[allow(clippy::too_many_arguments)]
-pub async fn ring_allreduce_network(
+pub(crate) async fn ring_allreduce_network(
     shared_state: &Arc<SharedState>,
     network_tx: &mpsc::Sender<NetworkCommand>,
     ring_registry: &RingChunkRegistry,

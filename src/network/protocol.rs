@@ -11,9 +11,6 @@ use crate::types::{
     SwarmMessage, TensorFormat,
 };
 
-// Re-export compression helpers for use in tests and other modules.
-pub use self::compression::{compress_tensor, decompress_tensor};
-
 /// Protocol ID for SwarmLLM unified request/response (JSON control + binary tensor).
 pub const PROTOCOL_ID: &str = "/swarmllm/1.0.0";
 
@@ -1026,6 +1023,7 @@ mod compression {
 
 #[cfg(test)]
 mod tests {
+    use super::compression::{compress_tensor, decompress_tensor};
     use super::*;
 
     #[test]

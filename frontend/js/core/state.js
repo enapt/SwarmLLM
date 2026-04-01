@@ -60,7 +60,8 @@ window.App = {
 
   // --- Component namespaces (populated by component files) ---
   // ui, chat, dashboard, hf, settings, setup, identity, networkMap,
-  // compare, data, notifications, models, downloads, shardMenu, providerHealth
+  // compare, data, notifications, models, downloads, shardMenu, providerHealth,
+  // pruneSchedule, networkCode, modeIndicator
 };
 
 // Initialize _swarmModelSort using the constant now that App is defined

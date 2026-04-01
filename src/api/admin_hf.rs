@@ -1441,6 +1441,7 @@ pub async fn cancel_download(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::admin_models::validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
     let shared = &state.shared_state;
 
@@ -1511,6 +1512,7 @@ pub async fn hf_source(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::api::admin_models::validate_model_id(&model_id)?;
     let mid = crate::types::ModelId(model_id.clone());
 
     if let Some(src) = state.shared_state.models.hf_sources.get(&mid) {

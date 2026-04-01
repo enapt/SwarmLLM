@@ -6,7 +6,7 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 
 /// Validate that a model ID from a URL path param is within length bounds.
-fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
     if model_id.len() > 256 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Model ID must be 256 characters or fewer".into(),
@@ -1970,8 +1970,8 @@ pub async fn model_metadata(
         .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
     let mut cursor = std::io::Cursor::new(&header_bytes);
     let ct = candle_core::quantized::gguf_file::Content::read(&mut cursor).map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to parse GGUF header: {e}"
+        ApiError(crate::error::SwarmError::Validation(format!(
+            "Failed to parse GGUF header (file may be corrupt): {e}"
         )))
     })?;
 

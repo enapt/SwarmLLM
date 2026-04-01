@@ -414,7 +414,6 @@
   "setup.complete": "设置完成！欢迎使用 SwarmLLM。",
   "setup.skipped": "已跳过设置——您可以在设置中配置一切。",
   "shard.removed": "分片 {idx} 已删除",
-  "shard.downloading_peer": "正在从节点下载第 {idx} 部分...",
   "shard.downloading_hf": "正在从 HuggingFace 下载第 {idx} 部分",
   "shard.already_local": "第 {idx} 部分已在本设备上",
   "shard.locked": "分片 {idx} 已锁定",

@@ -414,7 +414,6 @@
   "setup.complete": "Setup complete! Welcome to SwarmLLM.",
   "setup.skipped": "Setup skipped — you can configure everything in Settings.",
   "shard.removed": "Shard {idx} removed",
-  "shard.downloading_peer": "Downloading part {idx} from peer...",
   "shard.downloading_hf": "Downloading part {idx} from HuggingFace",
   "shard.already_local": "Part {idx} is already on this device",
   "shard.locked": "Shard {idx} locked — will not be auto-pruned",

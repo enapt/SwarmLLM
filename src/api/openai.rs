@@ -2166,19 +2166,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         if seen.contains(&id) {
             continue;
         }
-        // Check that every shard has at least one holder somewhere in the network
-        let all_covered = (0..manifest.shard_count).all(|idx| {
-            let shard_id = crate::types::ShardId {
-                model_id: manifest.id.clone(),
-                index: idx,
-            };
-            !state
-                .shared_state
-                .model_registry
-                .shard_holders(&shard_id)
-                .is_empty()
-        });
-        if all_covered && manifest.num_layers > 0 {
+        if all_shards_available(&state, &id) {
             seen.insert(id.clone());
             data.push(ModelInfo {
                 id,

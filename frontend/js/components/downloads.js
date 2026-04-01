@@ -12,6 +12,35 @@
   // ========================================================================
   // Download Queue
   // ========================================================================
+
+  // Shared helper: update progress display on a download item element.
+  function _updateDlProgress(item, data) {
+    var totalBytes = data.total_bytes || 0;
+    var dlBytes = data.downloaded_bytes || 0;
+    var pct = data.overall_pct != null ? data.overall_pct :
+      (totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0);
+    var speed = data.speed_bytes_per_sec || 0;
+
+    var barFill = item.querySelector('.dl-queue-bar-fill');
+    if (barFill) barFill.style.width = pct + '%';
+
+    var leftEl = item.querySelector('.dqs-left');
+    if (leftEl) {
+      var shardInfo = I18n.t('dl.shards_progress', { downloaded: data.downloaded_shards || 0, total: data.total_shards || 0 });
+      if (data.verified_shards > 0) shardInfo += ' ' + I18n.t('dl.shards_verified', { count: data.verified_shards });
+      leftEl.textContent = shardInfo + ' \u00b7 ' + pct + '%';
+    }
+
+    var rightEl = item.querySelector('.dqs-right');
+    if (rightEl) {
+      var right = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes);
+      if (speed > 0) right += ' \u00b7 ' + U.formatSpeed(speed);
+      if (data.eta_secs) right += I18n.t('dashboard.eta', { eta: U.formatEta(data.eta_secs) });
+      else if (speed > 0 && totalBytes > dlBytes) right += I18n.t('dashboard.eta', { eta: U.formatEta((totalBytes - dlBytes) / speed) });
+      rightEl.textContent = right;
+    }
+  }
+
   App.downloads = {
     load: async function() {
       try {
@@ -61,19 +90,7 @@
         item.querySelector('.dl-queue-actions').appendChild(cancelBtn);
       }
 
-      var pct = dl.overall_pct != null ? dl.overall_pct :
-        (dl.total_bytes > 0 ? Math.min(100, Math.round((dl.downloaded_bytes / dl.total_bytes) * 100)) : 0);
-      item.querySelector('.dl-queue-bar-fill').style.width = pct + '%';
-
-      var shardInfo = I18n.t('dl.shards_progress', { downloaded: dl.downloaded_shards || 0, total: dl.total_shards || 0 });
-      if (dl.verified_shards > 0) shardInfo += ' ' + I18n.t('dl.shards_verified', { count: dl.verified_shards });
-      item.querySelector('.dqs-left').textContent = shardInfo + ' \u00b7 ' + pct + '%';
-
-      var speed = dl.speed_bytes_per_sec || 0;
-      var statsRight = U.formatBytes(dl.downloaded_bytes || 0) + ' / ' + U.formatBytes(dl.total_bytes || 0);
-      if (speed > 0) statsRight += ' \u00b7 ' + U.formatSpeed(speed);
-      if (dl.eta_secs) statsRight += I18n.t('dashboard.eta', { eta: U.formatEta(dl.eta_secs) });
-      item.querySelector('.dqs-right').textContent = statsRight;
+      _updateDlProgress(item, dl);
 
       if (dl.log && dl.log.length > 0) {
         var logRow = item.querySelector('.dl-queue-log-row');
@@ -161,29 +178,7 @@
           return;
         }
 
-        var totalBytes = acq.total_bytes || 0;
-        var dlBytes = acq.downloaded_bytes || 0;
-        var pct = acq.overall_pct != null ? acq.overall_pct :
-          (totalBytes > 0 ? Math.min(100, Math.round((dlBytes / totalBytes) * 100)) : 0);
-        var speed = acq.speed_bytes_per_sec || 0;
-
-        var barFill = existing.querySelector('.dl-queue-bar-fill');
-        if (barFill) barFill.style.width = pct + '%';
-
-        var leftEl = existing.querySelector('.dqs-left');
-        if (leftEl) {
-          var shardInfo = I18n.t('dl.shards_progress', { downloaded: acq.downloaded_shards || 0, total: acq.total_shards || 0 });
-          leftEl.textContent = shardInfo + ' \u00b7 ' + pct + '%';
-        }
-
-        var rightEl = existing.querySelector('.dqs-right');
-        if (rightEl) {
-          var right = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes);
-          if (speed > 0) right += ' \u00b7 ' + U.formatSpeed(speed);
-          if (acq.eta_secs) right += I18n.t('dashboard.eta', { eta: U.formatEta(acq.eta_secs) });
-          else if (speed > 0 && totalBytes > dlBytes) right += I18n.t('dashboard.eta', { eta: U.formatEta((totalBytes - dlBytes) / speed) });
-          rightEl.textContent = right;
-        }
+        _updateDlProgress(existing, acq);
 
         if (typeof acq.state === 'string' && acq.state === 'complete') {
           setTimeout(function() { App.downloads.load(); }, 2000);

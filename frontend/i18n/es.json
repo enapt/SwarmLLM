@@ -414,7 +414,6 @@
   "setup.complete": "¡Configuración completa! Bienvenido a SwarmLLM.",
   "setup.skipped": "Configuración omitida — puedes configurar todo en Ajustes.",
   "shard.removed": "Fragmento {idx} eliminado",
-  "shard.downloading_peer": "Descargando parte {idx} del peer...",
   "shard.downloading_hf": "Descargando parte {idx} de HuggingFace",
   "shard.already_local": "La parte {idx} ya está en este dispositivo",
   "shard.locked": "Fragmento {idx} bloqueado",
