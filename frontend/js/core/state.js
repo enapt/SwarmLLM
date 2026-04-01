@@ -50,7 +50,6 @@ window.App = {
   MODEL_SORT_KEY: 'swarmllm_model_sort',
   CURRENT_MODEL_KEY: 'swarmllm_current_model',
   COMPARE_HISTORY_KEY: 'swarmllm_compare_history',
-  LANG_KEY: 'swarmllm_lang',
   CHAT_HISTORY_KEY: 'swarmllm_chat_history', // legacy migration key
   // sessionStorage keys
   MODEL_STATUS_KEY: 'swarmllm_model_status',

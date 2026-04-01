@@ -45,12 +45,6 @@ impl PoolInviteCode {
         }
     }
 
-    /// Verify a code matches this invite's hash.
-    pub fn verify_code(&self, candidate: &str) -> bool {
-        let hash = *blake3::hash(candidate.as_bytes()).as_bytes();
-        self.code_hash == hash
-    }
-
     pub fn is_expired(&self) -> bool {
         chrono::Utc::now() > self.expires_at
     }

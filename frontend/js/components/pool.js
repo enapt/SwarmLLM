@@ -223,9 +223,9 @@
           statusEl.style.color = m.online ? 'var(--green)' : 'var(--text-muted)';
           statusEl.textContent = m.online ? '\u25CF' : '\u25CB'; // filled/empty circle
           statusEl.title = m.online
-            ? (I18n.t('pool.online') || 'Online')
-            : (I18n.t('pool.offline') || 'Offline') +
-              (m.last_seen ? ' — ' + (I18n.t('pool.last_seen') || 'last seen') + ' ' + new Date(m.last_seen).toLocaleString() : '');
+            ? I18n.t('pool.online')
+            : I18n.t('pool.offline') +
+              (m.last_seen ? ' — ' + I18n.t('pool.last_seen') + ' ' + new Date(m.last_seen).toLocaleString() : '');
         }
 
         // Joined date
@@ -420,7 +420,7 @@
       label.className = 'text-muted';
       label.style.fontSize = '0.72rem';
       label.style.marginTop = '4px';
-      label.textContent = I18n.t('pool.scan_or_type') || 'or type the code manually';
+      label.textContent = I18n.t('pool.scan_or_type');
       container.appendChild(label);
     },
 
@@ -494,21 +494,16 @@
       }
     },
 
-    /// Check pool state on startup and show/hide the slave banner
+    /// Check pool state on startup and show/hide the slave banner.
+    /// Reuses load() to avoid duplicate /api/pool/state fetch.
     checkSlaveBanner: async function () {
       try {
         // Delay slightly to let the API key load
         await new Promise(function (r) { setTimeout(r, 2000); });
-        if (!this._myNodeId) {
-          var statsResult = await App.data.loadStats();
-          if (statsResult && statsResult.stats) {
-            this._myNodeId = statsResult.stats.node_id || null;
-          }
+        await this.load();
+        if (this._poolState) {
+          this.updateSlaveBanner(this._poolState);
         }
-        var resp = await App.authFetch('/api/pool/state');
-        if (!resp.ok) return;
-        var data = await resp.json();
-        this.updateSlaveBanner(data);
       } catch (e) {
         // Silent — banner is secondary
       }

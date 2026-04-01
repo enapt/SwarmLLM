@@ -880,22 +880,6 @@ impl SharedState {
             .push((layer_start, layer_end));
     }
 
-    /// Remove a split model segment from the secondary index.
-    pub fn index_split_model_remove(
-        &self,
-        model_id: &crate::types::ModelId,
-        layer_start: usize,
-        layer_end: usize,
-    ) {
-        if let Some(mut ranges) = self.split_model_index.get_mut(model_id) {
-            ranges.retain(|&(s, e)| s != layer_start || e != layer_end);
-            if ranges.is_empty() {
-                drop(ranges);
-                self.split_model_index.remove(model_id);
-            }
-        }
-    }
-
     /// Remove all segments for a model from the secondary index.
     pub fn index_split_model_remove_all(&self, model_id: &crate::types::ModelId) {
         self.split_model_index.remove(model_id);

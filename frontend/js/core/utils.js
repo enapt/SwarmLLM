@@ -318,10 +318,10 @@
     if (chatInput) {
       chatInput.disabled = !hasModels;
       if (hasModels) {
-        chatInput.placeholder = I18n.t('chat.placeholder') || 'Type your message...';
+        chatInput.placeholder = I18n.t('chat.placeholder');
       } else {
         var dlInfo = document.getElementById('chat-dl-progress');
-        if (!dlInfo) chatInput.placeholder = I18n.t('chat.no_models_placeholder') || 'Waiting for models — connect to peers or add a cloud provider in Settings';
+        if (!dlInfo) chatInput.placeholder = I18n.t('chat.no_models_placeholder');
       }
     }
     if (emptyState && !hasModels) {
@@ -331,16 +331,16 @@
         // Connected to peers but no models ready yet — they're coming
         emptyState.innerHTML = '<div class="chat-empty-icon" style="font-size:2rem">' +
           '<div class="spinner" style="width:24px;height:24px;display:inline-block"></div></div>' +
-          '<div class="chat-empty-title" style="font-size:1.1rem">' + (I18n.t('chat.discovering') || 'Discovering models on the network...') + '</div>' +
+          '<div class="chat-empty-title" style="font-size:1.1rem">' + I18n.t('chat.discovering') + '</div>' +
           '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.discovering_hint', { count: peerCount }) + '</div>';
       } else {
         // No peers, no models — need to connect or add cloud provider
         emptyState.innerHTML = '<div class="chat-empty-icon">&#11203;</div>' +
-          '<div class="chat-empty-title" style="font-size:1.1rem">' + (I18n.t('chat.getting_started') || 'Getting Started') + '</div>' +
-          '<div class="chat-empty-hint" style="margin:8px 0">' + (I18n.t('chat.getting_started_hint') || 'Connect to the SwarmLLM network to access models, or add a cloud provider in Settings for instant chat.') + '</div>' +
+          '<div class="chat-empty-title" style="font-size:1.1rem">' + I18n.t('chat.getting_started') + '</div>' +
+          '<div class="chat-empty-hint" style="margin:8px 0">' + I18n.t('chat.getting_started_hint') + '</div>' +
           '<div style="display:flex;gap:8px;margin-top:12px;justify-content:center">' +
-            '<button class="btn btn-primary" data-goto-network-code="1">' + (I18n.t('chat.connect_peers') || 'Connect to Peers') + '</button>' +
-            '<button class="btn btn-outline" data-goto-settings="1" style="border:1px solid var(--border)">' + (I18n.t('chat.add_provider') || 'Add Cloud Provider') + '</button>' +
+            '<button class="btn btn-primary" data-goto-network-code="1">' + I18n.t('chat.connect_peers') + '</button>' +
+            '<button class="btn btn-outline" data-goto-settings="1" style="border:1px solid var(--border)">' + I18n.t('chat.add_provider') + '</button>' +
           '</div>';
       }
     }

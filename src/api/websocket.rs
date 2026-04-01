@@ -10,6 +10,14 @@ use futures::{SinkExt, StreamExt};
 use crate::api::server::AppState;
 use crate::daemon::SharedState;
 
+/// Interval between stats push messages to WebSocket clients.
+const WS_STATS_INTERVAL_SECS: u64 = 2;
+/// Interval between WebSocket ping frames for liveness detection.
+const WS_PING_INTERVAL_SECS: u64 = 30;
+/// Maximum time since last pong before considering a connection dead.
+/// Must be > WS_PING_INTERVAL_SECS to allow one full ping cycle.
+const WS_PONG_TIMEOUT_SECS: u64 = 35;
+
 /// GET /api/admin/ws — WebSocket handler for real-time dashboard updates.
 ///
 /// Validates the Origin header to prevent cross-site WebSocket hijacking.
@@ -119,8 +127,8 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
             }
         }
 
-        let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
-        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut stats_interval = tokio::time::interval(Duration::from_secs(WS_STATS_INTERVAL_SECS));
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
         // Track previous shard registry snapshot for change detection
         let mut prev_shard_snapshot: HashMap<String, Vec<ShardSnapshot>> = HashMap::new();
         let mut tick_count: u64 = 0;
@@ -142,7 +150,7 @@ async fn handle_socket(socket: WebSocket, shared_state: Arc<SharedState>) {
                     // Ping fires every 30s; allow up to 35s since last pong to detect
                     // dead connections within ~1 ping cycle instead of ~2.
                     let last = *last_pong_push.lock().await;
-                    if last.elapsed() > Duration::from_secs(35) {
+                    if last.elapsed() > Duration::from_secs(WS_PONG_TIMEOUT_SECS) {
                         tracing::debug!("WebSocket client failed pong check — closing");
                         break;
                     }

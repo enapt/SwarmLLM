@@ -283,15 +283,15 @@
         var peerCount = (App.data.cache && App.data.cache.stats) ? (App.data.cache.stats.peers || 0) : 0;
         if (peerCount > 0) {
           list.innerHTML = '<div class="model-dropdown-empty">' +
-            (I18n.t('models.discovering') || 'Discovering models...') +
+            I18n.t('models.discovering') +
             '<br><span style="font-size:0.72rem;color:var(--text-muted)">' +
             I18n.t('models.discovering_hint', { count: peerCount }) +
             '</span></div>';
         } else {
           list.innerHTML = '<div class="model-dropdown-empty">' +
-            (I18n.t('models.no_models') || 'No models available yet') +
+            I18n.t('models.no_models') +
             '<br><span style="font-size:0.72rem;color:var(--text-muted)">' +
-            (I18n.t('models.no_models_hint') || 'Connect to the network to access shared models, or add a cloud provider in Settings') +
+            I18n.t('models.no_models_hint') +
             '</span></div>';
         }
         return;

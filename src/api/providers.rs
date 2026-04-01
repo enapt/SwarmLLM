@@ -3,7 +3,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 
 use crate::api::server::AppState;
-use crate::config::ProvidersConfig;
+use crate::config::{ProviderEntry, ProvidersConfig};
 use crate::error::ApiError;
 
 /// Build a passthrough response from a proxied reqwest response.
@@ -81,6 +81,7 @@ const ANTHROPIC_ERROR_KEYS: &[&[&str]] = &[&["error", "message"], &["message"], 
 /// Known provider base URLs (OpenAI-compatible).
 pub fn provider_base_url(name: &str) -> Option<&'static str> {
     match name {
+        "anthropic" => Some("https://api.anthropic.com"),
         "openai" => Some("https://api.openai.com/v1"),
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "mistral" => Some("https://api.mistral.ai/v1"),
@@ -177,96 +178,66 @@ fn resolve_provider_inner(model: &str, config: &ProvidersConfig) -> Option<Provi
     None
 }
 
+/// Helper: build ProviderInfo from a config entry and known provider name.
+fn make_provider(name: &str, entry: &ProviderEntry, is_anthropic: bool) -> ProviderInfo {
+    ProviderInfo {
+        name: name.into(),
+        base_url: provider_base_url(name).expect("known provider").into(),
+        api_key: entry.api_key.clone(),
+        is_anthropic,
+    }
+}
+
 pub fn resolve_by_name(name: &str, config: &ProvidersConfig) -> Option<ProviderInfo> {
     match name {
-        "anthropic" => config.anthropic.as_ref().map(|e| ProviderInfo {
-            name: "anthropic".into(),
-            base_url: "https://api.anthropic.com".into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: true,
-        }),
-        "openai" => config.openai.as_ref().map(|e| ProviderInfo {
-            name: "openai".into(),
-            base_url: provider_base_url("openai").expect("known provider").into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "deepseek" => config.deepseek.as_ref().map(|e| ProviderInfo {
-            name: "deepseek".into(),
-            base_url: provider_base_url("deepseek")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "mistral" => config.mistral.as_ref().map(|e| ProviderInfo {
-            name: "mistral".into(),
-            base_url: provider_base_url("mistral").expect("known provider").into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "groq" => config.groq.as_ref().map(|e| ProviderInfo {
-            name: "groq".into(),
-            base_url: provider_base_url("groq").expect("known provider").into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "nvidia_nim" | "nvidia" | "nim" => config.nvidia_nim.as_ref().map(|e| ProviderInfo {
-            name: "nvidia_nim".into(),
-            base_url: provider_base_url("nvidia_nim")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "cerebras" => config.cerebras.as_ref().map(|e| ProviderInfo {
-            name: "cerebras".into(),
-            base_url: provider_base_url("cerebras")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "sambanova" => config.sambanova.as_ref().map(|e| ProviderInfo {
-            name: "sambanova".into(),
-            base_url: provider_base_url("sambanova")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "fireworks" => config.fireworks.as_ref().map(|e| ProviderInfo {
-            name: "fireworks".into(),
-            base_url: provider_base_url("fireworks")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "together" => config.together.as_ref().map(|e| ProviderInfo {
-            name: "together".into(),
-            base_url: provider_base_url("together")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "deepinfra" => config.deepinfra.as_ref().map(|e| ProviderInfo {
-            name: "deepinfra".into(),
-            base_url: provider_base_url("deepinfra")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
-        "moonshot" | "kimi" => config.moonshot.as_ref().map(|e| ProviderInfo {
-            name: "moonshot".into(),
-            base_url: provider_base_url("moonshot")
-                .expect("known provider")
-                .into(),
-            api_key: e.api_key.clone(),
-            is_anthropic: false,
-        }),
+        "anthropic" => config
+            .anthropic
+            .as_ref()
+            .map(|e| make_provider("anthropic", e, true)),
+        "openai" => config
+            .openai
+            .as_ref()
+            .map(|e| make_provider("openai", e, false)),
+        "deepseek" => config
+            .deepseek
+            .as_ref()
+            .map(|e| make_provider("deepseek", e, false)),
+        "mistral" => config
+            .mistral
+            .as_ref()
+            .map(|e| make_provider("mistral", e, false)),
+        "groq" => config
+            .groq
+            .as_ref()
+            .map(|e| make_provider("groq", e, false)),
+        "nvidia_nim" | "nvidia" | "nim" => config
+            .nvidia_nim
+            .as_ref()
+            .map(|e| make_provider("nvidia_nim", e, false)),
+        "cerebras" => config
+            .cerebras
+            .as_ref()
+            .map(|e| make_provider("cerebras", e, false)),
+        "sambanova" => config
+            .sambanova
+            .as_ref()
+            .map(|e| make_provider("sambanova", e, false)),
+        "fireworks" => config
+            .fireworks
+            .as_ref()
+            .map(|e| make_provider("fireworks", e, false)),
+        "together" => config
+            .together
+            .as_ref()
+            .map(|e| make_provider("together", e, false)),
+        "deepinfra" => config
+            .deepinfra
+            .as_ref()
+            .map(|e| make_provider("deepinfra", e, false)),
+        "moonshot" | "kimi" => config
+            .moonshot
+            .as_ref()
+            .map(|e| make_provider("moonshot", e, false)),
         _ => {
             // Check custom providers
             config

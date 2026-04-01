@@ -5,6 +5,17 @@ use serde::Deserialize;
 use crate::api::server::AppState;
 use crate::error::ApiError;
 
+/// Timeout for fetching model lists from provider APIs.
+const PROVIDER_LIST_TIMEOUT_SECS: u64 = 5;
+/// Total timeout for model availability probes (includes inference).
+const PROVIDER_PROBE_TIMEOUT_SECS: u64 = 10;
+/// Connect timeout for model availability probes.
+const PROVIDER_PROBE_CONNECT_SECS: u64 = 5;
+/// Total timeout for lightweight model health checks.
+const PROVIDER_HEALTH_TIMEOUT_SECS: u64 = 5;
+/// Connect timeout for lightweight model health checks.
+const PROVIDER_HEALTH_CONNECT_SECS: u64 = 3;
+
 // ── Cloud Provider Management ──
 
 /// GET /api/admin/providers — List configured provider status (no keys exposed).
@@ -350,9 +361,9 @@ async fn fetch_provider_models_inner(state: &AppState) -> Vec<serde_json::Value>
 
     drop(config);
 
-    // Fetch models from all OpenAI-compatible providers in parallel (5s timeout per provider)
+    // Fetch models from all OpenAI-compatible providers in parallel
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(PROVIDER_LIST_TIMEOUT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -510,8 +521,8 @@ pub async fn provider_health(State(state): State<AppState>) -> Json<serde_json::
     drop(config);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_PROBE_CONNECT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -662,8 +673,8 @@ pub async fn provider_model_status(
     drop(config);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(PROVIDER_HEALTH_CONNECT_SECS))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

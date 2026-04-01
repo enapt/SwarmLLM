@@ -21,6 +21,13 @@ use crate::storage::db::Database;
 use crate::types::NetworkCommand;
 use swarmllm_frontend as assets;
 
+/// HTTP request processing timeout (kills stalled connections).
+const REQUEST_TIMEOUT_SECS: u64 = 300;
+/// Rate-limiter cleanup interval.
+const RATE_LIMIT_CLEANUP_INTERVAL_SECS: u64 = 300;
+/// Rate-limiter bucket TTL — entries older than this are evicted.
+const RATE_LIMIT_BUCKET_TTL_SECS: u64 = 600;
+
 /// Shared application state passed to all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -259,7 +266,7 @@ pub fn build_router(state: AppState) -> Router {
         // initial request processing, not the response stream. Long inference
         // requests complete within this window; the 30s inference timeout fires first.
         .layer(tower_http::timeout::TimeoutLayer::new(
-            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -306,11 +313,13 @@ pub async fn run_server_with_state(
     let cleanup_limiter = state.rate_limiter.clone();
     let mut cleanup_shutdown = state.shared_state.shutdown_rx();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            RATE_LIMIT_CLEANUP_INTERVAL_SECS,
+        ));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    cleanup_limiter.cleanup(std::time::Duration::from_secs(600));
+                    cleanup_limiter.cleanup(std::time::Duration::from_secs(RATE_LIMIT_BUCKET_TTL_SECS));
                 }
                 _ = cleanup_shutdown.changed() => break,
             }
