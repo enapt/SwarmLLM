@@ -159,7 +159,7 @@ Add SwarmLLM as an MCP server for tool-based access. The `compare` tool sends th
 }
 ```
 
-MCP tools: `chat` (inference), `models` (list available), `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts` (batch processing), `node_info` (node status).
+MCP tools: `chat` (inference), `models` (list available), `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts` (batch processing), `delegate` (route to provider), `node_info` (node status).
 
 ## Connecting to the Network
 
@@ -191,13 +191,13 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 - **Cloud Providers** — Route to 12 cloud providers (OpenAI, Anthropic, DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together, DeepInfra, Moonshot/Kimi). API keys can be set via the dashboard, config.toml, environment variables (`OPENAI_API_KEY`, etc.), or a `.env` file in your data directory
 - **OpenAI-Compatible API** — `POST /v1/chat/completions` with streaming, tool calling, logprobs, embeddings. Drop-in for Open WebUI, SillyTavern, LangChain, etc.
 - **Anthropic Messages API** — `POST /v1/messages` with full Claude Code compatibility: tools, tool_choice, thinking blocks, cache_control, streaming SSE. Use SwarmLLM as a drop-in Claude Code backend (`ANTHROPIC_BASE_URL=http://localhost:8800`). Non-Claude models auto-translated from Anthropic→OpenAI format and routed to cloud providers
-- **MCP Server** — Native Model Context Protocol server with 6 tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts`, and `node_info`
+- **MCP Server** — Native Model Context Protocol server with 7 tools: `chat`, `models`, `compare` (multi-model side-by-side), `research` (fan out to multiple models), `batch_prompts`, `delegate` (route to specific provider), and `node_info`
 - **Prompt Cache Control** — Client-directed KV caching with Anthropic-compatible `cache_control` fields (ephemeral/persistent)
 - **Tensor Parallelism** — Automatic tensor-parallel splitting for LAN peers (auto-detected via RTT measurement ≤10ms), with ring-allreduce for 4+ ranks. Complements pipeline parallelism for WAN
 - **Vision & Adapters** — VLM support (LLaVA-v1.5-7B verified, Qwen2-VL) with chat UI image upload (camera button, paste, drag-drop), distributed mmproj encoding, and per-request LoRA adapter loading
 - **Speculative Decoding** — Draft model + rejection sampling for 2-3x local inference throughput (requires `llama` feature flag)
 - **Batched Inference** — True GPU batching: multiple concurrent requests stacked into batch tensors for parallel computation, filling pipeline bubbles in distributed inference
-- **Multi-turn KV-cache** — Session-aware cache reuse with pipeline affinity (multi-turn sessions reuse the same nodes for KV-cache locality), cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), paged attention (CUDA block pool), VRAM-aware LRU eviction
+- **Multi-turn KV-cache** — Session-aware cache reuse with pipeline affinity (multi-turn sessions reuse the same nodes for KV-cache locality), cross-request prefix caching, chunked prefill, flash attention (CPU + GPU), VRAM-aware LRU eviction
 - **On-Demand Loading** — Models with shards on disk auto-load into VRAM on first inference request, with LRU eviction to make room
 
 ### Networking & Security
@@ -403,13 +403,13 @@ cd SwarmLLM
 # CPU-only build (candle inference engine)
 cargo build --release
 
-# With CUDA GPU acceleration (candle + flash attention + paged attention)
+# With CUDA GPU acceleration (candle + flash attention)
 cargo build --release --features candle-cuda
 
 # With llama.cpp backend (optional, requires cmake + libclang)
 cargo build --release --features llama
 
-# Full CUDA build (candle + llama.cpp + flash/paged attention)
+# Full CUDA build (candle + llama.cpp + flash attention)
 cargo build --release --features cuda
 
 # Windows GPU build: llama.cpp via Vulkan (all vendors) + candle CUDA static runtime
@@ -431,10 +431,13 @@ swarmllm <COMMAND>
 Commands:
   run         Start the SwarmLLM daemon (default if omitted)
   status      Show node status (queries running daemon)
+  chat        Interactive terminal chat with a running daemon
   bench       Run inference benchmarks (tokens/sec, latency)
+  peers       List connected peers with latency and trust scores
+  pool        Device pool management (combine credits across devices)
   test-split  Test split inference locally (single-node diagnostic)
-  version     Print version information
   update      Check for and download updates
+  version     Print version information
 
 Options:
   -c, --config <PATH>       Config file path
@@ -443,7 +446,6 @@ Options:
   -m, --model <PATH>        Path to a GGUF model file to load
       --gpu-layers <N>      Number of layers to offload to GPU (0 = CPU only)
       --bootstrap <ADDR>    Bootstrap peer multiaddr
-      --shards <RANGE>      Claim specific layer range for split inference (e.g. "0-15")
   -v, --verbose             Increase log verbosity (-v, -vv, -vvv)
 ```
 
@@ -506,7 +508,7 @@ See the [Configuration Reference](docs/book/src/configuration/reference.md) for 
 ### MCP Server
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/mcp` | JSON-RPC 2.0 MCP endpoint (6 tools: chat, models, compare, research, batch_prompts, node_info) |
+| POST | `/mcp` | JSON-RPC 2.0 MCP endpoint (7 tools: chat, models, compare, research, batch_prompts, delegate, node_info) |
 
 ### Admin (CORS-protected)
 | Method | Path | Description |
@@ -556,7 +558,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
 | HTTP Server | Axum 0.7 with WebSocket |
-| Inference | candle (split/distributed, CUDA, flash/paged attention), llama.cpp (single-node, optional) |
+| Inference | candle (split/distributed, CUDA, flash attention), llama.cpp (single-node, optional) |
 | Database | redb v3 (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 | Monitoring | Prometheus + Grafana (dashboards included) |
