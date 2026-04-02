@@ -155,7 +155,7 @@ pub fn build_behaviour(
     let request_response = request_response::Behaviour::with_codec(
         codec,
         [(
-            StreamProtocol::new("/swarmllm/1.0.0"),
+            StreamProtocol::new(crate::network::protocol::PROTOCOL_ID),
             request_response::ProtocolSupport::Full,
         )],
         // NET-C3: 30s timeout covers LAN shard transfers (256MB @ 100Mbps < 25s)

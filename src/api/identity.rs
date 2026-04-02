@@ -126,8 +126,9 @@ fn is_leaderboard_eligible(first_seen: u64, verified_tx_count: u32, peer_count: 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    const SECS_PER_DAY: u64 = 86_400;
     let age_days = if first_seen > 0 {
-        (now_ts.saturating_sub(first_seen)) / 86400
+        (now_ts.saturating_sub(first_seen)) / SECS_PER_DAY
     } else {
         0
     };
@@ -182,7 +183,11 @@ pub async fn leaderboard(
             .peer_credit_balances
             .get(&peer.node_id)
             .map(|v| *v)
-            .unwrap_or_else(|| (peer.trust_score * 5000.0) as i64);
+            .unwrap_or_else(|| {
+                // Scale trust score [0.0, 1.0] to a synthetic credit balance for display
+                const TRUST_CREDIT_SCALE: f32 = 5000.0;
+                (peer.trust_score * TRUST_CREDIT_SCALE) as i64
+            });
         let peer_tier = crate::credit::priority::PriorityCalculator::tier_name(balance);
         entries.push(serde_json::json!({
             "node_id": format!("{}", peer.node_id),

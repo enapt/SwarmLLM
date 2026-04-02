@@ -958,11 +958,7 @@ pub async fn chat_completions(
     // avoiding template mismatch (e.g. `<|assistant|>` prefix leak) and the unnecessary
     // loaded_model_info.read().await before the split path.
     let requested_mid = crate::types::ModelId(req.model.clone());
-    let has_local_split_model = state
-        .shared_state
-        .split_models
-        .iter()
-        .any(|e| e.key().0 == requested_mid && e.value().is_complete);
+    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid);
 
     if has_local_split_model {
         if req.stream {

@@ -60,22 +60,32 @@ pub fn shard_filename(index: u32) -> String {
     format!("shard_{index:03}.bin")
 }
 
+/// Determine whether a layer range covers the first/last segments of a model,
+/// given the set of locally available shard indices.
+///
+/// `is_first` = layer_start is 0 AND shard 0 is present.
+/// `is_last` = layer_end covers all layers AND the final shard is present.
+pub fn compute_first_last(
+    local_shard_indices: &[u32],
+    shard_count: u32,
+    layer_start: usize,
+    layer_end: usize,
+    total_layers: usize,
+) -> (bool, bool) {
+    let has_shard_0 = local_shard_indices.contains(&0);
+    let last_shard_idx = shard_count.saturating_sub(1);
+    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
+    let is_first = layer_start == 0 && has_shard_0;
+    let is_last = layer_end >= total_layers && has_last_shard;
+    (is_first, is_last)
+}
+
 /// Get the directory path for a specific model under data_dir, with sanitization.
 /// Use this instead of manually joining `data_dir.join("models").join(id)`.
 pub fn model_dir(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
     data_dir
         .join("models")
         .join(sanitize_path_component(model_id))
-}
-
-/// Get the GGUF header path for a model (free function).
-pub fn header_path(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
-    model_dir(data_dir, model_id).join(HEADER_FILENAME)
-}
-
-/// Get the mmproj.gguf path for a model (free function).
-pub fn mmproj_path(data_dir: &std::path::Path, model_id: &str) -> std::path::PathBuf {
-    model_dir(data_dir, model_id).join(MMPROJ_FILENAME)
 }
 
 /// Manages shard files on disk — loading, verification, and storage.
@@ -101,19 +111,17 @@ impl ShardStore {
         model_dir(&self.data_dir, &model_id.0)
     }
 
-    /// Get the GGUF header path for a model.
-    pub fn header_path(&self, model_id: &ModelId) -> PathBuf {
-        self.model_dir(model_id).join(HEADER_FILENAME)
-    }
-
-    /// Get the manifest.json path for a model.
-    pub fn manifest_path(&self, model_id: &ModelId) -> PathBuf {
-        self.model_dir(model_id).join(MANIFEST_FILENAME)
-    }
-
-    /// Get the mmproj.gguf path for a model.
-    pub fn mmproj_path(&self, model_id: &ModelId) -> PathBuf {
-        self.model_dir(model_id).join(MMPROJ_FILENAME)
+    /// Scan disk for locally available shard files, returning (index, path) pairs.
+    pub fn scan_local_shards(&self, model_id: &ModelId, shard_count: u32) -> Vec<(u32, PathBuf)> {
+        let limit = shard_count.max(1);
+        let mut shards = Vec::new();
+        for i in 0..limit {
+            let path = self.shard_path(model_id, i);
+            if path.exists() {
+                shards.push((i, path));
+            }
+        }
+        shards
     }
 
     /// Get the models directory path.

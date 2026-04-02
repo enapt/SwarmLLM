@@ -38,15 +38,7 @@ pub fn try_load_from_shards(
     }
 
     // Collect available shard files for this model
-    // Scan all possible shard indices — don't stop on gaps (sparse sets are valid)
-    let mut shard_files: Vec<(u32, std::path::PathBuf)> = Vec::new();
-    let scan_limit = params.manifest.shard_count.max(1);
-    for i in 0u32..scan_limit {
-        let path = shard_store.shard_path(model_id, i);
-        if path.exists() {
-            shard_files.push((i, path));
-        }
-    }
+    let shard_files = shard_store.scan_local_shards(model_id, params.manifest.shard_count);
 
     if shard_files.is_empty() {
         return Err(SwarmError::Internal(format!(

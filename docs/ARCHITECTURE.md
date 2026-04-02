@@ -100,7 +100,7 @@ The **MessageDispatcher** is a dedicated task in `daemon/dispatch.rs` that route
 3.  Load or create config (TOML + env + defaults + CLI overrides)
 4.  Ensure data directory exists
 5.  Load or generate Ed25519 identity
-6.  Open redb database (auto-migrates from sled if `migrate-sled` feature enabled)
+6.  Open redb database
 7.  Build Daemon { config, identity, db }
 8.  Initialize ModelExecutor (load GGUF model if --model provided)
 9.  Build Arc<SharedState> (includes ModelRegistry loaded from DB)

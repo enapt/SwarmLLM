@@ -152,24 +152,16 @@ fn ensure_model_loaded(
     }
 
     let model_dir = crate::model::shard::model_dir(data_dir, &model_id.0);
-    let manifest_path = model_dir.join(crate::model::shard::MANIFEST_FILENAME);
-    let manifest: crate::types::ModelManifest = serde_json::from_str(
-        &std::fs::read_to_string(&manifest_path)
-            .map_err(|e| SwarmError::Internal(format!("Read manifest: {e}")))?,
-    )
-    .map_err(|e| SwarmError::Internal(format!("Parse manifest: {e}")))?;
+    use crate::model::manifest::ModelManifestExt;
+    let manifest = crate::types::ModelManifest::load_from_dir(&model_dir)?;
 
     let total_layers = manifest.num_layers as usize;
-    // Determine which shards we have on disk
     let shard_store = crate::model::shard::ShardStore::new(data_dir);
-    let mut local_shard_indices: Vec<u32> = Vec::new();
-    let scan_limit = manifest.shard_count.max(1);
-    for i in 0u32..scan_limit {
-        let path = shard_store.shard_path(model_id, i);
-        if path.exists() {
-            local_shard_indices.push(i);
-        }
-    }
+    let mut local_shard_indices: Vec<u32> = shard_store
+        .scan_local_shards(model_id, manifest.shard_count)
+        .iter()
+        .map(|(i, _)| *i)
+        .collect();
 
     // Filter by shard window if active — only load allowed shards into VRAM
     if let Some(window) = shard_window {
@@ -186,11 +178,13 @@ fn ensure_model_loaded(
         }
     }
 
-    let has_shard_0 = local_shard_indices.contains(&0);
-    let last_shard_idx = manifest.shard_count.saturating_sub(1);
-    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
-    let is_first = layer_start == 0 && has_shard_0;
-    let is_last = layer_end >= total_layers && has_last_shard;
+    let (is_first, is_last) = crate::model::shard::compute_first_last(
+        &local_shard_indices,
+        manifest.shard_count,
+        layer_start,
+        layer_end,
+        total_layers,
+    );
 
     // Try loading the split model from available sources
     let gguf_path = model_dir.join("model.gguf");

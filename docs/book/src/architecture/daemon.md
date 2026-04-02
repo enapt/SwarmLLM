@@ -60,7 +60,7 @@ Manager  Router  Ledger  Monitor  Server ancer    tion Mgr   Dispatch   Manager 
 3. Load/create config (TOML + env + defaults + CLI overrides)
 4. Ensure data directory exists
 5. Load/generate Ed25519 identity
-6. Open redb database (auto-migrates from sled if `migrate-sled` feature enabled)
+6. Open redb database
 7. Build `Daemon { config, identity, db }`
 8. Initialize ModelExecutor (load GGUF if `--model` provided)
 9. Build `Arc<SharedState>` (includes ModelRegistry from DB)

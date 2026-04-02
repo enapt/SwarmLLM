@@ -394,11 +394,7 @@ pub async fn messages(
     // Fast path: if we have a complete local split model for the REQUESTED model, generate directly.
     // Match by model ID — not just "any loaded model" (compare sends different model IDs).
     let requested_mid = crate::types::ModelId(model.clone());
-    let has_local_split_model = state
-        .shared_state
-        .split_models
-        .iter()
-        .any(|e| e.key().0 == requested_mid && e.value().is_complete);
+    let has_local_split_model = state.shared_state.has_complete_split_model(&requested_mid);
 
     tracing::debug!(
         request_id = %request_id,
@@ -1199,9 +1195,10 @@ async fn anthropic_to_openai_proxy(
 
     // Non-streaming: read full JSON response
     let openai_resp: serde_json::Value = resp.json().await.map_err(|e| {
-        ApiError(crate::error::SwarmError::Internal(format!(
-            "Failed to parse cloud response: {e}"
-        )))
+        ApiError(crate::error::SwarmError::ProviderError {
+            status: 502,
+            body: format!("Cloud provider returned malformed JSON: {e}"),
+        })
     })?;
 
     // Translate OpenAI response → Anthropic Messages format

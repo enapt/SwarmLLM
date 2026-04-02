@@ -89,6 +89,9 @@ enum BucketKind {
     SensitiveAdmin,
 }
 
+/// Requests per minute for sensitive key-management endpoints.
+const SENSITIVE_ADMIN_RPM: u64 = 5;
+
 /// Token-bucket rate limiter keyed by client IP address.
 ///
 /// Each IP gets separate buckets for API and admin endpoints that refill
@@ -131,7 +134,7 @@ impl RateLimiter {
         let (kind, limit) = if path == "/api/admin/provider-model-status"
             || ((path == "/api/admin/providers" || path == "/api/admin/api-key") && is_mutating)
         {
-            (BucketKind::SensitiveAdmin, 5)
+            (BucketKind::SensitiveAdmin, SENSITIVE_ADMIN_RPM)
         } else if path.starts_with("/api/admin/") {
             (BucketKind::Admin, self.admin_rpm)
         } else if path.starts_with("/v1/") || path.starts_with("/api/chat") || path == "/mcp" {

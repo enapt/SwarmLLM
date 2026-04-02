@@ -867,6 +867,13 @@ impl SharedState {
         false
     }
 
+    /// Check if a complete (all layers covered) split model is loaded.
+    pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
+        self.split_models
+            .iter()
+            .any(|e| e.key().0 == *model_id && e.value().is_complete)
+    }
+
     /// Register a split model segment in the secondary index.
     pub fn index_split_model_insert(
         &self,
