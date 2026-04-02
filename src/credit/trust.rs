@@ -134,7 +134,7 @@ impl TrustManager {
 
     /// Load persisted trust scores into the peer registry (test/bulk-restore helper).
     /// In production, trust is restored per-peer at connection time via `get_trust()`
-    /// in `NetworkManager::register_peer`.
+    /// in the Identify handler in `network/manager.rs`.
     pub fn hydrate_from_db(&self, peer_registry: &DashMap<NodeId, crate::types::PeerInfo>) {
         if let Ok(entries) = self.db.iter_raw(TREE_TRUST_SCORES) {
             for (key_bytes, val_bytes) in entries {

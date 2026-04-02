@@ -1188,7 +1188,7 @@ When a requested model isn't available locally or on the swarm, requests can opt
 - **No build step**: Vanilla HTML/CSS/JS — no framework, no bundler, no Node.js
 - **Component architecture**: `App` global namespace with component sub-objects (`App.chat`, `App.dashboard`, etc.)
   - `frontend/js/core/state.js` — App namespace, shared mutable state, theme, storage keys
-  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`)
+  - `frontend/js/core/utils.js` — format helpers (`formatBytes`, `formatDlProgress`, `escapeHtml`, etc.), DOM builders (`appendMessageToDOM`, `createEmptyState`), `getApiErrorMessage`
   - `frontend/js/core/data.js` — data store with in-flight deduplication, `authFetch` wrapper
   - `frontend/js/components/ui.js` — tab switching, banners, mode indicator, sidebar
   - `frontend/js/components/chat.js` — sessions, messages, SSE streaming, image upload, layout toggle

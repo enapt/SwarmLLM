@@ -517,7 +517,10 @@ pub async fn apply_credit_direct(
     delta: i64,
     is_earning: bool,
 ) -> Result<(), SwarmError> {
-    {
+    // Update in-memory balance under write lock, then release before DB write.
+    // The small crash window (memory updated, process dies before persist) is
+    // acceptable — the same pattern is used by CreditLedger::apply_credit.
+    let snapshot = {
         let mut bal = balance.write().await;
         // SEC-I1: saturating arithmetic to prevent overflow
         bal.balance = bal.balance.saturating_add(delta);
@@ -537,9 +540,10 @@ pub async fn apply_credit_direct(
             "Credit balance updated (direct)"
         );
 
-        // Persist while we still hold the balance data (clone for serialization)
-        db.put_json(TREE_CREDITS, KEY_BALANCE, &*bal)?;
-    }
+        bal.clone()
+    };
+    // Persist outside write lock to avoid blocking inference hot path
+    db.put_json(TREE_CREDITS, KEY_BALANCE, &snapshot)?;
 
     Ok(())
 }
