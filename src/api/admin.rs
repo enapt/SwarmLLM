@@ -158,8 +158,17 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
 }
 
 /// GET /api/admin/config — Return current configuration.
+///
+/// Reads the persisted config from disk so this always reflects the latest saved
+/// values (including those applied by `PUT /api/admin/config`). Falls back to the
+/// in-memory startup config if the file cannot be read.
 pub async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let config = &state.config;
+    let config_path = state.config.node.data_dir.join("config.toml");
+    let config = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<crate::config::Config>(&s).ok())
+        .unwrap_or_else(|| state.config.clone());
+    let config = &config;
     let contribution = match config.node.contribution {
         ContributionMode::Minimal => "minimal",
         ContributionMode::Moderate => "moderate",
@@ -275,6 +284,11 @@ pub async fn update_config(
     .map_err(|e| ApiError(crate::error::SwarmError::Io(e)))?;
 
     tracing::info!(path = %config_path.display(), "Configuration saved");
+
+    // Hot-reload operational params so in-memory state reflects the saved config
+    state
+        .shared_state
+        .apply_config_reload(crate::config::OperationalParams::from_config(&config));
 
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
@@ -797,10 +811,17 @@ pub async fn update_schedule(
     State(state): State<AppState>,
     Json(body): Json<ScheduleUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut schedule = state.shared_state.models.resource_schedule.write().await;
+    // Clone current schedule, validate + apply updates without holding the write lock
+    let mut new_schedule = state
+        .shared_state
+        .models
+        .resource_schedule
+        .read()
+        .await
+        .clone();
 
     if let Some(enabled) = body.enabled {
-        schedule.enabled = enabled;
+        new_schedule.enabled = enabled;
     }
     if let Some(start) = body.reduced_hours_start {
         if start > 23 {
@@ -808,7 +829,7 @@ pub async fn update_schedule(
                 "reduced_hours_start must be 0-23".to_string(),
             )));
         }
-        schedule.reduced_hours_start = start;
+        new_schedule.reduced_hours_start = start;
     }
     if let Some(end) = body.reduced_hours_end {
         if end > 23 {
@@ -816,12 +837,12 @@ pub async fn update_schedule(
                 "reduced_hours_end must be 0-23".to_string(),
             )));
         }
-        schedule.reduced_hours_end = end;
+        new_schedule.reduced_hours_end = end;
     }
     if let Some(ref contribution) = body.reduced_contribution {
         match contribution.as_str() {
             "minimal" | "moderate" | "maximum" => {
-                schedule.reduced_contribution = contribution.clone();
+                new_schedule.reduced_contribution = contribution.clone();
             }
             _ => {
                 return Err(ApiError(crate::error::SwarmError::Validation(
@@ -833,7 +854,7 @@ pub async fn update_schedule(
     if let Some(ref aggressiveness) = body.prune_aggressiveness {
         match aggressiveness.as_str() {
             "normal" | "aggressive" | "conservative" => {
-                schedule.prune_aggressiveness = aggressiveness.clone();
+                new_schedule.prune_aggressiveness = aggressiveness.clone();
             }
             _ => {
                 return Err(ApiError(crate::error::SwarmError::Validation(
@@ -844,26 +865,29 @@ pub async fn update_schedule(
         }
     }
 
-    // Persist to DB
+    // Persist to DB (no write lock held)
     let _ = state
         .shared_state
         .db
-        .put_json("resource_schedule", "current", &*schedule);
+        .put_json("resource_schedule", "current", &new_schedule);
 
     tracing::debug!(
-        enabled = schedule.enabled,
-        prune_aggressiveness = %schedule.prune_aggressiveness,
+        enabled = new_schedule.enabled,
+        prune_aggressiveness = %new_schedule.prune_aggressiveness,
         "DIAG: schedule updated"
     );
 
     let result = serde_json::json!({
         "status": "ok",
-        "enabled": schedule.enabled,
-        "reduced_hours_start": schedule.reduced_hours_start,
-        "reduced_hours_end": schedule.reduced_hours_end,
-        "reduced_contribution": schedule.reduced_contribution,
-        "prune_aggressiveness": schedule.prune_aggressiveness,
+        "enabled": new_schedule.enabled,
+        "reduced_hours_start": new_schedule.reduced_hours_start,
+        "reduced_hours_end": new_schedule.reduced_hours_end,
+        "reduced_contribution": new_schedule.reduced_contribution,
+        "prune_aggressiveness": new_schedule.prune_aggressiveness,
     });
+
+    // Briefly acquire write lock to commit
+    *state.shared_state.models.resource_schedule.write().await = new_schedule;
 
     Ok(Json(result))
 }

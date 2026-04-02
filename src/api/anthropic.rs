@@ -462,17 +462,7 @@ pub async fn messages(
 
         // Direct executor fallback (single-node, no router)
         if model_locally_available {
-            let (tmpl, bos, eos) = {
-                let info = state.shared_state.loaded_model_info.read().await;
-                match info.as_ref() {
-                    Some(i) => (
-                        i.chat_template.clone(),
-                        i.bos_token.clone(),
-                        i.eos_token.clone(),
-                    ),
-                    None => (None, String::new(), String::new()),
-                }
-            };
+            let (tmpl, bos, eos) = super::resolve_chat_template(&state, &model).await;
             let prompt =
                 chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos);
 

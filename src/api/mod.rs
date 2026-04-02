@@ -55,6 +55,71 @@ pub(crate) async fn submit_to_router(
         .map_err(crate::error::ApiError)
 }
 
+/// Resolve chat template, BOS token, and EOS token for a model.
+///
+/// Fallback chain:
+/// 1. `loaded_model_info` (in-memory, fastest — available when model is loaded locally)
+/// 2. GGUF header file on disk (for distributed-only nodes that have the probe)
+/// 3. HuggingFace metadata probe (downloads header if available)
+/// 4. Empty defaults (template=None, bos="", eos="")
+pub(crate) async fn resolve_chat_template(
+    state: &crate::api::server::AppState,
+    model_name: &str,
+) -> (Option<String>, String, String) {
+    // 1. In-memory loaded model info
+    {
+        let info = state.shared_state.loaded_model_info.read().await;
+        if let Some(i) = info.as_ref() {
+            return (
+                i.chat_template.clone(),
+                i.bos_token.clone(),
+                i.eos_token.clone(),
+            );
+        }
+    }
+
+    // 2. GGUF header on disk
+    let header_path =
+        crate::model::shard::model_dir(&state.shared_state.config.node.data_dir, model_name)
+            .join(crate::model::shard::HEADER_FILENAME);
+    if header_path.exists() {
+        if let Some((t, b, e)) = crate::inference::pipeline::template_from_header(&header_path) {
+            return (t, b, e);
+        }
+    }
+
+    // 3. HuggingFace metadata probe
+    let mid = crate::types::ModelId(model_name.to_string());
+    if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
+        let model_dir =
+            crate::model::shard::model_dir(&state.shared_state.config.node.data_dir, model_name);
+        let shard_size = state.shared_state.config.model.shard_size_bytes();
+        if let Ok(info) = crate::model::huggingface::probe_gguf_file(
+            &hf_src.repo_id,
+            &hf_src.filename,
+            shard_size,
+        )
+        .await
+        {
+            if let Ok(hp) = crate::model::huggingface::download_gguf_header(
+                &hf_src.repo_id,
+                &hf_src.filename,
+                &model_dir,
+                info.header_size,
+            )
+            .await
+            {
+                if let Some((t, b, e)) = crate::inference::pipeline::template_from_header(&hp) {
+                    return (t, b, e);
+                }
+            }
+        }
+    }
+
+    // 4. Empty defaults
+    (None, String::new(), String::new())
+}
+
 pub mod admin;
 pub mod admin_hf;
 pub mod admin_models;

@@ -111,18 +111,7 @@ impl AutoShardManager {
                 let is_downloading = self
                     .shared_state
                     .models
-                    .acquisition_progress
-                    .get(&manifest.id)
-                    .map(|entry| {
-                        entry
-                            .shard_progress
-                            .get(&shard.index)
-                            .map(|sp| {
-                                sp.state == crate::model::acquisition::ShardState::Downloading
-                            })
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
+                    .is_shard_in_progress(&manifest.id, shard.index);
                 if is_downloading {
                     continue;
                 }

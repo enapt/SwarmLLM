@@ -265,6 +265,11 @@ pub async fn pool_set_device_name(
     State(state): State<AppState>,
     Json(body): Json<PoolDeviceNameRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.name.trim().is_empty() {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Device name must not be empty".into(),
+        )));
+    }
     if body.name.len() > 64 {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Device name must be 64 characters or fewer".into(),

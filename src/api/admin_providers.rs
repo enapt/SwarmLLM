@@ -125,10 +125,15 @@ pub async fn update_providers(
         }
     }
 
-    // Build updated config on a clone so in-memory state only changes after
-    // successful persist — prevents RAM/disk divergence on encryption failure.
-    let mut config = state.shared_state.metrics.providers_config.write().await;
-    let mut new_config = config.clone();
+    // Build updated config on a clone — only hold the read lock briefly to snapshot,
+    // then release before encryption + DB write to avoid blocking inference readers.
+    let mut new_config = state
+        .shared_state
+        .metrics
+        .providers_config
+        .read()
+        .await
+        .clone();
 
     fn update_entry(entry: &mut Option<crate::config::ProviderEntry>, key: Option<String>) {
         if let Some(k) = key {
@@ -172,7 +177,8 @@ pub async fn update_providers(
         new_config.fill_from_env();
     }
 
-    // Encrypt and persist BEFORE committing to in-memory state
+    // Encrypt and persist BEFORE committing to in-memory state.
+    // No write lock held during encryption + DB write — avoids blocking inference readers.
     let signing_key_bytes = state.shared_state.identity.signing_key_bytes();
     match crate::crypto::encrypt_config(&new_config, &signing_key_bytes) {
         Ok(encrypted) => {
@@ -189,8 +195,25 @@ pub async fn update_providers(
         }
     }
 
-    // Persist succeeded — commit to in-memory state
-    *config = new_config;
+    // Build response before moving new_config into the write guard
+    let response = serde_json::json!({
+        "status": "ok",
+        "anthropic": new_config.anthropic.is_some(),
+        "openai": new_config.openai.is_some(),
+        "deepseek": new_config.deepseek.is_some(),
+        "mistral": new_config.mistral.is_some(),
+        "groq": new_config.groq.is_some(),
+        "nvidia_nim": new_config.nvidia_nim.is_some(),
+        "cerebras": new_config.cerebras.is_some(),
+        "sambanova": new_config.sambanova.is_some(),
+        "fireworks": new_config.fireworks.is_some(),
+        "together": new_config.together.is_some(),
+        "deepinfra": new_config.deepinfra.is_some(),
+        "moonshot": new_config.moonshot.is_some(),
+    });
+
+    // Persist succeeded — briefly acquire write lock to commit to in-memory state
+    *state.shared_state.metrics.providers_config.write().await = new_config;
 
     tracing::info!(target: "swarmllm::api::admin_providers", "Cloud provider configuration updated");
 
@@ -212,21 +235,7 @@ pub async fn update_providers(
         .dashboard_tx
         .send(crate::daemon::state::DashboardSignal::ModelsChanged);
 
-    Ok(Json(serde_json::json!({
-        "status": "ok",
-        "anthropic": config.anthropic.is_some(),
-        "openai": config.openai.is_some(),
-        "deepseek": config.deepseek.is_some(),
-        "mistral": config.mistral.is_some(),
-        "groq": config.groq.is_some(),
-        "nvidia_nim": config.nvidia_nim.is_some(),
-        "cerebras": config.cerebras.is_some(),
-        "sambanova": config.sambanova.is_some(),
-        "fireworks": config.fireworks.is_some(),
-        "together": config.together.is_some(),
-        "deepinfra": config.deepinfra.is_some(),
-        "moonshot": config.moonshot.is_some(),
-    })))
+    Ok(Json(response))
 }
 
 /// GET /api/admin/provider-models — Fetch available models from configured providers.

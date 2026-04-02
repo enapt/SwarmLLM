@@ -248,19 +248,8 @@ pub async fn check_and_load_model(
                 return false;
             }
             // Check no active download for this shard
-            let is_downloading = shared
-                .models
-                .acquisition_progress
-                .get(model_id)
-                .map(|entry| {
-                    entry
-                        .shard_progress
-                        .get(&s.index)
-                        .map(|sp| sp.state == crate::model::acquisition::ShardState::Downloading)
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
-            !is_downloading
+            let in_progress = shared.models.is_shard_in_progress(model_id, s.index);
+            !in_progress
         })
         .map(|s| s.index)
         .collect();

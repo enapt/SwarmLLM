@@ -991,67 +991,7 @@ pub async fn chat_completions(
     // Uses loaded_model_info first; falls back to GGUF header on disk for
     // distributed-only nodes that have no local model but do have the probe.
     let prompt = {
-        let (tmpl, bos, eos) = {
-            let info = state.shared_state.loaded_model_info.read().await;
-            match info.as_ref() {
-                Some(i) => (
-                    i.chat_template.clone(),
-                    i.bos_token.clone(),
-                    i.eos_token.clone(),
-                ),
-                None => {
-                    // Try loading template from GGUF header on disk
-                    let header_path = crate::model::shard::model_dir(
-                        &state.shared_state.config.node.data_dir,
-                        &req.model,
-                    )
-                    .join(crate::model::shard::HEADER_FILENAME);
-                    if header_path.exists() {
-                        match crate::inference::pipeline::template_from_header(&header_path) {
-                            Some((t, b, e)) => (t, b, e),
-                            None => (None, String::new(), String::new()),
-                        }
-                    } else {
-                        // No header on disk — try fetching from HuggingFace for remote models
-                        let mid = crate::types::ModelId(req.model.clone());
-                        let model_dir = crate::model::shard::model_dir(
-                            &state.shared_state.config.node.data_dir,
-                            &req.model,
-                        );
-                        if let Some(hf_src) = state.shared_state.models.hf_sources.get(&mid) {
-                            let shard_size = state.shared_state.config.model.shard_size_bytes();
-                            if let Ok(info) = crate::model::huggingface::probe_gguf_file(
-                                &hf_src.repo_id,
-                                &hf_src.filename,
-                                shard_size,
-                            )
-                            .await
-                            {
-                                if let Ok(hp) = crate::model::huggingface::download_gguf_header(
-                                    &hf_src.repo_id,
-                                    &hf_src.filename,
-                                    &model_dir,
-                                    info.header_size,
-                                )
-                                .await
-                                {
-                                    match crate::inference::pipeline::template_from_header(&hp) {
-                                        Some((t, b, e)) => (t, b, e),
-                                        None => (None, String::new(), String::new()),
-                                    }
-                                } else {
-                                    (None, String::new(), String::new())
-                                }
-                            } else {
-                                (None, String::new(), String::new())
-                            }
-                        } else {
-                            (None, String::new(), String::new())
-                        }
-                    }
-                }
-            }
-        };
+        let (tmpl, bos, eos) = super::resolve_chat_template(&state, &req.model).await;
         chat_template::build_prompt(&internal_messages, tmpl.as_deref(), &bos, &eos)
     };
 

@@ -257,7 +257,7 @@ impl EscrowManager {
         Ok(amount)
     }
 
-    /// Get an escrow entry by ID.
+    /// Get an escrow entry by ID (used by integration tests).
     pub fn get_escrow(&self, escrow_id: &uuid::Uuid) -> Option<EscrowEntry> {
         self.entries.get(escrow_id).map(|e| e.clone())
     }

@@ -14,6 +14,24 @@
   // HuggingFace Module
   // ========================================================================
   App.hf = {
+    /**
+     * Centralized HF shard download request.
+     * @param {Object} body - Request body (repo_id, filename, shards?, model_id?, peer_fair_share?)
+     * @returns {Promise<{ok: boolean, data: Object, errorMsg: string|null}>}
+     */
+    downloadShards: async function(body) {
+      var resp = await App.authFetch('/api/admin/hf/download-shards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      var errorMsg = null;
+      if (!resp.ok) {
+        errorMsg = (data.error && data.error.message) || I18n.t('models.download_failed', { error: '' });
+      }
+      return { ok: resp.ok, data: data, errorMsg: errorMsg };
+    },
     search: async function() {
       var query = document.getElementById('hf-search-input').value.trim();
       var suggestions = document.getElementById('hf-suggestions');
@@ -157,22 +175,16 @@
         }
 
         App.ui.showBanner('info', I18n.t('models.checking'));
-        var resp = await App.authFetch('/api/admin/hf/download-shards', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_id: repoId, filename: filename, peer_fair_share: true }),
-        });
-        var data = await resp.json();
-        if (!resp.ok) {
-          var errMsg = (data.error && data.error.message) || I18n.t('models.download_failed', { error: '' });
-          App.ui.showBanner('error', errMsg);
+        var result = await App.hf.downloadShards({ repo_id: repoId, filename: filename, peer_fair_share: true });
+        if (!result.ok) {
+          App.ui.showBanner('error', result.errorMsg);
           return;
         }
-        if (data.status === 'started') {
+        if (result.data.status === 'started') {
           App.notifications.showToast(I18n.t('models.download_started'), 'success');
           App.ui.closeModelBrowser();
         } else {
-          App.notifications.showToast(data.message || I18n.t('models.download_could_not_start'), 'warning');
+          App.notifications.showToast(result.data.message || I18n.t('models.download_could_not_start'), 'warning');
         }
       } catch (e) {
         App.ui.showBanner('error', I18n.t('models.download_failed', { error: e.message }));

@@ -238,6 +238,30 @@ pub struct ModelMgmt {
     pub prune_history: RwLock<VecDeque<crate::types::PruneEvent>>,
 }
 
+impl ModelMgmt {
+    /// Check if a shard is currently being downloaded, pending, or verifying.
+    /// Prevents races where multiple subsystems try to download the same shard.
+    pub fn is_shard_in_progress(&self, model_id: &crate::types::ModelId, shard_index: u32) -> bool {
+        self.acquisition_progress
+            .get(model_id)
+            .map(|entry| {
+                entry
+                    .shard_progress
+                    .get(&shard_index)
+                    .map(|sp| {
+                        matches!(
+                            sp.state,
+                            crate::model::acquisition::ShardState::Downloading
+                                | crate::model::acquisition::ShardState::Pending
+                                | crate::model::acquisition::ShardState::Verifying
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+}
+
 /// Metrics, stats, and provider configuration.
 pub struct MetricsProviders {
     pub inference_requests_total: AtomicU64,

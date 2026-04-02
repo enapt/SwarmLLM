@@ -138,16 +138,12 @@
             App.models.load();
           } else if (dlData.status === 'use_hf') {
             // Backend says use HuggingFace
-            var hfResp = await App.authFetch('/api/admin/hf/download-shards', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ repo_id: dlData.repo_id, filename: dlData.filename, shards: [idx], model_id: modelId }),
-            });
-            if (hfResp.ok) {
+            var hfResult = await App.hf.downloadShards({ repo_id: dlData.repo_id, filename: dlData.filename, shards: [idx], model_id: modelId });
+            if (hfResult.ok) {
               App.ui.showBanner('success', I18n.t('shard.downloading_hf', { idx: idx + 1 }));
               App.models.load();
             } else {
-              App.ui.showBanner('error', await U.getApiErrorMessage(hfResp, I18n.t('shard.hf_download_failed')));
+              App.ui.showBanner('error', hfResult.errorMsg || I18n.t('shard.hf_download_failed'));
             }
           } else if (dlData.status === 'already_local') {
             App.ui.showBanner('info', I18n.t('shard.already_local', { idx: idx + 1 }));

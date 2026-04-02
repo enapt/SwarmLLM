@@ -501,13 +501,9 @@
                 if (last && !last.local) missing.push(last.index);
               }
               if (missing.length === 0) { App.ui.showBanner('info', I18n.t('init.no_missing_shards')); return; }
-              App.authFetch('/api/admin/hf/download-shards', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ repo_id: src.repo_id, filename: src.filename, shards: missing }),
-              }).then(function(r) {
-                if (r.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.join(', ') }));
-                else App.ui.showBanner('error', I18n.t('shard.download_failed', { error: '' }));
+              App.hf.downloadShards({ repo_id: src.repo_id, filename: src.filename, shards: missing }).then(function(result) {
+                if (result.ok) App.ui.showBanner('success', I18n.t('init.downloading_shards', { shards: missing.join(', ') }));
+                else App.ui.showBanner('error', result.errorMsg);
               });
             });
           }
