@@ -362,7 +362,7 @@
   "pool.linking": "Linking...",
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.failed_generic": "Failed: {error}",
-  "chat.credit_activity_empty": "La actividad de créditos aparecerá aquí",
+  "dashboard.credit_activity_empty": "La actividad de créditos aparecerá aquí",
   "chat.avatar_ai": "IA",
   "chat.encrypted_title": "Enviado con cifrado E2E",
   "chat.copy_response": "Copiar esta respuesta",

@@ -1468,8 +1468,13 @@ impl Daemon {
 
         // Drain the JoinSet with a timeout so subsystems can run their cleanup
         // (e.g., save peer cache, close connections, flush data).
-        tracing::info!("Waiting for subsystems to shut down (10s timeout)...");
-        let drain_deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
+        const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
+        tracing::info!(
+            timeout_secs = SHUTDOWN_TIMEOUT_SECS,
+            "Waiting for subsystems to shut down"
+        );
+        let drain_deadline =
+            tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_TIMEOUT_SECS));
         tokio::pin!(drain_deadline);
         loop {
             tokio::select! {
@@ -1508,7 +1513,7 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
     // 1. Explicit key in config takes priority
     if let Some(ref k) = config.api.api_key {
         if !k.is_empty() {
-            tracing::info!("Using API key from configuration");
+            tracing::info!(source = "config", "Using API key from configuration");
             key = k.clone();
             write_api_key_file(&config.node.data_dir, &key);
             return key;
@@ -1518,7 +1523,7 @@ fn resolve_api_key(config: &Config, db: &Database) -> String {
     // 2. Check persisted key in database
     if let Ok(Some(k)) = db.get_json::<String>("config", "api_key") {
         if !k.is_empty() {
-            tracing::info!("Using persisted API key from database");
+            tracing::info!(source = "database", "Using persisted API key from database");
             write_api_key_file(&config.node.data_dir, &k);
             return k;
         }

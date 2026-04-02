@@ -362,7 +362,7 @@
   "pool.linking": "Linking...",
   "pool.link_sent": "✓ Link request sent — will be added shortly",
   "pool.failed_generic": "Failed: {error}",
-  "chat.credit_activity_empty": "积分活动将显示在此处",
+  "dashboard.credit_activity_empty": "积分活动将显示在此处",
   "chat.avatar_ai": "AI",
   "chat.encrypted_title": "已使用端到端加密发送",
   "chat.copy_response": "复制此回复",
