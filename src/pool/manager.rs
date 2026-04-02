@@ -645,19 +645,27 @@ impl PoolManager {
             tracing::warn!(error = %e, "Failed to apply forwarded credits to owner balance");
         }
 
-        // Update the member's contribution in pool state
-        let mut state = self.shared_state.credits.pool_state.write().await;
-        if let Some(ref mut ps) = *state {
-            if let Some(member) = ps
-                .members
-                .iter_mut()
-                .find(|m| m.node_id == forward.from_node_id)
-            {
-                member.credits_contributed =
-                    member.credits_contributed.saturating_add(forward.amount);
+        // Update the member's contribution in pool state.
+        // Clone+drop before DB write to avoid holding write lock across I/O.
+        let snapshot = {
+            let mut state = self.shared_state.credits.pool_state.write().await;
+            if let Some(ref mut ps) = *state {
+                if let Some(member) = ps
+                    .members
+                    .iter_mut()
+                    .find(|m| m.node_id == forward.from_node_id)
+                {
+                    member.credits_contributed =
+                        member.credits_contributed.saturating_add(forward.amount);
+                }
+                ps.total_lifetime_credits =
+                    ps.total_lifetime_credits.saturating_add(forward.amount);
+                Some(ps.clone())
+            } else {
+                None
             }
-            ps.total_lifetime_credits = ps.total_lifetime_credits.saturating_add(forward.amount);
-
+        };
+        if let Some(ref ps) = snapshot {
             if let Err(e) = self.persist_pool_state(ps) {
                 tracing::warn!(error = %e, "Failed to persist pool state after credit forward");
             }
@@ -898,42 +906,45 @@ impl PoolManager {
             .db
             .remove(TREE_POOL_INVITATIONS, &acceptance.invitation_id.to_string());
 
-        let mut state = self.shared_state.credits.pool_state.write().await;
-        if let Some(ref mut ps) = *state {
-            // Check not already a member
-            if ps
-                .members
-                .iter()
-                .any(|m| m.node_id == acceptance.invitee_node_id)
-            {
-                return;
+        // Clone+drop before DB write to avoid holding write lock across I/O.
+        let (snapshot, member_count) = {
+            let mut state = self.shared_state.credits.pool_state.write().await;
+            if let Some(ref mut ps) = *state {
+                if ps
+                    .members
+                    .iter()
+                    .any(|m| m.node_id == acceptance.invitee_node_id)
+                {
+                    return;
+                }
+                ps.members.push(PoolMembership {
+                    node_id: acceptance.invitee_node_id.clone(),
+                    credits_contributed: 0,
+                    joined_at: acceptance.accepted_at,
+                    acceptance_signature: acceptance.invitee_signature.clone(),
+                    invitation_id: acceptance.invitation_id,
+                    device_name: None,
+                    last_seen: Some(chrono::Utc::now()),
+                    online: true,
+                    device_stats: None,
+                    contribution_level: 100,
+                });
+                (Some(ps.clone()), ps.members.len())
+            } else {
+                tracing::warn!(
+                    "Acceptance received but no pool state — invitation consumed to prevent replay"
+                );
+                (None, 0)
             }
-
-            ps.members.push(PoolMembership {
-                node_id: acceptance.invitee_node_id.clone(),
-                credits_contributed: 0,
-                joined_at: acceptance.accepted_at,
-                acceptance_signature: acceptance.invitee_signature.clone(),
-                invitation_id: acceptance.invitation_id,
-                device_name: None,
-                last_seen: Some(chrono::Utc::now()),
-                online: true,
-                device_stats: None,
-                contribution_level: 100,
-            });
-
+        };
+        if let Some(ref ps) = snapshot {
             if let Err(e) = self.persist_pool_state(ps) {
                 tracing::warn!(error = %e, "Failed to persist pool state after acceptance");
             }
-
             tracing::info!(
                 new_member = %acceptance.invitee_node_id,
-                members = ps.members.len(),
+                members = member_count,
                 "Pool member joined"
-            );
-        } else {
-            tracing::warn!(
-                "Acceptance received but no pool state — invitation consumed to prevent replay"
             );
         }
     }
@@ -1029,16 +1040,26 @@ impl PoolManager {
             return;
         }
 
-        let mut state = self.shared_state.credits.pool_state.write().await;
-        if let Some(ref mut ps) = *state {
-            let before = ps.members.len();
-            ps.members.retain(|m| m.node_id != node_id);
-            if ps.members.len() < before {
-                if let Err(e) = self.persist_pool_state(ps) {
-                    tracing::warn!(error = %e, "Failed to persist pool state after member left");
+        // Clone+drop before DB write to avoid holding write lock across I/O.
+        let snapshot = {
+            let mut state = self.shared_state.credits.pool_state.write().await;
+            if let Some(ref mut ps) = *state {
+                let before = ps.members.len();
+                ps.members.retain(|m| m.node_id != node_id);
+                if ps.members.len() < before {
+                    Some(ps.clone())
+                } else {
+                    None
                 }
-                tracing::info!(member = %node_id, "Member left pool");
+            } else {
+                None
             }
+        };
+        if let Some(ref ps) = snapshot {
+            if let Err(e) = self.persist_pool_state(ps) {
+                tracing::warn!(error = %e, "Failed to persist pool state after member left");
+            }
+            tracing::info!(member = %node_id, "Member left pool");
         }
     }
 
@@ -1090,14 +1111,17 @@ impl PoolManager {
             ));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.credits.pool_state.write().await;
-        let ps = ps
-            .as_mut()
-            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
-        if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == my_id) {
-            member.device_name = if name.is_empty() { None } else { Some(name) };
-        }
-        self.persist_pool_state(ps)?;
+        let snapshot = {
+            let mut ps = self.shared_state.credits.pool_state.write().await;
+            let ps = ps
+                .as_mut()
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
+            if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == my_id) {
+                member.device_name = if name.is_empty() { None } else { Some(name) };
+            }
+            ps.clone()
+        };
+        self.persist_pool_state(&snapshot)?;
         Ok(())
     }
 
@@ -1107,17 +1131,20 @@ impl PoolManager {
             return Err(SwarmError::Validation("Split must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.credits.pool_state.write().await;
-        let ps = ps
-            .as_mut()
-            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
-        if ps.pool_id != my_id {
-            return Err(SwarmError::Validation(
-                "Only the pool owner can change the credit split".into(),
-            ));
-        }
-        ps.member_credit_split_pct = pct;
-        self.persist_pool_state(ps)?;
+        let snapshot = {
+            let mut ps = self.shared_state.credits.pool_state.write().await;
+            let ps = ps
+                .as_mut()
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
+            if ps.pool_id != my_id {
+                return Err(SwarmError::Validation(
+                    "Only the pool owner can change the credit split".into(),
+                ));
+            }
+            ps.member_credit_split_pct = pct;
+            ps.clone()
+        };
+        self.persist_pool_state(&snapshot)?;
         tracing::info!(pct, "Pool credit split updated");
         Ok(())
     }
@@ -1132,26 +1159,29 @@ impl PoolManager {
             return Err(SwarmError::Validation("Level must be 0-100".into()));
         }
         let my_id = self.shared_state.identity.node_id().clone();
-        let mut ps = self.shared_state.credits.pool_state.write().await;
-        let ps = ps
-            .as_mut()
-            .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
-        if ps.pool_id != my_id {
-            return Err(SwarmError::Validation(
-                "Only the pool owner can set contribution levels".into(),
-            ));
-        }
-        if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == node_id) {
-            member.contribution_level = level;
-            tracing::info!(
-                node = %node_id,
-                level,
-                "Set device contribution level"
-            );
-        } else {
-            return Err(SwarmError::Validation("Device not found in pool".into()));
-        }
-        self.persist_pool_state(ps)?;
+        let snapshot = {
+            let mut ps = self.shared_state.credits.pool_state.write().await;
+            let ps = ps
+                .as_mut()
+                .ok_or_else(|| SwarmError::Validation("Not in a pool".into()))?;
+            if ps.pool_id != my_id {
+                return Err(SwarmError::Validation(
+                    "Only the pool owner can set contribution levels".into(),
+                ));
+            }
+            if let Some(member) = ps.members.iter_mut().find(|m| m.node_id == node_id) {
+                member.contribution_level = level;
+                tracing::info!(
+                    node = %node_id,
+                    level,
+                    "Set device contribution level"
+                );
+            } else {
+                return Err(SwarmError::Validation("Device not found in pool".into()));
+            }
+            ps.clone()
+        };
+        self.persist_pool_state(&snapshot)?;
         Ok(())
     }
 

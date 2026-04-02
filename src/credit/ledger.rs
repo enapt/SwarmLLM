@@ -657,10 +657,12 @@ pub async fn process_balance_gossip(
                     map.insert(gossip.node_id.clone(), gossip.balance_bucket);
                 }
 
-                // Rebuild the Vec from the deduped map
+                // Collect values outside the write lock to avoid blocking
+                // estimate_percentile (inference hot path) during iteration
+                let new_values: Vec<i64> = map.iter().map(|e| *e.value()).collect();
                 let mut balances = peer_balances.write().await;
                 balances.clear();
-                balances.extend(map.iter().map(|e| *e.value()));
+                balances.extend(new_values);
             } else {
                 // Fallback: raw push (used in tests without SharedState)
                 const MAX_BALANCE_VEC_PEERS: usize = 1000;

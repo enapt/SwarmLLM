@@ -755,7 +755,7 @@
             }
             shardLabel = (triggerText ? triggerText + ': ' : '') + I18n.t('dashboard.downloading_label') + dlShardIdx + (sourceText ? ' ' + sourceText : '') + I18n.t('dashboard.downloading_local', { local: localNow, total: shardCount });
           }
-          var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
+          var rightText = U.formatDlProgress(dlBytes, totalBytes, pct);
           if (speed > 0) rightText += ' \u00b7 ' + U.formatSpeed(speed);
           if (etaStr) rightText += I18n.t('dashboard.eta', { eta: etaStr });
           progressHtml = _buildProgressBar({ safeId: safeId, pct: pct, label: shardLabel, rightText: rightText, barContent: segmentsHtml });
@@ -1109,7 +1109,7 @@
               }
               var textEl = progressEl.querySelector('.dl-progress-text');
               if (textEl) {
-                var txt = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(acq.total_bytes) + ' (' + pct + '%)';
+                var txt = U.formatDlProgress(dlBytes, acq.total_bytes, pct);
                 if (speed > 0) txt += ' \u00b7 ' + U.formatSpeed(speed);
                 if (etaStr) txt += I18n.t('dashboard.eta', { eta: etaStr });
                 textEl.textContent = txt;
@@ -1137,7 +1137,7 @@
               var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
               var speed2 = acq.speed_bytes_per_sec || 0;
               var shardLabel2 = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || '?' }) : I18n.t('dashboard.downloading_label');
-              var rightText2 = U.formatBytes(dlBytes2) + ' / ' + U.formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' + (speed2 > 0 ? ' \u2014 ' + U.formatSpeed(speed2) : '');
+              var rightText2 = U.formatDlProgress(dlBytes2, acq.total_bytes, pct2) + (speed2 > 0 ? ' \u2014 ' + U.formatSpeed(speed2) : '');
               var progWrapper = document.createElement('div');
               progWrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct2, label: shardLabel2, rightText: rightText2 });
               var progDiv = progWrapper.firstChild;
@@ -1451,7 +1451,7 @@
 
       var speedStr = speed > 0 ? ' - ' + U.formatSpeed(speed) : '';
       var cancelBtn = '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.cancel_label')) + '</button>';
-      var rightText3 = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr;
+      var rightText3 = U.formatDlProgress(dlBytes, totalBytes, pct) + speedStr;
       var wrapper = document.createElement('div');
       wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct, label: U.escapeHtml(I18n.t('dashboard.downloading_data')), rightText: rightText3, cancelBtn: cancelBtn });
       progressEl.innerHTML = wrapper.firstChild.innerHTML;

@@ -703,15 +703,22 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 local_bytes += shard.size_bytes;
             }
 
-            // Only attach download state to the SPECIFIC shard being downloaded
+            // Attach download state — check all in-progress states (not just Downloading)
             let download_state = acq_progress.as_ref().and_then(|p| {
                 let p = p.value();
-                // Check per-shard progress first (populated by auto-manage)
                 if let Some(sp) = p.shard_progress.get(&shard.index) {
-                    if matches!(sp.state, crate::model::acquisition::ShardState::Downloading) {
+                    let dl_state = match sp.state {
+                        crate::model::acquisition::ShardState::Downloading => {
+                            Some("Downloading")
+                        }
+                        crate::model::acquisition::ShardState::Verifying => Some("Verifying"),
+                        crate::model::acquisition::ShardState::Pending => Some("Queued"),
+                        _ => None,
+                    };
+                    if let Some(state_str) = dl_state {
                         any_downloading = true;
                         return Some(serde_json::json!({
-                            "state": "Downloading",
+                            "state": state_str,
                             "progress_pct": crate::model::acquisition::shard_pct(sp.downloaded_bytes, sp.total_bytes),
                             "downloaded_bytes": sp.downloaded_bytes,
                             "total_bytes": sp.total_bytes,
@@ -738,7 +745,9 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                 .shared_state
                 .models
                 .locked_shards
-                .contains_key(&shard_id);
+                .get(&shard_id)
+                .map(|v| *v)
+                .unwrap_or(false);
             let mut shard_json = serde_json::json!({
                 "index": shard.index,
                 "size_bytes": shard.size_bytes,

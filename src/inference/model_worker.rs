@@ -555,6 +555,8 @@ async fn handle_generate(
     let (mut next_token, mut token_logprob) =
         crate::inference::tensor_util::sample_token_with_logprob(&logits, &gen.sampling)?;
 
+    // SYNC: token loop logic must match executor.rs generate_stream_inner.
+    // Changes to EOS/stop handling must be applied to both.
     let eos = model.eos_tokens().to_vec();
     let stop_sequences = &gen.sampling.stop;
     let mut generated: Vec<u32> = Vec::new();

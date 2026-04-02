@@ -311,6 +311,8 @@ impl ModelExecutor {
         // Auto-regressive generation loop
         let mut completion_tokens = 0u32;
         let mut cur_pos = tokens.len();
+        // SYNC: token loop logic must match model_worker.rs handle_generate.
+        // Changes to EOS/stop handling must be applied to both.
         let eos = model.token_eos();
         let stop_sequences = &params.stop;
         let mut accumulated_text = String::new();

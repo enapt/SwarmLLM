@@ -52,6 +52,10 @@
     return Math.round(bytes / 1024) + ' KB';
   }
 
+  function formatDlProgress(dlBytes, totalBytes, pct) {
+    return formatBytes(dlBytes) + ' / ' + formatBytes(totalBytes) + ' (' + pct + '%)';
+  }
+
   function formatSpeed(bytesPerSec) {
     if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
     if (bytesPerSec >= 1024) return Math.round(bytesPerSec / 1024) + ' KB/s';
@@ -409,6 +413,7 @@
     formatUptime: formatUptime,
     formatMB: formatMB,
     formatBytes: formatBytes,
+    formatDlProgress: formatDlProgress,
     formatSpeed: formatSpeed,
     formatEta: formatEta,
     timeAgo: timeAgo,
