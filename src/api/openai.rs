@@ -2121,23 +2121,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelListRespons
         let manifest = state
             .shared_state
             .model_registry
-            .get_manifest(&crate::types::ModelId(slug.clone()))
-            .or_else(|| {
-                state
-                    .shared_state
-                    .model_registry
-                    .get_manifest(&crate::types::ModelId(info.name.clone()))
-            })
-            .or_else(|| {
-                // Match by manifest name field (auto-manage sets loaded_model_info.name
-                // from manifest.name, but registry key is manifest.id)
-                state
-                    .shared_state
-                    .model_registry
-                    .models()
-                    .into_iter()
-                    .find(|m| m.name == info.name)
-            });
+            .resolve_manifest_by_name(&info.name);
 
         let model_id = if let Some(ref m) = manifest {
             seen.insert(m.id.0.clone());

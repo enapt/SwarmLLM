@@ -401,26 +401,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
             let slug = crate::types::slugify_model_name(&info.name);
             seen_ids.insert(slug.clone());
 
-            let mid = crate::types::ModelId(info.name.clone());
             let manifest = state
                 .shared_state
                 .model_registry
-                .get_manifest(&mid)
-                .or_else(|| {
-                    // Try slug form (registry may use "qwen2.5-coder-7b-instruct" not display name)
-                    let slug_id = crate::types::ModelId(slug.clone());
-                    state.shared_state.model_registry.get_manifest(&slug_id)
-                })
-                .or_else(|| {
-                    // Try matching by manifest `name` field (auto-manage sets loaded_model_info.name
-                    // from manifest.name, but the registry key is manifest.id which may differ)
-                    state
-                        .shared_state
-                        .model_registry
-                        .models()
-                        .into_iter()
-                        .find(|m| m.name == info.name)
-                });
+                .resolve_manifest_by_name(&info.name);
 
             // Mark the manifest's actual registry ID as seen to prevent duplicates
             // in section 2 (which iterates by manifest.id)
@@ -1063,6 +1047,7 @@ pub async fn unload_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     // SEC: Reject mmproj sentinel index
     if shard_index == u32::MAX {
         return Err(ApiError(crate::error::SwarmError::Validation(
@@ -1192,6 +1177,7 @@ pub async fn load_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     // SEC: Reject mmproj sentinel index
     if shard_index == u32::MAX {
         return Err(ApiError(crate::error::SwarmError::Validation(
@@ -1489,6 +1475,7 @@ pub async fn download_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     if shard_index == u32::MAX {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Reserved shard index".into(),

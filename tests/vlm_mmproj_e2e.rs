@@ -28,7 +28,7 @@ fn vlm_mmproj_load_and_encode() {
         vision_module.encoder.config().vision_num_layers,
         vision_module.encoder.config().projection_dim,
     );
-    eprintln!("Tokens per image: {}", vision_module.tokens_per_image());
+    eprintln!("Tokens per image: {}", vision_module.num_image_tokens());
 
     // Create a test image (red square on white background)
     let size = vision_module.encoder.config().image_size;
@@ -60,7 +60,7 @@ fn vlm_mmproj_load_and_encode() {
         embeddings.dims()
     );
 
-    let num_tokens = vision_module.tokens_per_image();
+    let num_tokens = vision_module.num_image_tokens();
     let llm_hidden = vision_module.projection.llm_hidden_dim();
     assert_eq!(
         embeddings.dims(),

@@ -38,7 +38,7 @@ const RING_MIN_TP_SIZE: u32 = 4;
 
 /// Strategy for performing allreduce across TP ranks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AllReduceStrategy {
+enum AllReduceStrategy {
     /// Star: all ranks → coordinator → broadcast. Good for small groups.
     Star,
     /// Ring: scatter-reduce + allgather. Bandwidth-optimal for large groups.
@@ -58,7 +58,7 @@ fn choose_allreduce_strategy(tp_size: u32, tensor_elements: usize) -> AllReduceS
 
 /// Phase of the ring allreduce algorithm.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RingPhase {
+enum RingPhase {
     /// Scatter-reduce: accumulate partial sums in chunks around the ring.
     ScatterReduce,
     /// Allgather: propagate fully-reduced chunks around the ring.
@@ -67,7 +67,7 @@ pub enum RingPhase {
 
 /// One communication step in the ring allreduce.
 #[derive(Clone, Debug)]
-pub struct RingAllReduceStep {
+struct RingAllReduceStep {
     /// Step index within the phase (0..n-1).
     pub step: usize,
     /// Phase.

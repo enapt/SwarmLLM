@@ -172,6 +172,14 @@ impl ModelRegistry {
         self.manifests.get(model_id).map(|v| v.clone())
     }
 
+    /// Resolve a manifest for a loaded model by trying slug, display name, and manifest name field.
+    pub fn resolve_manifest_by_name(&self, display_name: &str) -> Option<ModelManifest> {
+        let slug = crate::types::slugify_model_name(display_name);
+        self.get_manifest(&ModelId(slug))
+            .or_else(|| self.get_manifest(&ModelId(display_name.to_string())))
+            .or_else(|| self.models().into_iter().find(|m| m.name == display_name))
+    }
+
     /// Human-friendly display name for a model (falls back to raw model ID).
     pub fn display_name(&self, model_id: &ModelId) -> String {
         self.manifests

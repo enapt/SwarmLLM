@@ -8,12 +8,37 @@ use crate::pool::types::{PoolAcceptance, PoolCreditForward, PoolId, PoolInvitati
 use crate::types::NodeId;
 
 // Domain-separated BLAKE3 prefixes per the plan.
+const PREFIX_POOL_CREATE: &[u8] = b"pool_create_v1";
+const PREFIX_MEMBER_LEFT: &[u8] = b"pool_member_left_v1";
 const PREFIX_INVITATION: &[u8] = b"pool_invitation_v1";
 const PREFIX_ACCEPTANCE: &[u8] = b"pool_acceptance_v1";
 const PREFIX_REMOVAL: &[u8] = b"pool_removal_v1";
 const PREFIX_CREDIT_FORWARD: &[u8] = b"pool_credit_forward_v1";
 #[cfg(test)]
 const PREFIX_BLIND_INVITE: &[u8] = b"pool_blind_invite_v1";
+
+/// BLAKE3 payload for pool creation (sign + verify).
+pub(crate) fn pool_create_payload(
+    owner_id: &NodeId,
+    name: &str,
+    created_at: &chrono::DateTime<chrono::Utc>,
+) -> Vec<u8> {
+    let mut h = blake3::Hasher::new();
+    h.update(PREFIX_POOL_CREATE);
+    h.update(&owner_id.0);
+    h.update(name.as_bytes());
+    h.update(created_at.to_rfc3339().as_bytes());
+    h.finalize().as_bytes().to_vec()
+}
+
+/// BLAKE3 payload for member-left notice (sign + verify).
+pub(crate) fn member_left_payload(pool_id: &PoolId, node_id: &NodeId) -> Vec<u8> {
+    let mut h = blake3::Hasher::new();
+    h.update(PREFIX_MEMBER_LEFT);
+    h.update(&pool_id.0);
+    h.update(&node_id.0);
+    h.finalize().as_bytes().to_vec()
+}
 
 /// Create a pool invitation signed by the pool owner.
 pub fn create_invitation(
@@ -280,7 +305,11 @@ fn invitation_payload(
     hasher.finalize().as_bytes().to_vec()
 }
 
-fn acceptance_payload(invitation_id: &uuid::Uuid, pool_id: &PoolId, invitee: &NodeId) -> Vec<u8> {
+pub(crate) fn acceptance_payload(
+    invitation_id: &uuid::Uuid,
+    pool_id: &PoolId,
+    invitee: &NodeId,
+) -> Vec<u8> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(PREFIX_ACCEPTANCE);
     hasher.update(invitation_id.as_bytes());

@@ -490,11 +490,6 @@ impl VisionModule {
 
         Ok(result)
     }
-
-    /// Number of embedding tokens each image produces.
-    pub fn tokens_per_image(&self) -> usize {
-        self.encoder.num_vision_tokens()
-    }
 }
 
 /// Merge vision embeddings with text token embeddings for multimodal forward pass.

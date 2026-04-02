@@ -254,14 +254,7 @@ impl PoolManager {
         let now = chrono::Utc::now();
 
         // Sign the pool creation
-        let payload = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"pool_create_v1");
-            h.update(&my_id.0);
-            h.update(name.as_bytes());
-            h.update(now.to_rfc3339().as_bytes());
-            h.finalize().as_bytes().to_vec()
-        };
+        let payload = super::crypto::pool_create_payload(&my_id, &name, &now);
         let sig = self.shared_state.identity.sign(&payload);
 
         let state = PoolState {
@@ -546,13 +539,7 @@ impl PoolManager {
 
         // Broadcast signed member-left notice
         let my_id = self.shared_state.identity.node_id().clone();
-        let leave_payload = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"pool_member_left_v1");
-            h.update(&pool_id.0);
-            h.update(&my_id.0);
-            h.finalize().as_bytes().to_vec()
-        };
+        let leave_payload = super::crypto::member_left_payload(&pool_id, &my_id);
         let leave_signature = self.shared_state.identity.sign(&leave_payload);
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::MemberLeft {
             pool_id,
@@ -697,14 +684,8 @@ impl PoolManager {
             }
         };
         // Reconstruct the pool creation signing payload and verify
-        let payload = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"pool_create_v1");
-            h.update(&state.pool_id.0);
-            h.update(state.name.as_bytes());
-            h.update(state.created_at.to_rfc3339().as_bytes());
-            h.finalize().as_bytes().to_vec()
-        };
+        let payload =
+            super::crypto::pool_create_payload(&state.pool_id, &state.name, &state.created_at);
         let sig_bytes: &[u8; 64] = match state.owner_signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => {
@@ -759,14 +740,11 @@ impl PoolManager {
                 }
             };
             // Verify the acceptance signature using the acceptance payload
-            let acceptance_payload = {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"pool_acceptance_v1");
-                hasher.update(member.invitation_id.as_bytes());
-                hasher.update(&state.pool_id.0);
-                hasher.update(&member.node_id.0);
-                hasher.finalize().as_bytes().to_vec()
-            };
+            let acceptance_payload = super::crypto::acceptance_payload(
+                &member.invitation_id,
+                &state.pool_id,
+                &member.node_id,
+            );
             let sig_bytes: &[u8; 64] = match member.acceptance_signature.as_slice().try_into() {
                 Ok(b) => b,
                 Err(_) => {
@@ -1027,13 +1005,7 @@ impl PoolManager {
                 return;
             }
         };
-        let payload = {
-            let mut h = blake3::Hasher::new();
-            h.update(b"pool_member_left_v1");
-            h.update(&pool_id.0);
-            h.update(&node_id.0);
-            h.finalize().as_bytes().to_vec()
-        };
+        let payload = super::crypto::member_left_payload(&pool_id, &node_id);
         let sig_bytes: &[u8; 64] = match signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => {
