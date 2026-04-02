@@ -541,6 +541,7 @@ impl PoolManager {
         let my_id = self.shared_state.identity.node_id().clone();
         let leave_payload = super::crypto::member_left_payload(&pool_id, &my_id);
         let leave_signature = self.shared_state.identity.sign(&leave_payload);
+        let pool_id_short = hex::encode(&pool_id.0[..8]);
         let msg = SwarmMessage::PoolMessage(crate::types::PoolMessage::MemberLeft {
             pool_id,
             node_id: my_id,
@@ -548,7 +549,7 @@ impl PoolManager {
         });
         let _ = self.network_tx.send(NetworkCommand::Broadcast(msg)).await;
 
-        tracing::info!("Left device pool");
+        tracing::info!(pool_id = %pool_id_short, "Left device pool");
 
         self.shared_state.emit_activity(
             crate::daemon::state::ActivityEvent::new(
@@ -759,11 +760,20 @@ impl PoolManager {
             }
         }
 
-        // Store in registry for network-wide visibility
-        self.shared_state
-            .credits
-            .pool_registry
-            .insert(state.pool_id.clone(), state);
+        // Store in registry for network-wide visibility (cap to prevent unbounded growth from gossip)
+        const MAX_POOL_REGISTRY: usize = 1_000;
+        if self.shared_state.credits.pool_registry.len() < MAX_POOL_REGISTRY
+            || self
+                .shared_state
+                .credits
+                .pool_registry
+                .contains_key(&state.pool_id)
+        {
+            self.shared_state
+                .credits
+                .pool_registry
+                .insert(state.pool_id.clone(), state);
+        }
     }
 
     /// SEC-M18: Handle a blinded invitation broadcast.
@@ -1241,7 +1251,7 @@ impl PoolManager {
         // we only auto-accept if it matches this specific join request.
         self.auto_accept_code_hash = Some(code_hash);
 
-        tracing::info!("Broadcast pool join request with invite code (auto-accept enabled)");
+        tracing::info!(code_hash = %hex::encode(code_hash), "Broadcast pool join request with invite code (auto-accept enabled)");
         Ok(())
     }
 

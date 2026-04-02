@@ -1324,6 +1324,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 ## Deferred Items
 
 - **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses
+- **Local executor streaming serialization**: `executor.lock().await` in openai.rs/anthropic.rs holds the Mutex for the entire streaming inference duration, serializing concurrent local streaming requests. Fix: route local streaming through `ModelProcessPool` (consistent with non-streaming path), or add concurrency documentation. Only affects the legacy single-GGUF executor path; split-model and distributed paths are unaffected.
 
 ## Scalability (Phase 19)
 

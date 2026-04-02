@@ -86,58 +86,23 @@ pub async fn stats(State(state): State<AppState>) -> Json<serde_json::Value> {
         .unwrap_or_else(|_| serde_json::json!({}));
 
     // Inference performance metrics from latency samples
-    let inference_perf = {
-        let samples = state.shared_state.metrics.inference_latency_samples.read();
-        match samples {
-            Err(_) => {
-                tracing::warn!(
-                    module = "admin",
-                    "inference_latency_samples lock poisoned — skipping perf metrics"
-                );
-                serde_json::json!({
-                    "total_requests": state.shared_state.metrics.inference_requests_total
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    "avg_latency_ms": null,
-                    "samples": 0,
-                })
-            }
-            Ok(s) if !s.is_empty() => {
-                let count = s.len();
-                let sum: f64 = s.iter().sum();
-                let avg_ms = (sum / count as f64) * 1000.0;
-                let min_ms = s.iter().cloned().fold(f64::INFINITY, f64::min) * 1000.0;
-                let max_ms = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 1000.0;
-                // p50 / p95 / p99
-                let mut sorted: Vec<f64> = s.iter().cloned().collect();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let p50_ms = sorted[(count - 1) / 2] * 1000.0;
-                let p95_ms = sorted[((count as f64 * 0.95).ceil() as usize)
-                    .saturating_sub(1)
-                    .min(count - 1)]
-                    * 1000.0;
-                let p99_ms = sorted[((count as f64 * 0.99).ceil() as usize)
-                    .saturating_sub(1)
-                    .min(count - 1)]
-                    * 1000.0;
-                serde_json::json!({
-                    "total_requests": state.shared_state.metrics.inference_requests_total
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                    "avg_latency_ms": (avg_ms * 10.0).round() / 10.0,
-                    "min_latency_ms": (min_ms * 10.0).round() / 10.0,
-                    "max_latency_ms": (max_ms * 10.0).round() / 10.0,
-                    "p50_latency_ms": (p50_ms * 10.0).round() / 10.0,
-                    "p95_latency_ms": (p95_ms * 10.0).round() / 10.0,
-                    "p99_latency_ms": (p99_ms * 10.0).round() / 10.0,
-                    "samples": count,
-                })
-            }
-            _ => serde_json::json!({
-                "total_requests": state.shared_state.metrics.inference_requests_total
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                "avg_latency_ms": null,
-                "samples": 0,
-            }),
-        }
+    let inference_perf = match crate::api::metrics::compute_latency_stats(&state.shared_state) {
+        Some(ls) => serde_json::json!({
+            "total_requests": ls.total_requests,
+            "avg_latency_ms": ls.avg_ms,
+            "min_latency_ms": ls.min_ms,
+            "max_latency_ms": ls.max_ms,
+            "p50_latency_ms": ls.p50_ms,
+            "p95_latency_ms": ls.p95_ms,
+            "p99_latency_ms": ls.p99_ms,
+            "samples": ls.count,
+        }),
+        None => serde_json::json!({
+            "total_requests": state.shared_state.metrics.inference_requests_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "avg_latency_ms": null,
+            "samples": 0,
+        }),
     };
 
     Json(serde_json::json!({

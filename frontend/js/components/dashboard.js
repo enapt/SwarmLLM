@@ -24,6 +24,30 @@
   // Kinds that go to the network ticker on model cards
   var MODEL_NET_KINDS = { 'shard_announced': 1, 'peer_connected': 1, 'peer_disconnected': 1, 'rebalance_peer_left': 1 };
 
+  /**
+   * Build a download progress bar HTML string.
+   * @param {Object} opts
+   * @param {string} opts.safeId - CSS-safe model ID for data attributes
+   * @param {number} opts.pct - Download percentage (0-100)
+   * @param {string} opts.label - Left-side label text
+   * @param {string} opts.rightText - Right-side text (bytes, speed, etc.)
+   * @param {string} [opts.barContent] - Inner bar HTML (segments or fill); defaults to dl-fill
+   * @param {string} [opts.cancelBtn] - Optional cancel button HTML appended to right text
+   */
+  function _buildProgressBar(opts) {
+    var bar = opts.barContent || '<div class="dl-fill" style="width:' + opts.pct + '%"></div>';
+    var right = opts.cancelBtn
+      ? '<span style="display:flex;align-items:center;gap:8px"><span class="mono dl-progress-text">' + opts.rightText + '</span>' + opts.cancelBtn + '</span>'
+      : '<span class="mono dl-progress-text">' + opts.rightText + '</span>';
+    return '<div class="dl-progress" data-model-progress="' + opts.safeId + '" data-last-pct="' + opts.pct + '">' +
+      '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
+      '<span class="text-muted">' + opts.label + '</span>' +
+      right +
+      '</div>' +
+      '<div class="dl-bar">' + bar + '</div>' +
+      '</div>';
+  }
+
   function _persistModelEvents() {
     try {
       var slim = {};
@@ -732,15 +756,9 @@
             shardLabel = (triggerText ? triggerText + ': ' : '') + I18n.t('dashboard.downloading_label') + dlShardIdx + (sourceText ? ' ' + sourceText : '') + I18n.t('dashboard.downloading_local', { local: localNow, total: shardCount });
           }
           var rightText = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)';
-          if (speed > 0) rightText += ' &middot; ' + U.formatSpeed(speed);
+          if (speed > 0) rightText += ' \u00b7 ' + U.formatSpeed(speed);
           if (etaStr) rightText += I18n.t('dashboard.eta', { eta: etaStr });
-          progressHtml = '<div class="dl-progress" data-model-progress="' + safeId + '" data-last-pct="' + pct + '">' +
-            '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-            '<span class="text-muted">' + shardLabel + '</span>' +
-            '<span class="mono dl-progress-text">' + rightText + '</span>' +
-            '</div>' +
-            '<div class="dl-bar">' + (segmentsHtml || '<div class="dl-fill" style="width:' + pct + '%"></div>') + '</div>' +
-            '</div>';
+          progressHtml = _buildProgressBar({ safeId: safeId, pct: pct, label: shardLabel, rightText: rightText, barContent: segmentsHtml });
         }
 
         // Per-shard download bars
@@ -1119,16 +1137,10 @@
               var pct2 = Math.min(100, Math.round((dlBytes2 / acq.total_bytes) * 100));
               var speed2 = acq.speed_bytes_per_sec || 0;
               var shardLabel2 = acq.downloaded_shards !== undefined ? I18n.t('dashboard.shard_progress_label', { dl: acq.downloaded_shards, total: acq.total_shards || '?' }) : I18n.t('dashboard.downloading_label');
-              var progDiv = document.createElement('div');
-              progDiv.className = 'dl-progress';
-              progDiv.setAttribute('data-model-progress', safeId);
-              progDiv.setAttribute('data-last-pct', '' + pct2);
-              progDiv.innerHTML =
-                '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-                '<span class="text-muted">' + shardLabel2 + '</span>' +
-                '<span class="mono dl-progress-text">' + U.formatBytes(dlBytes2) + ' / ' + U.formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' +
-                (speed2 > 0 ? ' \u2014 ' + U.formatSpeed(speed2) : '') + '</span></div>' +
-                '<div class="dl-bar"><div class="dl-fill" style="width:' + pct2 + '%"></div></div>';
+              var rightText2 = U.formatBytes(dlBytes2) + ' / ' + U.formatBytes(acq.total_bytes) + ' (' + pct2 + '%)' + (speed2 > 0 ? ' \u2014 ' + U.formatSpeed(speed2) : '');
+              var progWrapper = document.createElement('div');
+              progWrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct2, label: shardLabel2, rightText: rightText2 });
+              var progDiv = progWrapper.firstChild;
               card.appendChild(progDiv);
               if (!card.classList.contains('downloading')) {
                 card.classList.remove('partial');
@@ -1438,15 +1450,11 @@
       }
 
       var speedStr = speed > 0 ? ' - ' + U.formatSpeed(speed) : '';
-      progressEl.innerHTML =
-        '<div class="flex-between" style="font-size:0.75rem;margin-bottom:3px">' +
-        '<span class="text-muted">' + U.escapeHtml(I18n.t('dashboard.downloading_data')) + '</span>' +
-        '<span style="display:flex;align-items:center;gap:8px">' +
-          '<span class="mono dl-progress-text">' + U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr + '</span>' +
-          '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.cancel_label')) + '</button>' +
-        '</span>' +
-        '</div>' +
-        '<div class="dl-bar"><div class="dl-fill" style="width:' + pct + '%"></div></div>';
+      var cancelBtn = '<button class="btn btn-sm" style="padding:1px 6px;font-size:0.7rem;line-height:1.2" data-cancel-download="' + U.escapeHtml(modelId) + '" title="' + U.escapeHtml(I18n.t('dashboard.cancel_download')) + '">&times; ' + U.escapeHtml(I18n.t('dashboard.cancel_label')) + '</button>';
+      var rightText3 = U.formatBytes(dlBytes) + ' / ' + U.formatBytes(totalBytes) + ' (' + pct + '%)' + speedStr;
+      var wrapper = document.createElement('div');
+      wrapper.innerHTML = _buildProgressBar({ safeId: safeId, pct: pct, label: U.escapeHtml(I18n.t('dashboard.downloading_data')), rightText: rightText3, cancelBtn: cancelBtn });
+      progressEl.innerHTML = wrapper.firstChild.innerHTML;
 
       var oldPanel = document.getElementById('acq-panel-' + safeId);
       if (oldPanel) oldPanel.remove();

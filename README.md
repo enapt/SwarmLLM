@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 649 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 653 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -276,7 +276,7 @@ Key source directories:
 - `src/pool/` — device pool management, crypto, credit forwarding
 - `frontend/` — vanilla HTML/CSS/JS dashboard (13 component JS files, 13 HTML templates, 21 language translations)
 
-649 tests (581 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+653 tests (581 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -623,7 +623,7 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 649 tests
+cargo test                # 653 tests
 cargo clippy -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```

@@ -123,6 +123,63 @@ pub(crate) fn count_local_shards(shared: &crate::daemon::SharedState) -> usize {
     count
 }
 
+/// Precomputed latency statistics from the inference latency sample buffer.
+pub(crate) struct LatencyStats {
+    pub total_requests: u64,
+    pub count: usize,
+    pub avg_ms: f64,
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+}
+
+/// Compute latency percentile statistics from the shared inference sample buffer.
+/// Returns `None` if the lock is poisoned or there are no samples.
+pub(crate) fn compute_latency_stats(shared: &crate::daemon::SharedState) -> Option<LatencyStats> {
+    let total_requests = shared
+        .metrics
+        .inference_requests_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let samples = match shared.metrics.inference_latency_samples.read() {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("inference_latency_samples lock poisoned — skipping stats");
+            return None;
+        }
+    };
+    if samples.is_empty() {
+        return None;
+    }
+    let count = samples.len();
+    let sum: f64 = samples.iter().sum();
+    let avg_ms = (sum / count as f64) * 1000.0;
+    let min_ms = samples.iter().cloned().fold(f64::INFINITY, f64::min) * 1000.0;
+    let max_ms = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max) * 1000.0;
+    let mut sorted: Vec<f64> = samples.iter().cloned().collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50_ms = sorted[(count - 1) / 2] * 1000.0;
+    let p95_ms = sorted[((count as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(count - 1)]
+        * 1000.0;
+    let p99_ms = sorted[((count as f64 * 0.99).ceil() as usize)
+        .saturating_sub(1)
+        .min(count - 1)]
+        * 1000.0;
+    Some(LatencyStats {
+        total_requests,
+        count,
+        avg_ms: (avg_ms * 10.0).round() / 10.0,
+        min_ms: (min_ms * 10.0).round() / 10.0,
+        max_ms: (max_ms * 10.0).round() / 10.0,
+        p50_ms: (p50_ms * 10.0).round() / 10.0,
+        p95_ms: (p95_ms * 10.0).round() / 10.0,
+        p99_ms: (p99_ms * 10.0).round() / 10.0,
+    })
+}
+
 fn write_gauge(buf: &mut String, name: &str, help: &str, value: f64) {
     let _ = writeln!(buf, "# HELP {name} {help}");
     let _ = writeln!(buf, "# TYPE {name} gauge");
