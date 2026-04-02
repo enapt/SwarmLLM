@@ -10,7 +10,7 @@ Decentralized peer-to-peer LLM inference network. A single Rust binary that shar
 
 **Join the swarm. Run AI together — for free.**
 
-> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node Proxmox deployments on real networks. 650 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
+> **Status:** Alpha — actively developed. Distributed inference stable, tested across multi-node deployments on real networks. 649 tests, comprehensive security auditing. [Report issues](https://github.com/enapt/SwarmLLM/issues).
 
 ---
 
@@ -88,7 +88,7 @@ SwarmLLM distributes transformer model layers across a pool of peer-to-peer node
 - **No central server** — fully peer-to-peer with no single point of failure
 - **No accounts or subscriptions** — just a cryptographic identity (Ed25519 keypair)
 - **Zero configuration** — nodes find each other automatically via mDNS, peer cache, and peer exchange
-- **Single binary, zero dependencies** — one ~43MB Rust binary. No Python, no Docker, no runtime installs
+- **Single binary, zero dependencies** — one ~47MB Rust binary. No Python, no Docker, no runtime installs
 - **BitTorrent-inspired incentives** — contribute compute, earn priority access
 - **OpenAI + Anthropic + MCP compatible** — drop-in replacement for any tool that speaks OpenAI, Claude, or MCP
 
@@ -227,7 +227,7 @@ SwarmLLM uses a 5-layer discovery stack — no manual configuration needed:
 
 ## Architecture
 
-Single Rust binary (~43MB release), three simultaneous functions:
+Single Rust binary (~47MB release), three simultaneous functions:
 
 | Component | Responsibility | Interface |
 |-----------|---------------|-----------|
@@ -235,7 +235,7 @@ Single Rust binary (~43MB release), three simultaneous functions:
 | LLM API Server | OpenAI + Anthropic + MCP inference endpoints | `localhost:8800/v1/*` |
 | Management UI | Dashboard, settings, model browser, chat | `localhost:8800/admin` |
 
-Internally, the daemon runs 10 async Tokio tasks communicating via channels:
+Internally, the daemon runs 11 async Tokio tasks communicating via channels:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -247,7 +247,8 @@ Internally, the daemon runs 10 async Tokio tasks communicating via channels:
 │       │                    │                   │                      │
 │  PoolManager        AutoShardManager    ShardRebalancer               │
 │       │                    │                   │                      │
-│  AcquisitionManager ───────┴───────────────────┘                     │
+│  AcquisitionManager    UpdateChecker                                 │
+│       └────────────────────┴───────────────────┘                     │
 │                                                                      │
 │              All connected via mpsc channels                         │
 │              Shared state via Arc<SharedState> + DashMap              │
@@ -256,12 +257,12 @@ Internally, the daemon runs 10 async Tokio tasks communicating via channels:
 
 ### Codebase
 
-Cargo workspace with 3 crates, 92 Rust source files (~64K lines), plus vanilla frontend (~8.5K lines HTML/CSS/JS):
+Cargo workspace with 3 crates, 107 Rust source files (~73K lines), plus vanilla frontend (~13K lines HTML/CSS/JS):
 
 | Crate | Path | Purpose |
 |-------|------|---------|
 | `swarmllm` | `/` (root) | Main binary — daemon, networking, inference, API, all subsystems |
-| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (69 types: NodeId, ModelManifest, SwarmMessage, etc.) |
+| `swarmllm-types` | `crates/swarmllm-types/` | Shared data types (75 types: NodeId, ModelManifest, SwarmMessage, etc.) |
 | `swarmllm-frontend` | `crates/swarmllm-frontend/` | Frontend asset serving (embedded in release, disk-based in dev mode) |
 
 Key source directories:
@@ -273,9 +274,9 @@ Key source directories:
 - `src/credit/` — ledger, transactions, priority tiers, anti-gaming, trust, escrow
 - `src/crypto/` — session encryption, pipeline sealing, gossip sealing, key rotation, provider key encryption
 - `src/pool/` — device pool management, crypto, credit forwarding
-- `frontend/` — vanilla HTML/CSS/JS dashboard (13 component JS files, 13 HTML templates, 20 language translations)
+- `frontend/` — vanilla HTML/CSS/JS dashboard (13 component JS files, 13 HTML templates, 21 language translations)
 
-650 tests (582 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
+649 tests (581 unit + 22 integration + 31 module + 14 yamux + 1 VLM E2E), all passing, clippy clean.
 
 ## Node Tiers
 
@@ -389,7 +390,7 @@ docker compose -f docker-compose.dev.yml up
 
 ```bash
 # Requires Rust 1.80+
-cargo install --git https://github.com/enapt/SwarmLLM.git --tag v0.1.0
+cargo install --git https://github.com/enapt/SwarmLLM.git
 swarmllm run
 ```
 
@@ -550,7 +551,7 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Rust (2021 edition), ~64K lines across 92 source files |
+| Language | Rust (2021 edition), ~73K lines across 107 source files |
 | Async Runtime | Tokio (multi-threaded) |
 | Networking | libp2p 0.55 (TCP+Yamux + QUIC + mDNS + Kademlia + GossipSub) |
 | Serialization | serde_json (API), binary with type-tag (tensors), zstd compression |
@@ -559,14 +560,14 @@ Plus ~50 more admin routes for downloads, providers, adapters, identity, pools, 
 | Database | redb v3 (embedded, ACID) |
 | Cryptography | Ed25519 (identity), X25519 + ChaCha20-Poly1305 (E2E), BLAKE3 (integrity) |
 | Monitoring | Prometheus + Grafana (dashboards included) |
-| Frontend | Vanilla HTML/CSS/JS, 21 languages, light/dark/system theme, ~8.5K lines |
+| Frontend | Vanilla HTML/CSS/JS, 21 languages, light/dark/system theme, ~13K lines |
 | SDK | Python, JS/TS, LangChain, LlamaIndex |
 
 ## How SwarmLLM Compares
 
 | Feature | SwarmLLM | Petals | Exo | Bittensor |
 |---------|----------|--------|-----|-----------|
-| **Language** | Rust (single ~43MB binary) | Python | Python | Python + Substrate |
+| **Language** | Rust (single ~47MB binary) | Python | Python | Python + Substrate |
 | **Install** | Download & run | pip install | pip/source/macOS app | pip + blockchain setup |
 | **Scale** | LAN + WAN + Tailscale/WireGuard (zero config) | Internet (volunteer) | LAN + Tailscale (manual) | Internet (blockchain) |
 | **E2E Encryption** | **X25519 + ChaCha20 + forward secrecy** | **None** — peers can see your prompts | **None** | Minimal (blockchain-level) |
@@ -605,7 +606,7 @@ See the full [mdBook documentation](docs/book/) for detailed guides on networkin
 
 SwarmLLM was developed collaboratively between a human developer and Claude (Anthropic's AI). The entire codebase — Rust backend, JavaScript frontend, P2P networking, distributed inference pipeline, credit system, security hardening, and documentation — was written by Claude Code across 20+ build phases. The human developer provided architecture direction, testing, and review, but zero lines of code were manually written.
 
-This is an honest disclosure. The project has been through rigorous quality assurance — 654 passing tests, continuous security auditing, dozens of parallel multi-agent code sweeps, and multi-node distributed inference tested across Proxmox VMs on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
+This is an honest disclosure. The project has been through rigorous quality assurance — 649 passing tests, continuous security auditing, dozens of parallel multi-agent code sweeps, and multi-node distributed inference tested on real networks. Every commit passes `cargo fmt`, `cargo clippy -- -D warnings`, and the full test suite before push.
 
 We believe AI-assisted development should be transparent. Judge the code on its technical merit — contributions, scrutiny, and feedback are all welcome.
 
@@ -620,7 +621,7 @@ Contributions are welcome! Whether it's bug reports, feature ideas, code, or doc
 ```bash
 # Quick dev setup
 git clone https://github.com/enapt/SwarmLLM.git && cd SwarmLLM
-cargo test                # 650 tests
+cargo test                # 649 tests
 cargo clippy -- -D warnings  # Zero warnings policy
 cargo run -- run          # Start a node
 ```
