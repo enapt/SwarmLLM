@@ -303,7 +303,7 @@ pub async fn reload_config(
     if changed {
         tracing::info!(?params, "Config reloaded with changes via API");
     } else {
-        tracing::info!("Config reloaded via API — no changes detected");
+        tracing::info!(path = %config_path.display(), "Config reloaded via API — no changes detected");
     }
 
     Ok(Json(serde_json::json!({

@@ -1979,11 +1979,19 @@ impl SplitModel {
             Device::cuda_if_available(0).unwrap_or(Device::Cpu)
         };
         if device.is_cuda() {
-            tracing::info!("Split model using CUDA GPU");
+            tracing::info!(layer_start, layer_end, "Split model using CUDA GPU");
         } else if force_cpu {
-            tracing::info!("Split model using CPU (GPU OOM fallback)");
+            tracing::info!(
+                layer_start,
+                layer_end,
+                "Split model using CPU (GPU OOM fallback)"
+            );
         } else {
-            tracing::info!("Split model using CPU (no CUDA available)");
+            tracing::info!(
+                layer_start,
+                layer_end,
+                "Split model using CPU (no CUDA available)"
+            );
         }
 
         Self::load_model_from_content(

@@ -118,7 +118,7 @@
       var cardTmpl = document.getElementById('tmpl-compare-card');
       App.compare.selected.forEach(function(modelId) {
         var card = cardTmpl.content.cloneNode(true).firstElementChild;
-        card.id = 'compare-card-' + modelId.replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.id = 'compare-card-' + U.safeId(modelId);
         card.querySelector('.compare-card-model').textContent = modelId;
         card.querySelector('.compare-card-model').title = modelId;
         card.querySelector('.compare-card-status').innerHTML = '<span class="spinner" style="width:14px;height:14px"></span>';
@@ -241,7 +241,7 @@
       var rCardTmpl = document.getElementById('tmpl-compare-card');
       item.results.forEach(function(r) {
         var card = rCardTmpl.content.cloneNode(true).firstElementChild;
-        card.id = 'compare-card-' + r.model.replace(/[^a-zA-Z0-9_-]/g, '_');
+        card.id = 'compare-card-' + U.safeId(r.model);
         resultsDiv.appendChild(card);
         App.compare.renderCard({
           model: r.model, ok: r.ok, error: r.error,
@@ -258,7 +258,7 @@
     },
 
     renderCard: function(result) {
-      var cardId = 'compare-card-' + result.model.replace(/[^a-zA-Z0-9_-]/g, '_');
+      var cardId = 'compare-card-' + U.safeId(result.model);
       var card = document.getElementById(cardId);
       if (!card) return;
 
@@ -285,7 +285,7 @@
         outputTokens = (result.data.usage || {}).output_tokens || 0;
       }
 
-      var cardContentId = 'compare-content-' + result.model.replace(/[^a-zA-Z0-9_-]/g, '_');
+      var cardContentId = 'compare-content-' + U.safeId(result.model);
 
       var modelEl = card.querySelector('.compare-card-model');
       modelEl.textContent = result.model;

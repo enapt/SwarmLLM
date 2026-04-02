@@ -19,6 +19,22 @@ use serde_json::{json, Value};
 use super::{DEFAULT_MAX_TOKENS, DEFAULT_TOP_K};
 use crate::api::server::AppState;
 
+/// Collect results from spawned JoinHandles, converting join errors to error JSON.
+async fn collect_handle_results(
+    handles: Vec<tokio::task::JoinHandle<serde_json::Value>>,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
+            }
+        }
+    }
+    results
+}
+
 /// Extract text content and token usage from an Anthropic Messages API response body.
 fn extract_anthropic_response(body: &serde_json::Value) -> (String, u64, u64) {
     let content = body["content"]
@@ -847,16 +863,7 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         handles.push(handle);
     }
 
-    // Collect all results
-    let mut results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
-            }
-        }
-    }
+    let results = collect_handle_results(handles).await;
 
     let summary = json!({
         "prompt": prompt,
@@ -990,15 +997,7 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         handles.push(handle);
     }
 
-    let mut results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
-            }
-        }
-    }
+    let results = collect_handle_results(handles).await;
 
     let total_tokens: u64 = results
         .iter()
@@ -1144,15 +1143,7 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
         handles.push(handle);
     }
 
-    let mut results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => {
-                results.push(json!({"error": format!("Task failed: {e}"), "status": "error"}))
-            }
-        }
-    }
+    let results = collect_handle_results(handles).await;
 
     let successful = results.iter().filter(|r| r["status"] == "ok").count();
 

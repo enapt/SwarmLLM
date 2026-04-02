@@ -390,7 +390,7 @@ pub async fn hf_download(
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: "Cancelled by daemon shutdown".into(),
                     };
-                    entry.log.push("Cancelled by daemon shutdown".into());
+                    entry.log_push("Cancelled by daemon shutdown".into());
                 }
                 None
             }
@@ -455,7 +455,7 @@ pub async fn hf_download(
                             .acquisition_progress
                             .get_mut(&download_mid)
                         {
-                            entry.log.push(format!("Model loaded: {}", model_name));
+                            entry.log_push(format!("Model loaded: {}", model_name));
                         }
                         tracing::info!(model = %model_name, "HF model loaded for inference");
                     }
@@ -465,7 +465,7 @@ pub async fn hf_download(
                             .acquisition_progress
                             .get_mut(&download_mid)
                         {
-                            entry.log.push(format!("Model load failed: {}", e));
+                            entry.log_push(format!("Model load failed: {}", e));
                         }
                         tracing::error!(error = %e, "Failed to load HF model");
                     }
@@ -481,7 +481,7 @@ pub async fn hf_download(
                     entry.state =
                         crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
                     entry.failed_shards = 1;
-                    entry.log.push(format!("Download failed: {}", e));
+                    entry.log_push(format!("Download failed: {}", e));
                 }
                 download_shared.emit_activity(
                     crate::daemon::state::ActivityEvent::new(
@@ -673,6 +673,11 @@ pub async fn hf_download_shards(
     // Use provided model_id if it matches an existing model, otherwise derive from filename.
     // Always sanitize to prevent path traversal.
     let safe_name = if let Some(ref mid) = body.model_id {
+        if mid.len() > 256 {
+            return Err(ApiError(crate::error::SwarmError::Validation(
+                "model_id must be 256 characters or fewer".into(),
+            )));
+        }
         let sanitized = crate::model::shard::sanitize_path_component(mid);
         if crate::model::shard::model_dir(&state.config.node.data_dir, &sanitized).exists() {
             sanitized
@@ -834,7 +839,7 @@ pub async fn hf_download_shards(
                 .get_mut(&download_mid)
             {
                 entry.total_shards = 1;
-                entry.log.push(format!(
+                entry.log_push(format!(
                     "Seeding shard {seed_shard}/{total_shards} — auto-manage will acquire more as peers join"
                 ));
                 entry.shard_progress.insert(
@@ -865,7 +870,7 @@ pub async fn hf_download_shards(
                 .sum();
             entry.total_bytes = requested_bytes;
             // Don't overwrite total_shards — keep as the requested count, not the full model count
-            entry.log.push(format!(
+            entry.log_push(format!(
                 "Probed: {} shards, {:.1} MB total",
                 info.shard_count(),
                 info.total_size as f64 / (1024.0 * 1024.0)
@@ -897,7 +902,7 @@ pub async fn hf_download_shards(
             {
                 entry.state =
                     crate::model::acquisition::AcquisitionState::Failed { reason: e.clone() };
-                entry.log.push(format!("Header download failed: {}", e));
+                entry.log_push(format!("Header download failed: {}", e));
             }
             download_shared.emit_activity(
                 crate::daemon::state::ActivityEvent::new(
@@ -946,7 +951,7 @@ pub async fn hf_download_shards(
                 .acquisition_progress
                 .get_mut(&download_mid)
             {
-                entry.log.push(format!("Manifest generation failed: {e}"));
+                entry.log_push(format!("Manifest generation failed: {e}"));
             }
             // Continue with downloads anyway — manifest can be regenerated later
         }
@@ -1057,7 +1062,7 @@ pub async fn hf_download_shards(
                     entry.state = crate::model::acquisition::AcquisitionState::Failed {
                         reason: reason.to_string(),
                     };
-                    entry.log.push(reason.to_string());
+                    entry.log_push(reason.to_string());
                 }
                 // Clean up cancel flag
                 download_shared
@@ -1154,7 +1159,7 @@ pub async fn hf_download_shards(
                         .get_mut(&download_mid)
                     {
                         entry.downloaded_shards += 1;
-                        entry.log.push(format!("Shard {} downloaded", shard_idx));
+                        entry.log_push(format!("Shard {} downloaded", shard_idx));
                         // Mark this shard's progress as complete so check_and_load_model
                         // won't skip it as "still downloading"
                         if let Some(sp) = entry.shard_progress.get_mut(&shard_idx) {
@@ -1187,7 +1192,7 @@ pub async fn hf_download_shards(
                         .get_mut(&download_mid)
                     {
                         entry.failed_shards += 1;
-                        entry.log.push(format!("Shard {} failed: {}", shard_idx, e));
+                        entry.log_push(format!("Shard {} failed: {}", shard_idx, e));
                     }
                     download_shared.emit_activity(
                         crate::daemon::state::ActivityEvent::new(
@@ -1457,7 +1462,7 @@ pub async fn cancel_download(
         entry.state = crate::model::acquisition::AcquisitionState::Failed {
             reason: "Cancelled by user".to_string(),
         };
-        entry.log.push("Download cancelled by user".to_string());
+        entry.log_push("Download cancelled by user".to_string());
     }
 
     // Clean up partial .tmp files in the model directory

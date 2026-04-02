@@ -281,9 +281,9 @@ pub struct SharedState {
     pub split_model_index: DashMap<crate::types::ModelId, Vec<(usize, usize)>>,
     pub kv_cache_store: Arc<crate::inference::split::KvCacheStore>,
     pub gguf_meta: DashMap<crate::types::ModelId, crate::inference::split::GgufTensorMeta>,
-    /// Deferred: distributed streaming token routing. Currently unused — pipeline.rs
-    /// does not insert channels here yet. The dispatch handler and health monitor
-    /// cleanup are wired but dormant until distributed streaming is implemented.
+    /// Distributed streaming token routing. Consumer side (dispatch handler +
+    /// health monitor cleanup) is wired and runs. Producer side (pipeline.rs
+    /// inserting channels) is deferred — map is always empty until implemented.
     pub streaming_token_txs: DashMap<uuid::Uuid, mpsc::Sender<crate::types::StreamingToken>>,
     pub pending_layer_results:
         DashMap<uuid::Uuid, tokio::sync::oneshot::Sender<crate::types::LayerResult>>,

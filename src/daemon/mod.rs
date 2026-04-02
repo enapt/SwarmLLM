@@ -116,7 +116,7 @@ impl Daemon {
         let mut executor = crate::inference::executor::ModelExecutor::new();
         if let Some(ref model_path) = self.config.inference.model_path {
             match executor.load_model(model_path, self.config.inference.gpu_layers) {
-                Ok(()) => tracing::info!("Model ready"),
+                Ok(()) => tracing::info!(path = %model_path.display(), "Model ready"),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to load model — running without inference")
                 }

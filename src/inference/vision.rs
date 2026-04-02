@@ -862,7 +862,7 @@ pub fn load_from_mmproj_gguf(
     let proj2 = Linear::new(mm2_w, mm2_b);
     let projection = MultimodalProjection::new(proj1, proj2, llm_hidden_dim);
 
-    tracing::info!("VisionModule loaded from mmproj GGUF");
+    tracing::info!(llm_hidden_dim, "VisionModule loaded from mmproj GGUF");
 
     Ok(VisionModule {
         encoder,

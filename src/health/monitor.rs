@@ -553,6 +553,32 @@ impl HealthMonitor {
             }
         }
 
+        // region_shard_summaries: evict entries older than 10 minutes
+        const REGION_SUMMARY_TTL_MS: u64 = 600_000;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let stale_region: Vec<_> = self
+            .shared_state
+            .region_shard_summaries
+            .iter()
+            .filter(|entry| {
+                now_ms.saturating_sub(entry.value().timestamp_ms) > REGION_SUMMARY_TTL_MS
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        if !stale_region.is_empty() {
+            tracing::debug!(
+                count = stale_region.len(),
+                total = self.shared_state.region_shard_summaries.len(),
+                "DIAG: cleaning up stale region_shard_summaries"
+            );
+            for key in stale_region {
+                self.shared_state.region_shard_summaries.remove(&key);
+            }
+        }
+
         // active_relay_circuits: remove entries older than 1 hour (abnormally terminated)
         const RELAY_CIRCUIT_TTL_SECS: u64 = 3600;
         let stale_relay: Vec<_> = self

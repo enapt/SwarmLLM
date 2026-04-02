@@ -27,7 +27,7 @@
 
   // SEC: Safe DOM ID from arbitrary string (for element IDs derived from model IDs etc.)
   function safeId(str) {
-    return (str || '').replace(/[^a-zA-Z0-9]/g, '_');
+    return (str || '').replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
   function formatUptime(seconds) {
