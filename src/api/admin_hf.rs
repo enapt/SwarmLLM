@@ -995,7 +995,7 @@ pub async fn hf_download_shards(
 
         spawn_progress_updater(shared.clone(), mid.clone(), prx);
 
-        // Download individual v2 layer-aligned shards
+        // Download individual layer-aligned shards
         let total_shard_bytes: u64 = shard_indices
             .iter()
             .filter_map(|&idx| info.layouts.get(idx as usize))
@@ -1102,7 +1102,7 @@ pub async fn hf_download_shards(
                 }
             });
 
-            match crate::model::huggingface::download_shard_v2(
+            match crate::model::huggingface::download_shard(
                 &repo_id,
                 &filename,
                 &dest_dir,
@@ -1331,7 +1331,6 @@ fn generate_manifest_from_header(params: &ManifestGenParams<'_>) -> Result<(), S
     let node_id = params.shared.identity.node_id().clone();
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: 2,
         id: model_id.clone(),
         name: model_name,
         architecture,

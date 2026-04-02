@@ -311,7 +311,7 @@ impl AutoShardManager {
                         }
                     });
 
-                    // Probe to get v2 layouts, then download the specific shard
+                    // Probe to get shard layouts, then download the specific shard
                     let configured_shard_size = shared.config.model.shard_size_bytes();
                     let probe_result = crate::model::huggingface::probe_gguf_file(
                         &repo_id,
@@ -392,7 +392,7 @@ impl AutoShardManager {
                         tracing::warn!(error = %e, "Tied output weight download failed (non-fatal)");
                     }
 
-                    match crate::model::huggingface::download_shard_v2(
+                    match crate::model::huggingface::download_shard(
                         &repo_id,
                         &filename,
                         &dest,

@@ -276,7 +276,7 @@ pub async fn check_and_load_model(
     let has_all = local_shard_indices.len() == manifest.shard_count as usize;
 
     // Determine ALL layer ranges covered by our local shards using manifest
-    // tensor metadata.  V2 manifests carry per-shard tensor entries with
+    // tensor metadata.  Manifests carry per-shard tensor entries with
     // accurate layer_range data, so we always use that.
     let ranges: Vec<(usize, usize)> = if has_all {
         vec![(0, manifest.num_layers as usize)]

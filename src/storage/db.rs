@@ -6,11 +6,6 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::error::SwarmError;
 
-/// Current database schema version. Increment when making breaking changes.
-/// Version 2: migrated from sled to redb.
-/// Version 3: upgraded to redb 3.x (v3 file format).
-const DB_SCHEMA_VERSION: u32 = 3;
-
 /// Critical trees to check during integrity verification.
 const CRITICAL_TREES: &[&str] = &["manifests", "credits", "identity", "nicknames"];
 
@@ -121,35 +116,7 @@ impl Database {
             inner: Arc::new(inner),
             _temp_dir: None,
         };
-        db.check_schema_version()?;
         Ok(db)
-    }
-
-    /// Check and store the DB schema version. Warn on mismatch.
-    fn check_schema_version(&self) -> Result<(), SwarmError> {
-        match self.get_json::<u32>("meta", "schema_version")? {
-            Some(stored) => {
-                if stored < DB_SCHEMA_VERSION {
-                    tracing::info!(
-                        stored_version = stored,
-                        current_version = DB_SCHEMA_VERSION,
-                        "Database schema upgraded (no migration needed for this version)"
-                    );
-                    self.put_json("meta", "schema_version", &DB_SCHEMA_VERSION)?;
-                } else if stored > DB_SCHEMA_VERSION {
-                    tracing::warn!(
-                        stored_version = stored,
-                        current_version = DB_SCHEMA_VERSION,
-                        "Database was created by a newer version — downgrade may cause issues"
-                    );
-                }
-            }
-            None => {
-                // First run — store the current version
-                self.put_json("meta", "schema_version", &DB_SCHEMA_VERSION)?;
-            }
-        }
-        Ok(())
     }
 
     /// Open a temporary database (for testing).
@@ -162,12 +129,10 @@ impl Database {
             std::env::temp_dir().join(format!("swarmllm_test_{}.redb", uuid::Uuid::new_v4()));
         let inner = redb::Database::create(&temp_path)
             .map_err(|e| SwarmError::Database(format!("Failed to create temp db: {e}")))?;
-        let db = Self {
+        Ok(Self {
             inner: Arc::new(inner),
             _temp_dir: None,
-        };
-        db.check_schema_version()?;
-        Ok(db)
+        })
     }
 
     /// Store a JSON-serializable value.

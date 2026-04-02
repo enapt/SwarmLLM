@@ -31,7 +31,6 @@ fn available_layer_ranges_from_manifest_basic() {
     use crate::types::{ModelId, ModelManifest, ShardInfo};
 
     let manifest = ModelManifest {
-        schema_version: 2,
         id: ModelId("test".into()),
         name: "test".into(),
         architecture: crate::types::ModelArchitecture::Llama,

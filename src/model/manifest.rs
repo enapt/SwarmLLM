@@ -26,17 +26,8 @@ impl ModelManifestExt for ModelManifest {
         let manifest: ModelManifest =
             serde_json::from_str(&contents).map_err(SwarmError::Serialization)?;
 
-        // Reject legacy manifests at load time — v2 tensor entries are required
-        if let Err(e) = manifest.validate_version() {
-            return Err(SwarmError::Internal(format!(
-                "Rejecting manifest {}: {e}. Delete and re-download shards.",
-                manifest_path.display()
-            )));
-        }
-
         tracing::debug!(
             model = %manifest.id,
-            schema_version = manifest.schema_version,
             shard_count = manifest.shard_count,
             dir_path = %dir.display(),
             "DIAG: load_from_dir manifest loaded"
@@ -193,7 +184,6 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
-            schema_version: 2,
             id: ModelId("test-model".into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,

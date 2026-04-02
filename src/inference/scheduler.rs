@@ -896,7 +896,6 @@ mod tests {
 
     fn make_manifest(model_id: &str, num_layers: u32, shards: Vec<ShardInfo>) -> ModelManifest {
         ModelManifest {
-            schema_version: 2,
             id: ModelId(model_id.into()),
             name: "Test Model".into(),
             architecture: ModelArchitecture::Llama,

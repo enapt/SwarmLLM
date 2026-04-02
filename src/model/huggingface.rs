@@ -756,14 +756,14 @@ pub fn coalesce_byte_ranges(ranges: &[(u64, u64)], max_gap: u64) -> Vec<(u64, u6
     merged
 }
 
-/// Download a v2 layer-aligned shard from HuggingFace.
+/// Download a layer-aligned shard from HuggingFace.
 ///
 /// Takes a `LayerShardLayout` describing which tensors belong to this shard.
 /// Coalesces nearby byte ranges into fewer HTTP Range requests, then packs
 /// the tensor data sequentially into `shard_{idx:03}.bin`.
 ///
 /// Connection errors are retried up to 3 times with backoff.
-pub async fn download_shard_v2(
+pub async fn download_shard(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
@@ -1073,20 +1073,20 @@ pub async fn download_shard_v2(
         shard = shard_index,
         size = actual_size,
         path = %dest_path.display(),
-        "Downloaded v2 layer-aligned shard from HuggingFace"
+        "Downloaded layer-aligned shard from HuggingFace"
     );
 
     Ok(dest_path)
 }
 
-/// Download header + specified v2 shards from HuggingFace.
+/// Download header + specified shards from HuggingFace.
 ///
 /// Main entry point for shard-level downloads:
 /// 1. Probes the remote file to get tensor metadata and layer-aligned shard layouts
 /// 2. Downloads the GGUF header
 /// 3. Downloads each requested shard via coalesced Range requests
 /// 4. Returns the model directory and file info
-pub async fn download_shards_v2(
+pub async fn download_shards(
     repo_id: &str,
     filename: &str,
     dest_dir: &std::path::Path,
@@ -1137,7 +1137,7 @@ pub async fn download_shards_v2(
             }
         });
 
-        download_shard_v2(repo_id, filename, dest_dir, layout, Some(shard_tx), None).await?;
+        download_shard(repo_id, filename, dest_dir, layout, Some(shard_tx), None).await?;
         let _ = progress_task.await;
 
         cumulative_downloaded += layout.size_bytes;

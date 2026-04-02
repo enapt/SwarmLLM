@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Current manifest schema version.
-const MANIFEST_SCHEMA_VERSION: u32 = 2;
-
 // ---- Config types (moved from config.rs for cross-crate use) ----
 
 /// Contribution mode from node config — maps to ContributionLevel.
@@ -207,9 +204,6 @@ impl fmt::Display for ModelId {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelManifest {
-    /// Schema version (current: 2). Older versions are rejected.
-    #[serde(default)]
-    pub schema_version: u32,
     pub id: ModelId,
     pub name: String,
     pub architecture: ModelArchitecture,
@@ -237,30 +231,6 @@ pub struct MmprojInfo {
     /// HuggingFace filename for the mmproj GGUF (e.g. "llava-v1.5-7b-mmproj-model-f16.gguf").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_filename: Option<String>,
-}
-
-impl ModelManifest {
-    /// Validate the schema version. Rejects legacy (< 2) and future versions.
-    pub fn validate_version(&self) -> Result<(), String> {
-        if self.schema_version < MANIFEST_SCHEMA_VERSION {
-            return Err(format!(
-                "Manifest schema_version {} is outdated (current: {})",
-                self.schema_version, MANIFEST_SCHEMA_VERSION
-            ));
-        } else if self.schema_version > MANIFEST_SCHEMA_VERSION {
-            return Err(format!(
-                "Manifest schema_version {} is newer than supported version {}",
-                self.schema_version, MANIFEST_SCHEMA_VERSION
-            ));
-        }
-        Ok(())
-    }
-
-    /// Set schema_version to the current version before serialization.
-    #[cfg(test)]
-    pub fn stamp_version(&mut self) {
-        self.schema_version = MANIFEST_SCHEMA_VERSION;
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1497,7 +1467,6 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
             id: ModelId("test".into()),
             name: "Test".into(),
             architecture: ModelArchitecture::Llama,
@@ -1514,57 +1483,6 @@ mod tests {
             license: "MIT".into(),
             mmproj: None,
         }
-    }
-
-    #[test]
-    fn manifest_schema_version_current_is_valid() {
-        let m = test_manifest();
-        assert!(m.validate_version().is_ok());
-    }
-
-    #[test]
-    fn manifest_schema_version_legacy_rejected() {
-        let mut m = test_manifest();
-        m.schema_version = 0;
-        assert!(m.validate_version().is_err());
-    }
-
-    #[test]
-    fn manifest_schema_version_future_rejected() {
-        let mut m = test_manifest();
-        m.schema_version = MANIFEST_SCHEMA_VERSION + 1;
-        assert!(m.validate_version().is_err());
-    }
-
-    #[test]
-    fn manifest_missing_version_defaults_to_zero() {
-        // Simulate a legacy JSON manifest without schema_version
-        let json = r#"{
-            "id": "test",
-            "name": "Test",
-            "architecture": "Llama",
-            "num_layers": 2,
-            "num_params_billions": 0.001,
-            "quantization": "Q4KM",
-            "total_size_bytes": 1024,
-            "shard_count": 1,
-            "shards": [],
-            "tokenizer_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            "manifest_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            "publisher": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            "publish_date": "2024-01-01T00:00:00Z",
-            "license": "MIT"
-        }"#;
-        let m: ModelManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(m.schema_version, 0);
-    }
-
-    #[test]
-    fn manifest_stamp_version_sets_current() {
-        let mut m = test_manifest();
-        m.schema_version = 0;
-        m.stamp_version();
-        assert_eq!(m.schema_version, MANIFEST_SCHEMA_VERSION);
     }
 
     #[test]

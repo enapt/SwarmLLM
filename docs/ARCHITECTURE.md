@@ -199,7 +199,7 @@ libp2p Swarm
 ├── Kademlia (DHT)
 │   ├── /swarm/node/{node_id}                  → NodeCapability
 │   ├── /swarm/shards/{model_id}/{node_id_hex} → Vec<ShardIndex> (per-node; avoids last-writer-wins)
-│   ├── /swarm/shard/{model}/{index}           → Vec<NodeId> (batched per model, legacy provider key)
+│   ├── /swarm/shard/{model}/{index}           → Vec<NodeId> (batched per model)
 │   └── /swarm/model/{model_id}               → ModelManifest
 │   └── Records expire after 1 hour, re-published periodically
 │
@@ -705,7 +705,7 @@ long-running Tokio task, receiving commands via `mpsc` from the API server.
 
 ## redb Database Tables
 
-Storage backend is **redb** (pure-Rust, ACID, single-file). The legacy **sled** backend is available behind the `migrate-sled` feature flag for one-time migration.
+Storage backend is **redb** (pure-Rust, ACID, single-file).
 
 | Table | Key | Value |
 |---|---|---|
@@ -1323,35 +1323,7 @@ Single-node inference performance, measured with `swarmllm bench` (100 output to
 
 ## Deferred Items
 
-Items identified during audits but deferred for future implementation:
-
-No active deferred items — all resolved.
-
-Resolved items (removed from deferred):
-- **PEX aggregate rate limiter**: COMPLETE — sliding window (50 req/60s) on inbound PEX requests + per-peer address cap (8 addrs) + connection_addrs cap (1024)
-- **DeltaNet alpha/beta integration**: COMPLETE — proper Gated DeltaNet formula: `g_t = exp(-softplus(α + dt))`, prediction error `v - g·S@k`, per-dim beta gating from GGUF tensors
-- **Download resume**: COMPLETE — HF shard downloads resume from partial .tmp files, skipping completed coalesced ranges
-- **Qwen 3.5 batched inference**: COMPLETE — per-request SSM state splitting for batch > 1, same pattern as Dense attention batching
-- **Starcoder2 / Glm4 layer loading**: COMPLETE — optional FFN gate (Starcoder2 2-layer MLP), Gelu activation, both added to supported_list()
-- **TP FFN norm position**: COMPLETE — 2-phase IPC protocol (AttnOnly → AllReduce → FfnOnly → AllReduce) ensures FFN norm applied to full post-attention tensor
-- **LoRA inference wiring**: COMPLETE — adapter_id in LayerForward/IpcForward, model_worker loads from adapter_config.json + safetensors, forward_with_lora() called
-- **Paged attention pool wiring**: REMOVED — PagedKvPool/PagedKvStore module and SharedState fields deleted (never wired to any production path). Feature gated behind `paged-attn` which was never enabled
-- **Speculative decoding in subprocess**: DEFERRED — IPC scaffolding removed; speculative decoding works via legacy executor path only
-- **Ring AllReduce network wiring**: COMPLETE — TpRingChunk message type + SendRingChunk NetworkCommand + dispatcher handler. Star topology still default; ring activates at tp_size ≥ 4
-- **Torrent-style parallel P2P download**: COMPLETE — ParallelChunkTracker: 8 MB chunks, max 4 concurrent, round-robin peer assignment, fail/reassign support
-- **DHT-based shard holder resolution (S5)**: COMPLETE — Kademlia provider records + bounded cache (max 50/shard LRU). Two-tier resolution: sync cache for hot path, async DHT for cold lookups. Scales to 50K+ nodes.
-- **Qwen 3.5 single-request forward**: Wired — attention + SSM (DeltaNet) layers execute through split/model.rs forward loop
-- **Model governance**: Module removed — P2P voting didn't match product model (users add models from HuggingFace directly)
-- **prefix_cache SharedState field**: Removed — initialized but never read from any production path
-- **SpeculativePair struct**: Removed — scaffolding for a registry that was never built
-- **TOPIC_GOVERNANCE subscription**: Removed — nodes were subscribing to dead bandwidth
-- **Schema version migration**: Auto-upgrades on older DB, warns on downgrade
-- **DiskPressure rebalance**: Enum variant removed (never emitted)
-- **SpmTokenizer::vocab**: Field already removed in prior cleanup
-- **Legacy single-GGUF**: `model_path` config still valid for Phase 1 llama-cpp executor
-- **prefix_cache module**: Removed — never wired to any production inference path
-- **quantization module**: Removed — utility functions only called by their own tests, no production consumers
-- **paged_kv module + SharedState fields**: Removed — `paged-attn` feature never enabled, fields always `None`
+- **Speculative decoding in subprocess**: IPC scaffolding removed; speculative decoding works via the direct executor path only, not through worker subprocesses
 
 ## Scalability (Phase 19)
 

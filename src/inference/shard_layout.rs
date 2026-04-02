@@ -1,10 +1,10 @@
-//! V2 layer-aligned shard layout computation.
+//! Layer-aligned shard layout computation.
 
 use std::collections::HashMap;
 
 use super::split::GgufTensorMeta;
 
-// ── V2 Layer-Aligned Sharding ──
+// ── Layer-Aligned Sharding ──
 
 /// Describes one layer-aligned shard: which layers it contains and their tensors.
 #[derive(Clone, Debug)]

@@ -10,7 +10,6 @@ use swarmllm::types::{ModelArchitecture, ModelId, ModelManifest, NodeId, Quantiz
 
 fn make_manifest(id: &str, params_b: f32) -> ModelManifest {
     ModelManifest {
-        schema_version: 2,
         id: ModelId(id.to_string()),
         name: id.to_string(),
         architecture: ModelArchitecture::Llama,

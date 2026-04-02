@@ -119,7 +119,6 @@ pub fn generate_and_register_local_manifest(
         };
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: 2,
         id: model_id.clone(),
         name: info.name.clone(),
         architecture,
@@ -351,7 +350,6 @@ pub(super) fn regenerate_manifest_from_header(
     };
 
     let mut manifest = crate::types::ModelManifest {
-        schema_version: 2,
         id: model_id.clone(),
         name: model_name,
         architecture,

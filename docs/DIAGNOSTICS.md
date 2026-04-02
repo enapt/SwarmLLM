@@ -402,7 +402,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| INFO  | `DIAG: register_manifest` | `model_id`, `schema_version`, `shard_count` |
+| INFO  | `DIAG: register_manifest` | `model_id`, `shard_count` |
 | INFO  | `DIAG: load_from_db complete` | `manifests_loaded_count` |
 
 ### HuggingFace (huggingface.rs)
@@ -415,7 +415,7 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 
 | Level | What | Fields |
 |-------|------|--------|
-| DEBUG | `DIAG: load_from_dir` | `dir`, `schema_version`, `shard_count` |
+| DEBUG | `DIAG: load_from_dir` | `dir`, `shard_count` |
 
 ### LoRA (lora.rs)
 
@@ -615,9 +615,9 @@ For production testing, use native Linux (dual boot or bare metal). WSL2 is suit
 | `src/inference/vision.rs` | Image encoding timing |
 | `src/inference/chat_template.rs` | Template matching and fallback detection |
 | `src/model/shard.rs` | Shard verification failures, load_all_local summary |
-| `src/model/registry.rs` | Manifest registration with schema version, DB load counts |
+| `src/model/registry.rs` | Manifest registration, DB load counts |
 | `src/model/huggingface.rs` | Search result counts, HF_TOKEN auth |
-| `src/model/manifest.rs` | Manifest load with schema version and shard count |
+| `src/model/manifest.rs` | Manifest load with shard count |
 | `src/model/lora.rs` | Adapter load with rank, alpha, target modules |
 | `src/model/acquisition.rs` | Acquisition requests, peer selection |
 | `src/model/auto_manage/` | Prune evaluation (prune.rs), shard registration (download.rs), model readiness (scan.rs) |

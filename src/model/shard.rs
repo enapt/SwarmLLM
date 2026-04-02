@@ -264,8 +264,8 @@ impl ShardStore {
             match crate::types::ModelManifest::load_from_dir(&model_dir) {
                 Ok(mut manifest) => {
                     // Auto-compute hash for zero-hash manifests (e.g. manually placed
-                    // or pre-V2 manifests updated to V2 format). This ensures they pass
-                    // the strict verification when gossiped to peers.
+                    // shards). This ensures they pass the strict verification when
+                    // gossiped to peers.
                     if manifest.manifest_hash == [0u8; 32] {
                         manifest.manifest_hash = manifest.compute_hash();
                         if let Err(e) = manifest.save_to_dir(&model_dir) {

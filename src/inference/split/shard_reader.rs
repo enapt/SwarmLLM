@@ -24,11 +24,11 @@ struct ShardFile {
     file_len: u64,
 }
 
-/// A reader that presents a GGUF header + v2 layer-aligned shard files as a
+/// A reader that presents a GGUF header + layer-aligned shard files as a
 /// single contiguous seekable file.  This allows candle's `Content::read()`
 /// and `ct.tensor()` to work transparently over shard files.
 ///
-/// V2 shards contain packed tensor data (not byte-range slices of the GGUF).
+/// Shards contain packed tensor data (not byte-range slices of the GGUF).
 /// The `tensor_map` translates virtual GGUF offsets → (shard_idx, shard_local_offset)
 /// via binary search.
 pub struct ShardReader {
@@ -47,7 +47,7 @@ pub struct ShardReader {
 }
 
 impl ShardReader {
-    /// Create a ShardReader from a GGUF header and v2 shard files with tensor maps.
+    /// Create a ShardReader from a GGUF header and shard files with tensor maps.
     ///
     /// `shard_files` must be ordered by shard index.  Each shard's tensor entries
     /// describe which virtual-GGUF-offset ranges map to which shard-local offsets.
