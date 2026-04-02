@@ -10,7 +10,6 @@ use crate::inference::chat_template;
 use crate::inference::router::{
     InferenceOutput, StreamingTokenEvent, StreamingTokenTx, TokenLogProbEntry,
 };
-use crate::inference::split;
 use crate::types::{
     InferenceError, InferenceRequest, LayerForward, LayerResult, ModelId, NetworkCommand,
     NetworkFinishReason, PipelineAssignment, PipelineSegment, SwarmMessage, TensorFormat,
@@ -124,13 +123,6 @@ impl PipelineExecutor {
         layer_start: usize,
         layer_end: usize,
     ) -> Result<(ModelId, usize, usize), SwarmError> {
-        let split_key = (model_id.clone(), layer_start, layer_end);
-        if self.shared_state.split_models.contains_key(&split_key) {
-            return Ok(split_key);
-        }
-
-        let shard_store = self.shared_state.shard_store();
-        let model_dir = shard_store.model_dir(model_id);
         let manifest = self
             .shared_state
             .model_registry
@@ -154,42 +146,22 @@ impl PipelineExecutor {
             })
             .map(|s| s.index)
             .collect();
-        let has_first = local_shards.contains(&0);
-        let has_last = local_shards.contains(&manifest.shard_count.saturating_sub(1));
-        let is_first = layer_start == 0 && has_first;
-        let is_last = layer_end >= total_layers && has_last;
-
-        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
-        let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
-            &model_dir,
+        let (is_first, is_last) = crate::model::shard::compute_first_last(
+            &local_shards,
+            manifest.shard_count,
             layer_start,
             layer_end,
             total_layers,
         );
-        let new_entry = split::SplitModelEntry::from_header(
-            &header_path,
+
+        let split_key = self.shared_state.ensure_split_model_entry(
+            model_id,
             layer_start,
             layer_end,
             is_first,
             is_last,
-            vram_estimate,
+            total_layers,
         );
-
-        let vram_budget = crate::model::auto_manage::compute_vram_budget(&self.shared_state)
-            .or(self.shared_state.config.inference.max_split_model_memory_mb);
-        if let Some(budget_mb) = vram_budget {
-            split::evict_split_models_lru(
-                &self.shared_state.split_models,
-                &self.shared_state.active_pipelines,
-                budget_mb,
-                new_entry.estimated_vram_mb,
-            );
-        }
-        self.shared_state
-            .split_models
-            .entry(split_key.clone())
-            .or_insert(new_entry);
-
         Ok(split_key)
     }
 

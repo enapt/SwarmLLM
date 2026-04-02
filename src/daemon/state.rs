@@ -874,6 +874,63 @@ impl SharedState {
             .any(|e| e.key().0 == *model_id && e.value().is_complete)
     }
 
+    /// Ensure a split model metadata entry exists for the given key.
+    /// Creates the entry from GGUF header, runs VRAM-aware eviction, and inserts.
+    /// Returns the split key. No-op if the entry already exists.
+    pub fn ensure_split_model_entry(
+        &self,
+        model_id: &crate::types::ModelId,
+        layer_start: usize,
+        layer_end: usize,
+        is_first: bool,
+        is_last: bool,
+        total_layers: usize,
+    ) -> crate::inference::split::SplitModelKey {
+        let split_key = (model_id.clone(), layer_start, layer_end);
+        if self.split_models.contains_key(&split_key) {
+            return split_key;
+        }
+
+        let shard_store = self.shard_store();
+        let model_dir = shard_store.model_dir(model_id);
+        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
+        let vram_estimate = crate::daemon::estimate_vram_from_shard_dir(
+            &model_dir,
+            layer_start,
+            layer_end,
+            total_layers,
+        );
+        let entry = crate::inference::split::SplitModelEntry::from_header(
+            &header_path,
+            layer_start,
+            layer_end,
+            is_first,
+            is_last,
+            vram_estimate,
+        );
+
+        let vram_budget = crate::model::auto_manage::compute_vram_budget(self)
+            .or(self.config.inference.max_split_model_memory_mb);
+        if let Some(budget_mb) = vram_budget {
+            let evicted = crate::inference::split::evict_split_models_lru(
+                &self.split_models,
+                &self.active_pipelines,
+                budget_mb,
+                entry.estimated_vram_mb,
+            );
+            if evicted > 0 {
+                tracing::info!(
+                    evicted,
+                    budget_mb,
+                    "Evicted LRU split models for VRAM budget"
+                );
+            }
+        }
+        self.index_split_model_insert(model_id, layer_start, layer_end);
+        self.split_models.entry(split_key.clone()).or_insert(entry);
+        split_key
+    }
+
     /// Register a split model segment in the secondary index.
     pub fn index_split_model_insert(
         &self,

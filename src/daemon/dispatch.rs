@@ -1443,61 +1443,23 @@ async fn handle_layer_forward(
         return;
     }
 
-    // is_first requires shard 0 (token_embd.weight is at tensor offset 0)
-    // is_last requires the final shard (output.weight spans to the end of the file)
-    let has_shard_0 = local_shard_indices.contains(&0);
-    let last_shard_idx = manifest.shard_count.saturating_sub(1);
-    let has_last_shard = local_shard_indices.contains(&last_shard_idx);
-    let is_first = layer_start == 0 && has_shard_0;
-    let is_last = layer_end >= total_layers && has_last_shard;
+    let (is_first, is_last) = crate::model::shard::compute_first_last(
+        &local_shard_indices,
+        manifest.shard_count,
+        layer_start,
+        layer_end,
+        total_layers,
+    );
 
     // Ensure the split model metadata entry exists (lightweight — no GPU loading).
-    // Re-check after computation to avoid overwriting a concurrent insert.
-    let split_key = (model_id.clone(), layer_start, layer_end);
-    if !shared_state.split_models.contains_key(&split_key) {
-        let shard_store = shared_state.shard_store();
-        let model_dir = shard_store.model_dir(&model_id);
-
-        // Estimate VRAM from shard file sizes on disk (no model loading)
-        let vram_estimate_mb =
-            estimate_vram_from_shard_dir(&model_dir, layer_start, layer_end, total_layers);
-
-        // Read metadata from GGUF header file
-        let header_path = model_dir.join(crate::model::shard::HEADER_FILENAME);
-        let entry = crate::inference::split::SplitModelEntry::from_header(
-            &header_path,
-            layer_start,
-            layer_end,
-            is_first,
-            is_last,
-            vram_estimate_mb,
-        );
-
-        // VRAM-aware eviction before inserting
-        let vram_budget = crate::model::auto_manage::compute_vram_budget(&shared_state)
-            .or(shared_state.config.inference.max_split_model_memory_mb);
-        if let Some(budget_mb) = vram_budget {
-            let evicted = crate::inference::split::evict_split_models_lru(
-                &shared_state.split_models,
-                &shared_state.active_pipelines,
-                budget_mb,
-                entry.estimated_vram_mb,
-            );
-            if evicted > 0 {
-                tracing::info!(
-                    evicted,
-                    budget_mb,
-                    "Evicted LRU split models for VRAM budget"
-                );
-            }
-        }
-        // Re-check: a concurrent task may have inserted while we computed above.
-        // or_insert avoids overwriting the concurrent entry (and its VRAM eviction).
-        shared_state
-            .split_models
-            .entry(split_key.clone())
-            .or_insert(entry);
-    }
+    let split_key = shared_state.ensure_split_model_entry(
+        &model_id,
+        layer_start,
+        layer_end,
+        is_first,
+        is_last,
+        total_layers,
+    );
 
     // Touch the metadata entry
     if let Some(entry) = shared_state.split_models.get(&split_key) {
