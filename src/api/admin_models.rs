@@ -156,8 +156,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
 
                 // Check if this shard is currently loaded in memory (VRAM or RAM).
                 // Check subprocess pool and split_models DashMap.
-                // Also check legacy executor — but only if its loaded model matches this model.
-                let legacy_loaded = state
+                // Also check direct executor — but only if its loaded model matches this model.
+                let direct_loaded = state
                     .shared_state
                     .model_loaded
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -181,7 +181,7 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                     .get_shard_window(&m.id);
                 let is_model_loaded = state.shared_state.model_process_pool.is_loaded(&m.id)
                     || state.shared_state.has_split_model(&m.id)
-                    || legacy_loaded;
+                    || direct_loaded;
                 let in_vram = if local {
                     match &shard_window {
                         // Explicit window = shard is loaded only if in the window

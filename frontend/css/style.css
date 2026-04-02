@@ -1861,7 +1861,7 @@ kbd {
 }
 .shard-transitioning { animation: shard-flash 1.5s ease-out; }
 
-/* Legacy shard summary (kept for live updates) */
+/* Shard summary (live updates) */
 .shard-summary { display: flex; flex-wrap: wrap; font-size: 0.72rem; color: var(--text-secondary); margin-bottom: 6px; }
 .shard-sum-item { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; white-space: nowrap; }
 .shard-sum-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }

@@ -218,7 +218,7 @@ pub async fn hf_search(
             let fits_boomerang =
                 available_vram_bytes > 0 && est_boomerang_size < available_vram_bytes;
             let fits_shard = available_vram_bytes > 0 && est_shard_size < available_vram_bytes;
-            // Legacy field: true if any participation mode fits
+            // True if any participation mode fits
             let fits_vram = fits_full || fits_boomerang || fits_shard;
 
             // Network replication: count unique peers holding shards of any variant of this repo

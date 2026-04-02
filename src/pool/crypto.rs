@@ -228,8 +228,7 @@ fn unblind_token(
 /// Verifier recomputes the commitment from (invitation_id, blinding_factor), then checks
 /// that the signature over (commitment, pool_id, expires_at) is valid.
 ///
-/// SEC: Legacy no-expiry fallback removed to prevent permanent blind tokens.
-/// Tokens signed under the old scheme must be re-issued by the pool owner.
+/// SEC: All tokens require expiry to prevent permanent blind tokens.
 #[cfg(test)]
 fn verify_membership(token: &UnblindedToken, owner_key: &VerifyingKey) -> Result<(), SwarmError> {
     let commitment = compute_blind_commitment(&token.invitation_id, &token.blinding_factor);

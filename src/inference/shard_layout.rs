@@ -186,7 +186,7 @@ pub fn compute_layer_shard_layouts(
 
 /// Return all contiguous layer ranges from manifest ShardInfo entries.
 ///
-/// Reads layer_range directly from each shard — v2 manifests have accurate
+/// Reads layer_range directly from each shard — manifests have accurate
 /// layer ranges computed from GGUF tensor metadata.
 pub fn available_layer_ranges_from_manifest(
     manifest: &crate::types::ModelManifest,

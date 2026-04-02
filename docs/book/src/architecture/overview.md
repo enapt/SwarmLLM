@@ -49,5 +49,5 @@ All three share a single port (default 8800) and a common `Arc<SharedState>`.
 | GGUF inference | llama-cpp-2 (optional backend) |
 | Cryptography | ed25519-dalek, x25519-dalek, chacha20poly1305 |
 | Content hashing | BLAKE3 |
-| Database | redb (pure-Rust, ACID; sled migration via `migrate-sled` feature) |
+| Database | redb (pure-Rust, ACID, single-file) |
 | Concurrent maps | DashMap 6 |

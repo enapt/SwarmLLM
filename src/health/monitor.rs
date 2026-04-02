@@ -143,7 +143,7 @@ impl HealthMonitor {
         let mut hosted_shards = self.shared_state.model_registry.shards_for_node(&node_id);
 
         // If no shards from registry but we have a loaded model (and no shard_range),
-        // represent the full model as shard index 0 for backward compatibility.
+        // represent the full model as shard index 0.
         if hosted_shards.is_empty() && self.shared_state.config.inference.shard_range.is_none() {
             if let Some(info) = self.shared_state.loaded_model_info.read().await.as_ref() {
                 hosted_shards.push(crate::types::ShardId {
