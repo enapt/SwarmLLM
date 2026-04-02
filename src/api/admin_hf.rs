@@ -6,6 +6,14 @@ use crate::api::server::AppState;
 use crate::error::ApiError;
 use crate::model::manifest::ModelManifestExt;
 
+/// Heuristic shard sizing constants for HF search scoring.
+const EST_SHARD_SIZE_BYTES: u64 = 800 * 1024 * 1024;
+const EST_SHARD_COUNT_MIN: u64 = 2;
+const EST_SHARD_COUNT_MAX: u64 = 16;
+const BOOMERANG_SIZE_NUMERATOR: u64 = 12;
+const BOOMERANG_SIZE_DENOMINATOR: u64 = 5;
+const MODEL_SIZE_SCORE_MAX_GB: f64 = 8.0;
+
 /// Count unique peers holding shards of the given model IDs.
 fn count_unique_shard_holders(
     registry: &crate::model::registry::ModelRegistry,
@@ -22,6 +30,11 @@ fn count_unique_shard_holders(
     unique.len()
 }
 
+/// Slow-download detection threshold: 100 KB/s.
+const SLOW_DOWNLOAD_SPEED_THRESHOLD: u64 = 102400;
+/// Duration in seconds before emitting a slow-download warning.
+const SLOW_DOWNLOAD_WARN_SECS: f64 = 30.0;
+
 /// Spawn a background task that reads download progress events and updates acquisition_progress.
 fn spawn_progress_updater(
     shared: std::sync::Arc<crate::daemon::state::SharedState>,
@@ -32,6 +45,8 @@ fn spawn_progress_updater(
     tokio::spawn(async move {
         let mut last_bytes = 0u64;
         let mut last_time = std::time::Instant::now();
+        let mut slow_since: Option<std::time::Instant> = None;
+        let mut throttle_warned = false;
         loop {
             tokio::select! {
                 prog = prx.recv() => {
@@ -47,6 +62,26 @@ fn spawn_progress_updater(
                             entry.speed_bytes_per_sec = speed;
                             last_bytes = prog.downloaded_bytes;
                             last_time = now;
+
+                            // Slow-download detection: warn once after sustained slow speed
+                            if speed > 0 && speed < SLOW_DOWNLOAD_SPEED_THRESHOLD {
+                                let since = *slow_since.get_or_insert(now);
+                                if !throttle_warned && now.duration_since(since).as_secs_f64() > SLOW_DOWNLOAD_WARN_SECS {
+                                    throttle_warned = true;
+                                    let speed_str = format!("{:.1} KB/s", speed as f64 / 1024.0);
+                                    shared.emit_activity(
+                                        crate::daemon::state::ActivityEvent::new(
+                                            "model", "download_slow",
+                                            format!("Download is slow ({speed_str}) — this can happen with popular models. It will keep going."),
+                                        )
+                                        .with_model(mid.0.clone())
+                                        .with_detail_str(speed_str)
+                                        .with_toast("warning", 10000),
+                                    );
+                                }
+                            } else {
+                                slow_since = None;
+                            }
                         }
                     }
                 }
@@ -207,12 +242,12 @@ pub async fn hf_search(
             let rec_size = recommended
                 .map(|f| f.size_bytes)
                 .unwrap_or(files.iter().map(|f| f.size_bytes).min().unwrap_or(u64::MAX));
-            // Estimate shard count from model size (heuristic: ~800MB per shard)
-            let est_shards = (rec_size / (800 * 1024 * 1024)).clamp(2, 16);
+            let est_shards =
+                (rec_size / EST_SHARD_SIZE_BYTES).clamp(EST_SHARD_COUNT_MIN, EST_SHARD_COUNT_MAX);
             let est_shard_size = rec_size / est_shards;
-            // Boomerang: first shard (embedding + layers) + last shard (output + layers)
-            // First/last shards are ~20% larger than middle due to embedding/output weights
-            let est_boomerang_size = est_shard_size * 12 / 5; // ~2.4x one shard
+            // Boomerang: first + last shard (~2.4x one shard due to embedding/output weights)
+            let est_boomerang_size =
+                est_shard_size * BOOMERANG_SIZE_NUMERATOR / BOOMERANG_SIZE_DENOMINATOR;
 
             let fits_full = available_vram_bytes > 0 && rec_size < available_vram_bytes;
             let fits_boomerang =
@@ -248,7 +283,7 @@ pub async fn hf_search(
                 0.7
             };
             let shard_gb = rec_size as f64 / (1024.0 * 1024.0 * 1024.0);
-            let size_factor = (1.0 - shard_gb / 8.0).clamp(0.1, 1.0);
+            let size_factor = (1.0 - shard_gb / MODEL_SIZE_SCORE_MAX_GB).clamp(0.1, 1.0);
             let composite_score = (quality * fit * demand * size_factor * 100.0) as u32;
 
             serde_json::json!({
@@ -1077,27 +1112,24 @@ pub async fn hf_download_shards(
                         }
                     }
                     // Broadcast progress to peers every ~2% so they see near real-time updates
-                    let pct = if prog.total_bytes > 0 {
-                        ((prog.downloaded_bytes as f64 / prog.total_bytes as f64) * 100.0) as u32
-                    } else {
-                        0
-                    };
-                    if pct >= last_broadcast_pct + 2 {
-                        last_broadcast_pct = pct;
-                        if let Some(ref ntx) = gossip_ntx {
-                            let msg = crate::types::SwarmMessage::ShardDownloadProgress(
-                                crate::types::ShardDownloadProgress {
-                                    node_id: gossip_node_id.clone(),
-                                    shard_id: crate::types::ShardId {
-                                        model_id: crate::types::ModelId(gossip_model_id.clone()),
-                                        index: shard_idx,
-                                    },
-                                    progress_pct: pct,
-                                    state: crate::types::DownloadState::Downloading,
-                                },
+                    let pct = crate::model::acquisition::shard_pct(
+                        prog.downloaded_bytes,
+                        prog.total_bytes,
+                    );
+                    if let Some(ref ntx) = gossip_ntx {
+                        let sid = crate::types::ShardId {
+                            model_id: crate::types::ModelId(gossip_model_id.clone()),
+                            index: shard_idx,
+                        };
+                        last_broadcast_pct =
+                            crate::model::acquisition::maybe_broadcast_shard_progress(
+                                ntx,
+                                &gossip_node_id,
+                                &sid,
+                                pct,
+                                last_broadcast_pct,
+                                2,
                             );
-                            let _ = ntx.send(crate::types::NetworkCommand::Broadcast(msg)).await;
-                        }
                     }
                 }
             });

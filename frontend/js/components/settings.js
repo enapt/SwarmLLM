@@ -232,8 +232,9 @@
     },
 
     saveProviders: async function() {
+      var providerNames = ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'];
       var keys = {};
-      ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'].forEach(function(name) {
+      providerNames.forEach(function(name) {
         var input = document.getElementById('provider-key-' + name);
         if (input && input.value) {
           keys[name + '_key'] = input.value;
@@ -246,7 +247,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(keys),
         });
-        ['anthropic', 'openai', 'deepseek', 'mistral', 'groq', 'nvidia_nim', 'cerebras', 'sambanova', 'fireworks', 'together', 'deepinfra', 'moonshot'].forEach(function(name) {
+        providerNames.forEach(function(name) {
           var input = document.getElementById('provider-key-' + name);
           if (input) input.value = '';
         });

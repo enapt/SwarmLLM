@@ -89,6 +89,39 @@ pub struct ShardProgress {
     pub state: ShardState,
 }
 
+/// Compute download progress as a 0–100 percentage (truncated).
+pub fn shard_pct(downloaded_bytes: u64, total_bytes: u64) -> u32 {
+    if total_bytes > 0 {
+        (downloaded_bytes as f64 / total_bytes as f64 * 100.0) as u32
+    } else {
+        0
+    }
+}
+
+/// Build and send a shard download progress broadcast to the network.
+/// Returns the new `last_broadcast_pct` if a broadcast was sent.
+pub fn maybe_broadcast_shard_progress(
+    net_tx: &tokio::sync::mpsc::Sender<crate::types::NetworkCommand>,
+    node_id: &NodeId,
+    shard_id: &ShardId,
+    pct: u32,
+    last_broadcast_pct: u32,
+    threshold: u32,
+) -> u32 {
+    if pct < last_broadcast_pct + threshold && pct != 100 {
+        return last_broadcast_pct;
+    }
+    let msg =
+        crate::types::SwarmMessage::ShardDownloadProgress(crate::types::ShardDownloadProgress {
+            node_id: node_id.clone(),
+            shard_id: shard_id.clone(),
+            progress_pct: pct,
+            state: crate::types::DownloadState::Downloading,
+        });
+    let _ = net_tx.try_send(crate::types::NetworkCommand::Broadcast(msg));
+    pct
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShardState {

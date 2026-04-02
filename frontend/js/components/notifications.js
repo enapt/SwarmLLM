@@ -79,6 +79,7 @@
     'pool_created': '\u2795',            // ➕
     'pool_member_removed': '\u26D4',     // ⛔
     'config_updated': '\u2699\uFE0F',    // ⚙️
+    'download_slow': '\u26A0\uFE0F',    // ⚠️
   };
 
   // Category CSS class for color coding

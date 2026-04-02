@@ -37,11 +37,7 @@ pub fn serialize_acquisition_to_json(
         .shard_progress
         .iter()
         .map(|(idx, sp)| {
-            let pct = if sp.total_bytes > 0 {
-                ((sp.downloaded_bytes as f64 / sp.total_bytes as f64) * 100.0) as u32
-            } else {
-                0
-            };
+            let pct = crate::model::acquisition::shard_pct(sp.downloaded_bytes, sp.total_bytes);
             serde_json::json!({
                 "index": idx,
                 "state": serde_json::to_value(&sp.state).unwrap_or_default(),
@@ -51,11 +47,8 @@ pub fn serialize_acquisition_to_json(
             })
         })
         .collect();
-    let overall_pct = if status.total_bytes > 0 {
-        ((status.downloaded_bytes as f64 / status.total_bytes as f64) * 100.0) as u32
-    } else {
-        0
-    };
+    let overall_pct =
+        crate::model::acquisition::shard_pct(status.downloaded_bytes, status.total_bytes);
     let model_name = shared
         .model_registry
         .get_manifest(model_id)
@@ -157,38 +150,8 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                 // Check if this shard is currently loaded in memory (VRAM or RAM).
                 // Check subprocess pool and split_models DashMap.
                 // Also check direct executor — but only if its loaded model matches this model.
-                let direct_loaded = state
-                    .shared_state
-                    .model_loaded
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    && state
-                        .shared_state
-                        .loaded_model_info
-                        .try_read()
-                        .map(|info| {
-                            info.as_ref().is_some_and(|i| {
-                                m.id.0
-                                    .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
-                            })
-                        })
-                        .unwrap_or(false);
-                // Determine if this shard is loaded in memory.
-                // If a shard window exists, it's the authority on what's loaded
-                // (even between worker restarts). Otherwise check if model is loaded.
-                let shard_window = state
-                    .shared_state
-                    .model_process_pool
-                    .get_shard_window(&m.id);
-                let is_model_loaded = state.shared_state.model_process_pool.is_loaded(&m.id)
-                    || state.shared_state.has_split_model(&m.id)
-                    || direct_loaded;
                 let in_vram = if local {
-                    match &shard_window {
-                        // Explicit window = shard is loaded only if in the window
-                        Some(w) => w.contains(&s.index),
-                        // No window = all local shards loaded if model is active
-                        None => is_model_loaded,
-                    }
+                    state.shared_state.is_shard_in_vram(&m.id, s.index)
                 } else {
                     false
                 };
@@ -222,11 +185,10 @@ pub async fn list_models(State(state): State<AppState>) -> Json<Vec<serde_json::
                             _ => None,
                         };
                         if let Some(state_str) = dl_state {
-                            let pct = if sp.total_bytes > 0 {
-                                (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
-                            } else {
-                                0
-                            };
+                            let pct = crate::model::acquisition::shard_pct(
+                                sp.downloaded_bytes,
+                                sp.total_bytes,
+                            );
                             if let Some(obj) = shard_json.as_object_mut() {
                                 obj.insert(
                                     "download".to_string(),
@@ -674,8 +636,8 @@ pub async fn add_model_interest(
         tx.send(crate::model::acquisition::AcquisitionCommand::Acquire { model_id: mid })
             .await
             .map_err(|e| {
-                ApiError(crate::error::SwarmError::Internal(format!(
-                    "Failed to send acquisition command: {e}"
+                ApiError(crate::error::SwarmError::ServiceUnavailable(format!(
+                    "Acquisition manager unavailable: {e}"
                 )))
             })?;
 
@@ -766,9 +728,7 @@ pub async fn shard_storage(State(state): State<AppState>) -> Json<serde_json::Va
                         any_downloading = true;
                         return Some(serde_json::json!({
                             "state": "Downloading",
-                            "progress_pct": if sp.total_bytes > 0 {
-                                (sp.downloaded_bytes as f64 / sp.total_bytes as f64 * 100.0) as u32
-                            } else { 0 },
+                            "progress_pct": crate::model::acquisition::shard_pct(sp.downloaded_bytes, sp.total_bytes),
                             "downloaded_bytes": sp.downloaded_bytes,
                             "total_bytes": sp.total_bytes,
                         }));

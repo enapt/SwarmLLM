@@ -867,6 +867,30 @@ impl SharedState {
         false
     }
 
+    /// Check if a local shard is currently loaded in VRAM (process pool, split model, or legacy executor).
+    pub fn is_shard_in_vram(&self, model_id: &crate::types::ModelId, shard_index: u32) -> bool {
+        let window = self.model_process_pool.get_shard_window(model_id);
+        match window {
+            Some(w) => w.contains(&shard_index),
+            None => {
+                self.model_process_pool.is_loaded(model_id)
+                    || self.has_split_model(model_id)
+                    || (self.model_loaded.load(std::sync::atomic::Ordering::Relaxed)
+                        && self
+                            .loaded_model_info
+                            .try_read()
+                            .map(|info| {
+                                info.as_ref().is_some_and(|i| {
+                                    model_id
+                                        .0
+                                        .contains(&i.name.to_lowercase().replace([' ', '_'], "-"))
+                                })
+                            })
+                            .unwrap_or(false))
+            }
+        }
+    }
+
     /// Check if a complete (all layers covered) split model is loaded.
     pub fn has_complete_split_model(&self, model_id: &crate::types::ModelId) -> bool {
         self.split_models

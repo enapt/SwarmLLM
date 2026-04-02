@@ -204,6 +204,7 @@
   "activity.shard_finalize_failed": "Failed to finalize shard",
   "activity.hf_download_complete": "Download complete: {model}",
   "activity.hf_download_failed": "Download failed: {detail}",
+  "activity.download_slow": "Download is slow ({detail}) — this can happen with popular models. It will keep going.",
   "activity.model_download_complete": "All shards of {model} ready",
   "activity.model_loaded": "Loaded {model} into memory",
   "activity.model_load_skipped": "Skipped loading {model}",

@@ -1355,20 +1355,6 @@
         }
         App.dashboard.renderAcquisitionPanel(modelId, status);
 
-        if (status.state === 'downloading' && status.source === 'huggingface') {
-          var acqInfo = S.activeAcquisitions[modelId];
-          var speed = status.speed_bytes_per_sec || 0;
-          if (speed > 0 && speed < 102400) {
-            if (!acqInfo._slowSince) acqInfo._slowSince = Date.now();
-            else if (Date.now() - acqInfo._slowSince > 30000 && !acqInfo._throttleWarned) {
-              acqInfo._throttleWarned = true;
-              App.notifications.showToast(I18n.t('models.download_slow', { speed: U.formatSpeed(speed) }), 'warning', 10000);
-            }
-          } else {
-            acqInfo._slowSince = null;
-          }
-        }
-
         // Detect completion: explicit state OR all tracked shards at 100%
         var isComplete = status.state === 'complete';
         if (!isComplete && status.shard_details && status.shard_details.length > 0) {

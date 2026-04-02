@@ -270,12 +270,10 @@ impl AutoShardManager {
                     tokio::spawn(async move {
                         let mut last_broadcast_pct: u32 = 0;
                         while let Some(prog) = prx.recv().await {
-                            let pct = if prog.total_bytes > 0 {
-                                (prog.downloaded_bytes as f64 / prog.total_bytes as f64 * 100.0)
-                                    as u32
-                            } else {
-                                0
-                            };
+                            let pct = crate::model::acquisition::shard_pct(
+                                prog.downloaded_bytes,
+                                prog.total_bytes,
+                            );
 
                             if let Some(mut entry) =
                                 prog_shared.models.acquisition_progress.get_mut(&prog_mid)
@@ -290,24 +288,19 @@ impl AutoShardManager {
                             }
 
                             // Broadcast progress every 5% to avoid gossip flood
-                            if pct >= last_broadcast_pct + 5 || pct == 100 {
-                                last_broadcast_pct = pct;
-                                let progress_msg =
-                                    crate::types::SwarmMessage::ShardDownloadProgress(
-                                        crate::types::ShardDownloadProgress {
-                                            node_id: prog_shared.identity.node_id().clone(),
-                                            shard_id: crate::types::ShardId {
-                                                model_id: prog_mid.clone(),
-                                                index: shard_idx,
-                                            },
-                                            progress_pct: pct,
-                                            state: crate::types::DownloadState::Downloading,
-                                        },
-                                    );
-                                let _ = prog_net_tx.try_send(
-                                    crate::types::NetworkCommand::Broadcast(progress_msg),
+                            let sid = crate::types::ShardId {
+                                model_id: prog_mid.clone(),
+                                index: shard_idx,
+                            };
+                            last_broadcast_pct =
+                                crate::model::acquisition::maybe_broadcast_shard_progress(
+                                    &prog_net_tx,
+                                    prog_shared.identity.node_id(),
+                                    &sid,
+                                    pct,
+                                    last_broadcast_pct,
+                                    5,
                                 );
-                            }
                         }
                     });
 

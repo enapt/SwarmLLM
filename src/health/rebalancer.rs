@@ -67,7 +67,7 @@ impl ShardRebalancer {
                     match event {
                         Some(event) => self.handle_event(event).await,
                         None => {
-                            tracing::info!("Rebalance channel closed");
+                            tracing::info!(subsystem = "rebalancer", "Rebalance channel closed");
                             break;
                         }
                     }
