@@ -996,6 +996,13 @@ impl SharedState {
         self.split_model_index.remove(model_id);
     }
 
+    /// Clear cached split model entries for a model (e.g., after shard load/unload/delete).
+    /// Call this whenever the set of loaded shards changes so inference re-evaluates segments.
+    pub fn evict_split_models(&self, model_id: &crate::types::ModelId) {
+        self.split_models.retain(|key, _| key.0 != *model_id);
+        self.index_split_model_remove_all(model_id);
+    }
+
     /// Emit a rich activity event to the dashboard.
     /// Lightweight fire-and-forget — if no WebSocket subscribers, the event is dropped.
     pub fn emit_activity(&self, event: ActivityEvent) {

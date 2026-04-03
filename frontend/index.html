@@ -487,7 +487,7 @@
           </div>
         </div>
         <input type="hidden" id="model-select" value="" />
-        <button class="btn btn-sm" id="btn-open-model-browser" data-i18n-title="nav.find_models_tip" title="Find models on HuggingFace to download and host." data-i18n-aria-label="nav.find_models_aria" aria-label="Find models">&#43; Find model</button>
+        <button class="btn btn-sm" id="btn-open-model-browser" data-i18n="nav.find_models_btn" data-i18n-title="nav.find_models_tip" title="Find models on HuggingFace to download and host." data-i18n-aria-label="nav.find_models_aria" aria-label="Find models">+ Find model</button>
       </div>
       <div class="share-btn-wrap" style="position:relative">
         <button class="btn btn-ghost btn-sm" id="btn-share-network" data-i18n-title="nav.share_peer" title="Share your swarm peer address" data-i18n-aria-label="nav.share_peer" aria-label="Share peer address" style="font-size:1rem"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></button>
@@ -669,20 +669,20 @@
               </div>
               <div class="node-hw-grid">
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span data-i18n="dashboard.cpu_label">CPU</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">⚙</span><span data-i18n="dashboard.cpu_label">CPU</span></span>
                   <span class="mono node-hw-value" id="node-cpu">...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">▪</span data-i18n="dashboard.gpu_label">GPU</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">▪</span><span data-i18n="dashboard.gpu_label">GPU</span></span>
                   <span class="mono node-hw-value" id="node-gpu" data-i18n="dashboard.detecting">Detecting...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">≡</span data-i18n="dashboard.ram_label">RAM</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">≡</span><span data-i18n="dashboard.ram_label">RAM</span></span>
                   <span class="mono node-hw-value"><span id="ram-used">...</span> <span class="text-muted" id="ram-total">/ ...</span></span>
                   <div class="progress-bar mini-bar"><div class="fill green" id="ram-bar" style="width:0%"></div></div>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">◫</span data-i18n="dashboard.disk_label">Disk</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">◫</span><span data-i18n="dashboard.disk_label">Disk</span></span>
                   <span class="mono node-hw-value"><span id="disk-used">...</span> <span class="text-muted" id="disk-total">/ ...</span></span>
                   <div class="progress-bar mini-bar"><div class="fill accent" id="disk-bar" style="width:0%"></div></div>
                 </div>
@@ -691,7 +691,7 @@
                   <span class="mono node-hw-value" id="node-vram">...</span>
                 </div>
                 <div class="node-hw-cell">
-                  <span class="node-hw-label"><span class="node-hw-icon">⬡</span data-i18n="dashboard.shards_label">Shards</span>
+                  <span class="node-hw-label"><span class="node-hw-icon">⬡</span><span data-i18n="dashboard.shards_label">Shards</span></span>
                   <span class="mono node-hw-value" id="hosted-shards">0</span>
                 </div>
               </div>
@@ -743,15 +743,15 @@
               <span class="models-stat-group">
                 <img src="/static/icons/swarm.svg" width="13" height="13" alt="" aria-hidden="true" style="opacity:0.7;vertical-align:middle">
                 <span class="models-stat-label" data-i18n="dashboard.swarm_label">Swarm</span>
-                <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span data-i18n="dashboard.chip_ready"> ready</span>
-                <span class="models-stat-chip dim" id="stat-chip-network" style="display:none"><span class="models-stat-value" id="stat-chip-network-val">0</span data-i18n="dashboard.chip_remote"> remote</span>
+                <span class="models-stat-chip" id="stat-chip-ready"><span class="models-stat-value" id="stat-chip-ready-val">0</span><span data-i18n="dashboard.chip_ready"> ready</span></span>
+                <span class="models-stat-chip dim" id="stat-chip-network" style="display:none"><span class="models-stat-value" id="stat-chip-network-val">0</span><span data-i18n="dashboard.chip_remote"> remote</span></span>
               </span>
               <span class="models-stat-sep"></span>
               <span class="models-stat-group" id="stat-group-cloud" style="display:none">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="opacity:0.7;vertical-align:middle;flex-shrink:0"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill="var(--accent)"/></svg>
                 <span class="models-stat-label" data-i18n="dashboard.chip_cloud">Cloud</span>
-                <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span data-i18n="dashboard.chip_models"> models</span>
-                <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span data-i18n="dashboard.chip_providers"> providers</span>
+                <span class="models-stat-chip accent" id="stat-chip-cloud"><span class="models-stat-value" id="stat-chip-cloud-val">0</span><span data-i18n="dashboard.chip_models"> models</span></span>
+                <span class="models-stat-chip dim" id="stat-chip-providers"><span class="models-stat-value" id="stat-chip-providers-val">0</span><span data-i18n="dashboard.chip_providers"> providers</span></span>
               </span>
             </div>
             <div id="models-container">

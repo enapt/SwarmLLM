@@ -12,6 +12,15 @@ pub(crate) fn validate_model_id(model_id: &str) -> Result<(), ApiError> {
             "Model ID must be 256 characters or fewer".into(),
         )));
     }
+    if model_id.contains("..")
+        || model_id.contains('/')
+        || model_id.contains('\\')
+        || model_id.contains('\0')
+    {
+        return Err(ApiError(crate::error::SwarmError::Validation(
+            "Model ID contains invalid characters".into(),
+        )));
+    }
     Ok(())
 }
 
@@ -930,8 +939,7 @@ pub async fn delete_model(
     shared.models.hf_sources.remove(&mid);
 
     // Remove split models for this model
-    shared.split_models.retain(|key, _| key.0 != mid);
-    shared.index_split_model_remove_all(&mid);
+    shared.evict_split_models(&mid);
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
@@ -985,16 +993,12 @@ pub async fn unload_model(
         .unwrap_or(0);
 
     // Remove split models for this model
-    let mut segments_removed = 0u32;
-    shared.split_models.retain(|key, _| {
-        if key.0 == mid {
-            segments_removed += 1;
-            false
-        } else {
-            true
-        }
-    });
-    shared.index_split_model_remove_all(&mid);
+    let segments_removed = shared
+        .split_models
+        .iter()
+        .filter(|e| e.key().0 == mid)
+        .count() as u32;
+    shared.evict_split_models(&mid);
 
     // Kill the worker subprocess to free GPU memory
     shared.model_process_pool.unload_model(&mid).await;
@@ -1084,36 +1088,18 @@ pub async fn unload_shard(
 
     // Get current shard window (or all local shard indices if no window set)
     let current_window = shared.model_process_pool.get_shard_window(&mid);
-    let all_local: Vec<u32> = shared
-        .model_registry
-        .get_manifest(&mid)
-        .map(|m| {
-            let local_node_id = shared.identity.node_id().clone();
-            m.shards
-                .iter()
-                .filter(|s| {
-                    let sid = crate::types::ShardId {
-                        model_id: mid.clone(),
-                        index: s.index,
-                    };
-                    shared
-                        .model_registry
-                        .shard_holders(&sid)
-                        .contains(&local_node_id)
-                })
-                .map(|s| s.index)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let window = current_window.unwrap_or(all_local);
+    let local_node_id = shared.identity.node_id().clone();
+    let window = current_window.unwrap_or_else(|| {
+        shared
+            .model_registry
+            .local_shard_indices(&mid, &local_node_id)
+    });
     let new_window: Vec<u32> = window.into_iter().filter(|&i| i != shard_index).collect();
 
     if new_window.is_empty() {
         // Unloading the last shard = unload the model entirely
         shared.model_process_pool.unload_model(&mid).await;
-        shared.split_models.retain(|key, _| key.0 != mid);
-        shared.index_split_model_remove_all(&mid);
+        shared.evict_split_models(&mid);
     } else {
         // Narrow window and restart worker — next inference request
         // respawns loading only the remaining shards
@@ -1122,8 +1108,7 @@ pub async fn unload_shard(
             .restart_with_window(&mid, new_window.clone())
             .await;
         // Remove split model entries so they reload with new window
-        shared.split_models.retain(|key, _| key.0 != mid);
-        shared.index_split_model_remove_all(&mid);
+        shared.evict_split_models(&mid);
     }
 
     // Clear stale model_loaded history so updated layer range emits fresh
@@ -1218,24 +1203,7 @@ pub async fn load_shard(
     let mut new_window = current_window.unwrap_or_else(|| {
         shared
             .model_registry
-            .get_manifest(&mid)
-            .map(|m| {
-                m.shards
-                    .iter()
-                    .filter(|s| {
-                        let sid = crate::types::ShardId {
-                            model_id: mid.clone(),
-                            index: s.index,
-                        };
-                        shared
-                            .model_registry
-                            .shard_holders(&sid)
-                            .contains(&local_node_id)
-                    })
-                    .map(|s| s.index)
-                    .collect()
-            })
-            .unwrap_or_default()
+            .local_shard_indices(&mid, &local_node_id)
     });
     if !new_window.contains(&shard_index) {
         new_window.push(shard_index);
@@ -1248,12 +1216,9 @@ pub async fn load_shard(
         .restart_with_window(&mid, new_window.clone())
         .await;
     // Clear split models so they reload with new window
-    shared.split_models.retain(|key, _| key.0 != mid);
-    shared.index_split_model_remove_all(&mid);
+    shared.evict_split_models(&mid);
     // Clear stale model_loaded history so the new layer range emits a fresh event
-    if let Ok(mut history) = shared.events.activity_history.lock() {
-        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
-    }
+    shared.events.clear_model_load_history(&model_id);
 
     let _ = shared
         .events
@@ -1360,8 +1325,7 @@ pub async fn delete_shard(
     }
 
     // Evict any cached split model segments that included this shard
-    shared.split_models.retain(|key, _| key.0 != mid);
-    shared.index_split_model_remove_all(&mid);
+    shared.evict_split_models(&mid);
 
     // Kill the worker subprocess to free GPU memory and clear the shard window
     // so next spawn doesn't try to load the deleted shard
@@ -1390,9 +1354,7 @@ pub async fn delete_shard(
 
     // Clear stale model_loaded history entries so the reload emits a fresh event
     // (the layer range may have changed after shard deletion)
-    if let Ok(mut history) = shared.events.activity_history.lock() {
-        history.retain(|e| !(e.kind == "model_loaded" && e.model_id.as_deref() == Some(&model_id)));
-    }
+    shared.events.clear_model_load_history(&model_id);
 
     // Reload remaining shards so the model stays available for inference
     // (check_and_load_model will re-compute layer ranges from remaining shards)

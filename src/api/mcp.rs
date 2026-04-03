@@ -796,6 +796,12 @@ async fn tool_compare(state: &AppState, id: Option<Value>, args: Value) -> JsonR
         .get("system")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    if system
+        .as_ref()
+        .is_some_and(|s| s.len() > MCP_MAX_PROMPT_BYTES)
+    {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "system prompt exceeds maximum length");
+    }
     let temperature = args
         .get("temperature")
         .and_then(|v| v.as_f64())
@@ -911,6 +917,12 @@ async fn tool_research(state: &AppState, id: Option<Value>, args: Value) -> Json
         .get("system")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    if system
+        .as_ref()
+        .is_some_and(|s| s.len() > MCP_MAX_PROMPT_BYTES)
+    {
+        return JsonRpcResponse::error(id, INVALID_PARAMS, "system prompt exceeds maximum length");
+    }
 
     // Determine which models to query
     let models: Vec<String> = if let Some(arr) = args.get("models").and_then(|v| v.as_array()) {
@@ -1094,6 +1106,19 @@ async fn tool_batch_prompts(state: &AppState, id: Option<Value>, args: Value) ->
             .get("system")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        if system
+            .as_ref()
+            .is_some_and(|s| s.len() > MCP_MAX_PROMPT_BYTES)
+        {
+            handles.push(tokio::spawn(async move {
+                json!({
+                    "task_id": task_id,
+                    "error": "system prompt exceeds maximum length",
+                    "status": "error",
+                })
+            }));
+            continue;
+        }
         let max_tokens = task
             .get("max_tokens")
             .and_then(|v| v.as_u64())

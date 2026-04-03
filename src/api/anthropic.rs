@@ -131,6 +131,32 @@ pub struct MessagesResponse {
     pub usage: AnthropicUsage,
 }
 
+impl MessagesResponse {
+    /// Build a simple text-only response.
+    fn text(
+        id: String,
+        model: String,
+        text: String,
+        stop_reason: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Self {
+        Self {
+            id,
+            response_type: "message",
+            role: "assistant",
+            content: vec![ResponseContentBlock::Text { text }],
+            model,
+            stop_reason: Some(stop_reason.into()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens,
+                output_tokens,
+            },
+        }
+    }
+}
+
 /// Response content block — supports text, tool_use, and thinking.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
@@ -348,19 +374,7 @@ pub async fn messages(
     // Fast-path: connectivity probes (Claude Code sends max_tokens=1 pings)
     if is_connectivity_probe(&req) {
         tracing::debug!(request_id = %request_id, "DIAG: anthropic connectivity probe — fast path");
-        let response = MessagesResponse {
-            id: request_id,
-            response_type: "message",
-            role: "assistant",
-            content: vec![ResponseContentBlock::Text { text: "ok".into() }],
-            model,
-            stop_reason: Some("end_turn".into()),
-            stop_sequence: None,
-            usage: AnthropicUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-            },
-        };
+        let response = MessagesResponse::text(request_id, model, "ok".into(), "end_turn", 1, 1);
         return Ok(Json(response).into_response());
     }
 
@@ -471,19 +485,14 @@ pub async fn messages(
                 .generate(&prompt, &sampling_params)
                 .map_err(ApiError)?;
 
-            let response = MessagesResponse {
-                id: request_id,
-                response_type: "message",
-                role: "assistant",
-                content: vec![ResponseContentBlock::Text { text: content }],
+            let response = MessagesResponse::text(
+                request_id,
                 model,
-                stop_reason: Some(map_finish_reason(result.finish_reason.as_str()).into()),
-                stop_sequence: None,
-                usage: AnthropicUsage {
-                    input_tokens: result.prompt_tokens,
-                    output_tokens: result.completion_tokens,
-                },
-            };
+                content,
+                map_finish_reason(result.finish_reason.as_str()),
+                result.prompt_tokens,
+                result.completion_tokens,
+            );
             return Ok(Json(response).into_response());
         }
     }
@@ -693,21 +702,14 @@ async fn anthropic_non_stream(
 
     let output = super::submit_to_router(&router_tx, inference_req).await?;
 
-    let response = MessagesResponse {
-        id: request_id,
-        response_type: "message",
-        role: "assistant",
-        content: vec![ResponseContentBlock::Text {
-            text: output.content,
-        }],
+    let response = MessagesResponse::text(
+        request_id,
         model,
-        stop_reason: Some(map_finish_reason(&output.finish_reason).into()),
-        stop_sequence: None,
-        usage: AnthropicUsage {
-            input_tokens: output.prompt_tokens,
-            output_tokens: output.completion_tokens,
-        },
-    };
+        output.content,
+        map_finish_reason(&output.finish_reason),
+        output.prompt_tokens,
+        output.completion_tokens,
+    );
 
     Ok(Json(response).into_response())
 }
@@ -970,23 +972,14 @@ async fn anthropic_split_non_stream(
     )
     .await?;
 
-    let stop_reason = map_finish_reason(&output.finish_reason);
-
-    let response = MessagesResponse {
-        id: request_id,
-        response_type: "message",
-        role: "assistant",
-        content: vec![ResponseContentBlock::Text {
-            text: output.content,
-        }],
+    let response = MessagesResponse::text(
+        request_id,
         model,
-        stop_reason: Some(stop_reason.into()),
-        stop_sequence: None,
-        usage: AnthropicUsage {
-            input_tokens: output.prompt_tokens,
-            output_tokens: output.completion_tokens,
-        },
-    };
+        output.content,
+        map_finish_reason(&output.finish_reason),
+        output.prompt_tokens,
+        output.completion_tokens,
+    );
 
     Ok(Json(response).into_response())
 }

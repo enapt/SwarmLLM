@@ -159,6 +159,29 @@ impl ModelRegistry {
             .unwrap_or(0)
     }
 
+    /// Get the shard indices held locally by a node for a given model.
+    pub fn local_shard_indices(
+        &self,
+        model_id: &crate::types::ModelId,
+        node_id: &NodeId,
+    ) -> Vec<u32> {
+        self.get_manifest(model_id)
+            .map(|m| {
+                m.shards
+                    .iter()
+                    .filter(|s| {
+                        let sid = ShardId {
+                            model_id: model_id.clone(),
+                            index: s.index,
+                        };
+                        self.shard_holders(&sid).contains(node_id)
+                    })
+                    .map(|s| s.index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Merge holders discovered via DHT provider queries into the cache.
     /// Updates timestamps for existing entries and adds new ones (with eviction).
     pub fn merge_dht_providers(&self, shard_id: &ShardId, providers: &[NodeId]) {
