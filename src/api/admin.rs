@@ -462,8 +462,6 @@ fn query_gpu_vram_used() -> Option<u64> {
     crate::model::auto_manage::vram::query_gpu_vram_used()
 }
 
-/// GET /api/admin/network-map — Aggregated region data for the world heatmap.
-///
 /// POST /api/admin/rescan-shards — Scan the models directory for new shard files.
 ///
 /// Discovers shard files that were added to disk since the last scan (e.g. by
@@ -481,6 +479,8 @@ pub async fn rescan_shards(State(state): State<AppState>) -> Json<serde_json::Va
     }))
 }
 
+/// GET /api/admin/network-map — Aggregated region data for the world heatmap.
+///
 /// Returns `{ regions: { "US": { total: N, models: { "model-id": count } }, ... } }`
 /// based on self-reported region in peer capabilities.
 pub async fn network_map(State(state): State<AppState>) -> Json<serde_json::Value> {

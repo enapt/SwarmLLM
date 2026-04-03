@@ -535,8 +535,8 @@
       <div class="sidebar-chat-tab" id="sidebar-edge-trigger" data-i18n-title="sidebar.open_chats" title="Open chats">&#128172;</div>
       <div class="sidebar-header">
         <span class="sidebar-title" data-i18n="sidebar.title">Chats</span>
-        <button class="btn btn-ghost btn-sm" id="btn-new-session" data-i18n-title="sidebar.new_chat" title="New chat">+</button>
-        <button class="btn btn-ghost btn-sm sidebar-close" id="btn-close-sidebar" data-i18n-title="sidebar.close" title="Close sidebar">&times;</button>
+        <button class="btn btn-ghost btn-sm" id="btn-new-session" data-i18n-title="sidebar.new_chat" data-i18n-aria-label="sidebar.new_chat" title="New chat" aria-label="New chat">+</button>
+        <button class="btn btn-ghost btn-sm sidebar-close" id="btn-close-sidebar" data-i18n-title="sidebar.close" data-i18n-aria-label="sidebar.close" title="Close sidebar" aria-label="Close sidebar">&times;</button>
       </div>
       <div class="session-list" id="session-list"></div>
     </aside>
@@ -548,7 +548,7 @@
       <div class="view" id="view-chat" style="display:none">
         <div class="mobile-model-bar">
           <select id="mobile-model-select" data-i18n-title="nav.active_model" title="Active model" aria-label="Active model"><option value="" data-i18n="models.select_model">Select model...</option></select>
-          <button class="btn btn-sm" id="btn-mobile-browse" data-i18n-title="nav.find_models_aria" title="Browse models">+</button>
+          <button class="btn btn-sm" id="btn-mobile-browse" data-i18n-title="nav.find_models_aria" data-i18n-aria-label="nav.find_models_aria" title="Browse models" aria-label="Find models">+</button>
         </div>
         <div class="chat-container">
           <div class="chat-session-header" id="chat-session-header"></div>
@@ -564,13 +564,13 @@
             <div id="image-preview-area" style="display:none;max-width:740px;margin:0 auto 6px;padding:6px;background:var(--bg-tertiary);border-radius:8px;"></div>
             <div class="chat-input-wrap">
               <input type="file" id="image-upload-input" accept="image/*" multiple style="display:none">
-              <button class="btn" id="image-upload-btn" data-i18n-title="chat.attach_image" title="Attach image (or paste/drag)" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
+              <button class="btn" id="image-upload-btn" data-i18n-title="chat.attach_image" data-i18n-aria-label="chat.attach_image" title="Attach image (or paste/drag)" aria-label="Attach image" style="padding:6px 10px;font-size:1.1rem;background:transparent;border:1px solid var(--border);cursor:pointer;border-radius:6px;margin-right:4px;">&#128247;</button>
               <textarea id="chat-input" placeholder="Type your message... (Enter to send, Shift+Enter for new line)" data-i18n-placeholder="chat.placeholder" rows="1"></textarea>
               <button class="btn btn-primary" id="send-btn" data-i18n="chat.send">Send</button>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between;max-width:740px;margin:4px auto 0">
               <div class="token-counter" id="token-counter" data-i18n-title="chat.word_counter_tip" title="Word count for your current message"></div>
-              <button class="chat-layout-toggle" id="chat-layout-toggle" data-i18n-title="chat.layout_tip" title="Switch between Linear (traditional) and Messenger (bubble) chat layout">
+              <button class="chat-layout-toggle" id="chat-layout-toggle" data-i18n-title="chat.layout_tip" data-i18n-aria-label="chat.layout_tip" title="Switch between Linear (traditional) and Messenger (bubble) chat layout" aria-label="Switch chat layout">
                 <span id="chat-layout-icon">&#9776;</span>
                 <span id="chat-layout-label" data-i18n="chat.layout_linear">Linear</span>
               </button>

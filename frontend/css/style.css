@@ -723,14 +723,10 @@ a:hover { color: var(--accent-hover); }
 /* ---- Grid ---- */
 .grid { display: grid; gap: 14px; }
 .grid-2 { grid-template-columns: repeat(2, 1fr); align-items: stretch; }
-.grid-3 { grid-template-columns: repeat(3, 1fr); align-items: stretch; }
 /* Panels inside grids stretch to equal height and distribute content */
 .grid > .panel { display: flex; flex-direction: column; }
 .grid > .panel > .panel-body { flex: 1; }
 .grid > .panel > :last-child:not(.panel-header) { margin-top: auto; }
-.grid-4 { grid-template-columns: repeat(4, 1fr); }
-
-@media (max-width: 1024px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }
 
 /* ---- Hamburger button (mobile only) ---- */
 .hamburger-btn {
@@ -761,7 +757,7 @@ a:hover { color: var(--accent-hover); }
 }
 
 @media (max-width: 768px) {
-  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
   .container { padding: 12px; }
 
   /* Hide non-essential header items */
@@ -854,7 +850,6 @@ a:hover { color: var(--accent-hover); }
 
   .tab-btn { padding: 8px 7px; font-size: 0.72rem; }
   .app-header .logo { font-size: 0.9rem; }
-  .app-header .logo::before { font-size: 0.95rem; }
 
   /* Even larger touch targets */
   .btn { min-height: 48px; }

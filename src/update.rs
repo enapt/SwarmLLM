@@ -427,7 +427,7 @@ impl UpdateChecker {
 }
 
 /// Compare two semver strings. Returns true if `latest` is newer than `current`.
-pub fn is_newer_version(current: &str, latest: &str) -> bool {
+pub(crate) fn is_newer_version(current: &str, latest: &str) -> bool {
     let parse = |s: &str| -> (u64, u64, u64) {
         let parts: Vec<&str> = s.split('.').collect();
         let major = parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
