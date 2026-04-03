@@ -11,8 +11,6 @@ const BYTE_RANGE_COALESCE_GAP: u64 = 4 * 1024 * 1024;
 const HF_CONNECT_TIMEOUT_SECS: u64 = 15;
 /// HTTP total timeout for metadata/probe requests.
 const HF_METADATA_TIMEOUT_SECS: u64 = 120;
-/// HTTP total timeout for medium downloads (shard lists, configs).
-const HF_MEDIUM_TIMEOUT_SECS: u64 = 300;
 /// HTTP total timeout for large shard downloads (up to 1 hour).
 const HF_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
@@ -146,7 +144,7 @@ pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, Strin
 
     // For each repo, look up the file tree to find GGUF files
     for repo in repos.iter().take(10) {
-        match fetch_gguf_files(&client, &repo.id).await {
+        match fetch_gguf_files(client, &repo.id).await {
             Ok(files) => {
                 for file in files {
                     results.push(HfModelResult {
@@ -343,11 +341,7 @@ pub async fn probe_gguf_file(
     filename: &str,
     shard_size: u64,
 ) -> Result<GgufFileInfo, String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(HF_METADATA_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_META_CLIENT;
 
     let url = download_url(repo_id, filename);
 
@@ -538,11 +532,7 @@ pub async fn download_gguf_header(
     dest_dir: &std::path::Path,
     header_size: u64,
 ) -> Result<std::path::PathBuf, String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(HF_MEDIUM_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_DOWNLOAD_CLIENT;
 
     let url = download_url(repo_id, filename);
     if header_size == 0 {
@@ -622,11 +612,7 @@ pub async fn download_tied_output_weight(
         "Downloading tied output weight (token_embd.weight) for weight-tied model"
     );
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_DOWNLOAD_CLIENT;
 
     let url = download_url(repo_id, filename);
     if size == 0 {
@@ -783,10 +769,7 @@ pub async fn download_shard(
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
     cancel_flag: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<std::path::PathBuf, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_DOWNLOAD_CLIENT;
 
     let url = download_url(repo_id, filename);
     let shard_index = layout.index;
