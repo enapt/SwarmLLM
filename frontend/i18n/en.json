@@ -711,6 +711,7 @@
   "model_browser.searching": "Searching HuggingFace...",
   "nav.active_model": "Active model",
   "nav.filter_models": "Filter models...",
+  "nav.find_models_btn": "+ Find model",
   "nav.find_models_tip": "Find models on HuggingFace to download and host.",
   "nav.find_models_aria": "Find models",
   "nav.share_peer": "Share your swarm peer address",
