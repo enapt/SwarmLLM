@@ -111,6 +111,10 @@ impl ShardRebalancer {
             return;
         }
 
+        // Prune stale cooldown entries (models not seen in 2x cooldown window)
+        self.last_rebalance_per_model
+            .retain(|_, instant| instant.elapsed().as_secs() < REBALANCE_COOLDOWN_SECS * 2);
+
         let local_node_id = self.shared_state.identity.node_id().clone();
         let now = Instant::now();
 

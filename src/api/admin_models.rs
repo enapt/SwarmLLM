@@ -942,8 +942,10 @@ pub async fn delete_model(
     shared.evict_split_models(&mid);
 
     // Kill the worker subprocess to free GPU memory
-    shared.model_process_pool.unload_model(&mid).await;
-    shared.model_process_pool.clear_shard_window(&mid);
+    shared
+        .model_process_pool
+        .unload_and_clear_window(&mid)
+        .await;
 
     // Broadcast shard removal via GossipSub
     if let Some(ref ntx) = state.network_tx {
@@ -1001,8 +1003,10 @@ pub async fn unload_model(
     shared.evict_split_models(&mid);
 
     // Kill the worker subprocess to free GPU memory
-    shared.model_process_pool.unload_model(&mid).await;
-    shared.model_process_pool.clear_shard_window(&mid);
+    shared
+        .model_process_pool
+        .unload_and_clear_window(&mid)
+        .await;
 
     // Clear loaded model info if it matches this model
     {
@@ -1098,7 +1102,10 @@ pub async fn unload_shard(
 
     if new_window.is_empty() {
         // Unloading the last shard = unload the model entirely
-        shared.model_process_pool.unload_model(&mid).await;
+        shared
+            .model_process_pool
+            .unload_and_clear_window(&mid)
+            .await;
         shared.evict_split_models(&mid);
     } else {
         // Narrow window and restart worker — next inference request
@@ -1276,6 +1283,7 @@ pub async fn delete_shard(
     State(state): State<AppState>,
     Path((model_id, shard_index)): Path<(String, u32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     if shard_index == u32::MAX {
         return Err(ApiError(crate::error::SwarmError::Validation(
             "Reserved shard index".into(),
@@ -1329,8 +1337,10 @@ pub async fn delete_shard(
 
     // Kill the worker subprocess to free GPU memory and clear the shard window
     // so next spawn doesn't try to load the deleted shard
-    shared.model_process_pool.unload_model(&mid).await;
-    shared.model_process_pool.clear_shard_window(&mid);
+    shared
+        .model_process_pool
+        .unload_and_clear_window(&mid)
+        .await;
 
     // Broadcast updated ShardAnnounce with remaining held shards
     if let Some(ref ntx) = state.network_tx {
@@ -2073,6 +2083,7 @@ pub async fn lock_shard(
     Path((model_id, index)): Path<(String, u32)>,
     Json(body): Json<ShardLockUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_model_id(&model_id)?;
     let shard_id = crate::types::ShardId {
         model_id: crate::types::ModelId(model_id.clone()),
         index,

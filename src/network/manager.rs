@@ -991,6 +991,10 @@ impl NetworkManager {
                         // Query finished — clean up tracking
                         self.pending_provider_queries.remove(&id);
                     }
+                    QueryResult::GetProviders(Err(ref e)) => {
+                        tracing::debug!(error = ?e, "DHT provider query failed — cleaning up");
+                        self.pending_provider_queries.remove(&id);
+                    }
                     _ => {
                         tracing::debug!(?result, "Kademlia query progressed");
                     }

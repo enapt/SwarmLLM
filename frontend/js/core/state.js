@@ -41,7 +41,6 @@ window.App = {
 
   // --- Storage keys (single source of truth for all storage key strings) ---
   // localStorage keys
-  LANG_KEY: 'swarmllm_lang', // mirrors raw string in i18n.js (which loads before state.js)
   SESSIONS_KEY: 'swarmllm_sessions',
   ACTIVE_SESSION_KEY: 'swarmllm_active_session',
   SETUP_DONE_KEY: 'swarmllm_setup_done',

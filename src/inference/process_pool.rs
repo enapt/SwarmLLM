@@ -451,6 +451,12 @@ impl ModelProcessPool {
         }
     }
 
+    /// Unload a model and clear its shard window so next spawn uses defaults.
+    pub async fn unload_and_clear_window(&self, model_id: &ModelId) {
+        self.unload_model(model_id).await;
+        self.clear_shard_window(model_id);
+    }
+
     /// Check if a worker is running for a model.
     pub fn is_loaded(&self, model_id: &ModelId) -> bool {
         self.workers.contains_key(model_id)
