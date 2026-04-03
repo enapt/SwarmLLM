@@ -766,6 +766,7 @@ pub(crate) async fn dispatch_network_messages(
                                         let inner_ok = match &pool_msg {
                                             crate::types::PoolMessage::CreditForward(fwd) => fwd.from_node_id == *sender,
                                             crate::types::PoolMessage::MemberLeft { node_id, .. } => node_id == sender,
+                                            crate::types::PoolMessage::JoinRequest { requester, .. } => requester == sender,
                                             // Invitation/Acceptance/Removal are verified by crypto sigs in pool manager
                                             _ => true,
                                         };

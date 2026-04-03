@@ -16,6 +16,24 @@ const HF_MEDIUM_TIMEOUT_SECS: u64 = 300;
 /// HTTP total timeout for large shard downloads (up to 1 hour).
 const HF_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
+/// Shared HTTP client for metadata/search/probe requests (short timeout).
+static HF_META_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HF_METADATA_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
+/// Shared HTTP client for large file downloads (long timeout, connection pooling).
+static HF_DOWNLOAD_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
+
 /// SEC: Validate HuggingFace repo ID format to prevent SSRF via crafted repo_id.
 /// Only allows `owner/repo-name` with alphanumeric, hyphens, dots, underscores.
 /// Includes length cap (96 chars per segment) and path traversal guard.
@@ -102,10 +120,7 @@ pub fn extract_quant_tag(filename: &str) -> Option<String> {
 /// Uses the HF API to find repos, then checks for GGUF files in each.
 /// Returns a flat list of downloadable GGUF files with repo + filename.
 pub async fn search_gguf_models(query: &str) -> Result<Vec<HfModelResult>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(HF_CONNECT_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_META_CLIENT;
 
     // Search HF API for models matching query, filtered to gguf tag
     let url = format!(
@@ -220,10 +235,7 @@ pub async fn download_model(
     dest_dir: &std::path::Path,
     progress_tx: Option<tokio::sync::mpsc::Sender<DownloadProgress>>,
 ) -> Result<std::path::PathBuf, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(HF_DOWNLOAD_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*HF_DOWNLOAD_CLIENT;
 
     let url = download_url(repo_id, filename);
 

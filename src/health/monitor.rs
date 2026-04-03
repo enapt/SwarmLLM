@@ -107,8 +107,9 @@ impl HealthMonitor {
                     self.shared_state.credits.anti_gaming.lock().await.cleanup();
                     // Decay trust scores toward default (0.5) on each health ping cycle
                     self.shared_state.credits.trust_manager.decay_all(&self.shared_state.peer_registry);
-                    // Clean up stale AllReduce entries (receiver dropped/timed out)
+                    // Clean up stale AllReduce/RingChunk entries (receiver dropped/timed out)
                     self.shared_state.allreduce_registry.cleanup_stale();
+                    self.shared_state.ring_chunk_registry.cleanup_stale();
                 }
             }
         }

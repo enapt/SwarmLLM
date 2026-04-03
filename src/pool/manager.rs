@@ -31,9 +31,9 @@ pub struct PoolManager {
     /// Active invite codes (owner only). Keyed by code_hash for O(1) lookup.
     /// One-time use, expired codes cleaned on each generate.
     invite_codes: HashMap<[u8; 32], PoolInviteCode>,
-    /// When set, auto-accept invitations from this specific pool owner (set by JoinWithCode).
-    /// Bound to a code_hash to prevent a different pool's invitation from being auto-accepted.
-    auto_accept_code_hash: Option<[u8; 32]>,
+    /// When set, auto-accept the next invitation (set by JoinWithCode).
+    /// Includes a timestamp so the intent expires after 5 minutes.
+    auto_accept_code_hash: Option<([u8; 32], std::time::Instant)>,
 }
 
 impl PoolManager {
@@ -74,6 +74,10 @@ impl PoolManager {
                 .pool_registry
                 .insert(pool_id, state);
         }
+
+        // Clear stale removal replay entries — the timestamp freshness check (±5min)
+        // already prevents replays, so persisted entries serve no purpose after restart.
+        let _ = db.clear_tree(TREE_POOL_REMOVAL_REPLAYS);
 
         // Restore pending invitations
         if let Ok(invitations) = db.iter_json::<PoolInvitation>(TREE_POOL_INVITATIONS) {
@@ -122,6 +126,13 @@ impl PoolManager {
                 }
                 _ = gossip_interval.tick() => {
                     self.gossip_pool_state().await;
+                    // Expire stale auto-accept intent (5 min timeout)
+                    if let Some((_, created_at)) = self.auto_accept_code_hash {
+                        if created_at.elapsed().as_secs() >= 300 {
+                            tracing::debug!("Clearing expired auto-accept code hash");
+                            self.auto_accept_code_hash = None;
+                        }
+                    }
                 }
             }
         }
@@ -845,15 +856,25 @@ impl PoolManager {
             "Recognized blinded pool invitation for us"
         );
 
-        // Auto-accept only if we have a pending code-based join
-        if self.auto_accept_code_hash.is_some() {
-            self.auto_accept_code_hash = None;
-            tracing::info!(
-                invitation_id = %invitation.id,
-                "Auto-accepting blinded invitation (from invite code join)"
-            );
-            if let Err(e) = self.handle_accept_invitation(invitation).await {
-                tracing::warn!(error = %e, "Auto-accept failed");
+        // Auto-accept only if we have a pending code-based join that hasn't expired
+        if let Some((_, created_at)) = self.auto_accept_code_hash {
+            const AUTO_ACCEPT_TIMEOUT_SECS: u64 = 300; // 5 minutes
+            if created_at.elapsed().as_secs() < AUTO_ACCEPT_TIMEOUT_SECS {
+                self.auto_accept_code_hash = None;
+                tracing::info!(
+                    invitation_id = %invitation.id,
+                    pool_id = %invitation.pool_id,
+                    "Auto-accepting blinded invitation (from invite code join)"
+                );
+                if let Err(e) = self.handle_accept_invitation(invitation).await {
+                    tracing::warn!(error = %e, "Auto-accept failed");
+                }
+            } else {
+                // Expired — clear the stale auto-accept intent
+                self.auto_accept_code_hash = None;
+                tracing::info!(
+                    "Auto-accept expired (>5min) — invitation stored but not auto-accepted"
+                );
             }
         }
     }
@@ -1277,9 +1298,8 @@ impl PoolManager {
             .send(crate::types::NetworkCommand::Broadcast(msg))
             .await;
 
-        // Set auto-accept with the code hash so when the invitation arrives via gossip,
-        // we only auto-accept if it matches this specific join request.
-        self.auto_accept_code_hash = Some(code_hash);
+        // Set auto-accept with the code hash and a timestamp so it expires after 5 minutes.
+        self.auto_accept_code_hash = Some((code_hash, std::time::Instant::now()));
 
         tracing::info!(code_hash = %hex::encode(code_hash), "Broadcast pool join request with invite code (auto-accept enabled)");
         Ok(())

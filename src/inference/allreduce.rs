@@ -369,6 +369,11 @@ impl RingChunkRegistry {
         rx
     }
 
+    /// Remove entries whose receiver has been dropped (timed-out operations).
+    pub fn cleanup_stale(&self) {
+        self.pending.retain(|_, tx| !tx.is_closed());
+    }
+
     /// Deliver a received chunk. Returns false if no one was waiting.
     pub fn deliver(&self, request_id: Uuid, layer_idx: u32, step: u32, data: Vec<u8>) -> bool {
         if let Some((_, tx)) = self.pending.remove(&(request_id, layer_idx, step)) {

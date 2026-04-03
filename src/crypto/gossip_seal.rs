@@ -1,6 +1,6 @@
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
@@ -158,17 +158,13 @@ impl GossipSealer {
         let sender_pub_bytes: [u8; 32] = sealed[..32]
             .try_into()
             .map_err(|_| SwarmError::DecryptionFailed)?;
-        let sig_bytes: [u8; 64] = sealed[32..96]
-            .try_into()
-            .map_err(|_| SwarmError::DecryptionFailed)?;
+        let sig_bytes = &sealed[32..96];
         let inner_sealed = &sealed[96..];
 
         // Verify Ed25519 signature
         let vk = VerifyingKey::from_bytes(&sender_pub_bytes)
             .map_err(|_| SwarmError::InvalidSignature)?;
-        let sig = Signature::from_bytes(&sig_bytes);
-        vk.verify(inner_sealed, &sig)
-            .map_err(|_| SwarmError::InvalidSignature)?;
+        super::verify_ed25519_sig(sig_bytes, inner_sealed, &vk)?;
 
         // Decrypt the inner payload
         let plaintext = self.open(inner_sealed)?;

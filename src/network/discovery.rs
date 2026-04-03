@@ -5,8 +5,6 @@ use libp2p::kad::RecordKey;
 use libp2p::swarm::Swarm;
 use libp2p::Multiaddr;
 
-use ed25519_dalek::Verifier;
-
 use crate::error::SwarmError;
 use crate::network::behaviour::SwarmBehaviour;
 use crate::types::ShardId;
@@ -118,16 +116,12 @@ pub fn verify_dht_value(signed: &[u8]) -> Result<([u8; 32], &[u8]), SwarmError> 
     let pubkey_bytes: [u8; 32] = signed[..32]
         .try_into()
         .map_err(|_| SwarmError::InvalidSignature)?;
-    let sig_bytes: [u8; 64] = signed[32..96]
-        .try_into()
-        .map_err(|_| SwarmError::InvalidSignature)?;
+    let sig_bytes = &signed[32..96];
     let payload = &signed[96..];
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|_| SwarmError::InvalidSignature)?;
-    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-    vk.verify(payload, &sig)
-        .map_err(|_| SwarmError::InvalidSignature)?;
+    crate::crypto::verify_ed25519_sig(sig_bytes, payload, &vk)?;
 
     Ok((pubkey_bytes, payload))
 }

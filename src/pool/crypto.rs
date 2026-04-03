@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 
 use crate::error::SwarmError;
 use crate::identity::Identity;
@@ -353,16 +353,7 @@ fn credit_forward_payload(
 }
 
 fn verify_sig(sig_bytes: &[u8], payload: &[u8], key: &VerifyingKey) -> Result<(), SwarmError> {
-    if sig_bytes.len() != 64 {
-        return Err(SwarmError::InvalidSignature);
-    }
-    let sig = Signature::from_bytes(
-        sig_bytes
-            .try_into()
-            .map_err(|_| SwarmError::Internal("Invalid signature length".into()))?,
-    );
-    key.verify(payload, &sig)
-        .map_err(|_| SwarmError::InvalidSignature)
+    crate::crypto::verify_ed25519_sig(sig_bytes, payload, key)
 }
 
 #[cfg(test)]

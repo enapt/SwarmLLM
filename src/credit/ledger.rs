@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use tokio::sync::{mpsc, watch, RwLock};
 
 use crate::error::SwarmError;
@@ -602,27 +602,13 @@ pub fn verify_balance_report(gossip: &CreditGossip) -> Result<(), SwarmError> {
     }
 
     // Verify Ed25519 signature
-    if gossip.signature.len() != 64 {
-        return Err(SwarmError::InvalidSignature);
-    }
-
     let verifying_key =
         VerifyingKey::from_bytes(&gossip.node_id.0).map_err(|_| SwarmError::InvalidSignature)?;
-
-    let sig = Signature::from_bytes(
-        gossip
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| SwarmError::InvalidSignature)?,
-    );
 
     let payload =
         build_balance_report_payload(&gossip.node_id, gossip.balance_bucket, gossip.timestamp);
 
-    verifying_key
-        .verify(&payload, &sig)
-        .map_err(|_| SwarmError::InvalidSignature)?;
+    crate::crypto::verify_ed25519_sig(&gossip.signature, &payload, &verifying_key)?;
 
     Ok(())
 }
