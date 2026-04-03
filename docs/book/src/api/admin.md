@@ -13,6 +13,24 @@ Connected peers with latency, trust scores, and hosted models.
 ### GET /api/admin/credits
 Credit balance and tier info.
 
+### GET /api/admin/network-map
+Geographic distribution of peers and shards across regions. Each entry includes the total peer count for that region, per-model shard-holder counts, per-model request demand rates, coverage gaps (models with zero holders in the region), and per-model replication targets derived from pool size and demand. Includes the local node in its auto-detected or configured region.
+
+Response:
+```json
+{
+  "regions": {
+    "US": {
+      "total": 3,
+      "models": { "tinyllama-1.1b-q4-k-m": 2 },
+      "demand": { "tinyllama-1.1b-q4-k-m": 5 },
+      "coverage_gaps": [],
+      "replication_target": { "tinyllama-1.1b-q4-k-m": 2 }
+    }
+  }
+}
+```
+
 ### GET/PUT /api/admin/config
 Read or update daemon configuration. PUT requires Bearer auth.
 
@@ -51,6 +69,62 @@ Per-model encrypted pipeline toggle. GET returns current status, readiness (whet
 Lock/unlock a shard to prevent auto-pruning.
 
 ## Storage & Shards
+
+### POST /api/admin/rescan-shards
+Rescan local shard files on disk and update the model registry and network announcements without restarting the daemon. Useful after manually placing shard files in the data directory. Bearer auth required.
+
+Response:
+```json
+{ "status": "ok", "models_updated": ["model-id-1"], "count": 1 }
+```
+
+### GET /api/admin/models/:id/metadata
+Read parsed GGUF metadata from a locally-stored model header (`gguf_header.bin`). Returns architecture parameters, tokenizer settings, quantization type, and all raw metadata key/value pairs (tokenizer vocabulary arrays are excluded). Returns 400 if no header file exists for the model.
+
+Response shape:
+```json
+{
+  "model_id": "...",
+  "general": { "name": "...", "architecture": "llama", "architecture_supported": true, "file_type": 11, "quantization": "Q4_K_M" },
+  "model": { "context_length": 4096, "block_count": 32, "embedding_length": 4096, "head_count": 32, "head_count_kv": 8, "rope_dimension_count": 128, "rope_freq_base": 500000.0, "layer_norm_rms_epsilon": 1e-5, "vocab_size": 32000 },
+  "tokenizer": { "model": "llama", "pre": "...", "eos_token_id": 2, "bos_token_id": 1, "padding_token_id": null },
+  "tensors": { "count": 291, "data_offset": 131072 },
+  "raw": [{ "key": "general.architecture", "value": "llama" }, ...]
+}
+```
+
+### POST /api/admin/models/:id/shards/:index/download
+Trigger a P2P download of a specific shard that is not yet held locally. The daemon first checks for P2P peers that hold the shard (picking the best peer by LAN-proximity, latency, and trust), then falls back to returning HuggingFace source info if no peers are available. Bearer auth required.
+
+Responses:
+- `{ "status": "already_local", ... }` — shard is already on disk
+- `{ "status": "downloading", "source": "p2p", "peer": "...", ... }` — P2P download started
+- `{ "status": "use_hf", "source": "huggingface", "repo_id": "...", "filename": "...", ... }` — no P2P peers, use `hf/download-shards` instead
+- 400 if no peers and no HuggingFace source known
+
+### POST /api/admin/models/:id/shards/:index/unload
+Unload a single shard from memory (VRAM/RAM) without deleting the file from disk. Narrows the model's shard window to exclude this shard and restarts the worker subprocess. If this is the last loaded shard, the model is fully unloaded. Bearer auth required.
+
+Response:
+```json
+{ "status": "unloaded", "model_id": "...", "shard_index": 0, "remaining_loaded": [1, 2] }
+```
+
+### POST /api/admin/models/:id/shards/:index/load
+Load a shard that is on disk into memory. The shard must already be present locally (use `/download` first if not). Expands the model's shard window to include the shard and restarts the worker subprocess. Bearer auth required.
+
+Response:
+```json
+{ "status": "loaded", "model_id": "...", "shard_index": 0, "loaded_shards": [0, 1, 2] }
+```
+
+### POST /api/admin/models/:id/unload
+Unload an entire model from memory (VRAM/RAM) without deleting any files from disk. Evicts all split-model entries, kills the worker subprocess, clears GGUF metadata cache, and clears the loaded-model record. Bearer auth required.
+
+Response:
+```json
+{ "status": "unloaded", "model_id": "...", "model_name": "...", "segments_removed": 2, "estimated_freed_mb": 4096 }
+```
 
 ### GET /api/admin/shard-storage
 Per-model storage breakdown, disk and VRAM usage.
@@ -96,11 +170,43 @@ curl -X POST http://localhost:8800/api/admin/hf/download-shards \
   -d '{"repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF", "filename": "qwen2.5-coder-7b-instruct.Q4_K_M.gguf", "peer_fair_share": true}'
 ```
 
+### GET /api/admin/hf/source/:model_id
+Look up the HuggingFace source (repo + filename) for a locally-known model. First checks the in-memory source cache and the probe cache, then auto-discovers by searching HuggingFace if neither has an entry. If found via auto-discovery the result is cached to the database and `hf_source.json` in the model directory.
+
+Response:
+```json
+{ "model_id": "...", "repo_id": "TheBloke/TinyLlama-...-GGUF", "filename": "tinyllama-...Q4_K_M.gguf" }
+```
+
 ### GET /api/admin/downloads
 List the download queue with per-shard progress, speed, and source.
 
 ### POST /api/admin/downloads/:model_id/cancel
 Cancel an in-progress download.
+
+## LoRA Adapters
+
+### GET /api/admin/adapters
+List all registered LoRA adapters with their metadata (id, name, base model, rank, alpha, path).
+
+Response: `{ "adapters": [ { "id": "...", "name": "...", "base_model": "...", "rank": 16, "alpha": 32.0, "path": "..." } ] }`
+
+### POST /api/admin/adapters
+Register a LoRA adapter from a safetensors file. Bearer auth required. Path traversal is blocked. If `id` is omitted, a UUID is generated.
+
+Request body:
+```json
+{ "id": "my-adapter", "name": "My Adapter", "base_model": "tinyllama-...", "rank": 16, "alpha": 32.0, "path": "adapters/my-adapter.safetensors" }
+```
+
+`path` may be absolute or relative to `<data_dir>/adapters/`.
+
+Response: `{ "status": "ok", "adapter": { ... } }`
+
+### DELETE /api/admin/adapters/:id
+Unregister a LoRA adapter. Does not delete the file from disk. Bearer auth required. Returns 400 if the id is not found.
+
+Response: `{ "status": "ok", "message": "Adapter 'my-adapter' removed" }`
 
 ## Cloud Providers
 
@@ -109,6 +215,33 @@ List configured cloud providers (name + configured flag, no keys exposed).
 
 ### PUT /api/admin/providers
 Update cloud provider API keys. Bearer auth required. Keys are encrypted at rest.
+
+### GET /api/admin/provider-models
+List available models from all configured cloud providers. Results are cached for 60 seconds; stale results are returned immediately and refreshed in the background. Includes models from OpenAI, Anthropic (static list), DeepSeek, Mistral, Groq, NVIDIA NIM, Cerebras, SambaNova, Fireworks, Together AI, DeepInfra, and Moonshot/Kimi.
+
+Response: `{ "models": [ { "id": "gpt-4o", "name": "GPT-4o", "provider": "openai" } ] }`
+
+### GET /api/admin/provider-health
+Probe each configured provider by sending a tiny `max_tokens=1` inference request (using a suitable test model per provider). All probes run in parallel with a connect timeout.
+
+Response:
+```json
+{ "providers": [ { "provider": "openai", "status": "up", "latency_ms": 320, "detail": "" } ] }
+```
+
+Status values: `up`, `rate_limited`, `overloaded`, `timeout`, `unreachable`, `error_<code>`.
+
+### POST /api/admin/provider-model-status
+Probe availability and latency for a list of specific cloud model IDs (up to 20 per request). Sends a `max_tokens=1` request to each model's provider endpoint. Anthropic models are skipped (no cloud proxy probing). Bearer auth not required.
+
+Request body: `{ "models": ["gpt-4o", "claude-sonnet-4-6", "deepseek-chat"] }`
+
+Response:
+```json
+{ "models": [ { "model": "gpt-4o", "status": "up", "latency_ms": 210 } ] }
+```
+
+Status values: `up`, `rate_limited`, `not_found`, `unavailable`, `timeout`, `error`.
 
 ## Updates
 
