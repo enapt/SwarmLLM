@@ -70,6 +70,7 @@ impl KvCacheStore {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn get_or_create(
         &self,
         model_key: &str,

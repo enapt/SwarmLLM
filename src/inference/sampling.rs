@@ -302,9 +302,9 @@ pub fn sample_token_with_logprobs(
         ctx.indexed_logits.clear();
         ctx.indexed_logits
             .extend(ctx.raw_logits.iter().copied().enumerate());
-        // Partial sort to get top-N by logit value
-        if ctx.indexed_logits.len() > n {
-            ctx.indexed_logits.select_nth_unstable_by(n, |a, b| {
+        // Partial sort to get top-N by logit value (k-1 pivot keeps exactly N elements)
+        if ctx.indexed_logits.len() > n && n > 0 {
+            ctx.indexed_logits.select_nth_unstable_by(n - 1, |a, b| {
                 b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
             });
             ctx.indexed_logits.truncate(n);

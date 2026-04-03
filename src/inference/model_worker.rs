@@ -642,6 +642,9 @@ async fn handle_generate(
     .await
     .map_err(|e| SwarmError::Internal(format!("send GenerateDone: {e}")))?;
 
+    // Free KV cache for this request to prevent VRAM leak across requests
+    kv_store.clear_request(model.kv_model_key(), &req_id_str);
+
     Ok(())
 }
 

@@ -30,7 +30,9 @@ pub use super::tensor_util::{
 pub use super::tokenizer::{BpeTokenizer, SplitTokenizer, SpmTokenizer};
 
 // Re-export from submodules so that `crate::inference::split::SplitModel` etc. continue to work.
-pub use self::entry::{evict_split_models_lru, BatchItem, SplitModelEntry, SplitModelKey};
+#[cfg(test)]
+pub use self::entry::BatchItem;
+pub use self::entry::{evict_split_models_lru, SplitModelEntry, SplitModelKey};
 pub use self::gguf_meta::{
     ensure_gguf_header, save_gguf_header, GgufTensorMeta, GgufTokenizerMeta, TensorLocation,
 };

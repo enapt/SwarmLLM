@@ -45,6 +45,7 @@ Single Rust binary, three simultaneous functions:
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │  ┌─ MetricsProviders (state.metrics) ────────────┐ │  │
 │  │  │  node_stats, inference_requests_total          │ │  │
+│  │  │  channel_metrics, inference_latency_samples    │ │  │
 │  │  │  providers_config, provider_model_map          │ │  │
 │  │  └────────────────────────────────────────────────┘ │  │
 │  │                                                     │  │

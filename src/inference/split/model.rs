@@ -14,6 +14,7 @@ use candle_transformers::quantized_nn::RmsNorm;
 use crate::error::SwarmError;
 use crate::model::lora::LoraAdapter;
 
+#[cfg(test)]
 use super::entry::BatchItem;
 use super::kv_cache::KvCacheStore;
 use super::rope::{load_longrope_factors, precompute_freqs_cis, precompute_freqs_cis_longrope};
@@ -2647,6 +2648,7 @@ impl SplitModel {
     ///
     /// Returns one output tensor per request in the same order as `items`.
     /// Falls back to sequential `forward()` if any item has seq_len > 1.
+    #[cfg(test)]
     pub fn forward_batch(
         &mut self,
         items: &[BatchItem<'_>],
@@ -3051,6 +3053,11 @@ impl SplitModel {
             "Pre-split weights for tensor parallelism"
         );
         Ok(())
+    }
+
+    /// Return the KV cache model key (used for cache cleanup).
+    pub fn kv_model_key(&self) -> &str {
+        &self.kv_model_key
     }
 
     /// Return the EOS token IDs loaded from GGUF metadata.
